@@ -1,0 +1,11 @@
+[package]
+id = "data-tools"
+name = "Data Tools"
+version = "0.1.0"
+description = "Data processing demonstrating collections, closures, and higher-order functions"
+authors = ["shmor3"]
+magi = ">=0.2.0"
+
+[dependencies]
+shared = { path = "../shared" }
+collections = "1.0.0"

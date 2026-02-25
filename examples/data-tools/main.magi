@@ -1,0 +1,38 @@
+use pkg::shared::{sum, range};
+use pkg::collections::{sorted_unique, flatten, chunk, zip, frequencies};
+
+output "--- Sorted Unique ---";
+let data = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+output f"Input:  {data}";
+output f"Unique: {sorted_unique(data)}";
+
+output "--- Flatten ---";
+let nested = [[1, 2], [3, [4, 5]], [6]];
+output f"Nested:    {nested}";
+output f"Flattened: {flatten(nested)}";
+
+output "--- Chunk ---";
+let items = range(1, 11);
+output f"Items:     {items}";
+output f"Chunks(3): {chunk(items, 3)}";
+
+output "--- Zip ---";
+let names = ["alice", "bob", "charlie"];
+let scores = [95, 87, 92];
+let pairs = zip(names, scores);
+output f"Zipped: {pairs}";
+
+output "--- Frequencies ---";
+let words = ["apple", "banana", "apple", "cherry", "banana", "apple"];
+output f"Words: {words}";
+output f"Counts: {frequencies(words)}";
+
+output "--- Combined ---";
+let nums = range(1, 21);
+let squared = [];
+let mut squared = [];
+for n in nums {
+    squared = array_push(squared, n * n);
+}
+output f"Squares 1..20: {squared}";
+output f"Sum of squares: {sum(squared)}";

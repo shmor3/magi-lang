@@ -1,0 +1,59 @@
+// Shared utilities used across example projects
+
+fn clamp(value, min, max) {
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
+fn repeat(s, n, sep) {
+    let mut result = "";
+    let mut i = 0;
+    while i < n {
+        if i > 0 {
+            result = result + sep;
+        }
+        result = result + s;
+        i = i + 1;
+    }
+    result
+}
+
+fn sum(arr) {
+    let mut total = 0;
+    for item in arr {
+        total = total + item;
+    }
+    total
+}
+
+fn average(arr) {
+    let total = sum(arr);
+    total / len(arr)
+}
+
+fn range(start, end) {
+    let mut result = [];
+    let mut i = start;
+    while i < end {
+        result = array_push(result, i);
+        i = i + 1;
+    }
+    result
+}
+
+fn fizzbuzz(n) {
+    if n % 15 == 0 {
+        "FizzBuzz"
+    } else if n % 3 == 0 {
+        "Fizz"
+    } else if n % 5 == 0 {
+        "Buzz"
+    } else {
+        to_string(n)
+    }
+}

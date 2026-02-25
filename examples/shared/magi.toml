@@ -1,0 +1,43 @@
+[package]
+id = "shared"
+name = "Shared Utilities"
+version = "0.1.0"
+description = "Shared utilities used across example projects"
+authors = ["shmor3"]
+magi = ">=0.2.0"
+
+[[package.exports]]
+name = "clamp"
+description = "Clamp a number between min and max"
+params = ["value", "min", "max"]
+return_type = "Number"
+
+[[package.exports]]
+name = "repeat"
+description = "Repeat a string n times with optional separator"
+params = ["s", "n", "sep"]
+return_type = "String"
+
+[[package.exports]]
+name = "sum"
+description = "Sum all numbers in an array"
+params = ["arr"]
+return_type = "Number"
+
+[[package.exports]]
+name = "average"
+description = "Compute the average of an array of numbers"
+params = ["arr"]
+return_type = "Float"
+
+[[package.exports]]
+name = "range"
+description = "Generate an array of integers from start to end (exclusive)"
+params = ["start", "end"]
+return_type = "Array"
+
+[[package.exports]]
+name = "fizzbuzz"
+description = "Return fizzbuzz string for a number"
+params = ["n"]
+return_type = "String"

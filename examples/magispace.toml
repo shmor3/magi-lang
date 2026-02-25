@@ -1,0 +1,13 @@
+[workspace]
+name = "magi-examples"
+version = "0.1.0"
+description = "Example MAGI projects demonstrating language features and workspace layout"
+authors = ["shmor3"]
+license = "MIT"
+
+[workspace.members]
+shared = { path = "shared" }
+hello = { path = "hello" }
+calculator = { path = "calculator" }
+data-tools = { path = "data-tools" }
+showcase = { path = "showcase" }

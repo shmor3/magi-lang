@@ -1,0 +1,39 @@
+use pkg::shared::{sum, average, range, clamp};
+
+// Recursive fibonacci
+fn fib(n) {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// Factorial
+fn factorial(n) {
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+// Generate first n fibonacci numbers
+fn fib_sequence(n) {
+    let indices = range(0, n);
+    let mut result = [];
+    for i in indices {
+        result = array_push(result, fib(i));
+    }
+    result
+}
+
+output "--- Fibonacci ---";
+let fibs = fib_sequence(15);
+output f"First 15: {fibs}";
+output f"Sum: {sum(fibs)}";
+output f"Average: {average(fibs)}";
+
+output "--- Factorials ---";
+let facts = range(1, 11);
+for n in facts {
+    output f"{n}! = {factorial(n)}";
+}
+
+output "--- Clamp ---";
+let values = [-10, 0, 5, 50, 100, 150];
+for v in values {
+    output f"clamp({v}, 0, 100) = {clamp(v, 0, 100)}";
+}

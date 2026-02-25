@@ -1,0 +1,389 @@
+/*
+ * MAGI Language Showcase
+ * Version: 0.2.0-alpha
+ *
+ * Demonstrates all major language features including:
+ * - Structs and enums
+ * - Higher-order functions on collections
+ * - Pattern matching with type/enum/range patterns
+ * - Destructuring in let bindings and for loops
+ * - Range expressions and slicing
+ * - List and map comprehensions
+ * - Closures and lambdas
+ * - Rest parameters and spread calls
+ * - Error propagation with ?
+ * - Pipe operator, optional chaining, null coalescing
+ * - String interpolation, multiline strings, raw strings
+ */
+
+/* ─── Block comments can be /* nested */ like this ─── */
+
+// ═══════════════════════════════════════════════════════
+// 1. Struct and Enum Definitions
+// ═══════════════════════════════════════════════════════
+
+struct Point {
+    x: float64,
+    y: float64
+}
+
+struct Person {
+    name: string,
+    age: int64,
+    email: string
+}
+
+enum Shape {
+    Circle(radius),
+    Rectangle(width, height),
+    Triangle(a, b, c)
+}
+
+enum Result {
+    Ok(value),
+    Err(message)
+}
+
+// ═══════════════════════════════════════════════════════
+// 2. Functions with Various Features
+// ═══════════════════════════════════════════════════════
+
+fn distance(p1, p2) {
+    let dx = p1.x - p2.x;
+    let dy = p1.y - p2.y;
+    (dx * dx + dy * dy)
+}
+
+fn area(shape) {
+    match shape {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rectangle(w, h) => w * h,
+        Shape::Triangle(a, b, c) => {
+            let s = (a + b + c) / 2.0;
+            s * (s - a) * (s - b) * (s - c)
+        },
+        _ => 0.0,
+    }
+}
+
+// Variadic function with rest parameters
+fn sum(first, ...rest) {
+    let mut total = first;
+    for n in rest {
+        total = total + n;
+    }
+    total
+}
+
+// Higher-order function
+fn apply_twice(f, x) {
+    f(f(x))
+}
+
+fn safe_divide(a, b) {
+    if b == 0 {
+        Result::Err("division by zero")
+    } else {
+        Result::Ok(a / b)
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// 3. Working with Data
+// ═══════════════════════════════════════════════════════
+
+let origin = Point { x: 0.0, y: 0.0 };
+let target = Point { x: 3.0, y: 4.0 };
+let dist_sq = distance(origin, target);
+output f"Distance squared from origin to target: {dist_sq}";
+
+// Enum construction and pattern matching
+let circle = Shape::Circle(5.0);
+let rect = Shape::Rectangle(4.0, 6.0);
+let tri = Shape::Triangle(3.0, 4.0, 5.0);
+
+output f"Circle area: {area(circle)}";
+output f"Rectangle area: {area(rect)}";
+
+// ═══════════════════════════════════════════════════════
+// 4. Range Expressions and Slicing
+// ═══════════════════════════════════════════════════════
+
+let numbers = 1..11;  // [1, 2, 3, ..., 10]
+let inclusive = 1..=5; // [1, 2, 3, 4, 5]
+
+output f"Range 1..11 has {len(numbers)} elements";
+output f"Range 1..=5 has {len(inclusive)} elements";
+
+// Array slicing
+let first_five = numbers[0..5];
+output f"First five: {first_five}";
+
+let middle = numbers[3..7];
+output f"Middle: {middle}";
+
+// String slicing
+let greeting = "Hello, World!";
+let hello = greeting[0..5];
+output f"Sliced: {hello}";
+
+// ═══════════════════════════════════════════════════════
+// 5. Higher-Order Methods on Collections
+// ═══════════════════════════════════════════════════════
+
+let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// Map, filter, reduce
+let doubled = data.map(|x| x * 2);
+let evens = data.filter(|x| x % 2 == 0);
+let total = data.reduce(0, |acc, x| acc + x);
+
+output f"Doubled: {doubled}";
+output f"Evens: {evens}";
+output f"Sum: {total}";
+
+// Find, any, all
+let first_gt_5 = data.find(|x| x > 5);
+let has_negative = data.any(|x| x < 0);
+let all_positive = data.all(|x| x > 0);
+
+output f"First > 5: {first_gt_5}";
+output f"Has negative: {has_negative}";
+output f"All positive: {all_positive}";
+
+// Enumerate and zip
+let names = ["alice", "bob", "charlie"];
+let ages = [30, 25, 35];
+let indexed = names.enumerate();
+let pairs = names.zip(ages);
+
+output f"Indexed: {indexed}";
+output f"Pairs: {pairs}";
+
+// Group by, partition
+let grouped = data.group_by(|x| {
+    if x % 2 == 0 { "even" } else { "odd" }
+});
+let parts = data.partition(|x| x <= 5);
+
+output f"Grouped: {grouped}";
+output f"Partitioned: {parts}";
+
+// Chunk
+let chunks = data.chunk(3);
+output f"Chunks of 3: {chunks}";
+
+// Take/skip while
+let taken = data.take_while(|x| x < 6);
+let skipped = data.skip_while(|x| x < 6);
+output f"Take while < 6: {taken}";
+output f"Skip while < 6: {skipped}";
+
+// Scan (intermediate accumulators)
+let running_sum = data.scan(0, |acc, x| acc + x);
+output f"Running sum: {running_sum}";
+
+// ═══════════════════════════════════════════════════════
+// 6. Destructuring
+// ═══════════════════════════════════════════════════════
+
+// Array destructuring
+let [first, second, ...rest] = [10, 20, 30, 40, 50];
+output f"First: {first}, Second: {second}, Rest: {rest}";
+
+// Map destructuring
+let {name, age} = {"name": "Alice", "age": 30, "city": "NYC"};
+output f"Name: {name}, Age: {age}";
+
+// Destructuring in for loops
+let people = [
+    {"name": "Alice", "age": 30},
+    {"name": "Bob", "age": 25},
+    {"name": "Charlie", "age": 35},
+];
+
+for {name, age} in people {
+    output f"{name} is {age} years old";
+}
+
+let coords = [[1, 2], [3, 4], [5, 6]];
+for [x, y] in coords {
+    output f"Point: ({x}, {y})";
+}
+
+// ═══════════════════════════════════════════════════════
+// 7. List and Map Comprehensions
+// ═══════════════════════════════════════════════════════
+
+let squares = [x * x for x in 1..=10];
+output f"Squares: {squares}";
+
+let even_squares = [x * x for x in 1..=10 if x % 2 == 0];
+output f"Even squares: {even_squares}";
+
+// ═══════════════════════════════════════════════════════
+// 8. Closures and Lambdas
+// ═══════════════════════════════════════════════════════
+
+let mul = |x| x * 3;
+output f"mul(5) = {mul(5)}";
+
+// Passing lambdas to higher-order functions
+let double = |x| x * 2;
+let result = apply_twice(double, 5);
+output f"apply_twice(double, 5) = {result}";
+
+// ═══════════════════════════════════════════════════════
+// 9. Rest Parameters and Spread Calls
+// ═══════════════════════════════════════════════════════
+
+let s = sum(1, 2, 3, 4, 5);
+output f"sum(1, 2, 3, 4, 5) = {s}";
+
+let args = [10, 20, 30];
+let spread_result = sum(...args);
+output f"sum(...[10, 20, 30]) = {spread_result}";
+
+// ═══════════════════════════════════════════════════════
+// 10. Pattern Matching (Advanced)
+// ═══════════════════════════════════════════════════════
+
+fn classify(value) {
+    match value {
+        0 => "zero",
+        1 | 2 | 3 => "small",
+        n: int64 if n > 100 => "large",
+        n: int64 => "medium",
+        s: string => f"text: {s}",
+        _ => "unknown",
+    }
+}
+
+output f"classify(0) = {classify(0)}";
+output f"classify(2) = {classify(2)}";
+output f"classify(50) = {classify(50)}";
+output f"classify(200) = {classify(200)}";
+
+// Enum pattern matching with data extraction
+fn unwrap_result(r) {
+    match r {
+        Result::Ok(v) => f"Success: {v}",
+        Result::Err(e) => f"Error: {e}",
+    }
+}
+
+let ok = safe_divide(10, 2);
+let err = safe_divide(10, 0);
+output unwrap_result(ok);
+output unwrap_result(err);
+
+// ═══════════════════════════════════════════════════════
+// 11. Pipe Operator
+// ═══════════════════════════════════════════════════════
+
+let pipe_result = [1, 2, 3, 4, 5]
+    |> len(_);
+output f"Piped length: {pipe_result}";
+
+// ═══════════════════════════════════════════════════════
+// 12. Null Safety
+// ═══════════════════════════════════════════════════════
+
+let config = {"database": {"host": "localhost", "port": 5432}};
+let host = config?.database?.host;
+let missing = config?.cache?.host;
+let fallback = missing ?? "default-host";
+
+output f"Host: {host}";
+output f"Missing: {missing}";
+output f"Fallback: {fallback}";
+
+// ═══════════════════════════════════════════════════════
+// 13. String Features
+// ═══════════════════════════════════════════════════════
+
+let multiline = """
+This is a
+multiline string
+that preserves newlines.
+""";
+output f"Multiline length: {len(multiline)}";
+
+let raw = r"No \escape \processing \here";
+output f"Raw string: {raw}";
+
+// String interpolation with expressions
+let x = 42;
+output f"The answer is {x}, and doubled is {x * 2}";
+
+// ═══════════════════════════════════════════════════════
+// 14. Number Methods
+// ═══════════════════════════════════════════════════════
+
+let neg = (-5).abs();
+let rounded = 3.7.round();
+let floored = 3.7.floor();
+let ceiled = 3.2.ceil();
+
+output f"|-5| = {neg}";
+output f"round(3.7) = {rounded}";
+output f"floor(3.7) = {floored}";
+output f"ceil(3.2) = {ceiled}";
+
+// ═══════════════════════════════════════════════════════
+// 15. Error Handling
+// ═══════════════════════════════════════════════════════
+
+fn risky_operation(flag) {
+    if flag {
+        throw "something went wrong";
+    }
+    "success"
+}
+
+let caught = try {
+    risky_operation(true)
+} catch err {
+    f"Caught: {err}"
+};
+output caught;
+
+let safe = try {
+    risky_operation(false)
+} catch err {
+    f"Caught: {err}"
+};
+output safe;
+
+// ═══════════════════════════════════════════════════════
+// 16. Loops and Control Flow
+// ═══════════════════════════════════════════════════════
+
+// While loop with mutation
+let mut count = 0;
+while count < 5 {
+    count = count + 1;
+}
+output f"Counted to: {count}";
+
+// Loop with break
+let mut i = 0;
+let found = loop {
+    if i * i > 50 {
+        break i;
+    }
+    i = i + 1;
+};
+output f"First i where i*i > 50: {found}";
+
+// For loop with continue
+let mut sum_odd = 0;
+for n in 1..=10 {
+    if n % 2 == 0 {
+        continue;
+    }
+    sum_odd = sum_odd + n;
+}
+output f"Sum of odds 1-10: {sum_odd}";
+
+output "═══ Showcase Complete ═══";

@@ -1,0 +1,10 @@
+[package]
+id = "showcase"
+name = "MAGI Showcase"
+version = "0.1.0"
+description = "Comprehensive showcase of all MAGI language features"
+authors = ["shmor3"]
+magi = ">=0.2.0"
+
+[dependencies]
+collections = "1.0.0"

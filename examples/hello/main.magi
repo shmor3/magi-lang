@@ -1,0 +1,13 @@
+use pkg::shared::{repeat, fizzbuzz, range};
+
+output "Hello from MAGI!";
+output repeat("=", 30, "");
+
+// FizzBuzz 1..20
+let numbers = range(1, 21);
+for n in numbers {
+    output f"{n}: {fizzbuzz(n)}";
+}
+
+output repeat("=", 30, "");
+output "Done!";
