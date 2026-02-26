@@ -2926,6 +2926,14 @@ impl<'a> Interpreter<'a> {
                 let mut map = std::collections::BTreeMap::new();
                 map.insert("__struct".to_string(), DataType::String(name.clone()));
                 for (field_name, field_expr) in fields {
+                    if map.contains_key(field_name) && field_name != "__struct" {
+                        return Err(InterpError::TypeError {
+                            expected: format!("unique field in struct '{}'", name),
+                            actual: format!("duplicate field '{}'", field_name),
+                            context: format!("struct '{}' construction", name),
+                            span: expr.span,
+                        });
+                    }
                     let val = self.eval_expr(field_expr)?;
                     map.insert(field_name.clone(), val);
                 }

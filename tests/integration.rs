@@ -4865,3 +4865,42 @@ let name = match c {
         w203
     );
 }
+
+// ── Round 36: Interpreter struct validation ──────────────────────────
+
+#[test]
+fn test_struct_duplicate_field_error() {
+    let src = r#"
+struct Point { x: int, y: int }
+let p = Point { x: 1, x: 2, y: 3 }
+"#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let result = interp.execute(&program);
+    assert!(result.is_err(), "duplicate struct fields should error");
+    let err = result.unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("duplicate"),
+        "error should mention 'duplicate', got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_struct_unique_fields_ok() {
+    let src = r#"
+struct Point { x: int, y: int }
+let p = Point { x: 1, y: 2 }
+p
+"#;
+    let result = run(src);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("x"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("y"), Some(&DataType::Int64(2)));
+        }
+        other => panic!("expected Map, got {:?}", other),
+    }
+}
