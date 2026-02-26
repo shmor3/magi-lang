@@ -2075,3 +2075,108 @@ fn test_linter_no_false_duplicate_import() {
         .collect();
     assert!(w208.is_empty(), "different imports should not warn: {:?}", w208);
 }
+
+// =============================================================================
+// Round 5: Parser, interpreter, type checker fixes
+// =============================================================================
+
+#[test]
+fn test_rest_pattern_must_be_last_in_destructure() {
+    // Valid: rest pattern at end
+    let result = magi_lang::syntax::parser::parse_v2("let [a, ...rest] = arr;");
+    assert!(result.is_ok(), "valid rest pattern should parse: {:?}", result.err());
+}
+
+#[test]
+fn test_while_loop_break_value() {
+    let result = run("
+        let mut i = 0;
+        while i < 10 {
+            i = i + 1;
+            if i == 5 {
+                break 42;
+            }
+        }
+    ");
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_while_loop_no_break_returns_null() {
+    let result = run("
+        let mut i = 0;
+        while i < 3 {
+            i = i + 1;
+        }
+    ");
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_pow_negative_exponent() {
+    // 2^(-3) should return 0 (integer division: 1/8 rounds to 0)
+    assert_eq!(run("2.pow(-3)"), DataType::Int64(0));
+}
+
+#[test]
+fn test_pow_negative_exponent_one() {
+    // 1^(-anything) is always 1
+    assert_eq!(run("1.pow(-5)"), DataType::Int64(1));
+}
+
+#[test]
+fn test_pow_negative_exponent_neg_one() {
+    // (-1)^(-2) = 1, (-1)^(-3) = -1
+    assert_eq!(run("let x = -1; x.pow(-2)"), DataType::Int64(1));
+    assert_eq!(run("let x = -1; x.pow(-3)"), DataType::Int64(-1));
+}
+
+#[test]
+fn test_try_propagate_caught_by_try_catch() {
+    // The ? operator should produce an error catchable by try/catch
+    let result = run(r#"
+        let val = null;
+        let mut caught = false;
+        try {
+            let x = val?;
+        } catch e {
+            caught = true;
+        }
+        caught
+    "#);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+#[test]
+fn test_w108_unnecessary_return() {
+    let program = magi_lang::syntax::parser::parse_v2(r#"
+        fn add(a, b) {
+            return a + b;
+        }
+    "#).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
+    let w108: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W108"))
+        .collect();
+    assert_eq!(w108.len(), 1, "should detect unnecessary return: {:?}", w108);
+}
+
+#[test]
+fn test_w108_no_false_positive_early_return() {
+    // Early returns (not in tail position) should NOT trigger W108
+    let program = magi_lang::syntax::parser::parse_v2(r#"
+        fn check(x) {
+            if x > 10 {
+                return "big";
+            }
+            "small"
+        }
+    "#).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
+    let w108: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W108"))
+        .collect();
+    assert!(w108.is_empty(), "early return should not warn: {:?}", w108);
+}

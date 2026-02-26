@@ -761,6 +761,7 @@ impl<'a> Interpreter<'a> {
 
             StatementKind::WhileLoop { condition, body } => {
                 let mut iterations = 0;
+                let mut last = DataType::Null;
                 loop {
                     if self.is_cancelled() {
                         return Err(InterpError::Cancelled);
@@ -798,14 +799,17 @@ impl<'a> Interpreter<'a> {
                     self.symbols.pop();
                     match result {
                         Ok(_) => {}
-                        Err(InterpError::BreakSignal(_)) => break,
+                        Err(InterpError::BreakSignal(val)) => {
+                            last = val;
+                            break;
+                        }
                         Err(InterpError::ContinueSignal) => {}
                         Err(e) => return Err(e), // propagate return/errors
                     }
                     iterations += 1;
                     self.maybe_gc();
                 }
-                Ok(DataType::Null)
+                Ok(last)
             }
 
             StatementKind::Output(expr) => {
@@ -1399,7 +1403,15 @@ impl<'a> Interpreter<'a> {
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
-                    Ok(Some(DataType::Int64(n.wrapping_pow(exp as u32))))
+                    if exp < 0 {
+                        // Negative exponents on integers would produce fractions; return 0
+                        // (integer division: 1 / n^|exp| rounds to 0 for |n| > 1)
+                        if *n == 1 { Ok(Some(DataType::Int64(1))) }
+                        else if *n == -1 { Ok(Some(DataType::Int64(if exp % 2 == 0 { 1 } else { -1 }))) }
+                        else { Ok(Some(DataType::Int64(0))) }
+                    } else {
+                        Ok(Some(DataType::Int64(n.wrapping_pow(exp as u32))))
+                    }
                 }
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
@@ -2614,28 +2626,36 @@ impl<'a> Interpreter<'a> {
             }
 
             ExpressionKind::TryPropagate(inner) => {
+                let span = expr.span;
                 match self.eval_expr(inner) {
-                    Ok(DataType::Null) => Err(InterpError::ReturnSignal(DataType::Null)),
+                    Ok(DataType::Null) => Err(InterpError::ThrownError {
+                        value: DataType::String("unwrap on null value".to_string()),
+                        span,
+                    }),
                     Ok(val) => {
-                        // Check if it's an error-like enum
+                        // Check if it's an error-like enum (Result::Err)
                         if let DataType::Map(ref m) = val {
                             if m.get("__variant").map(|v| v.to_string_lossy()) == Some("Err".to_string()) {
-                                return Err(InterpError::ReturnSignal(val));
+                                // Extract the error data for the thrown value
+                                let error_val = m.get("__data")
+                                    .and_then(|d| if let DataType::Array(arr) = d { arr.first().cloned() } else { None })
+                                    .unwrap_or(val.clone());
+                                return Err(InterpError::ThrownError {
+                                    value: error_val,
+                                    span,
+                                });
                             }
                         }
                         Ok(val)
                     }
                     // Propagate control flow signals as-is
                     Err(e) if is_control_flow(&e) => Err(e),
-                    // Convert runtime errors to ReturnSignal with error map
+                    // Convert runtime errors to thrown errors (catchable by try/catch)
                     Err(e) => {
-                        let mut err_map = std::collections::BTreeMap::new();
-                        err_map.insert("__enum".to_string(), DataType::String("Result".to_string()));
-                        err_map.insert("__variant".to_string(), DataType::String("Err".to_string()));
-                        err_map.insert("__data".to_string(), DataType::Array(vec![
-                            DataType::String(format!("{}", e)),
-                        ]));
-                        Err(InterpError::ReturnSignal(DataType::Map(err_map)))
+                        Err(InterpError::ThrownError {
+                            value: DataType::String(format!("{}", e)),
+                            span,
+                        })
                     }
                 }
             }

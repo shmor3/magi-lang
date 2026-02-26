@@ -607,6 +607,19 @@ impl TypeChecker {
                         DiagnosticSeverity::Error,
                     );
                 }
+                // W108: unnecessary return in tail position
+                if let Some(last_stmt) = def.body.statements.last() {
+                    if matches!(&last_stmt.kind, StatementKind::Return(Some(_))) && def.body.tail_expr.is_none() {
+                        self.emit_coded(
+                            last_stmt.span.start_line,
+                            last_stmt.span.start_col,
+                            "unnecessary `return` in tail position".to_string(),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::W108,
+                            Some("Remove `return` and use the expression as a tail expression".to_string()),
+                        );
+                    }
+                }
                 self.function_depth -= 1;
                 self.pop_scope();
             }

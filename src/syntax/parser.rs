@@ -319,6 +319,7 @@ impl Parser {
                 self.advance(); // consume '...'
                 let rest_name = self.expect_identifier()?;
                 elements.push(DestructureElement::Rest(rest_name.text));
+                break; // rest must be last element
             } else {
                 let name = self.expect_identifier()?;
                 elements.push(DestructureElement::Name(name.text));
