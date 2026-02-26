@@ -3,10 +3,12 @@
 fn clamp(value, min, max) {
     if value < min {
         min
-    } else if value > max {
-        max
     } else {
-        value
+        if value > max {
+            max
+        } else {
+            value
+        }
     }
 }
 
@@ -49,11 +51,15 @@ fn range(start, end) {
 fn fizzbuzz(n) {
     if n % 15 == 0 {
         "FizzBuzz"
-    } else if n % 3 == 0 {
-        "Fizz"
-    } else if n % 5 == 0 {
-        "Buzz"
     } else {
-        to_string(n)
+        if n % 3 == 0 {
+            "Fizz"
+        } else {
+            if n % 5 == 0 {
+                "Buzz"
+            } else {
+                to_string(n)
+            }
+        }
     }
 }

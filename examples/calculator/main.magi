@@ -1,38 +1,5 @@
 // Calculator — recursion, math, and utility functions
-
-fn sum(arr) {
-    let mut total = 0;
-    for item in arr {
-        total = total + item;
-    }
-    total
-}
-
-fn average(arr) {
-    sum(arr) / len(arr)
-}
-
-fn range(start, end) {
-    let mut result = [];
-    let mut i = start;
-    while i < end {
-        result = array_push(result, i);
-        i = i + 1;
-    }
-    result
-}
-
-fn clamp(value, min, max) {
-    if value < min {
-        min
-    } else {
-        if value > max {
-            max
-        } else {
-            value
-        }
-    }
-}
+use pkg::shared::*;
 
 // Recursive fibonacci
 fn fib(n) {

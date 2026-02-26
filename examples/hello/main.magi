@@ -1,6 +1,7 @@
 // Hello MAGI — string formatting and fizzbuzz
+use pkg::shared::*;
 
-fn repeat(s, n) {
+fn repeat_str(s, n) {
     let mut result = "";
     let mut i = 0;
     while i < n {
@@ -10,34 +11,8 @@ fn repeat(s, n) {
     result
 }
 
-fn fizzbuzz(n) {
-    if n % 15 == 0 {
-        "FizzBuzz"
-    } else {
-        if n % 3 == 0 {
-            "Fizz"
-        } else {
-            if n % 5 == 0 {
-                "Buzz"
-            } else {
-                to_string(n)
-            }
-        }
-    }
-}
-
-fn range(start, end) {
-    let mut result = [];
-    let mut i = start;
-    while i < end {
-        result = array_push(result, i);
-        i = i + 1;
-    }
-    result
-}
-
 output "Hello from MAGI!";
-output repeat("=", 30);
+output repeat_str("=", 30);
 
 // FizzBuzz 1..20
 let numbers = range(1, 21);
@@ -45,5 +20,5 @@ for n in numbers {
     output f"{n}: {fizzbuzz(n)}";
 }
 
-output repeat("=", 30);
+output repeat_str("=", 30);
 output "Done!";

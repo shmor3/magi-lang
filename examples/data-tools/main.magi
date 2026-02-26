@@ -1,22 +1,5 @@
 // Data Tools — collection processing and higher-order patterns
-
-fn range(start, end) {
-    let mut result = [];
-    let mut i = start;
-    while i < end {
-        result = array_push(result, i);
-        i = i + 1;
-    }
-    result
-}
-
-fn sum(arr) {
-    let mut total = 0;
-    for item in arr {
-        total = total + item;
-    }
-    total
-}
+use pkg::shared::*;
 
 fn sorted_unique(arr) {
     let sorted = arr.sort();

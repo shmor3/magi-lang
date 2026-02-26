@@ -188,44 +188,110 @@ impl Compiler {
             ("parse_int", 1),
             ("parse_float", 1),
             ("push", 2),
+            ("array_push", 2),
             ("pop", 1),
             ("range", 2),
             ("debug_log", 1),
+            ("map_get", 2),
+            ("map_set", 3),
+            ("map_from_entries", 1),
         ];
 
         for (name, param_count) in builtins {
             if !self.fn_index.contains_key(name) {
                 let idx = self.module.functions.len() as u32;
                 self.fn_index.insert(name.to_string(), idx);
-                // Build instructions for the builtin stub.
-                // In WASM, function params are in locals, not on the stack.
-                // For "print"/"println": push local 0 and call the imported print function.
-                // For others: return null stub (args ignored).
                 let mut instructions = Vec::new();
                 match name {
                     "println" | "print" | "debug_log" => {
-                        // Push the first arg from local 0 and call imported print (index 0).
                         instructions.push(Instruction::LocalGet(0));
                         instructions.push(Instruction::Print);
                         instructions.push(Instruction::PushNull);
                         instructions.push(Instruction::Return);
                     }
+                    "len" => {
+                        // Delegate to RuntimeCall so wasm.rs handles tag dispatch.
+                        let name_idx = self.module.intern_string("len");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 1 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "to_string" => {
+                        let name_idx = self.module.intern_string("to_string");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 1 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "typeof" => {
+                        let name_idx = self.module.intern_string("typeof");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 1 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "array_push" | "push" => {
+                        let name_idx = self.module.intern_string("array_push");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::LocalGet(1));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "map_get" => {
+                        let name_idx = self.module.intern_string("map_get");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::LocalGet(1));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "map_set" => {
+                        let name_idx = self.module.intern_string("map_set");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::LocalGet(1));
+                        instructions.push(Instruction::LocalGet(2));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 3 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "map_from_entries" => {
+                        let name_idx = self.module.intern_string("map_from_entries");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 1 });
+                        instructions.push(Instruction::Return);
+                    }
+                    "range" => {
+                        // range(start, end) → __range(start, end, false)
+                        let name_idx = self.module.intern_string("__range");
+                        instructions.push(Instruction::LocalGet(0));
+                        instructions.push(Instruction::LocalGet(1));
+                        instructions.push(Instruction::PushBool(false));
+                        instructions.push(Instruction::RuntimeCall { name: name_idx, arg_count: 3 });
+                        instructions.push(Instruction::Return);
+                    }
                     _ => {
-                        // Stub: return null (ignore params).
                         instructions.push(Instruction::PushNull);
                         instructions.push(Instruction::Return);
                     }
                 }
+                let locals: Vec<IrLocal> = (0..param_count)
+                    .map(|i| IrLocal {
+                        name: format!("__param{}", i),
+                        val_type: ValType::Tagged,
+                        mutable: false,
+                    })
+                    .collect();
                 self.module.functions.push(IrFunction {
                     name: name.to_string(),
                     param_count,
                     has_rest: false,
-                    locals: Vec::new(),
+                    locals,
                     instructions,
                     exported: false,
                     return_type: ValType::Tagged,
                 });
             }
+        }
+
+        // Intern type name strings used by typeof runtime dispatch.
+        for name in &["null", "bool", "int64", "float64", "string", "array", "map"] {
+            self.module.intern_string(name);
         }
     }
 
@@ -517,7 +583,11 @@ impl Compiler {
                 self.compile_expr(operand)?;
                 match op {
                     UnOp::Not => self.emit(Instruction::BoolNot),
-                    UnOp::Neg => self.emit(Instruction::I64Neg),
+                    UnOp::Neg => {
+                        self.emit(Instruction::UntagI64);
+                        self.emit(Instruction::I64Neg);
+                        self.emit(Instruction::TagI64);
+                    }
                 }
             }
 
@@ -869,6 +939,15 @@ impl Compiler {
     }
 
     fn compile_binop(&mut self, op: BinOp) -> Result<(), CompileError> {
+        // For Add, we need dynamic dispatch: string + string = StringConcat, else I64Add.
+        if matches!(op, BinOp::Add) {
+            // Stack: [left_tagged, right_tagged]
+            // Use RuntimeCall "__add" which wasm.rs handles with dynamic type dispatch.
+            let name_idx = self.module.intern_string("__add");
+            self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
+            return Ok(());
+        }
+
         // For arithmetic and comparisons, untag both operands first.
         // Stack: [left_tagged, right_tagged]
         // We need to untag both. Use a temp local to hold right while untagging left.
@@ -879,10 +958,7 @@ impl Compiler {
         self.emit(Instruction::UntagI64);       // untag right
 
         match op {
-            BinOp::Add => {
-                self.emit(Instruction::I64Add);
-                self.emit(Instruction::TagI64);
-            }
+            BinOp::Add => unreachable!(), // handled above
             BinOp::Sub => {
                 self.emit(Instruction::I64Sub);
                 self.emit(Instruction::TagI64);
@@ -972,14 +1048,17 @@ impl Compiler {
         let iter_local = self.define_local("__iter", ValType::Tagged, false);
         self.emit(Instruction::LocalSet(iter_local));
 
-        // Counter.
+        // Counter (raw untagged i64 — internal use only).
         let counter_local = self.define_local("__counter", ValType::I64, true);
-        self.emit(Instruction::PushI64(0));
+        self.emit(Instruction::PushNull); // placeholder 0 value (will be overwritten)
         self.emit(Instruction::LocalSet(counter_local));
+        // Actually store raw 0. We use PushNull (i64 0) since it's
+        // already an i64 const 0. The counter is untagged.
 
-        // Length.
+        // Length (raw untagged i64).
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::ArrayLen);
+        self.emit(Instruction::UntagI64); // strip tag to get raw length
         let len_local = self.define_local("__len", ValType::I64, false);
         self.emit(Instruction::LocalSet(len_local));
 
@@ -994,15 +1073,16 @@ impl Compiler {
             continue_label,
         });
 
-        // Check: counter < len.
+        // Check: counter >= len (both raw untagged).
         self.emit(Instruction::LocalGet(counter_local));
         self.emit(Instruction::LocalGet(len_local));
         self.emit(Instruction::I64Ge);
         self.emit(Instruction::BrIf(1)); // break out of block
 
-        // Load current element.
+        // Load current element. ArrayGet expects tagged index.
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::LocalGet(counter_local));
+        self.emit(Instruction::TagI64); // tag counter for ArrayGet
         self.emit(Instruction::ArrayGet);
 
         // Bind pattern.
@@ -1065,9 +1145,10 @@ impl Compiler {
         }
         self.fb().pop_scope();
 
-        // Increment counter.
+        // Increment counter (raw untagged arithmetic).
         self.emit(Instruction::LocalGet(counter_local));
         self.emit(Instruction::PushI64(1));
+        self.emit(Instruction::UntagI64); // get raw 1
         self.emit(Instruction::I64Add);
         self.emit(Instruction::LocalSet(counter_local));
 
@@ -1639,10 +1720,11 @@ mod tests {
     fn test_compile_compound_assign() {
         let module = compile("let mut x = 10; x += 5;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Add now uses __add RuntimeCall for dynamic string/int dispatch.
         assert!(main
             .instructions
             .iter()
-            .any(|i| matches!(i, Instruction::I64Add)));
+            .any(|i| matches!(i, Instruction::RuntimeCall { arg_count: 2, .. })));
     }
 
     #[test]

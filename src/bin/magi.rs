@@ -7,7 +7,7 @@ use std::process;
 
 use magi_lang::compiler;
 use magi_lang::eval::{EvalError, OperationEvaluator};
-use magi_lang::syntax::interpreter::Interpreter;
+use magi_lang::syntax::interpreter::{resolve_package_from_source, Interpreter, ResolvedPackage};
 use magi_lang::syntax::parser::parse_v2;
 use magi_lang::types::{DataType, OperationType};
 
@@ -493,6 +493,94 @@ fn main() {
     }
 }
 
+/// Resolve package dependencies by reading magi.toml next to the source file.
+fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage> {
+    let dir = magi_file_path.parent().unwrap_or(std::path::Path::new("."));
+    let toml_path = dir.join("magi.toml");
+
+    let toml_str = match fs::read_to_string(&toml_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let table: toml::Table = match toml_str.parse() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+
+    let deps = match table.get("dependencies").and_then(|d| d.as_table()) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+
+    let mut packages = Vec::new();
+    for (id, value) in deps {
+        let rel_path = match value.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let dep_dir = dir.join(rel_path);
+        let source_path = dep_dir.join("source.magi");
+        let source = match fs::read_to_string(&source_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Warning: could not read dependency '{}' at {}: {}", id, source_path.display(), e);
+                continue;
+            }
+        };
+
+        match resolve_package_from_source(id, &source) {
+            Ok(pkg) => packages.push(pkg),
+            Err(e) => {
+                eprintln!("Warning: could not parse dependency '{}': {}", id, e);
+            }
+        }
+    }
+
+    packages
+}
+
+/// Resolve package dependency sources (raw source strings) for compilation.
+fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
+    let dir = magi_file_path.parent().unwrap_or(std::path::Path::new("."));
+    let toml_path = dir.join("magi.toml");
+
+    let toml_str = match fs::read_to_string(&toml_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let table: toml::Table = match toml_str.parse() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+
+    let deps = match table.get("dependencies").and_then(|d| d.as_table()) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+
+    let mut sources = Vec::new();
+    for (id, value) in deps {
+        let rel_path = match value.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let dep_dir = dir.join(rel_path);
+        let source_path = dep_dir.join("source.magi");
+        match fs::read_to_string(&source_path) {
+            Ok(s) => sources.push(s),
+            Err(e) => {
+                eprintln!("Warning: could not read dependency '{}' at {}: {}", id, source_path.display(), e);
+            }
+        }
+    }
+
+    sources
+}
+
 fn cmd_run(path: &str) {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -511,7 +599,9 @@ fn cmd_run(path: &str) {
     };
 
     let evaluator = FullEvaluator;
-    let mut interp = Interpreter::new(&evaluator);
+    let file_path = std::path::Path::new(path);
+    let packages = resolve_dependencies(file_path);
+    let mut interp = Interpreter::new(&evaluator).with_packages(packages);
 
     match interp.execute(&program) {
         Ok(_) => {}
@@ -540,7 +630,25 @@ fn cmd_compile(path: &str) {
         }
     };
 
-    let program = match parse_v2(&source) {
+    // Resolve dependencies and prepend their source to create a single compilation unit.
+    let file_path = std::path::Path::new(path);
+    let mut combined_source = String::new();
+    let dep_sources = resolve_dependency_sources(file_path);
+    for dep_src in &dep_sources {
+        combined_source.push_str(dep_src);
+        combined_source.push('\n');
+    }
+    // Strip `use pkg::*` imports from the main source (they're inlined now).
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("use pkg::") {
+            continue;
+        }
+        combined_source.push_str(line);
+        combined_source.push('\n');
+    }
+
+    let program = match parse_v2(&combined_source) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Parse error: {}", e);
@@ -577,6 +685,103 @@ fn cmd_compile(path: &str) {
     }
 }
 
+/// Format a tagged WASM value into a human-readable string.
+fn format_tagged_value(val: i64, data: &[u8]) -> String {
+    let tag = (val >> 56) as u8;
+    let payload = val & 0x00FFFFFFFFFFFFFF;
+    match tag {
+        0 => "null".to_string(),
+        1 => format!("{}", payload != 0),
+        2 => {
+            // Sign-extend from 56 bits.
+            let n = if payload & (1 << 55) != 0 {
+                payload | !0x00FFFFFFFFFFFFFF
+            } else {
+                payload
+            };
+            format!("{}", n)
+        }
+        3 => "<float64>".to_string(),
+        4 => {
+            // String: payload is memory offset.
+            let offset = payload as usize;
+            if offset + 4 <= data.len() {
+                let len = u32::from_le_bytes([
+                    data[offset], data[offset + 1],
+                    data[offset + 2], data[offset + 3],
+                ]) as usize;
+                if offset + 4 + len <= data.len() {
+                    String::from_utf8_lossy(&data[offset + 4..offset + 4 + len]).to_string()
+                } else {
+                    format!("<string@{}>", offset)
+                }
+            } else {
+                format!("<string@{}>", offset)
+            }
+        }
+        5 => {
+            // Array: payload is memory offset.
+            // Layout: [i32 length][i32 capacity][i64 elem0][i64 elem1]...
+            let ptr = payload as usize;
+            if ptr + 4 <= data.len() {
+                let len = u32::from_le_bytes([
+                    data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
+                ]) as usize;
+                let mut parts = Vec::with_capacity(len);
+                for i in 0..len {
+                    let elem_offset = ptr + 8 + i * 8;
+                    if elem_offset + 8 <= data.len() {
+                        let elem = i64::from_le_bytes([
+                            data[elem_offset], data[elem_offset + 1],
+                            data[elem_offset + 2], data[elem_offset + 3],
+                            data[elem_offset + 4], data[elem_offset + 5],
+                            data[elem_offset + 6], data[elem_offset + 7],
+                        ]);
+                        parts.push(format_tagged_value(elem, data));
+                    }
+                }
+                format!("[{}]", parts.join(", "))
+            } else {
+                format!("<array@{}>", ptr)
+            }
+        }
+        6 => {
+            // Map: payload is memory offset.
+            // Layout: [i32 count][i32 capacity][i64 key0][i64 val0]...
+            let ptr = payload as usize;
+            if ptr + 4 <= data.len() {
+                let count = u32::from_le_bytes([
+                    data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
+                ]) as usize;
+                let mut parts = Vec::with_capacity(count);
+                for i in 0..count {
+                    let key_offset = ptr + 8 + i * 16;
+                    let val_offset = key_offset + 8;
+                    if val_offset + 8 <= data.len() {
+                        let key = i64::from_le_bytes([
+                            data[key_offset], data[key_offset + 1],
+                            data[key_offset + 2], data[key_offset + 3],
+                            data[key_offset + 4], data[key_offset + 5],
+                            data[key_offset + 6], data[key_offset + 7],
+                        ]);
+                        let value = i64::from_le_bytes([
+                            data[val_offset], data[val_offset + 1],
+                            data[val_offset + 2], data[val_offset + 3],
+                            data[val_offset + 4], data[val_offset + 5],
+                            data[val_offset + 6], data[val_offset + 7],
+                        ]);
+                        parts.push(format!("{}: {}", format_tagged_value(key, data), format_tagged_value(value, data)));
+                    }
+                }
+                format!("{{{}}}", parts.join(", "))
+            } else {
+                format!("<map@{}>", ptr)
+            }
+        }
+        _ => format!("<tagged:{}:{}>", tag, payload),
+    }
+}
+
 fn cmd_run_wasm(path: &str) {
     let wasm_bytes = match fs::read(path) {
         Ok(b) => b,
@@ -607,46 +812,12 @@ fn cmd_run_wasm(path: &str) {
     // Provide host functions that the MAGI runtime expects.
     linker
         .func_wrap("env", "print", |mut caller: wasmtime::Caller<'_, ()>, val: i64| {
-            // Decode tagged value for printing.
-            let tag = (val >> 56) as u8;
-            let payload = val & 0x00FFFFFFFFFFFFFF;
-            match tag {
-                0 => println!("null"),
-                1 => println!("{}", payload != 0),
-                2 => {
-                    // Sign-extend from 56 bits.
-                    let n = if payload & (1 << 55) != 0 {
-                        payload | !0x00FFFFFFFFFFFFFF
-                    } else {
-                        payload
-                    };
-                    println!("{}", n);
-                }
-                3 => println!("<float64>"),
-                4 => {
-                    // String: payload is memory offset. Read length-prefixed string data.
-                    let offset = payload as usize;
-                    if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                        let data = memory.data(&caller);
-                        if offset + 4 <= data.len() {
-                            let len = u32::from_le_bytes([
-                                data[offset], data[offset + 1],
-                                data[offset + 2], data[offset + 3],
-                            ]) as usize;
-                            if offset + 4 + len <= data.len() {
-                                let s = String::from_utf8_lossy(&data[offset + 4..offset + 4 + len]);
-                                println!("{}", s);
-                            } else {
-                                println!("<string@{}>", offset);
-                            }
-                        } else {
-                            println!("<string@{}>", offset);
-                        }
-                    } else {
-                        println!("<string@{}>", offset);
-                    }
-                }
-                _ => println!("<tagged:{}:{}>", tag, payload),
+            if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                let data = memory.data(&caller);
+                let s = format_tagged_value(val, data);
+                println!("{}", s);
+            } else {
+                println!("<no-memory>");
             }
         })
         .expect("failed to define print");
@@ -657,6 +828,45 @@ fn cmd_run_wasm(path: &str) {
             0i64
         })
         .expect("failed to define runtime_call");
+
+    linker
+        .func_wrap("env", "__to_string", |mut caller: wasmtime::Caller<'_, ()>, val: i64| -> i64 {
+            let tag = (val >> 56) as u8;
+            // If already a string, return as-is.
+            if tag == 4 {
+                return val;
+            }
+
+            let memory = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
+            let heap_global = caller.get_export("__heap_ptr").and_then(|e| e.into_global()).unwrap();
+
+            let formatted = {
+                let data = memory.data(&caller);
+                format_tagged_value(val, data)
+            };
+            let bytes = formatted.as_bytes();
+            let total = 4 + bytes.len();
+
+            // Read current heap pointer from exported global.
+            let ptr = heap_global.get(&mut caller).i32().unwrap() as u32;
+
+            // Write string: [u32 len][bytes...]
+            let str_offset = ptr as usize;
+            {
+                let data = memory.data_mut(&mut caller);
+                let len_bytes = (bytes.len() as u32).to_le_bytes();
+                data[str_offset..str_offset + 4].copy_from_slice(&len_bytes);
+                data[str_offset + 4..str_offset + 4 + bytes.len()].copy_from_slice(bytes);
+            }
+
+            // Update heap pointer.
+            let new_ptr = ptr + total as u32;
+            heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32)).unwrap();
+
+            // Return tagged string: (STRING_TAG << 56) | offset
+            ((4i64) << 56) | (str_offset as i64)
+        })
+        .expect("failed to define __to_string");
 
     let instance = match linker.instantiate(&mut store, &module) {
         Ok(i) => i,
