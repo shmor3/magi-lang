@@ -650,25 +650,35 @@ impl Compiler {
             }
 
             ExpressionKind::Call { name, args, .. } => {
-                // Compile arguments.
-                for arg in args {
-                    if let ExpressionKind::Spread(inner) = &arg.kind {
-                        // Spread in function call — at runtime this expands the array.
-                        self.compile_expr(inner)?;
-                    } else {
+                // Check if any argument uses spread — if so, delegate entirely
+                // to runtime since we can't know the expanded arity at compile time.
+                let has_spread = args.iter().any(|a| matches!(&a.kind, ExpressionKind::Spread(_)));
+
+                if has_spread {
+                    // Delegate to runtime: compile all args (spread stays as array),
+                    // runtime will expand spread arguments.
+                    for arg in args {
                         self.compile_expr(arg)?;
                     }
-                }
-
-                if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
-                    self.emit(Instruction::Call(fn_idx));
-                } else {
-                    // Runtime call for operations we don't have a compiled version of.
                     let name_idx = self.module.intern_string(name);
                     self.emit(Instruction::RuntimeCall {
                         name: name_idx,
                         arg_count: args.len() as u32,
                     });
+                } else {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+
+                    if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
+                        self.emit(Instruction::Call(fn_idx));
+                    } else {
+                        let name_idx = self.module.intern_string(name);
+                        self.emit(Instruction::RuntimeCall {
+                            name: name_idx,
+                            arg_count: args.len() as u32,
+                        });
+                    }
                 }
             }
 

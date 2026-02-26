@@ -428,11 +428,13 @@ impl TypeChecker {
                 }
 
                 if is_empty_block(body) {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         "Empty loop body".to_string(),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W104,
+                        None,
                     );
                 }
 
@@ -483,26 +485,30 @@ impl TypeChecker {
                     );
                 }
 
-                // W6: Infinite while loop (literal true condition).
+                // W105: Infinite while loop (literal true condition).
                 if matches!(
                     &condition.kind,
                     ExpressionKind::Literal(Literal::Bool(true))
                 ) {
-                    self.emit(
+                    self.emit_coded(
                         condition.span.start_line,
                         condition.span.start_col,
                         "Loop condition is always true".to_string(),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W105,
+                        None,
                     );
                 }
 
-                // W5: Empty loop body.
+                // W104: Empty loop body.
                 if is_empty_block(body) {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         "Empty loop body".to_string(),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W104,
+                        None,
                     );
                 }
 
@@ -964,18 +970,20 @@ impl TypeChecker {
             // Unary operations
             // -----------------------------------------------------------------
             ExpressionKind::UnaryOp { op, operand } => {
-                // W8/W9: Double negation or double NOT.
+                // W106: Double negation or double NOT.
                 if let ExpressionKind::UnaryOp { op: inner_op, .. } = &operand.kind {
                     if op == inner_op {
                         let msg = match op {
                             UnOp::Neg => "Double negation is redundant",
                             UnOp::Not => "Double logical NOT is redundant",
                         };
-                        self.emit(
+                        self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
                             msg.to_string(),
                             DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::W106,
+                            None,
                         );
                     }
                 }
@@ -1533,11 +1541,13 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             ExpressionKind::Loop(block) => {
                 if is_empty_block(block) {
-                    self.emit(
+                    self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         "Empty loop body".to_string(),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W104,
+                        None,
                     );
                 }
                 self.push_scope();
@@ -1821,58 +1831,66 @@ impl TypeChecker {
             );
         }
 
-        // W10: Modulo by 1.
+        // W107: Modulo by 1.
         if op == BinOp::Mod && literal_int(right) == Some(1) {
-            self.emit(
+            self.emit_coded(
                 span.start_line,
                 span.start_col,
                 "Modulo by 1 always returns 0".to_string(),
                 DiagnosticSeverity::Warning,
+                super::errors::ErrorCode::W107,
+                None,
             );
         }
 
-        // W11: Multiply by 0.
+        // W107: Multiply by 0.
         if op == BinOp::Mul
             && (literal_int(left) == Some(0)
                 || literal_int(right) == Some(0)
                 || literal_float(left) == Some(0.0)
                 || literal_float(right) == Some(0.0))
         {
-            self.emit(
+            self.emit_coded(
                 span.start_line,
                 span.start_col,
                 "Multiplication by 0 always returns 0".to_string(),
                 DiagnosticSeverity::Warning,
+                super::errors::ErrorCode::W107,
+                None,
             );
         }
 
-        // W4: Boolean literal comparison.
+        // W106: Boolean literal comparison.
         if matches!(op, BinOp::Eq | BinOp::NotEq)
             && (is_literal_bool(left, true)
                 || is_literal_bool(left, false)
                 || is_literal_bool(right, true)
                 || is_literal_bool(right, false))
         {
-            self.emit(
+            self.emit_coded(
                 span.start_line,
                 span.start_col,
                 "Comparison with boolean literal is unnecessary".to_string(),
                 DiagnosticSeverity::Warning,
+                super::errors::ErrorCode::W106,
+                None,
             );
         }
 
-        // W12: Self-comparison.
+        // W106: Self-comparison.
         if matches!(
             op,
             BinOp::Eq | BinOp::NotEq | BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq
         ) {
             if let (Some(l), Some(r)) = (as_variable(left), as_variable(right)) {
                 if l == r {
-                    self.emit(
+                    self.emit_coded(
                         span.start_line,
                         span.start_col,
                         format!("Comparing variable '{}' with itself", l),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W106,
+                        None,
                     );
                 }
             }

@@ -1941,6 +1941,13 @@ impl Parser {
                     }
                     expr_str.push(inner);
                 }
+                if depth > 0 {
+                    return Err(SyntaxError {
+                        line: tok.span.start_line as usize,
+                        column: tok.span.start_col as usize,
+                        message: "Unclosed interpolation brace in f-string".to_string(),
+                    });
+                }
                 // Parse the inner expression
                 let inner_tokens = super::lexer::tokenize(&expr_str).map_err(|e| SyntaxError {
                     line: tok.span.start_line as usize,

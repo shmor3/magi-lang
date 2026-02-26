@@ -568,12 +568,33 @@ impl WasmCodegen {
 
             // ── Memory ───────────────────────────────────
             Instruction::HeapAlloc(size) => {
-                // Bump allocator: load heap_ptr, return it, advance by size.
-                f.instruction(&WasmInst::GlobalGet(0)); // heap_ptr
+                // Bump allocator with bounds checking and auto-grow.
+                // 1. Save old heap_ptr as return value.
+                f.instruction(&WasmInst::GlobalGet(0));
+
+                // 2. Advance heap_ptr by size.
                 f.instruction(&WasmInst::GlobalGet(0));
                 f.instruction(&WasmInst::I32Const(*size as i32));
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::GlobalSet(0));
+
+                // 3. If new heap_ptr exceeds memory, grow it.
+                f.instruction(&WasmInst::GlobalGet(0));
+                f.instruction(&WasmInst::MemorySize(0));
+                f.instruction(&WasmInst::I32Const(16)); // pages → bytes: <<16
+                f.instruction(&WasmInst::I32Shl);
+                f.instruction(&WasmInst::I32GtU);
+                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::I32Const(16)); // grow by 1MB
+                f.instruction(&WasmInst::MemoryGrow(0));
+                f.instruction(&WasmInst::I32Const(-1_i32));
+                f.instruction(&WasmInst::I32Eq);
+                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::Unreachable); // out of memory
+                f.instruction(&WasmInst::End);
+                f.instruction(&WasmInst::End);
+
+                // 4. Return old_ptr as i64 (on stack from step 1).
                 f.instruction(&WasmInst::I64ExtendI32U);
             }
             Instruction::MemLoadI64 => {

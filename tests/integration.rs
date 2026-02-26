@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use magi_lang::compiler;
 use magi_lang::eval::{EvalError, OperationEvaluator};
 use magi_lang::syntax::ast::Program;
-use magi_lang::syntax::interpreter::Interpreter;
+use magi_lang::syntax::interpreter::{InterpError, Interpreter};
 use magi_lang::syntax::parser::parse_v2;
 use magi_lang::syntax::type_checker::check_types;
 use magi_lang::types::{DataType, OperationType};
@@ -267,6 +267,24 @@ fn run(src: &str) -> DataType {
     interp
         .execute(&program)
         .unwrap_or_else(|e| panic!("runtime error: {:?}", e))
+}
+
+fn run_err(src: &str) -> InterpError {
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    interp.execute(&program).unwrap_err()
+}
+
+fn typecheck_warnings(src: &str) -> Vec<String> {
+    let program = parse(src);
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    analysis
+        .diagnostics
+        .iter()
+        .filter_map(|d| d.code.clone())
+        .collect()
 }
 
 
@@ -1007,4 +1025,272 @@ fn test_version_features() {
     assert!(features.contains(&magi_lang::version::Feature::Core));
     assert!(features.contains(&magi_lang::version::Feature::Enums));
     assert!(features.contains(&magi_lang::version::Feature::WasmCompilation));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Edge case and error path tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_empty_program() {
+    assert_eq!(run(""), DataType::Null);
+}
+
+#[test]
+fn test_division_by_zero() {
+    let err = run_err("1 / 0");
+    match err {
+        InterpError::EvalError { error: EvalError::DivisionByZero, .. } => {}
+        _ => panic!("expected DivisionByZero, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_recursion_works() {
+    // Verify recursion works within limits (MAX_CALL_DEPTH = 48).
+    let src = r#"
+        fn fact(n) {
+            if n <= 1 { return 1; }
+            n * fact(n - 1)
+        }
+        fact(10)
+    "#;
+    assert_eq!(run(src), DataType::Int64(3628800));
+}
+
+#[test]
+fn test_immutable_assignment_error() {
+    let err = run_err("let x = 5; x = 10;");
+    match err {
+        InterpError::ImmutableAssignment { .. } => {}
+        _ => panic!("expected ImmutableAssignment, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_undefined_variable_error() {
+    let err = run_err("unknown_var");
+    match err {
+        InterpError::UndefinedVariable { .. } => {}
+        _ => panic!("expected UndefinedVariable, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_assert_failure() {
+    let err = run_err("assert(false)");
+    match err {
+        InterpError::ThrownError { .. } => {}
+        _ => panic!("expected ThrownError (assertion), got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_assert_success() {
+    assert_eq!(run("assert(true)"), DataType::Null);
+}
+
+#[test]
+fn test_assert_eq_success() {
+    assert_eq!(run("assert_eq(42, 42)"), DataType::Null);
+}
+
+#[test]
+fn test_assert_eq_failure() {
+    let err = run_err("assert_eq(1, 2)");
+    match err {
+        InterpError::ThrownError { .. } => {}
+        _ => panic!("expected ThrownError (assert_eq), got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_throw_and_catch() {
+    // The catch variable receives the error as a formatted string including span info.
+    let result = run(r#"try { throw "oops"; } catch e { e }"#);
+    match result {
+        DataType::String(s) => assert!(s.contains("oops"), "expected 'oops' in error: {}", s),
+        other => panic!("expected String, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_throw_uncaught() {
+    let err = run_err(r#"throw "error""#);
+    match err {
+        InterpError::ThrownError { .. } => {}
+        _ => panic!("expected ThrownError, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_try_catch_finally() {
+    let src = r#"
+        let mut x = 0;
+        try {
+            x = 1;
+            throw "err";
+        } catch e {
+            x = x + 10;
+        } finally {
+            x = x + 100;
+        }
+        x
+    "#;
+    assert_eq!(run(src), DataType::Int64(111));
+}
+
+#[test]
+fn test_float_nan_handling() {
+    match run("0.0 / 0.0") {
+        DataType::Float64(v) => assert!(v.is_nan(), "expected NaN"),
+        other => panic!("expected Float64(NaN), got: {:?}", other),
+    }
+    assert_eq!(run("let x = 0.0 / 0.0; x != x"), DataType::Bool(true));
+}
+
+#[test]
+fn test_float_infinity() {
+    assert_eq!(run("1.0 / 0.0"), DataType::Float64(f64::INFINITY));
+    assert_eq!(run("-1.0 / 0.0"), DataType::Float64(f64::NEG_INFINITY));
+}
+
+#[test]
+fn test_array_index_out_of_bounds() {
+    // Out-of-bounds index returns null (no runtime panic)
+    assert_eq!(run("let a = [10, 20, 30]; a[99]"), DataType::Null);
+    assert_eq!(run("let a = [10, 20, 30]; a[-1]"), DataType::Null);
+}
+
+#[test]
+fn test_try_catch_as_expression() {
+    let result = run(r#"let x = try { 42 } catch e { 0 }; x"#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_try_catch_expr_with_throw() {
+    let result = run(r#"let x = try { throw "err"; 0 } catch e { 99 }; x"#);
+    assert_eq!(result, DataType::Int64(99));
+}
+
+#[test]
+fn test_string_escape_sequences_extended() {
+    assert_eq!(
+        run(r#""\t\n\r\\""#),
+        DataType::String("\t\n\r\\".to_string())
+    );
+}
+
+#[test]
+fn test_hex_escape_sequence() {
+    assert_eq!(
+        run(r#""\x41""#),
+        DataType::String("A".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_escape_sequence() {
+    assert_eq!(
+        run(r#""\u{1F600}""#),
+        DataType::String("\u{1F600}".to_string())
+    );
+}
+
+#[test]
+fn test_string_methods_extended() {
+    assert_eq!(run(r#""hello".len()"#), DataType::Int64(5));
+    assert_eq!(run(r#""  hi  ".trim()"#), DataType::String("hi".to_string()));
+    assert_eq!(run(r#""abc".reverse()"#), DataType::String("cba".to_string()));
+    assert_eq!(run(r#""hello".contains("ell")"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello".starts_with("hel")"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello".ends_with("llo")"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello".to_upper()"#), DataType::String("HELLO".to_string()));
+    assert_eq!(run(r#""HELLO".to_lower()"#), DataType::String("hello".to_string()));
+    assert_eq!(run(r#""ha".repeat(3)"#), DataType::String("hahaha".to_string()));
+}
+
+#[test]
+fn test_int64_methods() {
+    assert_eq!(run("let x: int64 = -5; x.abs()"), DataType::Int64(5));
+    assert_eq!(run("let x: int64 = 2; x.pow(10)"), DataType::Int64(1024));
+    assert_eq!(run("let x: int64 = -3; x.sign()"), DataType::Int64(-1));
+}
+
+#[test]
+fn test_float64_methods() {
+    assert_eq!(run("let x: float64 = -2.5; x.abs()"), DataType::Float64(2.5));
+    assert_eq!(run("let x: float64 = 2.5; x.floor()"), DataType::Float64(2.0));
+    assert_eq!(run("let x: float64 = 2.5; x.ceil()"), DataType::Float64(3.0));
+    assert_eq!(run("let x: float64 = 9.0; x.sqrt()"), DataType::Float64(3.0));
+}
+
+#[test]
+fn test_loop_break_value() {
+    let result = run(r#"
+        let mut i = 0;
+        loop {
+            i = i + 1;
+            if i == 5 { break i * 10; }
+        }
+    "#);
+    assert_eq!(result, DataType::Int64(50));
+}
+
+#[test]
+fn test_deeply_nested_function_calls() {
+    let src = r#"
+        fn a(x) { x + 1 }
+        fn b(x) { a(a(a(x))) }
+        fn c(x) { b(b(b(x))) }
+        c(0)
+    "#;
+    assert_eq!(run(src), DataType::Int64(9));
+}
+
+#[test]
+fn test_fstring_unclosed_brace() {
+    let result = parse_v2(r#"f"hello {name""#);
+    assert!(result.is_err(), "expected parse error for unclosed f-string brace");
+}
+
+// ═══════════════════════════════════════════════════════════
+// Type checker warning code tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_w104_empty_loop_body() {
+    let codes = typecheck_warnings("for x in [1, 2, 3] {}");
+    assert!(codes.contains(&"W104".to_string()), "expected W104, got: {:?}", codes);
+}
+
+#[test]
+fn test_w105_infinite_loop() {
+    let codes = typecheck_warnings("while true {}");
+    assert!(codes.contains(&"W105".to_string()), "expected W105, got: {:?}", codes);
+}
+
+#[test]
+fn test_w106_double_negation() {
+    let codes = typecheck_warnings("let x = 5; let y = --x;");
+    assert!(codes.contains(&"W106".to_string()), "expected W106, got: {:?}", codes);
+}
+
+#[test]
+fn test_w106_self_comparison() {
+    let codes = typecheck_warnings("let x = 5; let y = x == x;");
+    assert!(codes.contains(&"W106".to_string()), "expected W106, got: {:?}", codes);
+}
+
+#[test]
+fn test_w107_modulo_by_one() {
+    let codes = typecheck_warnings("let x = 5; let y = x % 1;");
+    assert!(codes.contains(&"W107".to_string()), "expected W107, got: {:?}", codes);
+}
+
+#[test]
+fn test_w107_multiply_by_zero() {
+    let codes = typecheck_warnings("let x = 5; let y = x * 0;");
+    assert!(codes.contains(&"W107".to_string()), "expected W107, got: {:?}", codes);
 }
