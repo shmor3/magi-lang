@@ -1510,15 +1510,17 @@ impl TypeChecker {
                     }
                 }
 
-                // Unknown method — warn
-                self.emit_coded(
-                    expr.span.start_line,
-                    expr.span.start_col,
-                    format!("Unknown method '{}' on type '{}'", method, obj_ty.as_str()),
-                    DiagnosticSeverity::Warning,
-                    super::errors::ErrorCode::E201,
-                    None,
-                );
+                // Unknown method — warn (but suppress if receiver type is unknown/Null)
+                if obj_ty != ChannelType::Null {
+                    self.emit_coded(
+                        expr.span.start_line,
+                        expr.span.start_col,
+                        format!("Unknown method '{}' on type '{}'", method, obj_ty.as_str()),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E201,
+                        None,
+                    );
+                }
                 ChannelType::Null
             }
 
@@ -1566,7 +1568,7 @@ impl TypeChecker {
                         expr.span.start_col,
                         "Empty match expression".to_string(),
                         DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W107,
+                        super::errors::ErrorCode::W206,
                         None,
                     );
                     return ChannelType::Null;
@@ -1583,7 +1585,7 @@ impl TypeChecker {
                         expr.span.start_col,
                         "Non-exhaustive match: consider adding a wildcard '_' arm".to_string(),
                         DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W107,
+                        super::errors::ErrorCode::W203,
                         Some("Add a `_ => ...` arm to handle remaining cases".to_string()),
                     );
                 }
@@ -2051,25 +2053,30 @@ impl TypeChecker {
         }
 
         // W2: Arithmetic on non-numeric types.
+        // Exempt Add on strings (string concatenation is valid).
         if matches!(
             op,
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
         ) {
-            for ty in [left_ty, right_ty] {
-                if ty != ChannelType::Null && !is_numeric(ty) {
-                    self.emit_coded(
-                        span.start_line,
-                        span.start_col,
-                        format!(
-                            "Arithmetic operator '{}' expects numeric operands, got {}",
-                            op,
-                            ty.as_str()
-                        ),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::E103,
-                        None,
-                    );
-                    break; // One warning per operation.
+            let is_string_concat = op == BinOp::Add
+                && (left_ty == ChannelType::String || right_ty == ChannelType::String);
+            if !is_string_concat {
+                for ty in [left_ty, right_ty] {
+                    if ty != ChannelType::Null && !is_numeric(ty) {
+                        self.emit_coded(
+                            span.start_line,
+                            span.start_col,
+                            format!(
+                                "Arithmetic operator '{}' expects numeric operands, got {}",
+                                op,
+                                ty.as_str()
+                            ),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::E103,
+                            None,
+                        );
+                        break; // One warning per operation.
+                    }
                 }
             }
         }
@@ -2462,29 +2469,43 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "reverse" => Some("reverse".into()),
             "contains" => Some("array_contains".into()),
             "find" => Some("array_find".into()),
+            "find_index" => Some("array_find_index".into()),
             "flatten" => Some("array_flatten".into()),
             "join" => Some("array_join".into()),
             "slice" => Some("array_slice".into()),
             "concat" => Some("array_concat".into()),
             "unique" => Some("array_unique".into()),
+            // HOF methods handled by interpreter directly
+            "any" | "all" | "flat_map" | "each" | "sort_by" | "min_by"
+            | "max_by" | "partition" | "group_by" | "scan" | "take_while"
+            | "skip_while" | "zip" | "enumerate" | "chunk" | "windows" => {
+                Some("array_hof".into())
+            }
+            // Direct methods
+            "first" | "last" | "is_empty" | "sum" | "product" | "min"
+            | "max" => Some("array_direct".into()),
             _ => None,
         },
         ChannelType::String => match method {
             "len" | "length" => Some("string_length".into()),
             "split" => Some("split".into()),
-            "trim" => Some("trim".into()),
-            "to_upper" | "upper" => Some("to_upper".into()),
-            "to_lower" | "lower" => Some("to_lower".into()),
+            "trim" | "trim_start" | "trim_end" => Some("trim".into()),
+            "to_upper" | "upper" | "to_uppercase" => Some("to_upper".into()),
+            "to_lower" | "lower" | "to_lowercase" => Some("to_lower".into()),
             "contains" => Some("string_contains".into()),
             "starts_with" => Some("starts_with".into()),
             "ends_with" => Some("ends_with".into()),
             "replace" => Some("replace".into()),
-            "chars" => Some("string_chars".into()),
+            "chars" | "lines" => Some("string_chars".into()),
             "repeat" => Some("string_repeat".into()),
-            "substring" | "substr" => Some("substring".into()),
+            "substring" | "substr" | "slice" => Some("substring".into()),
             "index_of" => Some("index_of".into()),
             "pad_start" => Some("pad_start".into()),
             "pad_end" => Some("pad_end".into()),
+            "reverse" => Some("string_reverse".into()),
+            "is_empty" | "is_numeric" | "is_alphabetic" => Some("string_predicate".into()),
+            "to_int" | "to_float" => Some("string_convert".into()),
+            "char_at" => Some("string_char_at".into()),
             _ => None,
         },
         ChannelType::Map => match method {
@@ -2496,7 +2517,9 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "values" => Some("map_values".into()),
             "entries" => Some("map_entries".into()),
             "merge" => Some("map_merge".into()),
-            "len" | "length" => Some("map_size".into()),
+            "len" | "length" | "size" => Some("map_size".into()),
+            // HOF methods
+            "filter_entries" | "map_values" | "map_keys" => Some("map_hof".into()),
             _ => None,
         },
         ChannelType::Bytes => match method {
@@ -2504,6 +2527,18 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "slice" => Some("bytes_slice".into()),
             "concat" => Some("bytes_concat".into()),
             "contains" => Some("bytes_contains".into()),
+            _ => None,
+        },
+        ChannelType::Int64 | ChannelType::Int32 => match method {
+            "abs" | "sign" | "to_string" | "to_float64" | "pow" | "min"
+            | "max" | "clamp" => Some("numeric_method".into()),
+            _ => None,
+        },
+        ChannelType::Float64 | ChannelType::Float32 => match method {
+            "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
+            | "to_int64" | "pow" | "min" | "max" | "clamp" | "is_nan"
+            | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
+            | "tan" => Some("numeric_method".into()),
             _ => None,
         },
         _ => {
@@ -3311,7 +3346,8 @@ output r;"#,
 
     #[test]
     fn test_arithmetic_on_string_warns() {
-        let a = check(r#"let r = "a" + 1; output r;"#);
+        // String subtraction should warn (only + is valid for string concat)
+        let a = check(r#"let r = "a" - 1; output r;"#);
         let w = warnings(&a);
         assert!(w
             .iter()

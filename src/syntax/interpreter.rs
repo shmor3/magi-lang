@@ -632,7 +632,7 @@ impl<'a> Interpreter<'a> {
                         return Err(InterpError::BreakOutsideLoop { span: stmt.span });
                     }
                     Err(InterpError::ContinueSignal) => {
-                        return Err(InterpError::BreakOutsideLoop { span: stmt.span });
+                        return Err(InterpError::ContinueOutsideLoop { span: stmt.span });
                     }
                     Err(InterpError::ReturnSignal(_)) => {
                         return Err(InterpError::ReturnOutsideFunction { span: stmt.span });
@@ -785,7 +785,7 @@ impl<'a> Interpreter<'a> {
                         other => {
                             return Err(InterpError::TypeError {
                                 expected: "Bool".to_string(),
-                                actual: format!("{:?}", other),
+                                actual: datatype_type_name(&other).to_string(),
                                 context: "while condition".to_string(),
                                 span: condition.span,
                             });
@@ -935,11 +935,14 @@ impl<'a> Interpreter<'a> {
                         return try_result;
                     }
                     Err(e) => {
-                        let error_msg = format!("{}", e);
+                        let catch_value = match e {
+                            InterpError::ThrownError { value, .. } => value,
+                            other => DataType::String(format!("{}", other)),
+                        };
                         self.symbols.push(HashMap::new());
                         self.heap.push_scope();
                         if let Some(var_name) = catch_var {
-                            let addr = self.heap.alloc(DataType::String(error_msg));
+                            let addr = self.heap.alloc(catch_value);
                             self.define(var_name, addr, false);
                         }
                         let catch_result = self.exec_block(catch_block);
@@ -1055,7 +1058,7 @@ impl<'a> Interpreter<'a> {
                     other => {
                         return Err(InterpError::TypeError {
                             expected: "Array".to_string(),
-                            actual: format!("{:?}", other),
+                            actual: datatype_type_name(&other).to_string(),
                             context: "spread operator".to_string(),
                             span: arg.span,
                         });
@@ -1877,8 +1880,11 @@ impl<'a> Interpreter<'a> {
         let result = match self.exec_block(&func.body) {
             Ok(val) => Ok(val),
             Err(InterpError::ReturnSignal(val)) => Ok(val),
-            Err(InterpError::BreakSignal(_)) | Err(InterpError::ContinueSignal) => {
+            Err(InterpError::BreakSignal(_)) => {
                 Err(InterpError::BreakOutsideLoop { span: call_span })
+            }
+            Err(InterpError::ContinueSignal) => {
+                Err(InterpError::ContinueOutsideLoop { span: call_span })
             }
             Err(e) => Err(e),
         };
@@ -1942,7 +1948,7 @@ impl<'a> Interpreter<'a> {
                             other => {
                                 return Err(InterpError::TypeError {
                                     expected: "Array".to_string(),
-                                    actual: format!("{:?}", other),
+                                    actual: datatype_type_name(&other).to_string(),
                                     context: "spread in array literal".to_string(),
                                     span: elem.span,
                                 });
@@ -2314,7 +2320,7 @@ impl<'a> Interpreter<'a> {
                     other => {
                         return Err(InterpError::TypeError {
                             expected: "Bool".to_string(),
-                            actual: format!("{:?}", other),
+                            actual: datatype_type_name(other).to_string(),
                             context: "if condition".to_string(),
                             span: condition.span,
                         });
@@ -2906,11 +2912,14 @@ impl<'a> Interpreter<'a> {
                     Ok(val) => Ok(val),
                     Err(ref e) if is_control_flow(e) => try_result,
                     Err(e) => {
-                        let error_msg = format!("{}", e);
+                        let catch_value = match e {
+                            InterpError::ThrownError { value, .. } => value,
+                            other => DataType::String(format!("{}", other)),
+                        };
                         self.symbols.push(HashMap::new());
                         self.heap.push_scope();
                         if let Some(var_name) = catch_var {
-                            let addr = self.heap.alloc(DataType::String(error_msg));
+                            let addr = self.heap.alloc(catch_value);
                             self.define(var_name, addr, false);
                         }
                         let catch_result = self.exec_block(catch_block);
@@ -3314,6 +3323,7 @@ impl<'a> Interpreter<'a> {
                     | InterpError::MaxCallDepth { span, .. }
                     | InterpError::ArityMismatch { span, .. }
                     | InterpError::BreakOutsideLoop { span }
+                    | InterpError::ContinueOutsideLoop { span }
                     | InterpError::ReturnOutsideFunction { span }
                     | InterpError::NotImplemented { span, .. }
                     | InterpError::ThrownError { span, .. }
@@ -4250,8 +4260,12 @@ pub enum InterpError {
     ContinueSignal,
     /// Control flow signal: `return expr` (caught by function calls)
     ReturnSignal(DataType),
-    /// `break`/`continue` used outside a loop
+    /// `break` used outside a loop
     BreakOutsideLoop {
+        span: Span,
+    },
+    /// `continue` used outside a loop
+    ContinueOutsideLoop {
         span: Span,
     },
     /// `return` used outside a function
@@ -4371,6 +4385,9 @@ impl std::fmt::Display for InterpError {
             InterpError::BreakOutsideLoop { span } => {
                 write!(f, "{} [E300]: 'break' used outside of a loop", span)
             }
+            InterpError::ContinueOutsideLoop { span } => {
+                write!(f, "{} [E301]: 'continue' used outside of a loop", span)
+            }
             InterpError::ReturnOutsideFunction { span } => {
                 write!(f, "{} [E302]: 'return' used outside of a function", span)
             }
@@ -4378,7 +4395,7 @@ impl std::fmt::Display for InterpError {
                 write!(f, "{} [E408]: {}", span, message)
             }
             InterpError::ThrownError { value, span } => {
-                write!(f, "{} [E403]: Uncaught error: {:?}", span, value)
+                write!(f, "{} [E403]: Uncaught error: {}", span, datatype_to_display(value))
             }
         }
     }

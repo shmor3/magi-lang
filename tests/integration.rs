@@ -3851,3 +3851,114 @@ fn test_pad_start_excessive_width_errors() {
 "#);
     assert!(matches!(err, InterpError::TypeError { .. }));
 }
+
+// ── Round 25: catch values, error display, type checker fixes ──
+
+#[test]
+fn test_catch_preserves_thrown_string() {
+    assert_eq!(
+        run(r#"
+let result = try {
+    throw "something went wrong";
+    0
+} catch e {
+    e
+};
+result
+"#),
+        DataType::String("something went wrong".to_string())
+    );
+}
+
+#[test]
+fn test_catch_preserves_thrown_map() {
+    assert_eq!(
+        run(r#"
+let result = try {
+    throw {"code": 404, "msg": "not found"};
+    0
+} catch e {
+    e.code
+};
+result
+"#),
+        DataType::Int64(404)
+    );
+}
+
+#[test]
+fn test_catch_preserves_thrown_int() {
+    assert_eq!(
+        run(r#"
+let result = try { throw 42; 0 } catch e { e };
+result
+"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_statement_try_catch_preserves_thrown_value() {
+    // Statement-level try/catch: verify thrown array is preserved
+    assert_eq!(
+        run(r#"
+let mut caught = null;
+try {
+    throw [1, 2, 3];
+} catch e {
+    caught = e;
+}
+caught
+"#),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)])
+    );
+}
+
+#[test]
+fn test_short_circuit_and_with_side_effect_guard() {
+    // Verify short-circuit: second expression should not be evaluated
+    assert_eq!(
+        run(r#"
+let x = false && (1 / 0 > 0);
+x
+"#),
+        DataType::Bool(false)
+    );
+}
+
+#[test]
+fn test_short_circuit_or_with_side_effect_guard() {
+    assert_eq!(
+        run(r#"
+let x = true || (1 / 0 > 0);
+x
+"#),
+        DataType::Bool(true)
+    );
+}
+
+#[test]
+fn test_string_concat_no_type_checker_warning() {
+    let program = parse_v2(r#"let x = "hello" + " " + "world"; output x;"#).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let arith_warnings: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.message.contains("Arithmetic operator"))
+        .collect();
+    assert!(arith_warnings.is_empty(), "String + should not warn: {:?}", arith_warnings);
+}
+
+#[test]
+fn test_type_checker_non_exhaustive_match_uses_w203() {
+    let program = parse_v2(r#"
+let x = 42;
+let r = match x { 1 => "one", 2 => "two" };
+output r;
+"#).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let codes: Vec<_> = analysis.diagnostics.iter()
+        .filter_map(|d| d.code.as_deref())
+        .collect();
+    assert!(codes.contains(&"W203"), "Expected W203 for non-exhaustive match, got: {:?}", codes);
+}
