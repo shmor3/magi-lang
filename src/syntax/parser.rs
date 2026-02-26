@@ -1660,7 +1660,18 @@ impl Parser {
         let then_block = self.parse_block()?;
 
         let else_block = if self.eat(&TokenKind::Else) {
-            Some(self.parse_block()?)
+            if self.at(&TokenKind::If) {
+                // else if — parse nested if as a block containing a single tail expression
+                let nested_if = self.parse_if_expr()?;
+                let span = nested_if.span;
+                Some(Block {
+                    statements: Vec::new(),
+                    tail_expr: Some(Box::new(nested_if)),
+                    span,
+                })
+            } else {
+                Some(self.parse_block()?)
+            }
         } else {
             None
         };

@@ -128,6 +128,9 @@ impl<'a> Formatter<'a> {
                     | StatementKind::AsyncFunctionDef(_)
                     | StatementKind::EnumDef { .. }
                     | StatementKind::StructDef { .. }
+                    | StatementKind::ModuleDef { .. }
+                    | StatementKind::TestDef { .. }
+                    | StatementKind::ConstDef { .. }
             );
 
             // Blank line before definitions (but not the very first statement)
@@ -319,7 +322,7 @@ impl<'a> Formatter<'a> {
                 self.write(";");
             }
             StatementKind::TestDef { name, body } => {
-                self.write(&format!("test \"{}\" ", name));
+                self.write(&format!("test \"{}\" ", escape_string_contents(name)));
                 self.fmt_block(body);
             }
             StatementKind::EnumDef { name, variants } => {

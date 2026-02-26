@@ -4320,3 +4320,155 @@ fn test_lsp_utf16_column_conversion() {
     assert_eq!(char_col_to_utf16("café", 4), 4);
     assert_eq!(utf16_to_char_col("café", 4), 4);
 }
+
+// ── Round 32: else-if, cross-type match, circular import, linter, trailing commas ──
+
+#[test]
+fn test_else_if_chain() {
+    let result = run(
+        r#"
+        fn classify(n) {
+            if n < 0 {
+                "negative"
+            } else if n == 0 {
+                "zero"
+            } else if n < 10 {
+                "small"
+            } else {
+                "big"
+            }
+        }
+        [classify(-5), classify(0), classify(3), classify(100)]
+        "#,
+    );
+    assert_eq!(
+        result,
+        DataType::Array(vec![
+            DataType::String("negative".into()),
+            DataType::String("zero".into()),
+            DataType::String("small".into()),
+            DataType::String("big".into()),
+        ])
+    );
+}
+
+#[test]
+fn test_else_if_without_else() {
+    let result = run(
+        r#"
+        let x = 5;
+        if x < 0 {
+            "neg"
+        } else if x > 100 {
+            "big"
+        }
+        "#,
+    );
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_cross_type_match_int_float() {
+    // Matching float value against int literal pattern
+    let result = run(
+        r#"
+        match 1.0 {
+            1 => "one",
+            2 => "two",
+            _ => "other",
+        }
+        "#,
+    );
+    assert_eq!(result, DataType::String("one".into()));
+}
+
+#[test]
+fn test_cross_type_match_float_int() {
+    // Matching int value against float literal pattern
+    let result = run(
+        r#"
+        match 42 {
+            42.0 => "found",
+            _ => "nope",
+        }
+        "#,
+    );
+    assert_eq!(result, DataType::String("found".into()));
+}
+
+#[test]
+fn test_trailing_comma_function_call() {
+    let result = run(
+        r#"
+        fn add(a, b) { a + b }
+        add(10, 20,)
+        "#,
+    );
+    assert_eq!(result, DataType::Int64(30));
+}
+
+#[test]
+fn test_trailing_comma_function_def() {
+    let result = run(
+        r#"
+        fn greet(name: string, greeting: string,) {
+            greeting + " " + name
+        }
+        greet("world", "hello",)
+        "#,
+    );
+    assert_eq!(result, DataType::String("hello world".into()));
+}
+
+#[test]
+fn test_trailing_comma_array_literal() {
+    let result = run(
+        r#"
+        [1, 2, 3,]
+        "#,
+    );
+    assert_eq!(
+        result,
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Int64(3),
+        ])
+    );
+}
+
+#[test]
+fn test_trailing_comma_map_literal() {
+    let result = run(
+        r#"
+        { "a": 1, "b": 2, }
+        "#,
+    );
+    let map = match result {
+        DataType::Map(m) => m,
+        other => panic!("expected map, got {:?}", other),
+    };
+    assert_eq!(map.get("a"), Some(&DataType::Int64(1)));
+    assert_eq!(map.get("b"), Some(&DataType::Int64(2)));
+}
+
+#[test]
+fn test_lint_const_naming() {
+    use magi_lang::linter;
+
+    let program = parse(
+        r#"
+        const MyBadConst = 42;
+        const good_name = 10;
+        "#,
+    );
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    let codes: Vec<&str> = result
+        .diagnostics
+        .iter()
+        .filter_map(|d| d.code.as_deref())
+        .collect();
+    assert!(codes.contains(&"W200"), "should warn on PascalCase const name");
+    // good_name should not produce a warning
+    assert_eq!(codes.iter().filter(|&&c| c == "W200").count(), 1);
+}

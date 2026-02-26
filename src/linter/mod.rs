@@ -243,7 +243,10 @@ impl<'a> LintContext<'a> {
                     self.check_block(fb);
                 }
             }
-            StatementKind::ConstDef { value, .. } => {
+            StatementKind::ConstDef { name, value, .. } => {
+                if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                    self.emit(d);
+                }
                 self.check_expression(value);
             }
             StatementKind::ModuleDef { body, .. } => {

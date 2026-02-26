@@ -289,6 +289,8 @@ pub struct Interpreter<'a> {
     enum_defs: HashMap<String, Vec<EnumVariant>>,
     /// Struct definitions: name → fields.
     struct_defs: HashMap<String, Vec<StructField>>,
+    /// Package import guard: tracks packages currently being imported (circular import detection).
+    importing_packages: std::collections::HashSet<String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -311,6 +313,7 @@ impl<'a> Interpreter<'a> {
             packages: HashMap::new(),
             enum_defs: HashMap::new(),
             struct_defs: HashMap::new(),
+            importing_packages: std::collections::HashSet::new(),
         }
     }
 
@@ -3364,6 +3367,17 @@ impl<'a> Interpreter<'a> {
         }
         let package_id = &path[1];
 
+        // Circular import detection
+        if self.importing_packages.contains(package_id) {
+            return Err(InterpError::TypeError {
+                expected: "non-circular import".to_string(),
+                actual: format!("circular import of pkg::{}", package_id),
+                context: "package import".to_string(),
+                span,
+            });
+        }
+        self.importing_packages.insert(package_id.clone());
+
         // Try exact match first, then with underscores→hyphens (identifiers use _)
         let pkg = match self.packages.get(package_id).or_else(|| {
             let hyphenated = package_id.replace('_', "-");
@@ -3401,6 +3415,7 @@ impl<'a> Interpreter<'a> {
                 let local_name = alias.unwrap_or(func_name.as_str());
                 self.functions.insert(local_name.to_string(), func.clone());
             } else {
+                self.importing_packages.remove(package_id);
                 let available: Vec<&str> = pkg.functions.keys().map(|s| s.as_str()).collect();
                 let suggestion = super::errors::suggest_name(func_name, &available);
                 return Err(InterpError::UnknownOperation {
@@ -3410,6 +3425,7 @@ impl<'a> Interpreter<'a> {
                 });
             }
         }
+        self.importing_packages.remove(package_id);
         Ok(DataType::Null)
     }
 
@@ -3528,6 +3544,7 @@ impl<'a> Interpreter<'a> {
                 let saved_enums = self.enum_defs.clone();
                 let saved_structs = self.struct_defs.clone();
                 let saved_closures = self.closure_captures.clone();
+                let saved_stacks = self.saved_symbol_stacks.clone();
                 self.symbols.push(HashMap::new());
                 self.heap.push_scope();
 
@@ -3543,6 +3560,7 @@ impl<'a> Interpreter<'a> {
                 self.enum_defs = saved_enums;
                 self.struct_defs = saved_structs;
                 self.closure_captures = saved_closures;
+                self.saved_symbol_stacks = saved_stacks;
 
                 match test_result {
                     Ok(_) => {
@@ -4198,7 +4216,9 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
         Pattern::Literal(lit) => {
             let matches = match (lit, value) {
                 (Literal::Int64(a), DataType::Int64(b)) => a == b,
+                (Literal::Int64(a), DataType::Float64(b)) => (*a as f64) == *b,
                 (Literal::Float64(a), DataType::Float64(b)) => a.to_bits() == b.to_bits(),
+                (Literal::Float64(a), DataType::Int64(b)) => *a == (*b as f64),
                 (Literal::String(a), DataType::String(b)) => a == b,
                 (Literal::Bool(a), DataType::Bool(b)) => a == b,
                 (Literal::Null, DataType::Null) => true,
