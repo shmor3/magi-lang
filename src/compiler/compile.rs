@@ -371,12 +371,14 @@ impl Compiler {
         }
     }
 
-    fn fb(&mut self) -> &mut FnBuilder {
-        self.current_fn.as_mut().expect("no function context")
+    fn fb(&mut self) -> Result<&mut FnBuilder, CompileError> {
+        self.current_fn
+            .as_mut()
+            .ok_or_else(|| CompileError::Internal("no function context".into()))
     }
 
-    fn define_local(&mut self, name: &str, val_type: ValType, mutable: bool) -> u32 {
-        self.fb().define_local(name, val_type, mutable)
+    fn define_local(&mut self, name: &str, val_type: ValType, mutable: bool) -> Result<u32, CompileError> {
+        Ok(self.fb()?.define_local(name, val_type, mutable))
     }
 
     fn resolve_local(&self, name: &str) -> Option<u32> {
@@ -396,13 +398,13 @@ impl Compiler {
         match &stmt.kind {
             StatementKind::Let { name, value, .. } => {
                 self.compile_expr(value)?;
-                let idx = self.define_local(name, ValType::Tagged, false);
+                let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
 
             StatementKind::LetMut { name, value, .. } => {
                 self.compile_expr(value)?;
-                let idx = self.define_local(name, ValType::Tagged, true);
+                let idx = self.define_local(name, ValType::Tagged, true)?;
                 self.emit(Instruction::LocalSet(idx));
             }
 
@@ -489,7 +491,7 @@ impl Compiler {
 
             StatementKind::ConstDef { name, value, .. } => {
                 self.compile_expr(value)?;
-                let idx = self.define_local(name, ValType::Tagged, false);
+                let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
 
@@ -520,10 +522,10 @@ impl Compiler {
             }
 
             StatementKind::ModuleDef { name: _, body } => {
-                self.fb().push_scope();
+                self.fb()?.push_scope();
                 self.compile_block(body)?;
                 self.emit(Instruction::Drop);
-                self.fb().pop_scope();
+                self.fb()?.pop_scope();
             }
 
             StatementKind::TestDef { name, body } => {
@@ -589,7 +591,7 @@ impl Compiler {
                 match op {
                     BinOp::And => {
                         self.compile_expr(left)?;
-                        let temp = self.ensure_temp_local();
+                        let temp = self.ensure_temp_local()?;
                         self.emit(Instruction::Block);
                         self.emit(Instruction::Block);
                         // Duplicate & test: if falsy, skip right side.
@@ -603,7 +605,7 @@ impl Compiler {
                     }
                     BinOp::Or => {
                         self.compile_expr(left)?;
-                        let temp = self.ensure_temp_local();
+                        let temp = self.ensure_temp_local()?;
                         self.emit(Instruction::Block);
                         self.emit(Instruction::Block);
                         self.emit(Instruction::LocalTee(temp));
@@ -627,7 +629,7 @@ impl Compiler {
                     UnOp::Not => self.emit(Instruction::BoolNot),
                     UnOp::Neg => {
                         // Dispatch based on type tag: f64 uses F64Neg, i64 uses I64Neg.
-                        let temp = self.ensure_temp_local();
+                        let temp = self.ensure_temp_local()?;
                         self.emit(Instruction::LocalTee(temp));
                         self.emit(Instruction::GetTag);
                         self.emit(Instruction::PushI64(tag::F64 as i64));
@@ -770,12 +772,12 @@ impl Compiler {
                 let prev = self.current_fn.take();
                 self.begin_function(&lambda_name, false);
                 {
-                    let fb = self.fb();
+                    let fb = self.fb()?;
                     fb.param_count = params.len() as u32;
                     fb.has_rest = params.last().map_or(false, |p| p.rest);
                 }
                 for param in params {
-                    self.define_local(&param.name, ValType::Tagged, false);
+                    self.define_local(&param.name, ValType::Tagged, false)?;
                 }
                 self.compile_expr(body)?;
                 self.emit(Instruction::Return);
@@ -855,7 +857,7 @@ impl Compiler {
             ExpressionKind::NullCoalesce { left, right } => {
                 self.compile_expr(left)?;
                 // If not null, keep; else evaluate right.
-                let temp = self.ensure_temp_local();
+                let temp = self.ensure_temp_local()?;
                 self.emit(Instruction::LocalTee(temp));
                 self.emit(Instruction::GetTag);
                 self.emit(Instruction::PushI64(tag::NULL as i64));
@@ -868,7 +870,7 @@ impl Compiler {
 
             ExpressionKind::OptionalChain { object, field } => {
                 self.compile_expr(object)?;
-                let temp = self.ensure_temp_local();
+                let temp = self.ensure_temp_local()?;
                 self.emit(Instruction::LocalTee(temp));
                 self.emit(Instruction::GetTag);
                 self.emit(Instruction::PushI64(tag::NULL as i64));
@@ -912,11 +914,11 @@ impl Compiler {
                 self.compile_block(try_block)?;
                 // Compile catch block (for completeness, though WASM traps bypass it).
                 if let Some(var_name) = catch_var {
-                    self.fb().push_scope();
-                    let _idx = self.define_local(var_name, ValType::Tagged, false);
+                    self.fb()?.push_scope();
+                    let _idx = self.define_local(var_name, ValType::Tagged, false)?;
                     self.compile_block(catch_block)?;
                     self.emit(Instruction::Drop);
-                    self.fb().pop_scope();
+                    self.fb()?.pop_scope();
                 }
             }
 
@@ -969,7 +971,7 @@ impl Compiler {
             ExpressionKind::TryPropagate(inner) => {
                 self.compile_expr(inner)?;
                 // Check for null → return null.
-                let temp = self.ensure_temp_local();
+                let temp = self.ensure_temp_local()?;
                 self.emit(Instruction::LocalTee(temp));
                 self.emit(Instruction::GetTag);
                 self.emit(Instruction::PushI64(tag::NULL as i64));
@@ -1028,7 +1030,7 @@ impl Compiler {
         // For arithmetic and comparisons, untag both operands first.
         // Stack: [left_tagged, right_tagged]
         // We need to untag both. Use a temp local to hold right while untagging left.
-        let temp = self.ensure_temp_local();
+        let temp = self.ensure_temp_local()?;
         self.emit(Instruction::LocalSet(temp)); // save right
         self.emit(Instruction::UntagI64);       // untag left
         self.emit(Instruction::LocalGet(temp));  // restore right
@@ -1083,28 +1085,28 @@ impl Compiler {
     }
 
     fn compile_block(&mut self, block: &Block) -> Result<(), CompileError> {
-        self.fb().push_scope();
+        self.fb()?.push_scope();
         self.compile_statements(&block.statements)?;
         if let Some(tail) = &block.tail_expr {
             self.compile_expr(tail)?;
         } else {
             self.emit(Instruction::PushNull);
         }
-        self.fb().pop_scope();
+        self.fb()?.pop_scope();
         Ok(())
     }
 
     fn compile_function_def(&mut self, func: &FunctionDef) -> Result<(), CompileError> {
         self.begin_function(&func.name, false);
         {
-            let fb = self.fb();
+            let fb = self.fb()?;
             fb.param_count = func.params.len() as u32;
             fb.has_rest = func.params.last().map_or(false, |p| p.rest);
         }
 
         // Define parameter locals.
         for param in &func.params {
-            self.define_local(&param.name, ValType::Tagged, false);
+            self.define_local(&param.name, ValType::Tagged, false)?;
         }
 
         // Compile body.
@@ -1122,11 +1124,11 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Evaluate iterable into a local.
         self.compile_expr(iterable)?;
-        let iter_local = self.define_local("__iter", ValType::Tagged, false);
+        let iter_local = self.define_local("__iter", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(iter_local));
 
         // Counter (raw untagged i64 — internal use only).
-        let counter_local = self.define_local("__counter", ValType::I64, true);
+        let counter_local = self.define_local("__counter", ValType::I64, true)?;
         self.emit(Instruction::PushNull); // placeholder 0 value (will be overwritten)
         self.emit(Instruction::LocalSet(counter_local));
         // Actually store raw 0. We use PushNull (i64 0) since it's
@@ -1136,7 +1138,7 @@ impl Compiler {
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::ArrayLen);
         self.emit(Instruction::UntagI64); // strip tag to get raw length
-        let len_local = self.define_local("__len", ValType::I64, false);
+        let len_local = self.define_local("__len", ValType::I64, false)?;
         self.emit(Instruction::LocalSet(len_local));
 
         // Loop structure.
@@ -1165,11 +1167,11 @@ impl Compiler {
         // Bind pattern.
         match pattern {
             ForPattern::Single(name) => {
-                let idx = self.define_local(name, ValType::Tagged, false);
+                let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
             ForPattern::ArrayDestructure(elements) => {
-                let elem_local = self.define_local("__elem", ValType::Tagged, false);
+                let elem_local = self.define_local("__elem", ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(elem_local));
                 for (i, elem) in elements.iter().enumerate() {
                     match elem {
@@ -1177,7 +1179,7 @@ impl Compiler {
                             self.emit(Instruction::LocalGet(elem_local));
                             self.emit(Instruction::PushI64(i as i64));
                             self.emit(Instruction::ArrayGet);
-                            let idx = self.define_local(name, ValType::Tagged, false);
+                            let idx = self.define_local(name, ValType::Tagged, false)?;
                             self.emit(Instruction::LocalSet(idx));
                         }
                         DestructureElement::Rest(name) => {
@@ -1192,14 +1194,14 @@ impl Compiler {
                                 name: slice_name,
                                 arg_count: 4,
                             });
-                            let idx = self.define_local(name, ValType::Tagged, false);
+                            let idx = self.define_local(name, ValType::Tagged, false)?;
                             self.emit(Instruction::LocalSet(idx));
                         }
                     }
                 }
             }
             ForPattern::MapDestructure(entries) => {
-                let elem_local = self.define_local("__elem", ValType::Tagged, false);
+                let elem_local = self.define_local("__elem", ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(elem_local));
                 for (key, alias) in entries {
                     self.emit(Instruction::LocalGet(elem_local));
@@ -1207,20 +1209,20 @@ impl Compiler {
                     self.emit(Instruction::PushString(key_idx));
                     self.emit(Instruction::MapGet);
                     let bind_name = alias.as_deref().unwrap_or(key);
-                    let idx = self.define_local(bind_name, ValType::Tagged, false);
+                    let idx = self.define_local(bind_name, ValType::Tagged, false)?;
                     self.emit(Instruction::LocalSet(idx));
                 }
             }
         }
 
         // Compile body.
-        self.fb().push_scope();
+        self.fb()?.push_scope();
         self.compile_statements(&body.statements)?;
         if let Some(tail) = &body.tail_expr {
             self.compile_expr(tail)?;
             self.emit(Instruction::Drop);
         }
-        self.fb().pop_scope();
+        self.fb()?.pop_scope();
 
         // Increment counter (raw untagged arithmetic).
         self.emit(Instruction::LocalGet(counter_local));
@@ -1258,13 +1260,13 @@ impl Compiler {
         self.emit(Instruction::BrIf(1)); // break if false
 
         // Body.
-        self.fb().push_scope();
+        self.fb()?.push_scope();
         self.compile_statements(&body.statements)?;
         if let Some(tail) = &body.tail_expr {
             self.compile_expr(tail)?;
             self.emit(Instruction::Drop);
         }
-        self.fb().pop_scope();
+        self.fb()?.pop_scope();
 
         self.emit(Instruction::Br(0)); // continue
         self.emit(Instruction::End); // Loop
@@ -1300,7 +1302,7 @@ impl Compiler {
         arms: &[MatchArm],
     ) -> Result<(), CompileError> {
         self.compile_expr(value)?;
-        let val_local = self.define_local("__match_val", ValType::Tagged, false);
+        let val_local = self.define_local("__match_val", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(val_local));
 
         // Compile as chain of if-else.
@@ -1312,7 +1314,7 @@ impl Compiler {
                     // Always matches.
                     if let Pattern::Variable(name) = &arm.pattern {
                         self.emit(Instruction::LocalGet(val_local));
-                        let idx = self.define_local(name, ValType::Tagged, false);
+                        let idx = self.define_local(name, ValType::Tagged, false)?;
                         self.emit(Instruction::LocalSet(idx));
                     }
                     self.compile_block(&arm.body)?;
@@ -1374,7 +1376,7 @@ impl Compiler {
         //
         // This handles the common case: `try { risky() } catch e { fallback }`
         // where risky() returns Result::Err(...) instead of throwing.
-        let try_result = self.ensure_temp_local();
+        let try_result = self.ensure_temp_local()?;
         self.compile_block(try_block)?;
         self.emit(Instruction::LocalSet(try_result));
 
@@ -1388,15 +1390,15 @@ impl Compiler {
         // in user code that returns Result::Err).
         if let Some(var_name) = catch_var {
             // Bind the error value for the catch block's scope.
-            self.fb().push_scope();
-            let idx = self.define_local(var_name, ValType::Tagged, false);
+            self.fb()?.push_scope();
+            let idx = self.define_local(var_name, ValType::Tagged, false)?;
             // Store try result as the error binding (user should check if it's Err).
             self.emit(Instruction::LocalGet(try_result));
             self.emit(Instruction::LocalSet(idx));
             // Compile catch block but drop its result (try result is the final value).
             self.compile_block(catch_block)?;
             self.emit(Instruction::Drop);
-            self.fb().pop_scope();
+            self.fb()?.pop_scope();
         }
 
         // Compile finally block if present.
@@ -1414,7 +1416,7 @@ impl Compiler {
         pattern: &DestructurePattern,
         mutable: bool,
     ) -> Result<(), CompileError> {
-        let val_local = self.define_local("__destruct", ValType::Tagged, false);
+        let val_local = self.define_local("__destruct", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(val_local));
 
         match pattern {
@@ -1425,7 +1427,7 @@ impl Compiler {
                             self.emit(Instruction::LocalGet(val_local));
                             self.emit(Instruction::PushI64(i as i64));
                             self.emit(Instruction::ArrayGet);
-                            let idx = self.define_local(name, ValType::Tagged, mutable);
+                            let idx = self.define_local(name, ValType::Tagged, mutable)?;
                             self.emit(Instruction::LocalSet(idx));
                         }
                         DestructureElement::Rest(name) => {
@@ -1439,7 +1441,7 @@ impl Compiler {
                                 name: slice_name,
                                 arg_count: 4,
                             });
-                            let idx = self.define_local(name, ValType::Tagged, mutable);
+                            let idx = self.define_local(name, ValType::Tagged, mutable)?;
                             self.emit(Instruction::LocalSet(idx));
                         }
                     }
@@ -1452,7 +1454,7 @@ impl Compiler {
                     self.emit(Instruction::PushString(key_idx));
                     self.emit(Instruction::MapGet);
                     let bind_name = alias.as_deref().unwrap_or(key);
-                    let idx = self.define_local(bind_name, ValType::Tagged, mutable);
+                    let idx = self.define_local(bind_name, ValType::Tagged, mutable)?;
                     self.emit(Instruction::LocalSet(idx));
                 }
             }
@@ -1469,16 +1471,16 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Create result array.
         self.emit(Instruction::ArrayNew(0));
-        let result_local = self.define_local("__comp_result", ValType::Tagged, true);
+        let result_local = self.define_local("__comp_result", ValType::Tagged, true)?;
         self.emit(Instruction::LocalSet(result_local));
 
         // Compile iterable.
         self.compile_expr(iterable)?;
-        let iter_local = self.define_local("__comp_iter", ValType::Tagged, false);
+        let iter_local = self.define_local("__comp_iter", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(iter_local));
 
         // Counter + length (untagged raw i64 to avoid tag corruption on arithmetic).
-        let counter = self.define_local("__comp_i", ValType::I64, true);
+        let counter = self.define_local("__comp_i", ValType::I64, true)?;
         self.emit(Instruction::PushI64(0));
         self.emit(Instruction::UntagI64);
         self.emit(Instruction::LocalSet(counter));
@@ -1486,7 +1488,7 @@ impl Compiler {
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::ArrayLen);
         self.emit(Instruction::UntagI64);
-        let len = self.define_local("__comp_len", ValType::I64, false);
+        let len = self.define_local("__comp_len", ValType::I64, false)?;
         self.emit(Instruction::LocalSet(len));
 
         // Loop.
@@ -1507,12 +1509,12 @@ impl Compiler {
         // Bind pattern.
         match pattern {
             ForPattern::Single(name) => {
-                let idx = self.define_local(name, ValType::Tagged, false);
+                let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
             _ => {
                 // Simplified: store in temp.
-                let tmp = self.define_local("__comp_elem", ValType::Tagged, false);
+                let tmp = self.define_local("__comp_elem", ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(tmp));
             }
         }
@@ -1567,16 +1569,16 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Create empty result map.
         self.emit(Instruction::MapNew(0));
-        let result_local = self.define_local("__mcomp_result", ValType::Tagged, true);
+        let result_local = self.define_local("__mcomp_result", ValType::Tagged, true)?;
         self.emit(Instruction::LocalSet(result_local));
 
         // Iterable.
         self.compile_expr(iterable)?;
-        let iter_local = self.define_local("__mcomp_iter", ValType::Tagged, false);
+        let iter_local = self.define_local("__mcomp_iter", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(iter_local));
 
         // Counter + length (untagged raw i64 to avoid tag corruption on arithmetic).
-        let counter = self.define_local("__mcomp_i", ValType::I64, true);
+        let counter = self.define_local("__mcomp_i", ValType::I64, true)?;
         self.emit(Instruction::PushI64(0));
         self.emit(Instruction::UntagI64);
         self.emit(Instruction::LocalSet(counter));
@@ -1584,7 +1586,7 @@ impl Compiler {
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::ArrayLen);
         self.emit(Instruction::UntagI64);
-        let len = self.define_local("__mcomp_len", ValType::I64, false);
+        let len = self.define_local("__mcomp_len", ValType::I64, false)?;
         self.emit(Instruction::LocalSet(len));
 
         self.emit(Instruction::Block);
@@ -1603,11 +1605,11 @@ impl Compiler {
 
         match pattern {
             ForPattern::Single(name) => {
-                let idx = self.define_local(name, ValType::Tagged, false);
+                let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
             _ => {
-                let tmp = self.define_local("__mcomp_elem", ValType::Tagged, false);
+                let tmp = self.define_local("__mcomp_elem", ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(tmp));
             }
         }
@@ -1646,10 +1648,12 @@ impl Compiler {
     }
 
     /// Ensure a __temp local exists for intermediate values. Returns its index.
-    fn ensure_temp_local(&mut self) -> u32 {
-        let fb = self.current_fn.as_ref().expect("no function context");
+    fn ensure_temp_local(&mut self) -> Result<u32, CompileError> {
+        let fb = self.current_fn
+            .as_ref()
+            .ok_or_else(|| CompileError::Internal("no function context".into()))?;
         if let Some(idx) = fb.resolve_local("__temp") {
-            return idx;
+            return Ok(idx);
         }
         self.define_local("__temp", ValType::Tagged, true)
     }

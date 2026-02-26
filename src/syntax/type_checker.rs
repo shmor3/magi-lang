@@ -1097,6 +1097,15 @@ impl TypeChecker {
                     return sig.return_type;
                 }
 
+                // Is it a variable holding a lambda (callable value)?
+                // Check before operations so user-defined names shadow built-ins.
+                if self.lookup(name).is_some() {
+                    if let Some(info) = self.lookup_mut(name) {
+                        info.used = true;
+                    }
+                    return ChannelType::Null;
+                }
+
                 // Is it an plugin call?
                 if self.imports.contains(name.as_str()) {
                     self.used_imports.insert(name.clone());
@@ -2637,6 +2646,22 @@ output r;"#,
         let a = check("let _x = 42;");
         let w = warnings(&a);
         assert!(w.iter().all(|d| !d.message.contains("Unused")));
+    }
+
+    #[test]
+    fn test_variable_used_in_closure_no_warning() {
+        let a = check("let x = 42;\nlet add = |n| n + x;\noutput add(1);");
+        let w = warnings(&a);
+        assert!(w.iter().all(|d| !d.message.contains("Unused variable")),
+            "No variables should be reported as unused. Got: {:?}", w);
+    }
+
+    #[test]
+    fn test_variable_used_in_nested_function_no_warning() {
+        let a = check("let x = 10;\nfn foo() { output x; }\nfoo();");
+        let w = warnings(&a);
+        assert!(w.iter().all(|d| !d.message.contains("Unused variable 'x'")),
+            "Variable 'x' used in nested function should not be reported as unused. Got: {:?}", w);
     }
 
     // =========================================================================

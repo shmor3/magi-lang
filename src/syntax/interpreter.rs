@@ -1399,7 +1399,8 @@ impl<'a> Interpreter<'a> {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
                     let min_val = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MIN);
                     let max_val = self.eval_expr(&args[1])?.to_i64().unwrap_or(i64::MAX);
-                    Ok(Some(DataType::Int64((*n).max(min_val).min(max_val))))
+                    let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
+                    Ok(Some(DataType::Int64((*n).max(lo).min(hi))))
                 }
                 _ => Ok(None),
             },
@@ -1439,7 +1440,8 @@ impl<'a> Interpreter<'a> {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
                     let min_val = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::NEG_INFINITY);
                     let max_val = self.eval_expr(&args[1])?.to_f64().unwrap_or(f64::INFINITY);
-                    Ok(Some(DataType::Float64(n.max(min_val).min(max_val))))
+                    let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
+                    Ok(Some(DataType::Float64(n.max(lo).min(hi))))
                 }
                 _ => Ok(None),
             },
@@ -1460,7 +1462,7 @@ impl<'a> Interpreter<'a> {
             // String methods (Phase 16+)
             DataType::String(s) => match method {
                 "is_empty" => Ok(Some(DataType::Bool(s.is_empty()))),
-                "is_numeric" => Ok(Some(DataType::Bool(s.chars().all(|c| c.is_numeric() || c == '.' || c == '-')))),
+                "is_numeric" => Ok(Some(DataType::Bool(!s.is_empty() && s.parse::<f64>().is_ok()))),
                 "is_alphabetic" => Ok(Some(DataType::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))),
                 "to_int" => Ok(Some(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null))),
                 "to_float" => Ok(Some(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null))),
@@ -1519,7 +1521,11 @@ impl<'a> Interpreter<'a> {
                 "char_at" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_at".to_string(), expected: 1, actual: 0, span }); }
                     let idx = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
-                    Ok(Some(s.chars().nth(idx.max(0) as usize).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null)))
+                    if idx < 0 {
+                        Ok(Some(DataType::Null))
+                    } else {
+                        Ok(Some(s.chars().nth(idx as usize).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null)))
+                    }
                 }
                 "pad_start" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: 1, actual: 0, span }); }
@@ -1541,7 +1547,11 @@ impl<'a> Interpreter<'a> {
                     let end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(s.len() as i64).max(0) as usize } else { s.len() };
                     let start = start.min(s.len());
                     let end = end.min(s.len());
-                    Ok(Some(DataType::String(s[start..end].to_string())))
+                    if start >= end {
+                        Ok(Some(DataType::String(String::new())))
+                    } else {
+                        Ok(Some(DataType::String(s[start..end].to_string())))
+                    }
                 }
                 _ => Ok(None),
             },

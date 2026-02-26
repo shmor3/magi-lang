@@ -1294,3 +1294,158 @@ fn test_w107_multiply_by_zero() {
     let codes = typecheck_warnings("let x = 5; let y = x * 0;");
     assert!(codes.contains(&"W107".to_string()), "expected W107, got: {:?}", codes);
 }
+
+// ═══════════════════════════════════════════════════════════
+// String method edge cases
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_substring_start_greater_than_end() {
+    // substring(5, 2) should return empty string, not panic
+    assert_eq!(run(r#""hello world".substring(5, 2)"#), DataType::String("".into()));
+}
+
+#[test]
+fn test_substring_equal_indices() {
+    assert_eq!(run(r#""hello".substring(3, 3)"#), DataType::String("".into()));
+}
+
+#[test]
+fn test_substring_normal() {
+    assert_eq!(run(r#""hello world".substring(0, 5)"#), DataType::String("hello".into()));
+}
+
+#[test]
+fn test_is_numeric_valid_integer() {
+    assert_eq!(run(r#""42".is_numeric()"#), DataType::Bool(true));
+}
+
+#[test]
+fn test_is_numeric_valid_float() {
+    assert_eq!(run(r#""3.14".is_numeric()"#), DataType::Bool(true));
+}
+
+#[test]
+fn test_is_numeric_negative() {
+    assert_eq!(run(r#""-7".is_numeric()"#), DataType::Bool(true));
+}
+
+#[test]
+fn test_is_numeric_scientific() {
+    assert_eq!(run(r#""1e5".is_numeric()"#), DataType::Bool(true));
+}
+
+#[test]
+fn test_is_numeric_dashes() {
+    // "---" should NOT be numeric
+    assert_eq!(run(r#""---".is_numeric()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_is_numeric_dots() {
+    // "..." should NOT be numeric
+    assert_eq!(run(r#""...".is_numeric()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_is_numeric_empty() {
+    assert_eq!(run(r#""".is_numeric()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_is_numeric_mixed() {
+    assert_eq!(run(r#""12abc".is_numeric()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_char_at_negative_index() {
+    // char_at(-1) should return null, not the first character
+    assert_eq!(run(r#""hello".char_at(-1)"#), DataType::Null);
+}
+
+#[test]
+fn test_char_at_valid_index() {
+    assert_eq!(run(r#""hello".char_at(1)"#), DataType::String("e".into()));
+}
+
+#[test]
+fn test_char_at_out_of_bounds() {
+    assert_eq!(run(r#""hello".char_at(100)"#), DataType::Null);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Clamp edge cases
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_int_clamp_normal() {
+    assert_eq!(run("let x = 5; x.clamp(1, 10)"), DataType::Int64(5));
+}
+
+#[test]
+fn test_int_clamp_below_min() {
+    assert_eq!(run("let x = -5; x.clamp(0, 10)"), DataType::Int64(0));
+}
+
+#[test]
+fn test_int_clamp_above_max() {
+    assert_eq!(run("let x = 50; x.clamp(0, 10)"), DataType::Int64(10));
+}
+
+#[test]
+fn test_int_clamp_reversed_args() {
+    // clamp(10, 1) with reversed min/max should still work correctly
+    assert_eq!(run("let x = 5; x.clamp(10, 1)"), DataType::Int64(5));
+}
+
+#[test]
+fn test_float_clamp_reversed_args() {
+    assert_eq!(run("let x = 5.0; x.clamp(10.0, 1.0)"), DataType::Float64(5.0));
+}
+
+#[test]
+fn test_float_clamp_below_min() {
+    assert_eq!(run("let x = -5.0; x.clamp(0.0, 10.0)"), DataType::Float64(0.0));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Formatter round-trip tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_formatter_fstring_with_braces_in_literal() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    // An f-string like f"value: {x}" should round-trip correctly
+    let src = r#"let x = 42; let s = f"value: {x}";"#;
+    let program = parse(src);
+    let config = FormatConfig::default();
+    let formatted = format_program(&program, &config);
+    // Should contain the f-string with interpolation
+    assert!(formatted.contains("f\"value: {x}\""), "formatted: {}", formatted);
+}
+
+#[test]
+fn test_compiler_compiles_without_panic() {
+    // Verify that compiler returns errors as Result, not panics
+    let src = "let x = 42; fn add(a, b) { a + b } let y = add(x, 10);";
+    let program = parse(src);
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "compilation failed: {:?}", result.err());
+}
+
+// ═══════════════════════════════════════════════════════════
+// Variable capture in closures — no false W100
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_closure_captures_no_w100() {
+    let src = "let x = 42; let add = |n| n + x; output add(1);";
+    let program = parse(src);
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let w100_diags: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W100"))
+        .collect();
+    assert!(w100_diags.is_empty(),
+        "variable captured by closure should not trigger W100, got: {:?}", w100_diags);
+}

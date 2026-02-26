@@ -564,8 +564,14 @@ impl<'a> Formatter<'a> {
                 for part in parts {
                     match part {
                         StringPart::Literal(s) => {
-                            // Escape special characters in the literal
-                            self.write(&s.replace('\\', "\\\\").replace('"', "\\\""));
+                            // Escape special characters in the literal.
+                            // Braces must be doubled so they round-trip through the parser.
+                            let escaped = s
+                                .replace('\\', "\\\\")
+                                .replace('"', "\\\"")
+                                .replace('{', "{{")
+                                .replace('}', "}}");
+                            self.write(&escaped);
                         }
                         StringPart::Expr(e) => {
                             self.write("{");
