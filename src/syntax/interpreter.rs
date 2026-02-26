@@ -1171,7 +1171,7 @@ impl<'a> Interpreter<'a> {
                                 return Ok(Some(DataType::Int64(i as i64)));
                             }
                         }
-                        Ok(Some(DataType::Int64(-1)))
+                        Ok(Some(DataType::Null))
                     }
                     "any" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "any".to_string(), expected: 1, actual: 0, span }); }
@@ -1622,6 +1622,15 @@ impl<'a> Interpreter<'a> {
                 "pad_start" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: 1, actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    const MAX_PAD_WIDTH: usize = 10_000_000;
+                    if width > MAX_PAD_WIDTH {
+                        return Err(InterpError::TypeError {
+                            expected: format!("pad width at most {}", MAX_PAD_WIDTH),
+                            actual: format!("{}", width),
+                            context: "pad_start".to_string(),
+                            span,
+                        });
+                    }
                     let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
                     let pad_len = width.saturating_sub(s.chars().count());
                     Ok(Some(DataType::String(format!("{}{}", std::iter::repeat(pad_char).take(pad_len).collect::<String>(), s))))
@@ -1629,6 +1638,15 @@ impl<'a> Interpreter<'a> {
                 "pad_end" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: 1, actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    const MAX_PAD_WIDTH: usize = 10_000_000;
+                    if width > MAX_PAD_WIDTH {
+                        return Err(InterpError::TypeError {
+                            expected: format!("pad width at most {}", MAX_PAD_WIDTH),
+                            actual: format!("{}", width),
+                            context: "pad_end".to_string(),
+                            span,
+                        });
+                    }
                     let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
                     let pad_len = width.saturating_sub(s.chars().count());
                     Ok(Some(DataType::String(format!("{}{}", s, std::iter::repeat(pad_char).take(pad_len).collect::<String>()))))
@@ -1751,6 +1769,18 @@ impl<'a> Interpreter<'a> {
                         if cmp { max = item.clone(); }
                     }
                     Ok(Some(max))
+                }
+                "join" => {
+                    let separator = if !args.is_empty() {
+                        match self.eval_expr(&args[0])? {
+                            DataType::String(s) => s,
+                            other => other.to_string_lossy(),
+                        }
+                    } else {
+                        ",".to_string()
+                    };
+                    let parts: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
+                    Ok(Some(DataType::String(parts.join(&separator))))
                 }
                 _ => Ok(None),
             },

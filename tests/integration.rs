@@ -3770,3 +3770,84 @@ enum Color { Red, Green, Blue }
     assert_eq!(results.len(), 1);
     assert!(results[0].passed, "test should pass but got: {:?}", results[0].error_message);
 }
+
+// ── Round 24: join separator, find_index null, pad limits ──
+
+#[test]
+fn test_array_join_with_separator() {
+    assert_eq!(
+        run(r#"
+let words = ["hello", "world", "foo"];
+words.join(" - ")
+"#),
+        DataType::String("hello - world - foo".to_string())
+    );
+}
+
+#[test]
+fn test_array_join_default_separator() {
+    assert_eq!(
+        run(r#"
+[1, 2, 3].join()
+"#),
+        DataType::String("1,2,3".to_string())
+    );
+}
+
+#[test]
+fn test_array_join_empty_separator() {
+    assert_eq!(
+        run(r#"
+["a", "b", "c"].join("")
+"#),
+        DataType::String("abc".to_string())
+    );
+}
+
+#[test]
+fn test_find_index_found() {
+    assert_eq!(
+        run(r#"
+[10, 20, 30, 40].find_index(|x| x == 30)
+"#),
+        DataType::Int64(2)
+    );
+}
+
+#[test]
+fn test_find_index_not_found_returns_null() {
+    assert_eq!(
+        run(r#"
+[10, 20, 30].find_index(|x| x == 99)
+"#),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_pad_start_basic() {
+    assert_eq!(
+        run(r#"
+"42".pad_start(5, "0")
+"#),
+        DataType::String("00042".to_string())
+    );
+}
+
+#[test]
+fn test_pad_end_basic() {
+    assert_eq!(
+        run(r#"
+"hi".pad_end(5)
+"#),
+        DataType::String("hi   ".to_string())
+    );
+}
+
+#[test]
+fn test_pad_start_excessive_width_errors() {
+    let err = run_err(r#"
+"x".pad_start(99999999999)
+"#);
+    assert!(matches!(err, InterpError::TypeError { .. }));
+}
