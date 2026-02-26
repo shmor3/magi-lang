@@ -1192,7 +1192,12 @@ impl<'a> Interpreter<'a> {
                             let mut j = i;
                             while j > 0 {
                                 let cmp = self.call_lambda_with_args(&args[0], &[sorted[j - 1].clone(), key.clone()], span)?;
-                                let cmp_val = cmp.to_i64().unwrap_or(0);
+                                let cmp_val = cmp.to_i64().ok_or_else(|| InterpError::TypeError {
+                                    expected: "int64".to_string(),
+                                    actual: datatype_type_name(&cmp).to_string(),
+                                    context: "sort_by comparator must return an integer".to_string(),
+                                    span,
+                                })?;
                                 if cmp_val > 0 {
                                     sorted[j] = sorted[j - 1].clone();
                                     j -= 1;
@@ -1222,7 +1227,13 @@ impl<'a> Interpreter<'a> {
                         let mut min = arr[0].clone();
                         for item in &arr[1..] {
                             let cmp = self.call_lambda_with_args(&args[0], &[min.clone(), item.clone()], span)?;
-                            if cmp.to_i64().unwrap_or(0) > 0 {
+                            let cmp_val = cmp.to_i64().ok_or_else(|| InterpError::TypeError {
+                                expected: "int64".to_string(),
+                                actual: datatype_type_name(&cmp).to_string(),
+                                context: "min_by comparator must return an integer".to_string(),
+                                span,
+                            })?;
+                            if cmp_val > 0 {
                                 min = item.clone();
                             }
                         }
@@ -1233,7 +1244,13 @@ impl<'a> Interpreter<'a> {
                         let mut max = arr[0].clone();
                         for item in &arr[1..] {
                             let cmp = self.call_lambda_with_args(&args[0], &[max.clone(), item.clone()], span)?;
-                            if cmp.to_i64().unwrap_or(0) < 0 {
+                            let cmp_val = cmp.to_i64().ok_or_else(|| InterpError::TypeError {
+                                expected: "int64".to_string(),
+                                actual: datatype_type_name(&cmp).to_string(),
+                                context: "max_by comparator must return an integer".to_string(),
+                                span,
+                            })?;
+                            if cmp_val < 0 {
                                 max = item.clone();
                             }
                         }
@@ -1552,6 +1569,77 @@ impl<'a> Interpreter<'a> {
                     } else {
                         Ok(Some(DataType::String(s[start..end].to_string())))
                     }
+                }
+                _ => Ok(None),
+            },
+            // Array methods (direct, no OperationEvaluator needed)
+            DataType::Array(arr) => match method {
+                "first" => Ok(Some(arr.first().cloned().unwrap_or(DataType::Null))),
+                "last" => Ok(Some(arr.last().cloned().unwrap_or(DataType::Null))),
+                "is_empty" => Ok(Some(DataType::Bool(arr.is_empty()))),
+                "sum" => {
+                    let mut int_sum: i64 = 0;
+                    let mut has_float = false;
+                    let mut float_sum: f64 = 0.0;
+                    for item in arr {
+                        match item {
+                            DataType::Float64(f) => { has_float = true; float_sum += f; }
+                            DataType::Float32(f) => { has_float = true; float_sum += *f as f64; }
+                            _ => { int_sum += item.to_i64().unwrap_or(0); }
+                        }
+                    }
+                    if has_float {
+                        Ok(Some(DataType::Float64(float_sum + int_sum as f64)))
+                    } else {
+                        Ok(Some(DataType::Int64(int_sum)))
+                    }
+                }
+                "product" => {
+                    let mut int_prod: i64 = 1;
+                    let mut has_float = false;
+                    let mut float_prod: f64 = 1.0;
+                    for item in arr {
+                        match item {
+                            DataType::Float64(f) => { has_float = true; float_prod *= f; }
+                            DataType::Float32(f) => { has_float = true; float_prod *= *f as f64; }
+                            _ => { int_prod *= item.to_i64().unwrap_or(1); }
+                        }
+                    }
+                    if has_float {
+                        Ok(Some(DataType::Float64(float_prod * int_prod as f64)))
+                    } else {
+                        Ok(Some(DataType::Int64(int_prod)))
+                    }
+                }
+                "min" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Null)); }
+                    let mut min = arr[0].clone();
+                    for item in &arr[1..] {
+                        let cmp = match (&min, item) {
+                            (DataType::Int64(a), DataType::Int64(b)) => *a > *b,
+                            (DataType::Float64(a), DataType::Float64(b)) => *a > *b,
+                            (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) > *b,
+                            (DataType::Float64(a), DataType::Int64(b)) => *a > (*b as f64),
+                            _ => false,
+                        };
+                        if cmp { min = item.clone(); }
+                    }
+                    Ok(Some(min))
+                }
+                "max" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Null)); }
+                    let mut max = arr[0].clone();
+                    for item in &arr[1..] {
+                        let cmp = match (&max, item) {
+                            (DataType::Int64(a), DataType::Int64(b)) => *a < *b,
+                            (DataType::Float64(a), DataType::Float64(b)) => *a < *b,
+                            (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) < *b,
+                            (DataType::Float64(a), DataType::Int64(b)) => *a < (*b as f64),
+                            _ => false,
+                        };
+                        if cmp { max = item.clone(); }
+                    }
+                    Ok(Some(max))
                 }
                 _ => Ok(None),
             },

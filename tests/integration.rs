@@ -1449,3 +1449,127 @@ fn test_closure_captures_no_w100() {
     assert!(w100_diags.is_empty(),
         "variable captured by closure should not trigger W100, got: {:?}", w100_diags);
 }
+
+// ═══════════════════════════════════════════════════════════
+// Array direct methods
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_array_first() {
+    assert_eq!(run("[10, 20, 30].first()"), DataType::Int64(10));
+}
+
+#[test]
+fn test_array_first_empty() {
+    assert_eq!(run("[].first()"), DataType::Null);
+}
+
+#[test]
+fn test_array_last() {
+    assert_eq!(run("[10, 20, 30].last()"), DataType::Int64(30));
+}
+
+#[test]
+fn test_array_last_empty() {
+    assert_eq!(run("[].last()"), DataType::Null);
+}
+
+#[test]
+fn test_array_is_empty_true() {
+    assert_eq!(run("[].is_empty()"), DataType::Bool(true));
+}
+
+#[test]
+fn test_array_is_empty_false() {
+    assert_eq!(run("[1].is_empty()"), DataType::Bool(false));
+}
+
+#[test]
+fn test_array_sum_ints() {
+    assert_eq!(run("[1, 2, 3, 4, 5].sum()"), DataType::Int64(15));
+}
+
+#[test]
+fn test_array_sum_floats() {
+    assert_eq!(run("[1.5, 2.5, 3.0].sum()"), DataType::Float64(7.0));
+}
+
+#[test]
+fn test_array_sum_empty() {
+    assert_eq!(run("[].sum()"), DataType::Int64(0));
+}
+
+#[test]
+fn test_array_product() {
+    assert_eq!(run("[2, 3, 4].product()"), DataType::Int64(24));
+}
+
+#[test]
+fn test_array_min() {
+    assert_eq!(run("[5, 2, 8, 1, 9].min()"), DataType::Int64(1));
+}
+
+#[test]
+fn test_array_max() {
+    assert_eq!(run("[5, 2, 8, 1, 9].max()"), DataType::Int64(9));
+}
+
+#[test]
+fn test_array_min_empty() {
+    assert_eq!(run("[].min()"), DataType::Null);
+}
+
+#[test]
+fn test_array_max_empty() {
+    assert_eq!(run("[].max()"), DataType::Null);
+}
+
+// ═══════════════════════════════════════════════════════════
+// W109/W110 type checker warnings
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_w109_unused_parameter() {
+    let codes = typecheck_warnings("fn foo(x, y) { output x; }");
+    assert!(codes.contains(&"W109".to_string()), "expected W109, got: {:?}", codes);
+}
+
+#[test]
+fn test_w109_all_params_used() {
+    let codes = typecheck_warnings("fn foo(x, y) { output x + y; }");
+    assert!(!codes.contains(&"W109".to_string()), "should not get W109, got: {:?}", codes);
+}
+
+#[test]
+fn test_w110_unnecessary_mut() {
+    let codes = typecheck_warnings("let mut x = 5; output x;");
+    assert!(codes.contains(&"W110".to_string()), "expected W110, got: {:?}", codes);
+}
+
+#[test]
+fn test_w110_mut_actually_mutated() {
+    let codes = typecheck_warnings("let mut x = 5; x = 10; output x;");
+    assert!(!codes.contains(&"W110".to_string()), "should not get W110, got: {:?}", codes);
+}
+
+#[test]
+fn test_w110_compound_assign_counts_as_mutation() {
+    let codes = typecheck_warnings("let mut x = 5; x += 1; output x;");
+    assert!(!codes.contains(&"W110".to_string()), "compound assign should count as mutation, got: {:?}", codes);
+}
+
+// ═══════════════════════════════════════════════════════════
+// W202 reports all dead code
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_w202_reports_all_dead_code() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = "fn foo() {\n  return 1;\n  let x = 2;\n  let y = 3;\n}";
+    let program = parse(src);
+    let result = lint(&program, &LintConfig::default());
+    let w202_count = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W202"))
+        .count();
+    assert!(w202_count >= 2, "expected at least 2 W202 diagnostics for all dead code, got {}", w202_count);
+}

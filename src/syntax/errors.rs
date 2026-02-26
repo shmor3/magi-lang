@@ -96,6 +96,10 @@ pub enum ErrorCode {
     W106,
     /// Suspicious arithmetic (modulo by 1, multiply by 0, etc.)
     W107,
+    /// Unused function parameter
+    W109,
+    /// Unnecessary `let mut` — variable is never reassigned
+    W110,
 
     // Lint warnings (W2xx)
     /// Naming convention: functions/variables should be snake_case
@@ -156,6 +160,8 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W105 => "W105",
             ErrorCode::W106 => "W106",
             ErrorCode::W107 => "W107",
+            ErrorCode::W109 => "W109",
+            ErrorCode::W110 => "W110",
             ErrorCode::W200 => "W200",
             ErrorCode::W201 => "W201",
             ErrorCode::W202 => "W202",
@@ -218,6 +224,8 @@ impl ErrorCode {
             ErrorCode::W105 => "This loop has a literal `true` condition and no `break` statement, creating an infinite loop.",
             ErrorCode::W106 => "This operation is redundant (e.g., comparing a value to itself, double negation). Simplify the expression.",
             ErrorCode::W107 => "This arithmetic operation has a suspicious pattern (e.g., modulo by 1 always returns 0, multiply by 0 always returns 0).",
+            ErrorCode::W109 => "This function parameter is never used. Prefix it with `_` to suppress this warning, or remove it.",
+            ErrorCode::W110 => "This variable is declared as `let mut` but is never reassigned. Use `let` instead.",
 
             // Lint warnings
             ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",

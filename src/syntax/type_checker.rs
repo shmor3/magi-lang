@@ -69,6 +69,8 @@ struct VarInfo {
     channel_type: ChannelType,
     mutable: bool,
     used: bool,
+    mutated: bool,
+    is_param: bool,
     def_line: u32,
     def_col: u32,
 }
@@ -137,12 +139,34 @@ impl TypeChecker {
     fn pop_scope(&mut self) {
         if let Some(scope) = self.env.pop() {
             for (name, info) in &scope {
-                if !info.used && !name.starts_with('_') {
-                    let code = super::errors::ErrorCode::W100;
+                if name.starts_with('_') {
+                    continue;
+                }
+                if !info.used {
+                    let code = if info.is_param {
+                        super::errors::ErrorCode::W109
+                    } else {
+                        super::errors::ErrorCode::W100
+                    };
                     self.diagnostics.push(AstDiagnostic {
                         line: info.def_line,
                         column: info.def_col,
-                        message: format!("Unused variable '{}'", name),
+                        message: if info.is_param {
+                            format!("Unused parameter '{}'", name)
+                        } else {
+                            format!("Unused variable '{}'", name)
+                        },
+                        severity: DiagnosticSeverity::Warning,
+                        code: Some(code.to_string()),
+                        help: Some(code.help().to_string()),
+                        suggestion: None,
+                    });
+                } else if info.mutable && !info.mutated {
+                    let code = super::errors::ErrorCode::W110;
+                    self.diagnostics.push(AstDiagnostic {
+                        line: info.def_line,
+                        column: info.def_col,
+                        message: format!("Variable '{}' declared as mutable but never reassigned", name),
                         severity: DiagnosticSeverity::Warning,
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
@@ -228,6 +252,8 @@ impl TypeChecker {
                     channel_type: ct,
                     mutable,
                     used: false,
+                    mutated: false,
+                    is_param: false,
                     def_line: line,
                     def_col: col,
                 },
@@ -399,10 +425,11 @@ impl TypeChecker {
                     );
                 }
 
-                // Update the variable's type and mark used.
+                // Update the variable's type and mark used + mutated.
                 if let Some(info) = self.lookup_mut(name) {
                     info.channel_type = new_type;
                     info.used = true;
+                    info.mutated = true;
                 }
             }
 
@@ -553,6 +580,9 @@ impl TypeChecker {
                         param.span.start_line,
                         param.span.start_col,
                     );
+                    if let Some(info) = self.lookup_mut(&param.name) {
+                        info.is_param = true;
+                    }
                 }
                 // Infer body type and validate against declared return type
                 let body_type = self.infer_block_no_scope(&def.body);
@@ -730,6 +760,7 @@ impl TypeChecker {
                 if let Some(info) = self.lookup_mut(name) {
                     info.channel_type = result_type;
                     info.used = true;
+                    info.mutated = true;
                 }
             }
 
@@ -1417,6 +1448,9 @@ impl TypeChecker {
                         param.span.start_line,
                         param.span.start_col,
                     );
+                    if let Some(info) = self.lookup_mut(&param.name) {
+                        info.is_param = true;
+                    }
                 }
                 let _ = self.infer_expr(body);
                 self.function_depth -= 1;
@@ -2024,15 +2058,29 @@ impl TypeChecker {
         }
 
         // Pop all remaining scopes (usually just the global scope), collecting
-        // unused-variable warnings.
+        // unused-variable and unnecessary-mut warnings.
         while let Some(scope) = self.env.pop() {
             for (name, info) in &scope {
-                if !info.used && !name.starts_with('_') {
+                if name.starts_with('_') {
+                    continue;
+                }
+                if !info.used {
                     let code = super::errors::ErrorCode::W100;
                     self.diagnostics.push(AstDiagnostic {
                         line: info.def_line,
                         column: info.def_col,
                         message: format!("Unused variable '{}'", name),
+                        severity: DiagnosticSeverity::Warning,
+                        code: Some(code.to_string()),
+                        help: Some(code.help().to_string()),
+                        suggestion: None,
+                    });
+                } else if info.mutable && !info.mutated {
+                    let code = super::errors::ErrorCode::W110;
+                    self.diagnostics.push(AstDiagnostic {
+                        line: info.def_line,
+                        column: info.def_col,
+                        message: format!("Variable '{}' declared as mutable but never reassigned", name),
                         severity: DiagnosticSeverity::Warning,
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),

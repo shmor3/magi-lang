@@ -86,7 +86,7 @@ pub fn check_dead_code_in_block(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                 help: Some(code.help().to_string()),
                 suggestion: None,
             });
-            break; // Only report once per block
+            continue; // Report all unreachable statements, not just the first
         }
 
         match &stmt.kind {
