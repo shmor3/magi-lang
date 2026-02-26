@@ -1036,8 +1036,14 @@ fn cmd_run_wasm(path: &str) {
                 return val;
             }
 
-            let memory = caller.get_export("memory").and_then(|e| e.into_memory()).unwrap();
-            let heap_global = caller.get_export("__heap_ptr").and_then(|e| e.into_global()).unwrap();
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return 0, // null tagged value
+            };
+            let heap_global = match caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
+                Some(g) => g,
+                None => return 0,
+            };
 
             let formatted = {
                 let data = memory.data(&caller);
@@ -1047,12 +1053,18 @@ fn cmd_run_wasm(path: &str) {
             let total = 4 + bytes.len();
 
             // Read current heap pointer from exported global.
-            let ptr = heap_global.get(&mut caller).i32().unwrap() as u32;
+            let ptr = match heap_global.get(&mut caller).i32() {
+                Some(v) => v as u32,
+                None => return 0,
+            };
 
             // Write string: [u32 len][bytes...]
             let str_offset = ptr as usize;
             {
                 let data = memory.data_mut(&mut caller);
+                if str_offset + 4 + bytes.len() > data.len() {
+                    return 0; // out of memory
+                }
                 let len_bytes = (bytes.len() as u32).to_le_bytes();
                 data[str_offset..str_offset + 4].copy_from_slice(&len_bytes);
                 data[str_offset + 4..str_offset + 4 + bytes.len()].copy_from_slice(bytes);
@@ -1060,7 +1072,7 @@ fn cmd_run_wasm(path: &str) {
 
             // Update heap pointer.
             let new_ptr = ptr + total as u32;
-            heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32)).unwrap();
+            let _ = heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32));
 
             // Return tagged string: (STRING_TAG << 56) | offset
             ((4i64) << 56) | (str_offset as i64)

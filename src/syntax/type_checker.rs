@@ -270,18 +270,6 @@ impl TypeChecker {
     // Diagnostics
     // =========================================================================
 
-    fn emit(&mut self, line: u32, col: u32, msg: String, severity: DiagnosticSeverity) {
-        self.diagnostics.push(AstDiagnostic {
-            line,
-            column: col,
-            message: msg,
-            severity,
-            code: None,
-            help: None,
-            suggestion: None,
-        });
-    }
-
     fn emit_coded(
         &mut self,
         line: u32,
