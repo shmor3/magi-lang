@@ -3007,3 +3007,171 @@ fn test_type_checker_duplicate_map_key_has_error_code() {
         "Expected E107 for duplicate map key. Got: {:?}",
         analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
 }
+
+// =============================================================================
+// Round 15: Interpreter fixes and coverage tests
+// =============================================================================
+
+#[test]
+fn test_pad_start_negative_width_no_crash() {
+    // pad_start with negative width should not OOM — treated as 0
+    let src = r#"let x = "hello".pad_start(-5); output x;"#;
+    assert_eq!(run(src), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_pad_end_negative_width_no_crash() {
+    // pad_end with negative width should not OOM — treated as 0
+    let src = r#"let x = "hello".pad_end(-5); output x;"#;
+    assert_eq!(run(src), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_pad_start_positive_width() {
+    let src = r#""hi".pad_start(5)"#;
+    assert_eq!(run(src), DataType::String("   hi".to_string()));
+}
+
+#[test]
+fn test_pad_end_positive_width() {
+    let src = r#""hi".pad_end(5)"#;
+    assert_eq!(run(src), DataType::String("hi   ".to_string()));
+}
+
+#[test]
+fn test_product_integer_overflow_promotes_to_float() {
+    // Product of large integers should promote to float instead of overflowing
+    let src = r#"
+let big = 9223372036854775807;
+let result = [big, 2].product();
+output result;
+"#;
+    let result = run(src);
+    // Should be a float (promoted on overflow), not a wrapped integer
+    match result {
+        DataType::Float64(f) => assert!(f > 0.0, "Product should be positive, got {}", f),
+        other => panic!("Expected Float64 for overflowed product, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_string_interpolation_with_expressions() {
+    assert_eq!(
+        run(r#"
+let x = 5;
+let y = 3;
+f"sum={x + y}, product={x * y}"
+"#),
+        DataType::String("sum=8, product=15".to_string())
+    );
+}
+
+#[test]
+fn test_string_interpolation_function_call() {
+    assert_eq!(
+        run(r#"
+fn double(n) { n * 2 }
+let x = 5;
+f"doubled={double(x)}"
+"#),
+        DataType::String("doubled=10".to_string())
+    );
+}
+
+#[test]
+fn test_optional_chaining_deep() {
+    assert_eq!(
+        run(r#"let x = {"a": {"b": {"c": 42}}}; x?.a?.b?.c"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_optional_chaining_null_short_circuit() {
+    assert_eq!(
+        run(r#"let x = {"a": null}; x?.a?.b?.c"#),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_nested_closure_capture() {
+    assert_eq!(
+        run(r#"
+let x = 10;
+let outer = |y| |z| x + y + z;
+let inner = outer(5);
+inner(3)
+"#),
+        DataType::Int64(18)
+    );
+}
+
+#[test]
+fn test_function_default_params() {
+    assert_eq!(
+        run(r#"
+fn greet(name = "World") {
+    f"Hello, {name}!"
+}
+greet()
+"#),
+        DataType::String("Hello, World!".to_string())
+    );
+}
+
+#[test]
+fn test_function_default_params_override() {
+    assert_eq!(
+        run(r#"
+fn greet(name = "World") {
+    f"Hello, {name}!"
+}
+greet("Alice")
+"#),
+        DataType::String("Hello, Alice!".to_string())
+    );
+}
+
+#[test]
+fn test_match_guard_with_variable() {
+    assert_eq!(
+        run(r#"
+let x = 15;
+match x {
+    n if n < 10 => "small",
+    n if n < 20 => "medium",
+    _ => "large",
+}
+"#),
+        DataType::String("medium".to_string())
+    );
+}
+
+#[test]
+fn test_operator_precedence_and_or() {
+    // && binds tighter than ||
+    assert_eq!(run("true || false && false"), DataType::Bool(true));
+}
+
+#[test]
+fn test_operator_precedence_arithmetic_comparison() {
+    // * binds tighter than +, + binds tighter than ==
+    assert_eq!(run("2 + 3 * 4 == 14"), DataType::Bool(true));
+}
+
+#[test]
+fn test_const_def_with_type_annotation() {
+    assert_eq!(
+        run("const PI: float64 = 3.14159;\nPI"),
+        DataType::Float64(3.14159)
+    );
+}
+
+#[test]
+fn test_let_with_type_annotation() {
+    assert_eq!(
+        run("let x: int64 = 42;\nx"),
+        DataType::Int64(42)
+    );
+}

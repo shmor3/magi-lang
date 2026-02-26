@@ -1591,14 +1591,14 @@ impl<'a> Interpreter<'a> {
                 }
                 "pad_start" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: 1, actual: 0, span }); }
-                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as usize;
+                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
                     let pad_len = width.saturating_sub(s.chars().count());
                     Ok(Some(DataType::String(format!("{}{}", std::iter::repeat(pad_char).take(pad_len).collect::<String>(), s))))
                 }
                 "pad_end" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: 1, actual: 0, span }); }
-                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as usize;
+                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
                     let pad_len = width.saturating_sub(s.chars().count());
                     Ok(Some(DataType::String(format!("{}{}", s, std::iter::repeat(pad_char).take(pad_len).collect::<String>()))))
@@ -1644,15 +1644,34 @@ impl<'a> Interpreter<'a> {
                     let mut int_prod: i64 = 1;
                     let mut has_float = false;
                     let mut float_prod: f64 = 1.0;
+                    let mut int_overflow = false;
                     for item in arr {
                         match item {
                             DataType::Float64(f) => { has_float = true; float_prod *= f; }
                             DataType::Float32(f) => { has_float = true; float_prod *= *f as f64; }
-                            _ => { int_prod *= item.to_i64().unwrap_or(1); }
+                            _ => {
+                                if !int_overflow {
+                                    match int_prod.checked_mul(item.to_i64().unwrap_or(1)) {
+                                        Some(v) => int_prod = v,
+                                        None => {
+                                            // Overflow: promote to float
+                                            has_float = true;
+                                            float_prod *= int_prod as f64 * item.to_i64().unwrap_or(1) as f64;
+                                            int_overflow = true;
+                                        }
+                                    }
+                                } else {
+                                    float_prod *= item.to_i64().unwrap_or(1) as f64;
+                                }
+                            }
                         }
                     }
                     if has_float {
-                        Ok(Some(DataType::Float64(float_prod * int_prod as f64)))
+                        if !int_overflow {
+                            Ok(Some(DataType::Float64(float_prod * int_prod as f64)))
+                        } else {
+                            Ok(Some(DataType::Float64(float_prod)))
+                        }
                     } else {
                         Ok(Some(DataType::Int64(int_prod)))
                     }
