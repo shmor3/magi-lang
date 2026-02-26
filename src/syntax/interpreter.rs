@@ -1036,7 +1036,14 @@ impl<'a> Interpreter<'a> {
             if let ExpressionKind::Spread(inner) = &arg.kind {
                 match self.eval_expr(inner)? {
                     DataType::Array(arr) => result.extend(arr),
-                    other => result.push(other),
+                    other => {
+                        return Err(InterpError::TypeError {
+                            expected: "Array".to_string(),
+                            actual: format!("{:?}", other),
+                            context: "spread operator".to_string(),
+                            span: arg.span,
+                        });
+                    }
                 }
             } else {
                 result.push(self.eval_expr(arg)?);
@@ -1442,7 +1449,15 @@ impl<'a> Interpreter<'a> {
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
-                "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "to_int64" => {
+                    if !n.is_finite() {
+                        Ok(Some(DataType::Null))
+                    } else if *n > i64::MAX as f64 || *n < i64::MIN as f64 {
+                        Ok(Some(DataType::Null))
+                    } else {
+                        Ok(Some(DataType::Int64(*n as i64)))
+                    }
+                }
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
@@ -1817,7 +1832,14 @@ impl<'a> Interpreter<'a> {
                         let val = self.eval_expr(inner)?;
                         match val {
                             DataType::Array(arr) => items.extend(arr),
-                            other => items.push(other),
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    expected: "Array".to_string(),
+                                    actual: format!("{:?}", other),
+                                    context: "spread in array literal".to_string(),
+                                    span: elem.span,
+                                });
+                            }
                         }
                     } else {
                         items.push(self.eval_expr(elem)?);

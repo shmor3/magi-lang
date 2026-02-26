@@ -596,7 +596,7 @@ impl<'a> Formatter<'a> {
                 }
             }
             ExpressionKind::OptionalChain { object, field } => {
-                self.fmt_expression(object);
+                self.fmt_expression_prec(object, 8); // High precedence for postfix ?.
                 self.write("?.");
                 self.write(field);
             }

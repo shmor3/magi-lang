@@ -2180,3 +2180,97 @@ fn test_w108_no_false_positive_early_return() {
         .collect();
     assert!(w108.is_empty(), "early return should not warn: {:?}", w108);
 }
+
+// =============================================================================
+// Round 6: NaN truthiness, float-to-int safety, spread errors
+// =============================================================================
+
+#[test]
+fn test_nan_is_falsy() {
+    // NaN should be falsy via to_bool() conversion
+    // The interpreter's if-condition requires Bool, so we test via the types module
+    use magi_lang::types::DataType;
+    let nan = DataType::Float64(f64::NAN);
+    assert!(!nan.to_bool(), "NaN should be falsy");
+    let zero = DataType::Float64(0.0);
+    assert!(!zero.to_bool(), "0.0 should be falsy");
+    let positive = DataType::Float64(1.5);
+    assert!(positive.to_bool(), "positive floats should be truthy");
+}
+
+#[test]
+fn test_float_to_int64_nan_returns_null() {
+    let result = run("
+        let x = 0.0 / 0.0;
+        x.to_int64()
+    ");
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_float_to_int64_infinity_returns_null() {
+    let result = run("
+        let x = 1.0 / 0.0;
+        x.to_int64()
+    ");
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_float_to_int64_valid() {
+    let result = run("42.5.to_int64()");
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_spread_non_array_errors() {
+    // Spreading a non-array value should error
+    let result = run_err("
+        fn add(a, b) { a + b }
+        add(...5)
+    ");
+    match result {
+        InterpError::TypeError { context, .. } => {
+            assert!(context.contains("spread"), "error should mention spread: {}", context);
+        }
+        other => panic!("expected TypeError for spread on non-array, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_spread_non_array_in_array_literal_errors() {
+    let result = run_err("[1, ...5, 3]");
+    match result {
+        InterpError::TypeError { context, .. } => {
+            assert!(context.contains("spread"), "error should mention spread: {}", context);
+        }
+        other => panic!("expected TypeError for spread on non-array, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_spread_array_still_works() {
+    let result = run("
+        let a = [1, 2];
+        let b = [0, ...a, 3];
+        b
+    ");
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(0),
+        DataType::Int64(1),
+        DataType::Int64(2),
+        DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_formatter_optional_chain_idempotent() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let config = FormatConfig::default();
+    let source = "let x = obj?.field;\n";
+    let program1 = magi_lang::syntax::parser::parse_v2(source).unwrap();
+    let first = format_program(&program1, &config);
+    let program2 = magi_lang::syntax::parser::parse_v2(&first).unwrap();
+    let second = format_program(&program2, &config);
+    assert_eq!(first, second, "optional chain should be idempotent:\nfirst:  {}\nsecond: {}", first, second);
+}
