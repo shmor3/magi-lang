@@ -23,7 +23,7 @@ pub fn handle_goto_definition(
                 },
                 end: Position {
                     line: func.line.saturating_sub(1),
-                    character: func.col.saturating_sub(1) + word.len() as u32,
+                    character: func.col.saturating_sub(1) + word.chars().count() as u32,
                 },
             },
         }));
@@ -40,7 +40,7 @@ pub fn handle_goto_definition(
                 },
                 end: Position {
                     line: var.line.saturating_sub(1),
-                    character: var.col.saturating_sub(1) + word.len() as u32,
+                    character: var.col.saturating_sub(1) + word.chars().count() as u32,
                 },
             },
         }));
@@ -57,7 +57,7 @@ pub fn handle_goto_definition(
                 },
                 end: Position {
                     line: en.line.saturating_sub(1),
-                    character: en.col.saturating_sub(1) + word.len() as u32,
+                    character: en.col.saturating_sub(1) + word.chars().count() as u32,
                 },
             },
         }));
@@ -74,7 +74,7 @@ pub fn handle_goto_definition(
                 },
                 end: Position {
                     line: st.line.saturating_sub(1),
-                    character: st.col.saturating_sub(1) + word.len() as u32,
+                    character: st.col.saturating_sub(1) + word.chars().count() as u32,
                 },
             },
         }));

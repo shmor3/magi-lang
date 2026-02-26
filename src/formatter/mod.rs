@@ -583,9 +583,17 @@ impl<'a> Formatter<'a> {
                 self.write("\"");
             }
             ExpressionKind::NullCoalesce { left, right } => {
+                // NullCoalesce has very low precedence (below Or)
+                let needs_parens = parent_prec > 0;
+                if needs_parens {
+                    self.write("(");
+                }
                 self.fmt_expression(left);
                 self.write(" ?? ");
                 self.fmt_expression(right);
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::OptionalChain { object, field } => {
                 self.fmt_expression(object);
@@ -728,7 +736,7 @@ impl<'a> Formatter<'a> {
                 }
             }
             ExpressionKind::TryPropagate(inner) => {
-                self.fmt_expression(inner);
+                self.fmt_expression_prec(inner, 8); // Very high precedence for postfix ?
                 self.write("?");
             }
         }
@@ -808,7 +816,8 @@ impl<'a> Formatter<'a> {
                 if inline_len < self.config.max_width / 2 {
                     self.write("{");
                     for (i, (key, val)) in entries.iter().enumerate() {
-                        self.write(&format!("\"{}\": ", key));
+                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+                        self.write(&format!("\"{}\": ", escaped_key));
                         self.fmt_expression(val);
                         if i < entries.len() - 1 {
                             self.write(", ");
@@ -820,7 +829,8 @@ impl<'a> Formatter<'a> {
                     self.newline();
                     self.indent();
                     for (i, (key, val)) in entries.iter().enumerate() {
-                        self.write(&format!("\"{}\": ", key));
+                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+                        self.write(&format!("\"{}\": ", escaped_key));
                         self.fmt_expression(val);
                         if i < entries.len() - 1 {
                             self.write(",");

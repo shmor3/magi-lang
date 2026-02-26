@@ -1986,3 +1986,92 @@ fn test_lint_or_pattern_exhaustiveness() {
         .collect();
     assert!(w203.is_empty(), "all variants covered via or-pattern, should not warn: {:?}", w203);
 }
+
+// =============================================================================
+// Round 4: Formatter, LSP, and edge case fixes
+// =============================================================================
+
+#[test]
+fn test_formatter_map_key_with_quotes() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    // Map keys containing quotes should be escaped in output
+    let program = magi_lang::syntax::parser::parse_v2(r#"let x = {"say \"hello\"": 1};"#).unwrap();
+    let result = format_program(&program, &FormatConfig::default());
+    // The formatted output should contain escaped quotes in the key
+    assert!(result.contains("\\\"hello\\\""), "map key quotes should be escaped: {}", result);
+}
+
+#[test]
+fn test_formatter_map_key_with_backslash() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let program = magi_lang::syntax::parser::parse_v2(r#"let x = {"path\\dir": 1};"#).unwrap();
+    let result = format_program(&program, &FormatConfig::default());
+    assert!(result.contains("path\\\\dir"), "map key backslash should be escaped: {}", result);
+}
+
+#[test]
+fn test_formatter_null_coalesce() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let program = magi_lang::syntax::parser::parse_v2("let x = a ?? b;").unwrap();
+    let result = format_program(&program, &FormatConfig::default());
+    assert!(result.contains("a ?? b"), "null coalesce should format: {}", result);
+}
+
+#[test]
+fn test_formatter_try_propagate() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let program = magi_lang::syntax::parser::parse_v2("let x = foo()?;").unwrap();
+    let result = format_program(&program, &FormatConfig::default());
+    assert!(result.contains("foo()?"), "try propagate should format: {}", result);
+}
+
+#[test]
+fn test_formatter_idempotent_null_coalesce() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let config = FormatConfig::default();
+    let source = "let x = a ?? b;\n";
+    let program1 = magi_lang::syntax::parser::parse_v2(source).unwrap();
+    let first = format_program(&program1, &config);
+    let program2 = magi_lang::syntax::parser::parse_v2(&first).unwrap();
+    let second = format_program(&program2, &config);
+    assert_eq!(first, second, "null coalesce should be idempotent:\nfirst:  {}\nsecond: {}", first, second);
+}
+
+#[test]
+fn test_lexer_invalid_utf8_no_hang() {
+    // Test that invalid/incomplete UTF-8 in strings doesn't cause infinite loop.
+    // We can't inject raw bytes through parse_v2 (it takes &str), but we can test
+    // the replacement character path by verifying advance_char handles edge cases.
+    // Instead, test that Unicode replacement char in source is handled:
+    let source = "let x = \"hello\u{FFFD}world\";";
+    let result = magi_lang::syntax::parser::parse_v2(source);
+    assert!(result.is_ok(), "replacement char in string should parse: {:?}", result.err());
+}
+
+#[test]
+fn test_linter_duplicate_imports() {
+    use magi_lang::linter;
+    let program = magi_lang::syntax::parser::parse_v2(r#"
+        import "foo";
+        import "foo";
+    "#).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    let w208: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W208"))
+        .collect();
+    assert_eq!(w208.len(), 1, "should detect duplicate import: {:?}", w208);
+}
+
+#[test]
+fn test_linter_no_false_duplicate_import() {
+    use magi_lang::linter;
+    let program = magi_lang::syntax::parser::parse_v2(r#"
+        import "foo";
+        import "bar";
+    "#).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    let w208: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W208"))
+        .collect();
+    assert!(w208.is_empty(), "different imports should not warn: {:?}", w208);
+}

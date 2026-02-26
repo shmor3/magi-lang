@@ -288,6 +288,7 @@ impl<'a> Lexer<'a> {
 
     /// Advance and decode one full UTF-8 character from the source.
     /// Used inside string literals to correctly handle multi-byte characters.
+    /// Always advances at least one byte to prevent infinite loops.
     fn advance_char(&mut self) -> Option<char> {
         let first = self.source.get(self.pos).copied()?;
         // Determine UTF-8 sequence length from the first byte
@@ -297,15 +298,24 @@ impl<'a> Lexer<'a> {
             else { 4 };
         let end = (self.pos + byte_len).min(self.source.len());
         let slice = &self.source[self.pos..end];
-        let ch = std::str::from_utf8(slice).ok()?.chars().next()?;
-        self.pos += byte_len;
-        if ch == '\n' {
-            self.line += 1;
-            self.col = 1;
-        } else {
-            self.col += 1;
+        match std::str::from_utf8(slice).ok().and_then(|s| s.chars().next()) {
+            Some(ch) => {
+                self.pos += byte_len;
+                if ch == '\n' {
+                    self.line += 1;
+                    self.col = 1;
+                } else {
+                    self.col += 1;
+                }
+                Some(ch)
+            }
+            None => {
+                // Invalid or incomplete UTF-8: advance one byte as replacement char
+                self.pos += 1;
+                self.col += 1;
+                Some('\u{FFFD}')
+            }
         }
-        Some(ch)
     }
 
     fn skip_whitespace_and_comments(&mut self) -> Result<(), SyntaxError> {

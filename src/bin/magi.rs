@@ -514,6 +514,11 @@ fn main() {
                 }
             }
 
+            if write_in_place && check_only {
+                eprintln!("Error: --write and --check are mutually exclusive");
+                process::exit(1);
+            }
+
             match file_path {
                 Some(path) => cmd_fmt(path, write_in_place, check_only),
                 None => {
