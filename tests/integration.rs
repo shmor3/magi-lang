@@ -5120,3 +5120,84 @@ fn test_wasm_array_spread_rejected() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("spread"), "expected spread error, got: {err}");
 }
+
+// ═══════════════════════════════════════════════════════════
+// Round 39: Parser and interpreter correctness fixes
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_range_pattern_token_stream_integrity() {
+    // Range pattern that succeeds: 0..10
+    let result = run(r#"
+        match 5 {
+            0..10 => "in range",
+            _ => "out of range",
+        }
+    "#);
+    assert_eq!(result, DataType::String("in range".to_string()));
+}
+
+#[test]
+fn test_range_pattern_inclusive() {
+    let result = run(r#"
+        match 10 {
+            0..=10 => "in range",
+            _ => "out of range",
+        }
+    "#);
+    assert_eq!(result, DataType::String("in range".to_string()));
+}
+
+#[test]
+fn test_negative_range_pattern() {
+    let result = run(r#"
+        match -3 {
+            -10..0 => "negative",
+            0..10 => "positive",
+            _ => "other",
+        }
+    "#);
+    assert_eq!(result, DataType::String("negative".to_string()));
+}
+
+#[test]
+fn test_negative_to_negative_range_pattern() {
+    let result = run(r#"
+        match -5 {
+            -10..-1 => "deep negative",
+            _ => "other",
+        }
+    "#);
+    assert_eq!(result, DataType::String("deep negative".to_string()));
+}
+
+#[test]
+fn test_try_propagate_only_result_err() {
+    // The ? operator should only propagate Result::Err, not arbitrary maps with __variant: "Err"
+    let result = run(r#"
+        enum MyEnum { Err(v) }
+        fn test_fn() {
+            let x = MyEnum::Err("oops");
+            // This should NOT be treated as Result::Err by ?
+            x
+        }
+        test_fn()
+    "#);
+    // Should return the enum map, not throw
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("__enum").map(|v| v.to_string_lossy()), Some("MyEnum".to_string()));
+        }
+        other => panic!("expected Map, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_string_interpolation_basic() {
+    let result = run(r#"
+        let name = "world";
+        let n = 42;
+        f"hello {name}, number {n}"
+    "#);
+    assert_eq!(result, DataType::String("hello world, number 42".to_string()));
+}

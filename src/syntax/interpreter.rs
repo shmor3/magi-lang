@@ -1237,6 +1237,14 @@ impl<'a> Interpreter<'a> {
                                 DataType::Array(inner) => result.extend(inner),
                                 other => result.push(other),
                             }
+                            if result.len() > MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::TypeError {
+                                    expected: format!("flat_map result at most {} elements", MAX_ARRAY_ELEMENTS),
+                                    actual: format!("{} elements", result.len()),
+                                    context: "flat_map".to_string(),
+                                    span,
+                                });
+                            }
                         }
                         Ok(Some(DataType::Array(result)))
                     }
@@ -1251,12 +1259,18 @@ impl<'a> Interpreter<'a> {
                     "sort_by" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sort_by".to_string(), expected: 1, actual: 0, span }); }
                         let mut sorted = arr.clone();
+                        let max_comparisons = MAX_LOOP_ITERATIONS * 10; // 100,000 comparisons
+                        let mut comparison_count = 0usize;
                         // Simple insertion sort with comparator
                         for i in 1..sorted.len() {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let key = sorted[i].clone();
                             let mut j = i;
                             while j > 0 {
+                                comparison_count += 1;
+                                if comparison_count > max_comparisons {
+                                    return Err(InterpError::MaxIterations { limit: max_comparisons, span });
+                                }
                                 let cmp = self.call_lambda_with_args(&args[0], &[sorted[j - 1].clone(), key.clone()], span)?;
                                 let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
                                     expected: "number".to_string(),
@@ -2712,6 +2726,14 @@ impl<'a> Interpreter<'a> {
                             result.push_str(&datatype_to_display(&val));
                         }
                     }
+                    if result.len() > MAX_STRING_OUTPUT {
+                        return Err(InterpError::TypeError {
+                            expected: format!("string interpolation result at most {} bytes", MAX_STRING_OUTPUT),
+                            actual: format!("{} bytes", result.len()),
+                            context: "string interpolation".to_string(),
+                            span: expr.span,
+                        });
+                    }
                 }
                 Ok(DataType::String(result))
             }
@@ -3019,9 +3041,10 @@ impl<'a> Interpreter<'a> {
                         span,
                     }),
                     Ok(val) => {
-                        // Check if it's an error-like enum (Result::Err)
+                        // Check if it's a Result::Err enum
                         if let DataType::Map(ref m) = val {
-                            if m.get("__variant").map(|v| v.to_string_lossy()) == Some("Err".to_string()) {
+                            if m.get("__enum").map(|v| v.to_string_lossy()) == Some("Result".to_string())
+                                && m.get("__variant").map(|v| v.to_string_lossy()) == Some("Err".to_string()) {
                                 // Extract the error data for the thrown value
                                 let error_val = m.get("__data")
                                     .and_then(|d| if let DataType::Array(arr) = d { arr.first().cloned() } else { None })
@@ -3479,6 +3502,7 @@ impl<'a> Interpreter<'a> {
         }) {
             Some(p) => p.clone(),
             None => {
+                self.importing_packages.remove(package_id);
                 let available: Vec<&str> = self.packages.keys().map(|s| s.as_str()).collect();
                 let suggestion = super::errors::suggest_name(package_id, &available);
                 return Err(InterpError::UnknownOperation {

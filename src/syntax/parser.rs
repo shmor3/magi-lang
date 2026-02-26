@@ -1841,10 +1841,17 @@ impl Parser {
                 // Range pattern: 0..10 or 0..=10
                 if self.at(&TokenKind::DotDot) || self.at(&TokenKind::DotDotEq) {
                     let inclusive = self.at(&TokenKind::DotDotEq);
-                    self.advance();
-                    let end_tok = self.peek().clone();
-                    if end_tok.kind == TokenKind::IntLiteral {
-                        self.advance();
+                    // Peek ahead to check the end token BEFORE consuming `..`
+                    let end_pos = self.pos + 1;
+                    let end_tok_kind = if end_pos < self.tokens.len() {
+                        self.tokens[end_pos].kind.clone()
+                    } else {
+                        TokenKind::Eof
+                    };
+                    if end_tok_kind == TokenKind::IntLiteral {
+                        self.advance(); // consume `..` or `..=`
+                        let end_tok = self.peek().clone();
+                        self.advance(); // consume end integer
                         let end_val: i64 = end_tok.text.parse().map_err(|_| self.error("Invalid integer"))?;
                         return Ok(Pattern::RangePattern {
                             start: Box::new(start_expr),
@@ -1854,6 +1861,29 @@ impl Parser {
                             }),
                             inclusive,
                         });
+                    } else if end_tok_kind == TokenKind::Minus {
+                        // Negative end: 0..-10 or 0..=-10
+                        let neg_pos = end_pos + 1;
+                        let neg_tok_kind = if neg_pos < self.tokens.len() {
+                            self.tokens[neg_pos].kind.clone()
+                        } else {
+                            TokenKind::Eof
+                        };
+                        if neg_tok_kind == TokenKind::IntLiteral {
+                            self.advance(); // consume `..` or `..=`
+                            self.advance(); // consume `-`
+                            let end_tok = self.peek().clone();
+                            self.advance(); // consume end integer
+                            let end_val: i64 = end_tok.text.parse::<i64>().map_err(|_| self.error("Invalid integer"))?.wrapping_neg();
+                            return Ok(Pattern::RangePattern {
+                                start: Box::new(start_expr),
+                                end: Box::new(Expression {
+                                    kind: ExpressionKind::Literal(Literal::Int64(end_val)),
+                                    span: end_tok.span,
+                                }),
+                                inclusive,
+                            });
+                        }
                     }
                 }
                 Ok(Pattern::Literal(Literal::Int64(val)))
@@ -1945,7 +1975,7 @@ impl Parser {
                 Ok(Pattern::Variable(tok.text.clone()))
             }
             TokenKind::Minus => {
-                // Negative literal: -42
+                // Negative literal: -42, or negative range: -10..0
                 self.advance();
                 if self.at(&TokenKind::IntLiteral) {
                     let num_tok = self.advance().clone();
@@ -1953,7 +1983,62 @@ impl Parser {
                         .text
                         .parse()
                         .map_err(|_| self.error("Invalid integer"))?;
-                    Ok(Pattern::Literal(Literal::Int64(-val)))
+                    let neg_val = -val;
+                    // Check for range pattern: -10..5 or -10..=5
+                    if self.at(&TokenKind::DotDot) || self.at(&TokenKind::DotDotEq) {
+                        let inclusive = self.at(&TokenKind::DotDotEq);
+                        let end_pos = self.pos + 1;
+                        let end_tok_kind = if end_pos < self.tokens.len() {
+                            self.tokens[end_pos].kind.clone()
+                        } else {
+                            TokenKind::Eof
+                        };
+                        if end_tok_kind == TokenKind::IntLiteral {
+                            self.advance(); // consume `..` or `..=`
+                            let end_tok = self.peek().clone();
+                            self.advance();
+                            let end_val: i64 = end_tok.text.parse().map_err(|_| self.error("Invalid integer"))?;
+                            let start_expr = Expression {
+                                kind: ExpressionKind::Literal(Literal::Int64(neg_val)),
+                                span: tok.span,
+                            };
+                            return Ok(Pattern::RangePattern {
+                                start: Box::new(start_expr),
+                                end: Box::new(Expression {
+                                    kind: ExpressionKind::Literal(Literal::Int64(end_val)),
+                                    span: end_tok.span,
+                                }),
+                                inclusive,
+                            });
+                        } else if end_tok_kind == TokenKind::Minus {
+                            let neg_pos = end_pos + 1;
+                            let neg_end_kind = if neg_pos < self.tokens.len() {
+                                self.tokens[neg_pos].kind.clone()
+                            } else {
+                                TokenKind::Eof
+                            };
+                            if neg_end_kind == TokenKind::IntLiteral {
+                                self.advance(); // consume `..` or `..=`
+                                self.advance(); // consume `-`
+                                let end_tok = self.peek().clone();
+                                self.advance();
+                                let end_val: i64 = end_tok.text.parse::<i64>().map_err(|_| self.error("Invalid integer"))?.wrapping_neg();
+                                let start_expr = Expression {
+                                    kind: ExpressionKind::Literal(Literal::Int64(neg_val)),
+                                    span: tok.span,
+                                };
+                                return Ok(Pattern::RangePattern {
+                                    start: Box::new(start_expr),
+                                    end: Box::new(Expression {
+                                        kind: ExpressionKind::Literal(Literal::Int64(end_val)),
+                                        span: end_tok.span,
+                                    }),
+                                    inclusive,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Pattern::Literal(Literal::Int64(neg_val)))
                 } else if self.at(&TokenKind::FloatLiteral) {
                     let num_tok = self.advance().clone();
                     let val: f64 = num_tok
