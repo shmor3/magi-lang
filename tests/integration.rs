@@ -4472,3 +4472,177 @@ fn test_lint_const_naming() {
     // good_name should not produce a warning
     assert_eq!(codes.iter().filter(|&&c| c == "W200").count(), 1);
 }
+
+// ── Round 33: optional chaining methods, zero-param lambda, scope isolation, &&/|| types, exhaustiveness ──
+
+#[test]
+fn test_optional_chaining_method_null() {
+    let result = run(
+        r#"
+        let obj = null;
+        obj?.keys()
+        "#,
+    );
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_optional_chaining_method_nonnull() {
+    let result = run(
+        r#"
+        let arr = [1, 2, 3];
+        arr?.map(|x| x * 10)
+        "#,
+    );
+    assert_eq!(
+        result,
+        DataType::Array(vec![
+            DataType::Int64(10),
+            DataType::Int64(20),
+            DataType::Int64(30),
+        ])
+    );
+}
+
+#[test]
+fn test_optional_chaining_hof_null() {
+    let result = run(
+        r#"
+        let arr = null;
+        arr?.map(|x| x * 2)
+        "#,
+    );
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_zero_param_lambda() {
+    let result = run(
+        r#"
+        let f = || 42;
+        f()
+        "#,
+    );
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_zero_param_lambda_block() {
+    let result = run(
+        r#"
+        let f = || { let x = 10; x + 1 };
+        f()
+        "#,
+    );
+    assert_eq!(result, DataType::Int64(11));
+}
+
+#[test]
+fn test_if_else_scope_isolation() {
+    let result = run_err(
+        r#"
+        if true { let x = 42 }
+        x
+        "#,
+    );
+    match result {
+        InterpError::UndefinedVariable { name, .. } => assert_eq!(name, "x"),
+        other => panic!("expected UndefinedVariable, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_if_else_value_with_scope() {
+    let result = run(
+        r#"
+        let val = if true { let x = 10; x + 5 } else { 0 };
+        val
+        "#,
+    );
+    assert_eq!(result, DataType::Int64(15));
+}
+
+#[test]
+fn test_block_scope_isolation() {
+    let result = run_err(
+        r#"
+        { let inner = 99 }
+        inner
+        "#,
+    );
+    match result {
+        InterpError::UndefinedVariable { name, .. } => assert_eq!(name, "inner"),
+        other => panic!("expected UndefinedVariable, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_and_or_require_bool() {
+    let result = run_err(
+        r#"
+        0 && true
+        "#,
+    );
+    match result {
+        InterpError::TypeError { context, .. } => assert!(context.contains("&&")),
+        other => panic!("expected TypeError, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_and_or_short_circuit() {
+    // false && <anything> should short-circuit
+    let result = run(
+        r#"
+        let mut x = 0;
+        false && { x = 1; true };
+        x
+        "#,
+    );
+    assert_eq!(result, DataType::Int64(0));
+}
+
+#[test]
+fn test_exhaustive_enum_match_no_warning() {
+    let program = parse(
+        r#"
+        enum Color { Red, Green, Blue }
+        let c = Color::Red();
+        match c {
+            Color::Red() => "r",
+            Color::Green() => "g",
+            Color::Blue() => "b",
+        }
+        "#,
+    );
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let w203: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(w203.is_empty(), "should not warn W203 on exhaustive enum match, got: {:?}", w203);
+}
+
+#[test]
+fn test_incomplete_enum_match_warns() {
+    let program = parse(
+        r#"
+        enum Color { Red, Green, Blue }
+        let c = Color::Red();
+        match c {
+            Color::Red() => "r",
+            Color::Green() => "g",
+        }
+        "#,
+    );
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let w203: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(!w203.is_empty(), "should warn W203 on incomplete enum match");
+}

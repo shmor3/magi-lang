@@ -112,6 +112,8 @@ struct TypeChecker {
     function_depth: usize,
     /// Declared return type of the current function (for return statement validation).
     current_return_type: ChannelType,
+    /// Known enum definitions: enum_name → list of variant names.
+    enum_variants: HashMap<String, Vec<String>>,
 }
 
 impl TypeChecker {
@@ -122,6 +124,7 @@ impl TypeChecker {
             imports: imports.clone(),
             used_imports: HashSet::new(),
             function_sigs: HashMap::new(),
+            enum_variants: HashMap::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -295,8 +298,12 @@ impl TypeChecker {
     // =========================================================================
 
     fn check_program(&mut self, program: &Program) {
-        // Pass 1: collect function signatures
+        // Pass 1: collect function signatures and enum definitions
         for stmt in &program.statements {
+            if let StatementKind::EnumDef { name, variants } = &stmt.kind {
+                let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                self.enum_variants.insert(name.clone(), variant_names);
+            }
             if let StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) =
                 &stmt.kind
             {
@@ -935,13 +942,58 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            StatementKind::EnumDef { .. } | StatementKind::StructDef { .. } => {
-                // Enum/struct definitions are valid at any scope
+            StatementKind::EnumDef { name, variants } => {
+                let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                self.enum_variants.insert(name.clone(), variant_names);
+            }
+            StatementKind::StructDef { .. } => {
+                // Struct definitions are valid at any scope
             }
         }
     }
 
     // =========================================================================
+    /// Check if match arms exhaustively cover all variants of a known enum.
+    fn check_enum_exhaustive(&self, arms: &[crate::syntax::ast::MatchArm]) -> bool {
+        use std::collections::HashSet;
+        // Collect (enum_name, variant) pairs from unguarded EnumPattern arms
+        let mut enum_name: Option<&str> = None;
+        let mut covered = HashSet::new();
+        for arm in arms {
+            if arm.guard.is_some() {
+                continue; // guarded arms don't guarantee coverage
+            }
+            if let Pattern::EnumPattern { enum_name: en, variant, .. } = &arm.pattern {
+                match enum_name {
+                    None => { enum_name = Some(en); }
+                    Some(existing) if existing != en.as_str() => return false, // mixed enums
+                    _ => {}
+                }
+                covered.insert(variant.as_str());
+            }
+            // Or patterns can also contribute
+            if let Pattern::Or(alternatives) = &arm.pattern {
+                for alt in alternatives {
+                    if let Pattern::EnumPattern { enum_name: en, variant, .. } = alt {
+                        match enum_name {
+                            None => { enum_name = Some(en); }
+                            Some(existing) if existing != en.as_str() => return false,
+                            _ => {}
+                        }
+                        covered.insert(variant.as_str());
+                    }
+                }
+            }
+        }
+        // Look up the enum definition
+        if let Some(name) = enum_name {
+            if let Some(variants) = self.enum_variants.get(name) {
+                return variants.iter().all(|v| covered.contains(v.as_str()));
+            }
+        }
+        false
+    }
+
     // Block
     // =========================================================================
 
@@ -1578,20 +1630,24 @@ impl TypeChecker {
                     return ChannelType::Null;
                 }
 
-                // Check for exhaustiveness — warn if no wildcard/variable catch-all
+                // Check for exhaustiveness
                 let has_catchall = arms.iter().any(|arm| {
                     matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_))
                         && arm.guard.is_none()
                 });
                 if !has_catchall {
-                    self.emit_coded(
-                        expr.span.start_line,
-                        expr.span.start_col,
-                        "Non-exhaustive match: consider adding a wildcard '_' arm".to_string(),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W203,
-                        Some("Add a `_ => ...` arm to handle remaining cases".to_string()),
-                    );
+                    // Check if all enum variants are covered
+                    let enum_exhaustive = self.check_enum_exhaustive(arms);
+                    if !enum_exhaustive {
+                        self.emit_coded(
+                            expr.span.start_line,
+                            expr.span.start_col,
+                            "Non-exhaustive match: consider adding a wildcard '_' arm".to_string(),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::W203,
+                            Some("Add a `_ => ...` arm to handle remaining cases".to_string()),
+                        );
+                    }
                 }
 
                 let mut arm_types = Vec::new();

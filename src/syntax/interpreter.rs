@@ -2055,18 +2055,28 @@ impl<'a> Interpreter<'a> {
                 // Short-circuit evaluation for logical operators
                 if *op == BinOp::And {
                     let lhs = self.eval_expr(left)?;
-                    return if matches!(lhs, DataType::Bool(false)) {
-                        Ok(DataType::Bool(false))
-                    } else {
-                        self.eval_expr(right)
+                    return match lhs {
+                        DataType::Bool(false) => Ok(DataType::Bool(false)),
+                        DataType::Bool(true) => self.eval_expr(right),
+                        other => Err(InterpError::TypeError {
+                            expected: "Bool".to_string(),
+                            actual: datatype_type_name(&other).to_string(),
+                            context: "left side of &&".to_string(),
+                            span: left.span,
+                        }),
                     };
                 }
                 if *op == BinOp::Or {
                     let lhs = self.eval_expr(left)?;
-                    return if matches!(lhs, DataType::Bool(true)) {
-                        Ok(DataType::Bool(true))
-                    } else {
-                        self.eval_expr(right)
+                    return match lhs {
+                        DataType::Bool(true) => Ok(DataType::Bool(true)),
+                        DataType::Bool(false) => self.eval_expr(right),
+                        other => Err(InterpError::TypeError {
+                            expected: "Bool".to_string(),
+                            actual: datatype_type_name(&other).to_string(),
+                            context: "left side of ||".to_string(),
+                            span: left.span,
+                        }),
                     };
                 }
 
@@ -2384,15 +2394,32 @@ impl<'a> Interpreter<'a> {
 
                 // Lazy evaluation: only execute the matching branch
                 if is_true {
-                    self.exec_block(then_block)
+                    self.symbols.push(HashMap::new());
+                    self.heap.push_scope();
+                    let result = self.exec_block(then_block);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
+                    result
                 } else if let Some(else_b) = else_block {
-                    self.exec_block(else_b)
+                    self.symbols.push(HashMap::new());
+                    self.heap.push_scope();
+                    let result = self.exec_block(else_b);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
+                    result
                 } else {
                     Ok(DataType::Null)
                 }
             }
 
-            ExpressionKind::Block(block) => self.exec_block(block),
+            ExpressionKind::Block(block) => {
+                self.symbols.push(HashMap::new());
+                self.heap.push_scope();
+                let result = self.exec_block(block);
+                self.heap.pop_scope();
+                self.symbols.pop();
+                result
+            }
 
             ExpressionKind::Index { object, index } => {
                 // Slice syntax: arr[1..3] or str[0..5]
@@ -2531,6 +2558,13 @@ impl<'a> Interpreter<'a> {
                 kwargs,
             } => {
                 let obj = self.eval_expr(object)?;
+
+                // Optional chaining: if object came from ?. and evaluated to null, propagate null
+                if matches!(obj, DataType::Null)
+                    && matches!(object.kind, ExpressionKind::OptionalChain { .. })
+                {
+                    return Ok(DataType::Null);
+                }
 
                 // Try HOF methods first (they need interpreter for lambda calls)
                 if let Some(result) = self.try_eval_hof_method(&obj, method, args, expr.span)? {
@@ -2677,6 +2711,10 @@ impl<'a> Interpreter<'a> {
                 let obj = self.eval_expr(object)?;
                 if matches!(obj, DataType::Null) {
                     Ok(DataType::Null)
+                } else if field.is_empty() {
+                    // Empty field = null-check marker for optional method calls (obj?.method())
+                    // Just return the object itself — the MethodCall wrapper handles the actual call
+                    Ok(obj)
                 } else {
                     let inputs = HashMap::from([
                         ("map".to_string(), obj),

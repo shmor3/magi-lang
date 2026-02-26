@@ -1137,13 +1137,56 @@ impl Parser {
                 self.advance();
                 let field_tok = self.expect(&TokenKind::Ident)?;
                 let span = expr.span.merge(field_tok.span);
-                expr = Expression {
-                    kind: ExpressionKind::OptionalChain {
-                        object: Box::new(expr),
-                        field: field_tok.text,
-                    },
-                    span,
-                };
+                // Check if this is a direct optional method call: obj?.method(args)
+                if self.at(&TokenKind::LParen) {
+                    self.advance(); // consume '('
+                    let mut args = Vec::new();
+                    let mut kwargs = Vec::new();
+                    while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                        if self.peek_kind() == &TokenKind::Ident {
+                            let saved = self.pos;
+                            let name_tok = self.advance().clone();
+                            if self.at(&TokenKind::Eq) {
+                                self.advance();
+                                let value = self.parse_expression()?;
+                                kwargs.push((name_tok.text, value));
+                                if !self.eat(&TokenKind::Comma) { break; }
+                                continue;
+                            }
+                            self.pos = saved;
+                        }
+                        args.push(self.parse_expression()?);
+                        if !self.eat(&TokenKind::Comma) { break; }
+                    }
+                    let end = self.expect(&TokenKind::RParen)?;
+                    let method_span = expr.span.merge(end.span);
+                    // Wrap expr in OptionalChain as a marker for null propagation
+                    // The interpreter detects OptionalChain as MethodCall object → returns null if base is null
+                    let optional_marker = Expression {
+                        kind: ExpressionKind::OptionalChain {
+                            object: Box::new(expr),
+                            field: String::new(), // empty field = method call marker
+                        },
+                        span,
+                    };
+                    expr = Expression {
+                        kind: ExpressionKind::MethodCall {
+                            object: Box::new(optional_marker),
+                            method: field_tok.text,
+                            args,
+                            kwargs,
+                        },
+                        span: method_span,
+                    };
+                } else {
+                    expr = Expression {
+                        kind: ExpressionKind::OptionalChain {
+                            object: Box::new(expr),
+                            field: field_tok.text,
+                        },
+                        span,
+                    };
+                }
                 // Phase 14: propagate optional chaining through subsequent .field and .method()
                 while self.at(&TokenKind::Dot) {
                     self.advance();
@@ -1510,6 +1553,28 @@ impl Parser {
 
             // Lambda: |params| expr
             TokenKind::Bar => self.parse_lambda_expr(),
+
+            // Zero-parameter lambda: || expr
+            TokenKind::PipePipe => {
+                let start = self.advance().span; // consume '||'
+                let body = if self.at(&TokenKind::LBrace) {
+                    let block = self.parse_block()?;
+                    Expression {
+                        span: block.span,
+                        kind: ExpressionKind::Block(block),
+                    }
+                } else {
+                    self.parse_expression()?
+                };
+                let span = start.merge(body.span);
+                Ok(Expression {
+                    kind: ExpressionKind::Lambda {
+                        params: Vec::new(),
+                        body: Box::new(body),
+                    },
+                    span,
+                })
+            }
 
             // Spread: ...expr
             TokenKind::DotDotDot => {
