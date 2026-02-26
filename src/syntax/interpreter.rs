@@ -1536,7 +1536,10 @@ impl<'a> Interpreter<'a> {
                 _ => Ok(None),
             },
             DataType::Int32(n) => match method {
-                "abs" => Ok(Some(DataType::Int32(n.abs()))),
+                "abs" => Ok(Some(match n.checked_abs() {
+                    Some(v) => DataType::Int32(v),
+                    None => DataType::Null, // i32::MIN overflow
+                })),
                 _ => Ok(None),
             },
             // String methods (Phase 16+)
@@ -1654,15 +1657,29 @@ impl<'a> Interpreter<'a> {
                     let mut int_sum: i64 = 0;
                     let mut has_float = false;
                     let mut float_sum: f64 = 0.0;
+                    let mut int_overflow = false;
                     for item in arr {
                         match item {
                             DataType::Float64(f) => { has_float = true; float_sum += f; }
                             DataType::Float32(f) => { has_float = true; float_sum += *f as f64; }
-                            _ => { int_sum += item.to_i64().unwrap_or(0); }
+                            _ => {
+                                if !int_overflow {
+                                    match int_sum.checked_add(item.to_i64().unwrap_or(0)) {
+                                        Some(v) => int_sum = v,
+                                        None => {
+                                            has_float = true;
+                                            float_sum += int_sum as f64 + item.to_i64().unwrap_or(0) as f64;
+                                            int_overflow = true;
+                                        }
+                                    }
+                                } else {
+                                    float_sum += item.to_i64().unwrap_or(0) as f64;
+                                }
+                            }
                         }
                     }
                     if has_float {
-                        Ok(Some(DataType::Float64(float_sum + int_sum as f64)))
+                        Ok(Some(DataType::Float64(float_sum + if int_overflow { 0.0 } else { int_sum as f64 })))
                     } else {
                         Ok(Some(DataType::Int64(int_sum)))
                     }
@@ -1781,6 +1798,25 @@ impl<'a> Interpreter<'a> {
             });
         }
 
+        // Pre-evaluate default parameter values in the CALLER scope
+        // (default expressions may reference caller-scope variables)
+        let mut resolved_args: Vec<(String, DataType, bool)> = Vec::new();
+        for (i, param) in func.params.iter().enumerate() {
+            if param.rest {
+                let rest_args = args[i..].to_vec();
+                resolved_args.push((param.name.clone(), DataType::Array(rest_args), true));
+                break;
+            }
+            let arg = if i < args.len() {
+                args[i].clone()
+            } else if let Some(ref default_expr) = param.default {
+                self.eval_expr(default_expr)?
+            } else {
+                DataType::Null
+            };
+            resolved_args.push((param.name.clone(), arg, false));
+        }
+
         // Save outer symbol table
         let saved_symbols = std::mem::replace(&mut self.symbols, vec![HashMap::new()]);
         self.saved_symbol_stacks.push(saved_symbols);
@@ -1800,46 +1836,21 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Bind params in the function scope (overrides captures on conflict)
-        // Note: default param eval can fail, so we must ensure cleanup happens.
-        let mut param_error = None;
-        for (i, param) in func.params.iter().enumerate() {
-            if param.rest {
-                // Rest param collects remaining args as array
-                let rest_args = args[i..].to_vec();
-                let addr = self.heap.alloc(DataType::Array(rest_args));
-                self.define(&param.name, addr, false);
-                break;
-            }
-            let arg = if i < args.len() {
-                args[i].clone()
-            } else if let Some(ref default_expr) = param.default {
-                match self.eval_expr(default_expr) {
-                    Ok(val) => val,
-                    Err(e) => {
-                        param_error = Some(e);
-                        break;
-                    }
-                }
-            } else {
-                DataType::Null
-            };
-            let addr = self.heap.alloc(arg);
-            self.define(&param.name, addr, false);
+        // Bind pre-resolved params in the function scope
+        for (pname, pval, is_rest) in resolved_args {
+            let addr = self.heap.alloc(pval);
+            self.define(&pname, addr, false);
+            if is_rest { break; }
         }
 
         // Execute body — catch `return` signals at the function boundary
-        let result = if let Some(err) = param_error {
-            Err(err)
-        } else {
-            match self.exec_block(&func.body) {
-                Ok(val) => Ok(val),
-                Err(InterpError::ReturnSignal(val)) => Ok(val),
-                Err(InterpError::BreakSignal(_)) | Err(InterpError::ContinueSignal) => {
-                    Err(InterpError::BreakOutsideLoop { span: call_span })
-                }
-                Err(e) => Err(e),
+        let result = match self.exec_block(&func.body) {
+            Ok(val) => Ok(val),
+            Err(InterpError::ReturnSignal(val)) => Ok(val),
+            Err(InterpError::BreakSignal(_)) | Err(InterpError::ContinueSignal) => {
+                Err(InterpError::BreakOutsideLoop { span: call_span })
             }
+            Err(e) => Err(e),
         };
 
         // Restore outer symbols and pop function's heap scope
@@ -1950,6 +1961,24 @@ impl<'a> Interpreter<'a> {
             }
 
             ExpressionKind::BinaryOp { op, left, right } => {
+                // Short-circuit evaluation for logical operators
+                if *op == BinOp::And {
+                    let lhs = self.eval_expr(left)?;
+                    return if matches!(lhs, DataType::Bool(false)) {
+                        Ok(DataType::Bool(false))
+                    } else {
+                        self.eval_expr(right)
+                    };
+                }
+                if *op == BinOp::Or {
+                    let lhs = self.eval_expr(left)?;
+                    return if matches!(lhs, DataType::Bool(true)) {
+                        Ok(DataType::Bool(true))
+                    } else {
+                        self.eval_expr(right)
+                    };
+                }
+
                 let lhs = self.eval_expr(left)?;
                 let rhs = self.eval_expr(right)?;
 
@@ -3283,11 +3312,17 @@ impl<'a> Interpreter<'a> {
     pub fn run_tests(&mut self, program: &Program) -> Vec<TestResult> {
         let mut results = Vec::new();
 
-        // Pass 1: Collect function definitions and run setup code
+        // Pass 1: Collect function/enum/struct definitions and run setup code
         for stmt in &program.statements {
             match &stmt.kind {
                 StatementKind::FunctionDef(func) | StatementKind::AsyncFunctionDef(func) => {
                     self.functions.insert(func.name.clone(), func.clone());
+                }
+                StatementKind::EnumDef { name, variants } => {
+                    self.enum_defs.insert(name.clone(), variants.clone());
+                }
+                StatementKind::StructDef { name, fields } => {
+                    self.struct_defs.insert(name.clone(), fields.clone());
                 }
                 StatementKind::TestDef { .. } => {
                     // Skip tests in pass 1

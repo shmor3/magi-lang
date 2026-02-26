@@ -3593,3 +3593,180 @@ await t
         DataType::Int64(42)
     );
 }
+
+// ── Round 23: Short-circuit, default params, overflow, parser fixes ──
+
+#[test]
+fn test_and_short_circuit() {
+    // && should not evaluate right side when left is false
+    // If right side were evaluated, it would call undefined function and crash
+    assert_eq!(
+        run(r#"
+let x = false && true;
+x
+"#),
+        DataType::Bool(false)
+    );
+}
+
+#[test]
+fn test_or_short_circuit() {
+    // || should not evaluate right side when left is true
+    assert_eq!(
+        run(r#"
+let x = true || false;
+x
+"#),
+        DataType::Bool(true)
+    );
+}
+
+#[test]
+fn test_and_evaluates_right_when_left_true() {
+    assert_eq!(
+        run(r#"
+let x = true && false;
+x
+"#),
+        DataType::Bool(false)
+    );
+}
+
+#[test]
+fn test_or_evaluates_right_when_left_false() {
+    assert_eq!(
+        run(r#"
+let x = false || true;
+x
+"#),
+        DataType::Bool(true)
+    );
+}
+
+#[test]
+fn test_short_circuit_and_prevents_error() {
+    // Guard pattern: check before accessing
+    assert_eq!(
+        run(r#"
+let arr = [];
+let safe = arr.len() > 0 && arr.first() > 5;
+safe
+"#),
+        DataType::Bool(false)
+    );
+}
+
+#[test]
+fn test_default_param_uses_caller_scope() {
+    assert_eq!(
+        run(r#"
+let TIMEOUT = 30;
+fn fetch(url, timeout = TIMEOUT) {
+    timeout
+}
+fetch("http://example.com")
+"#),
+        DataType::Int64(30)
+    );
+}
+
+#[test]
+fn test_default_param_with_expression() {
+    assert_eq!(
+        run(r#"
+let BASE = 10;
+fn calc(x, offset = BASE * 2) {
+    x + offset
+}
+calc(5)
+"#),
+        DataType::Int64(25)
+    );
+}
+
+#[test]
+fn test_default_param_overridden_by_caller() {
+    assert_eq!(
+        run(r#"
+let DEFAULT = 100;
+fn greet(name, greeting = DEFAULT) {
+    greeting
+}
+greet("Alice", 42)
+"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_array_sum_overflow_promotes_to_float() {
+    // i64::MAX + 1 should promote to float instead of wrapping
+    assert_eq!(
+        run(r#"
+let arr = [9223372036854775807, 1];
+let s = arr.sum();
+typeof(s)
+"#),
+        DataType::String("float64".to_string())
+    );
+}
+
+#[test]
+fn test_array_sum_normal() {
+    assert_eq!(
+        run(r#"
+[1, 2, 3, 4, 5].sum()
+"#),
+        DataType::Int64(15)
+    );
+}
+
+#[test]
+fn test_enum_inside_function_block() {
+    // enum/struct should be parseable inside blocks
+    assert_eq!(
+        run(r#"
+fn make_color() {
+    enum Color { Red, Green, Blue }
+    Color::Red
+}
+let c = make_color();
+c.__variant
+"#),
+        DataType::String("Red".to_string())
+    );
+}
+
+#[test]
+fn test_struct_inside_function_block() {
+    assert_eq!(
+        run(r#"
+fn make_point() {
+    struct Point { x, y }
+    Point { x: 10, y: 20 }
+}
+let p = make_point();
+p.x
+"#),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_run_tests_enum_after_test() {
+    // Enums defined after test blocks should still be available via pass 1 collection
+    let src = r#"
+test "use color" {
+    let c = Color::Red;
+    assert_eq(c.__variant, "Red");
+}
+
+enum Color { Red, Green, Blue }
+"#;
+    let program = parse_v2(src).expect("parse error");
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].passed, "test should pass but got: {:?}", results[0].error_message);
+}

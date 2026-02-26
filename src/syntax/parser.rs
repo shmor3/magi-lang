@@ -852,7 +852,10 @@ impl Parser {
                 | TokenKind::Mod
                 | TokenKind::Use
                 | TokenKind::Type
-                | TokenKind::Pub => {
+                | TokenKind::Pub
+                | TokenKind::Enum
+                | TokenKind::Struct
+                | TokenKind::Test => {
                     statements.push(self.parse_statement()?);
                     continue;
                 }
