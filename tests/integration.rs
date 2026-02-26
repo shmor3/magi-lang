@@ -2102,14 +2102,15 @@ fn test_while_loop_break_value() {
 }
 
 #[test]
-fn test_while_loop_no_break_returns_null() {
+fn test_while_loop_no_break_returns_last_body_value() {
+    // while loop returns the last body expression value (consistent with for loop)
     let result = run("
         let mut i = 0;
         while i < 3 {
-            i = i + 1;
+            i = i + 1
         }
     ");
-    assert_eq!(result, DataType::Null);
+    assert_eq!(result, DataType::Int64(3));
 }
 
 #[test]
@@ -4022,4 +4023,92 @@ output r;
         .filter_map(|d| d.code.as_deref())
         .collect();
     assert!(codes.contains(&"W203"), "Expected W203 for non-exhaustive match, got: {:?}", codes);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Round 27: Match guard, has_main, spawn, while loop, test isolation
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_match_guard_non_boolean_errors() {
+    let err = run_err("match 42 { x if 1 => x, _ => -1 }");
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert_eq!(context, "match guard");
+        }
+        other => panic!("Expected TypeError for non-bool guard, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_match_guard_boolean_works() {
+    assert_eq!(
+        run("match 42 { x if true => x, _ => -1 }"),
+        DataType::Int64(42)
+    );
+    assert_eq!(
+        run("match 42 { x if false => x, _ => -1 }"),
+        DataType::Int64(-1)
+    );
+}
+
+#[test]
+fn test_spawn_captures_error_as_rejected_future() {
+    assert_eq!(
+        run("fn fail() { throw \"oops\" }\nlet f = spawn fail()\ntypeof(f)"),
+        DataType::String("future".to_string())
+    );
+}
+
+#[test]
+fn test_while_loop_returns_last_body_value() {
+    assert_eq!(
+        run("let mut i = 0\nwhile i < 5 { i = i + 1\ni * 10 }"),
+        DataType::Int64(50)
+    );
+}
+
+#[test]
+fn test_while_loop_empty_returns_null() {
+    // If condition is immediately false, returns Null
+    assert_eq!(
+        run("while false { 42 }"),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_run_tests_async_fn_registered() {
+    // Verify async functions are properly wrapped as futures in test runner
+    let program = parse("
+        async fn fetch() { 42 }
+        test \"async works\" {
+            let f = fetch();
+            assert_eq(typeof(f), \"future\")
+        }
+    ");
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert!(results[0].passed, "Test should pass: {:?}", results[0].error_message);
+}
+
+#[test]
+fn test_run_tests_isolation_variables() {
+    // Test that variables defined in one test don't leak to the next
+    let program = parse("
+        test \"define variable\" {
+            let x = 999;
+            assert_eq(x, 999)
+        }
+        test \"variable should not exist\" {
+            let found = try { x } catch e { \"not found\" };
+            assert_eq(found, \"not found\")
+        }
+    ");
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert!(results[0].passed, "First test should pass: {:?}", results[0].error_message);
+    assert!(results[1].passed, "Second test should pass (isolation): {:?}", results[1].error_message);
 }

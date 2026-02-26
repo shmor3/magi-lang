@@ -804,7 +804,7 @@ impl<'a> Interpreter<'a> {
                     self.heap.pop_scope();
                     self.symbols.pop();
                     match result {
-                        Ok(_) => {}
+                        Ok(val) => { last = val; }
                         Err(InterpError::BreakSignal(val)) => {
                             last = val;
                             break;
@@ -2409,12 +2409,19 @@ impl<'a> Interpreter<'a> {
 
             ExpressionKind::Spawn(inner) => {
                 // In the synchronous interpreter, spawn is eager:
-                // evaluate immediately and wrap in Future(Resolved)
-                let val = self.eval_expr(inner)?;
-                if matches!(val, DataType::Future(_)) {
-                    Ok(val) // Already a Future (e.g. from async fn), don't double-wrap
-                } else {
-                    Ok(DataType::Future(Box::new(FutureState::Resolved(Box::new(val)))))
+                // evaluate immediately and wrap in Future(Resolved),
+                // or capture errors as Future(Rejected)
+                match self.eval_expr(inner) {
+                    Ok(val) if matches!(val, DataType::Future(_)) => {
+                        Ok(val) // Already a Future (e.g. from async fn), don't double-wrap
+                    }
+                    Ok(val) => {
+                        Ok(DataType::Future(Box::new(FutureState::Resolved(Box::new(val)))))
+                    }
+                    Err(e) if !is_control_flow(&e) => {
+                        Ok(DataType::Future(Box::new(FutureState::Rejected(format!("{}", e)))))
+                    }
+                    Err(e) => Err(e), // control flow signals still propagate
                 }
             }
 
@@ -2558,7 +2565,17 @@ impl<'a> Interpreter<'a> {
                             Ok(DataType::Bool(true))
                         };
                         let guard_ok = match guard_result {
-                            Ok(ref v) => matches!(v, DataType::Bool(true)),
+                            Ok(DataType::Bool(b)) => b,
+                            Ok(other) => {
+                                self.heap.pop_scope();
+                                self.symbols.pop();
+                                return Err(InterpError::TypeError {
+                                    expected: "Bool".to_string(),
+                                    actual: datatype_type_name(&other).to_string(),
+                                    context: "match guard".to_string(),
+                                    span: arm.guard.as_ref().map(|g| g.span).unwrap_or(arm.body.span),
+                                });
+                            }
                             Err(e) => {
                                 self.heap.pop_scope();
                                 self.symbols.pop();
@@ -3386,7 +3403,11 @@ impl<'a> Interpreter<'a> {
         // Pass 1: Collect function/enum/struct definitions and run setup code
         for stmt in &program.statements {
             match &stmt.kind {
-                StatementKind::FunctionDef(func) | StatementKind::AsyncFunctionDef(func) => {
+                StatementKind::FunctionDef(func) => {
+                    self.functions.insert(func.name.clone(), func.clone());
+                }
+                StatementKind::AsyncFunctionDef(func) => {
+                    self.async_fns.insert(func.name.clone());
                     self.functions.insert(func.name.clone(), func.clone());
                 }
                 StatementKind::EnumDef { name, variants } => {
@@ -3394,6 +3415,22 @@ impl<'a> Interpreter<'a> {
                 }
                 StatementKind::StructDef { name, fields } => {
                     self.struct_defs.insert(name.clone(), fields.clone());
+                }
+                StatementKind::ModuleDef { name, body } => {
+                    for inner in &body.statements {
+                        match &inner.kind {
+                            StatementKind::FunctionDef(def) => {
+                                let qualified = format!("{}::{}", name, def.name);
+                                self.functions.insert(qualified, def.clone());
+                            }
+                            StatementKind::AsyncFunctionDef(def) => {
+                                let qualified = format!("{}::{}", name, def.name);
+                                self.async_fns.insert(qualified.clone());
+                                self.functions.insert(qualified, def.clone());
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 StatementKind::TestDef { .. } => {
                     // Skip tests in pass 1
@@ -3421,16 +3458,26 @@ impl<'a> Interpreter<'a> {
             if let StatementKind::TestDef { name, body } = &stmt.kind {
                 // Save state for isolation
                 let saved_symbols_len = self.symbols.len();
+                let saved_functions = self.functions.clone();
+                let saved_aliases = self.std_op_aliases.clone();
+                let saved_enums = self.enum_defs.clone();
+                let saved_structs = self.struct_defs.clone();
+                let saved_closures = self.closure_captures.clone();
                 self.symbols.push(HashMap::new());
                 self.heap.push_scope();
 
                 let test_result = self.exec_block(body);
 
-                // Restore scope
+                // Restore all state
                 self.heap.pop_scope();
                 while self.symbols.len() > saved_symbols_len {
                     self.symbols.pop();
                 }
+                self.functions = saved_functions;
+                self.std_op_aliases = saved_aliases;
+                self.enum_defs = saved_enums;
+                self.struct_defs = saved_structs;
+                self.closure_captures = saved_closures;
 
                 match test_result {
                     Ok(_) => {
