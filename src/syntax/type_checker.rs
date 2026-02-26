@@ -636,11 +636,13 @@ impl TypeChecker {
 
             StatementKind::Break(ref val_expr) => {
                 if self.loop_depth == 0 {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         "'break' used outside of a loop".to_string(),
                         DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E300,
+                        None,
                     );
                 }
                 if let Some(expr) = val_expr {
@@ -650,22 +652,26 @@ impl TypeChecker {
 
             StatementKind::Continue => {
                 if self.loop_depth == 0 {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         "'continue' used outside of a loop".to_string(),
                         DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E301,
+                        None,
                     );
                 }
             }
 
             StatementKind::Return(ref val_expr) => {
                 if self.function_depth == 0 {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         "'return' used outside of a function".to_string(),
                         DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E302,
+                        None,
                     );
                 }
                 if let Some(expr) = val_expr {
@@ -985,15 +991,17 @@ impl TypeChecker {
                     ChannelType::Array
                 }
                 Literal::Map(entries) => {
-                    // E4: Duplicate map keys.
+                    // E107: Duplicate map keys.
                     let mut seen_keys = HashSet::new();
                     for (key, val) in entries {
                         if !seen_keys.insert(key.as_str()) {
-                            self.emit(
+                            self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
                                 format!("Duplicate key '{}' in map literal", key),
                                 DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E107,
+                                None,
                             );
                         }
                         let _ = self.infer_expr(val);
@@ -1323,28 +1331,32 @@ impl TypeChecker {
                     );
                 }
 
-                // E2: Negative array index literal.
+                // E105: Negative array index literal.
                 if obj_ty == ChannelType::Array || obj_ty == ChannelType::Null {
                     if let Some(idx_val) = literal_int(index) {
                         if idx_val < 0 {
-                            self.emit(
+                            self.emit_coded(
                                 index.span.start_line,
                                 index.span.start_col,
                                 format!("Negative array index ({})", idx_val),
                                 DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E105,
+                                None,
                             );
                         }
                     }
                 }
 
-                // E3: Index into empty array literal.
+                // E106: Index into empty array literal.
                 if let ExpressionKind::Literal(Literal::Array(elements)) = &object.kind {
                     if elements.is_empty() {
-                        self.emit(
+                        self.emit_coded(
                             object.span.start_line,
                             object.span.start_col,
                             "Index into empty array literal".to_string(),
                             DiagnosticSeverity::Error,
+                            super::errors::ErrorCode::E106,
+                            None,
                         );
                     }
                 }
@@ -1373,13 +1385,14 @@ impl TypeChecker {
             // Placeholder (_)
             // -----------------------------------------------------------------
             ExpressionKind::Placeholder => {
-                // E5: Placeholder outside pipe expression.
                 if self.pipe_depth == 0 {
-                    self.emit(
+                    self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         "Placeholder '_' can only be used inside pipe expressions".to_string(),
                         DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E303,
+                        None,
                     );
                 }
                 ChannelType::Null
@@ -1906,15 +1919,17 @@ impl TypeChecker {
         right_ty: ChannelType,
         span: Span,
     ) {
-        // E1: Division/modulo by literal zero.
+        // E104: Division/modulo by literal zero.
         if (op == BinOp::Div || op == BinOp::Mod)
             && (literal_int(right) == Some(0) || literal_float(right) == Some(0.0))
         {
-            self.emit(
+            self.emit_coded(
                 span.start_line,
                 span.start_col,
                 "Division by zero".to_string(),
                 DiagnosticSeverity::Error,
+                super::errors::ErrorCode::E104,
+                None,
             );
         }
 

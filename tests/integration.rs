@@ -2918,3 +2918,92 @@ fn test_lsp_completion_prefix_boundary() {
     // But for completion, cursor at col 7 (middle of "foo_bar") should only return "foo_bar"
     // This is tested at the unit level in completion module
 }
+
+// =============================================================================
+// Round 14: Parser and type checker fixes
+// =============================================================================
+
+#[test]
+fn test_map_comprehension_key_is_string_literal() {
+    // Parser should produce Literal::String for map comprehension keys, not Variable
+    let src = r#"let m = {"key": x * 2 for x in [1, 2, 3]};"#;
+    let program = parse_v2(src).unwrap();
+    // If parsing produces Variable("key"), the interpreter would look up "key" as a var
+    // and fail. With Literal::String("key"), it produces a map with string key "key".
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let result = interp.execute(&program);
+    assert!(result.is_ok(), "Map comprehension with string key should succeed: {:?}", result.err());
+}
+
+#[test]
+fn test_type_checker_break_outside_loop_has_error_code() {
+    // break outside loop should emit E300
+    let src = "break;";
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("E300") && d.message.contains("break")),
+        "Expected E300 for break outside loop. Got: {:?}",
+        analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_type_checker_continue_outside_loop_has_error_code() {
+    // continue outside loop should emit E301
+    let src = "continue;";
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("E301") && d.message.contains("continue")),
+        "Expected E301 for continue outside loop. Got: {:?}",
+        analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_type_checker_return_outside_function_has_error_code() {
+    // return outside function should emit E302
+    let src = "return 5;";
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("E302") && d.message.contains("return")),
+        "Expected E302 for return outside function. Got: {:?}",
+        analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_type_checker_division_by_zero_has_error_code() {
+    // Division by zero should emit E104
+    let src = "let x = 5 / 0;";
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("E104") && d.message.contains("Division by zero")),
+        "Expected E104 for division by zero. Got: {:?}",
+        analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_type_checker_negative_array_index_has_error_code() {
+    // Negative array index should emit E105
+    let src = "let arr = [1, 2, 3];\nlet x = arr[-1];";
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("E105") && d.message.contains("Negative array index")),
+        "Expected E105 for negative array index. Got: {:?}",
+        analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_type_checker_duplicate_map_key_has_error_code() {
+    // Duplicate map key should emit E107
+    let src = r#"let m = {"a": 1, "a": 2};"#;
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("E107") && d.message.contains("Duplicate key")),
+        "Expected E107 for duplicate map key. Got: {:?}",
+        analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}

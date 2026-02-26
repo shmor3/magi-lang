@@ -1621,7 +1621,7 @@ impl Parser {
             return Ok(Expression {
                 kind: ExpressionKind::MapComprehension {
                     key_expr: Box::new(Expression {
-                        kind: ExpressionKind::Variable(key_tok.text),
+                        kind: ExpressionKind::Literal(Literal::String(key_tok.text)),
                         span: key_tok.span,
                     }),
                     value_expr: Box::new(first_value),
