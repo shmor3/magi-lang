@@ -3314,3 +3314,94 @@ log
         DataType::String("inner_catch,inner_finally,outer_finally".to_string())
     );
 }
+
+// Round 18: Memory safety and type checker tests
+#[test]
+fn test_string_repeat_bounded() {
+    // Normal repeat should work fine
+    assert_eq!(
+        run(r#""abc".repeat(3)"#),
+        DataType::String("abcabcabc".to_string())
+    );
+}
+
+#[test]
+fn test_string_repeat_zero() {
+    assert_eq!(
+        run(r#""abc".repeat(0)"#),
+        DataType::String("".to_string())
+    );
+}
+
+#[test]
+fn test_string_repeat_negative() {
+    assert_eq!(
+        run(r#""abc".repeat(-5)"#),
+        DataType::String("".to_string())
+    );
+}
+
+#[test]
+fn test_range_bounded() {
+    // Normal range should work fine
+    assert_eq!(
+        run("(0..5)"),
+        DataType::Array(vec![
+            DataType::Int64(0),
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Int64(3),
+            DataType::Int64(4),
+        ])
+    );
+}
+
+#[test]
+fn test_type_checker_error_codes_on_conditions() {
+    use std::collections::HashSet;
+    let source = "if 42 { 1 }";
+    let program = parse_v2(source).unwrap();
+    let analysis = check_types(&program, &HashSet::new());
+    let has_e101 = analysis.diagnostics.iter().any(|d| {
+        d.code.as_ref().map_or(false, |c: &String| c.contains("E101"))
+    });
+    assert!(has_e101, "Expected E101 for non-bool if condition, got: {:?}", analysis.diagnostics);
+}
+
+#[test]
+fn test_type_checker_error_codes_on_unknown_function() {
+    use std::collections::HashSet;
+    let source = "nonexistent_func(1, 2)";
+    let program = parse_v2(source).unwrap();
+    let analysis = check_types(&program, &HashSet::new());
+    let has_e201 = analysis.diagnostics.iter().any(|d| {
+        d.code.as_ref().map_or(false, |c: &String| c.contains("E201"))
+    });
+    assert!(has_e201, "Expected E201 for unknown function, got: {:?}", analysis.diagnostics);
+}
+
+#[test]
+fn test_type_checker_error_codes_on_arity_mismatch() {
+    use std::collections::HashSet;
+    let source = "fn add(a, b) { a + b }\nadd(1)";
+    let program = parse_v2(source).unwrap();
+    let analysis = check_types(&program, &HashSet::new());
+    let has_e405 = analysis.diagnostics.iter().any(|d| {
+        d.code.as_ref().map_or(false, |c: &String| c.contains("E405"))
+    });
+    assert!(has_e405, "Expected E405 for arity mismatch, got: {:?}", analysis.diagnostics);
+}
+
+#[test]
+fn test_type_checker_all_diagnostics_have_codes() {
+    use std::collections::HashSet;
+    let source = r#"
+fn greet(name: string) -> string { name }
+greet(42)
+"#;
+    let program = parse_v2(source).unwrap();
+    let analysis = check_types(&program, &HashSet::new());
+    for d in &analysis.diagnostics {
+        assert!(d.code.is_some(), "Diagnostic without error code: {}", d.message);
+    }
+}

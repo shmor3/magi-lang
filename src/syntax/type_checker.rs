@@ -225,11 +225,13 @@ impl TypeChecker {
     /// Define a variable in the current (innermost) scope.
     fn define_var(&mut self, name: &str, ct: ChannelType, mutable: bool, line: u32, col: u32) {
         if is_reserved_keyword(name) {
-            self.emit(
+            self.emit_coded(
                 line,
                 col,
                 format!("'{}' is a reserved keyword", name),
                 DiagnosticSeverity::Warning,
+                super::errors::ErrorCode::E200,
+                None,
             );
         }
         // W102: Variable shadowing within the same scope.
@@ -446,7 +448,7 @@ impl TypeChecker {
             } => {
                 let iter_type = self.infer_expr(iterable);
                 if iter_type != ChannelType::Array && iter_type != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         iterable.span.start_line,
                         iterable.span.start_col,
                         format!(
@@ -454,6 +456,8 @@ impl TypeChecker {
                             iter_type.as_str()
                         ),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E102,
+                        None,
                     );
                 }
 
@@ -507,11 +511,13 @@ impl TypeChecker {
             StatementKind::WhileLoop { condition, body } => {
                 let cond_type = self.infer_expr(condition);
                 if cond_type != ChannelType::Bool && cond_type != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         condition.span.start_line,
                         condition.span.start_col,
                         format!("While condition should be bool, got {}", cond_type.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E101,
+                        None,
                     );
                 }
 
@@ -604,7 +610,7 @@ impl TypeChecker {
                     && body_type != ChannelType::Null
                     && !body_type.is_compatible_with(&declared_return)
                 {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         format!(
@@ -614,6 +620,8 @@ impl TypeChecker {
                             body_type.as_str(),
                         ),
                         DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E100,
+                        None,
                     );
                 }
                 // W108: unnecessary return in tail position
@@ -681,7 +689,7 @@ impl TypeChecker {
                         && ret_type != ChannelType::Null
                         && !ret_type.is_compatible_with(&self.current_return_type)
                     {
-                        self.emit(
+                        self.emit_coded(
                             stmt.span.start_line,
                             stmt.span.start_col,
                             format!(
@@ -690,6 +698,8 @@ impl TypeChecker {
                                 ret_type.as_str(),
                             ),
                             DiagnosticSeverity::Error,
+                            super::errors::ErrorCode::E100,
+                            None,
                         );
                     }
                 }
@@ -708,7 +718,7 @@ impl TypeChecker {
                 match pattern {
                     DestructurePattern::Array(elements) => {
                         if val_type != ChannelType::Array && val_type != ChannelType::Null {
-                            self.emit(
+                            self.emit_coded(
                                 stmt.span.start_line,
                                 stmt.span.start_col,
                                 format!(
@@ -716,6 +726,8 @@ impl TypeChecker {
                                     val_type.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E102,
+                                None,
                             );
                         }
                         for elem in elements {
@@ -743,7 +755,7 @@ impl TypeChecker {
                     }
                     DestructurePattern::Map(entries) => {
                         if val_type != ChannelType::Map && val_type != ChannelType::Null {
-                            self.emit(
+                            self.emit_coded(
                                 stmt.span.start_line,
                                 stmt.span.start_col,
                                 format!(
@@ -751,6 +763,8 @@ impl TypeChecker {
                                     val_type.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E100,
+                                None,
                             );
                         }
                         for (key, alias) in entries {
@@ -876,11 +890,13 @@ impl TypeChecker {
             StatementKind::TypeAlias { name, target } => {
                 // Validate the target type exists
                 if ChannelType::parse(target).is_none() {
-                    self.emit(
+                    self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
                         format!("Unknown type '{}' in type alias '{}'", target, name),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E100,
+                        None,
                     );
                 }
             }
@@ -913,11 +929,13 @@ impl TypeChecker {
                         "collections", "sort", "cert",
                     ];
                     if !known_modules.contains(&path[1].as_str()) {
-                        self.emit(
+                        self.emit_coded(
                             stmt.span.start_line,
                             stmt.span.start_col,
                             format!("Unknown standard library module 'std::{}'", path[1]),
                             DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::E203,
+                            None,
                         );
                     }
                 }
@@ -1072,18 +1090,20 @@ impl TypeChecker {
                 match op {
                     UnOp::Not => {
                         if operand_ty != ChannelType::Bool && operand_ty != ChannelType::Null {
-                            self.emit(
+                            self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
                                 format!("Logical NOT expects bool, got {}", operand_ty.as_str()),
                                 DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E101,
+                                None,
                             );
                         }
                         ChannelType::Bool
                     }
                     UnOp::Neg => {
                         if !is_numeric(operand_ty) && operand_ty != ChannelType::Null {
-                            self.emit(
+                            self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
                                 format!(
@@ -1091,6 +1111,8 @@ impl TypeChecker {
                                     operand_ty.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E103,
+                                None,
                             );
                         }
                         // Preserve the input numeric type.
@@ -1117,11 +1139,13 @@ impl TypeChecker {
                 if name == "range" && args.len() >= 2 {
                     if let (Some(s), Some(e)) = (literal_int(&args[0]), literal_int(&args[1])) {
                         if s >= e {
-                            self.emit(
+                            self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
                                 "Range will produce empty array (start >= end)".to_string(),
                                 DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::W107,
+                                None,
                             );
                         }
                     }
@@ -1140,7 +1164,7 @@ impl TypeChecker {
                         } else {
                             format!("{}-{}", sig.required_params, sig.params.len())
                         };
-                        self.emit(
+                        self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
                             format!(
@@ -1150,6 +1174,8 @@ impl TypeChecker {
                                 arg_types.len()
                             ),
                             DiagnosticSeverity::Error,
+                            super::errors::ErrorCode::E405,
+                            None,
                         );
                     }
                     // Check param types
@@ -1160,7 +1186,7 @@ impl TypeChecker {
                                 && !actual_type.is_compatible_with(expected_type)
                             {
                                 if let Some(arg_span) = args.get(i).map(|a| a.span) {
-                                    self.emit(
+                                    self.emit_coded(
                                         arg_span.start_line,
                                         arg_span.start_col,
                                         format!(
@@ -1170,6 +1196,8 @@ impl TypeChecker {
                                             expected_type.as_str(),
                                         ),
                                         DiagnosticSeverity::Error,
+                                        super::errors::ErrorCode::E100,
+                                        None,
                                     );
                                 }
                             }
@@ -1205,7 +1233,7 @@ impl TypeChecker {
                                 && !actual_type.is_compatible_with(expected_type)
                             {
                                 let arg_span = &args[i].span;
-                                self.emit(
+                                self.emit_coded(
                                     arg_span.start_line,
                                     arg_span.start_col,
                                     format!(
@@ -1215,6 +1243,8 @@ impl TypeChecker {
                                         expected_type.as_str(),
                                     ),
                                     DiagnosticSeverity::Warning,
+                                    super::errors::ErrorCode::E103,
+                                    None,
                                 );
                             }
                         }
@@ -1224,11 +1254,13 @@ impl TypeChecker {
                 }
 
                 // Unknown function.
-                self.emit(
+                self.emit_coded(
                     expr.span.start_line,
                     expr.span.start_col,
                     format!("Unknown operation '{}'", name),
                     DiagnosticSeverity::Error,
+                    super::errors::ErrorCode::E201,
+                    self.suggest_variable(name).map(|s| format!("Did you mean '{}'?", s)),
                 );
                 ChannelType::Null
             }
@@ -1257,11 +1289,13 @@ impl TypeChecker {
             } => {
                 let cond_ty = self.infer_expr(condition);
                 if cond_ty != ChannelType::Bool && cond_ty != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         condition.span.start_line,
                         condition.span.start_col,
                         format!("If condition should be bool, got {}", cond_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E101,
+                        None,
                     );
                 }
 
@@ -1281,7 +1315,7 @@ impl TypeChecker {
                     then_ty
                 } else {
                     // Branches disagree — warn and use Null.
-                    self.emit(
+                    self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         format!(
@@ -1290,6 +1324,8 @@ impl TypeChecker {
                             else_ty.as_str(),
                         ),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E100,
+                        None,
                     );
                     ChannelType::Null
                 }
@@ -1311,11 +1347,13 @@ impl TypeChecker {
                     && obj_ty != ChannelType::Null
                     && obj_ty != ChannelType::Map
                 {
-                    self.emit(
+                    self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
                         format!("Indexing requires array or map, got {}", obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E100,
+                        None,
                     );
                 }
 
@@ -1323,11 +1361,13 @@ impl TypeChecker {
                     && !is_integer(idx_ty)
                     && idx_ty != ChannelType::Null
                 {
-                    self.emit(
+                    self.emit_coded(
                         index.span.start_line,
                         index.span.start_col,
                         format!("Array index should be integer, got {}", idx_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E103,
+                        None,
                     );
                 }
 
@@ -1371,11 +1411,13 @@ impl TypeChecker {
             ExpressionKind::FieldAccess { object, field: _ } => {
                 let obj_ty = self.infer_expr(object);
                 if obj_ty != ChannelType::Map && obj_ty != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
                         format!("Field access requires map, got {}", obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E100,
+                        None,
                     );
                 }
                 ChannelType::Null
@@ -1406,30 +1448,36 @@ impl TypeChecker {
                 let end_ty = self.infer_expr(end);
 
                 if !is_numeric(start_ty) && start_ty != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         start.span.start_line,
                         start.span.start_col,
                         format!("Range start should be numeric, got {}", start_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E103,
+                        None,
                     );
                 }
                 if !is_numeric(end_ty) && end_ty != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         end.span.start_line,
                         end.span.start_col,
                         format!("Range end should be numeric, got {}", end_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E103,
+                        None,
                     );
                 }
 
                 // W7: Empty range (start >= end with literals).
                 if let (Some(s), Some(e)) = (literal_int(start), literal_int(end)) {
                     if s >= e {
-                        self.emit(
+                        self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
                             "Range will produce empty array (start >= end)".to_string(),
                             DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::W107,
+                            None,
                         );
                     }
                 }
@@ -1475,11 +1523,13 @@ impl TypeChecker {
                 }
 
                 // Unknown method — warn
-                self.emit(
+                self.emit_coded(
                     expr.span.start_line,
                     expr.span.start_col,
                     format!("Unknown method '{}' on type '{}'", method, obj_ty.as_str()),
                     DiagnosticSeverity::Warning,
+                    super::errors::ErrorCode::E201,
+                    None,
                 );
                 ChannelType::Null
             }
@@ -1523,11 +1573,13 @@ impl TypeChecker {
                 let val_type = self.infer_expr(value);
 
                 if arms.is_empty() {
-                    self.emit(
+                    self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         "Empty match expression".to_string(),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W107,
+                        None,
                     );
                     return ChannelType::Null;
                 }
@@ -1538,11 +1590,13 @@ impl TypeChecker {
                         && arm.guard.is_none()
                 });
                 if !has_catchall {
-                    self.emit(
+                    self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         "Non-exhaustive match: consider adding a wildcard '_' arm".to_string(),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W107,
+                        Some("Add a `_ => ...` arm to handle remaining cases".to_string()),
                     );
                 }
 
@@ -1554,11 +1608,13 @@ impl TypeChecker {
                     if let Some(guard) = &arm.guard {
                         let guard_ty = self.infer_expr(guard);
                         if guard_ty != ChannelType::Bool && guard_ty != ChannelType::Null {
-                            self.emit(
+                            self.emit_coded(
                                 guard.span.start_line,
                                 guard.span.start_col,
                                 format!("Match guard should be bool, got {}", guard_ty.as_str()),
                                 DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E101,
+                                None,
                             );
                         }
                     }
@@ -1603,7 +1659,7 @@ impl TypeChecker {
             ExpressionKind::OptionalChain { object, field: _ } => {
                 let obj_ty = self.infer_expr(object);
                 if obj_ty != ChannelType::Map && obj_ty != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
                         format!(
@@ -1611,6 +1667,8 @@ impl TypeChecker {
                             obj_ty.as_str()
                         ),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E100,
+                        None,
                     );
                 }
                 // Result is always nullable — field type is unknown
@@ -1626,11 +1684,13 @@ impl TypeChecker {
                     && inner_ty != ChannelType::Map
                     && inner_ty != ChannelType::Null
                 {
-                    self.emit(
+                    self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         format!("Spread requires array or map, got {}", inner_ty.as_str()),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E103,
+                        None,
                     );
                 }
                 inner_ty
@@ -1858,7 +1918,7 @@ impl TypeChecker {
             // Logical operators: both sides should be Bool.
             BinOp::And | BinOp::Or => {
                 if left != ChannelType::Bool && left != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         span.start_line,
                         span.start_col,
                         format!(
@@ -1867,10 +1927,12 @@ impl TypeChecker {
                             left.as_str()
                         ),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E101,
+                        None,
                     );
                 }
                 if right != ChannelType::Bool && right != ChannelType::Null {
-                    self.emit(
+                    self.emit_coded(
                         span.start_line,
                         span.start_col,
                         format!(
@@ -1879,6 +1941,8 @@ impl TypeChecker {
                             right.as_str()
                         ),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E101,
+                        None,
                     );
                 }
                 ChannelType::Bool
@@ -2005,7 +2069,7 @@ impl TypeChecker {
         ) {
             for ty in [left_ty, right_ty] {
                 if ty != ChannelType::Null && !is_numeric(ty) {
-                    self.emit(
+                    self.emit_coded(
                         span.start_line,
                         span.start_col,
                         format!(
@@ -2014,6 +2078,8 @@ impl TypeChecker {
                             ty.as_str()
                         ),
                         DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E103,
+                        None,
                     );
                     break; // One warning per operation.
                 }
@@ -2035,11 +2101,13 @@ impl TypeChecker {
             // Allow cross-numeric comparisons (e.g. int64 == float64).
             && !(is_numeric(left_ty) && is_numeric(right_ty))
         {
-            self.emit(
+            self.emit_coded(
                 span.start_line,
                 span.start_col,
                 format!("Comparing {} with {}", left_ty.as_str(), right_ty.as_str()),
                 DiagnosticSeverity::Warning,
+                super::errors::ErrorCode::E100,
+                None,
             );
         }
     }
@@ -2066,11 +2134,13 @@ impl TypeChecker {
         let ann_type = match ChannelType::parse(ann_str) {
             Some(ct) => ct,
             None => {
-                self.emit(
+                self.emit_coded(
                     line,
                     col,
                     format!("Unknown type annotation '{}' on '{}'", ann_str, var_name),
                     DiagnosticSeverity::Error,
+                    super::errors::ErrorCode::E100,
+                    None,
                 );
                 return inferred;
             }
@@ -2087,7 +2157,7 @@ impl TypeChecker {
         }
 
         // Mismatch.
-        self.emit(
+        self.emit_coded(
             line,
             col,
             format!(
@@ -2097,6 +2167,8 @@ impl TypeChecker {
                 inferred.as_str()
             ),
             DiagnosticSeverity::Warning,
+            super::errors::ErrorCode::E100,
+            None,
         );
         ann_type
     }

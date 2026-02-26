@@ -153,14 +153,15 @@ impl LanguageServer for MagiLanguageServer {
         };
 
         let formatted = crate::formatter::format_program(program, &config);
-        // Calculate end position accounting for trailing newlines
-        // (str::lines() doesn't include a trailing empty line)
+        // Calculate end position of the source document.
+        // LSP uses 0-based line numbers. str::lines() omits trailing empty line.
+        let lines: Vec<&str> = state.source.lines().collect();
         let (last_line, last_line_len) = if state.source.ends_with('\n') {
-            (state.source.lines().count() as u32, 0u32)
+            (lines.len() as u32, 0u32)
+        } else if lines.is_empty() {
+            (0u32, 0u32)
         } else {
-            let count = state.source.lines().count();
-            let len = state.source.lines().last().map_or(0, |l| l.len()) as u32;
-            (count.saturating_sub(1) as u32, len)
+            ((lines.len().saturating_sub(1)) as u32, lines.last().map_or(0, |l| l.chars().count()) as u32)
         };
 
         Ok(Some(vec![TextEdit {

@@ -1587,8 +1587,17 @@ impl<'a> Interpreter<'a> {
                 }
                 "repeat" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "repeat".to_string(), expected: 1, actual: 0, span }); }
-                    let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
-                    Ok(Some(DataType::String(s.repeat(n.max(0) as usize))))
+                    let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    const MAX_REPEAT_LEN: usize = 10_000_000;
+                    if n > 0 && s.len().saturating_mul(n) > MAX_REPEAT_LEN {
+                        return Err(InterpError::TypeError {
+                            expected: format!("repeat count producing at most {} chars", MAX_REPEAT_LEN),
+                            actual: format!("{} * {} = {}", s.len(), n, s.len().saturating_mul(n)),
+                            context: "string repeat".to_string(),
+                            span,
+                        });
+                    }
+                    Ok(Some(DataType::String(s.repeat(n))))
                 }
                 "char_at" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_at".to_string(), expected: 1, actual: 0, span }); }
@@ -1827,7 +1836,7 @@ impl<'a> Interpreter<'a> {
 
         // Restore outer symbols and pop function's heap scope
         self.symbols = self.saved_symbol_stacks.pop()
-            .expect("internal error: saved_symbol_stacks underflow in call_function");
+            .unwrap_or_else(|| vec![HashMap::new()]);
         self.heap.pop_scope();
         self.call_depth -= 1;
 
@@ -2351,6 +2360,16 @@ impl<'a> Interpreter<'a> {
                         } else {
                             *b
                         };
+                        const MAX_RANGE_SIZE: i64 = 10_000_000;
+                        let range_size = end_v.saturating_sub(*a);
+                        if range_size > MAX_RANGE_SIZE {
+                            return Err(InterpError::TypeError {
+                                expected: format!("range size at most {}", MAX_RANGE_SIZE),
+                                actual: format!("range size {}", range_size),
+                                context: "range creation".to_string(),
+                                span: expr.span,
+                            });
+                        }
                         let arr: Vec<DataType> = (*a..end_v).map(DataType::Int64).collect();
                         Ok(DataType::Array(arr))
                     }
@@ -2669,7 +2688,15 @@ impl<'a> Interpreter<'a> {
                         span: expr.span,
                     });
                 }
-                let variants = self.enum_defs.get(enum_name).cloned().unwrap();
+                let variants = match self.enum_defs.get(enum_name).cloned() {
+                    Some(v) => v,
+                    None => return Err(InterpError::TypeError {
+                        expected: "defined enum".to_string(),
+                        actual: enum_name.clone(),
+                        context: "enum construction".to_string(),
+                        span: expr.span,
+                    }),
+                };
                 // Validate variant exists
                 let variant_def = variants.iter().find(|v| v.name == *variant).ok_or_else(|| {
                     InterpError::TypeError {
