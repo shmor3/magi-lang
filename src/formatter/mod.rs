@@ -662,28 +662,70 @@ impl<'a> Formatter<'a> {
                 self.write("::");
                 self.write(variant);
                 if !args.is_empty() {
-                    self.write("(");
-                    for (i, arg) in args.iter().enumerate() {
-                        self.fmt_expression(arg);
-                        if i < args.len() - 1 {
-                            self.write(", ");
+                    let inline_len: usize = args.iter().map(|e| self.expr_len(e) + 2).sum();
+                    let prefix_len = enum_name.len() + 2 + variant.len();
+                    if inline_len + prefix_len < self.config.max_width / 2 {
+                        self.write("(");
+                        for (i, arg) in args.iter().enumerate() {
+                            self.fmt_expression(arg);
+                            if i < args.len() - 1 {
+                                self.write(", ");
+                            }
                         }
+                        self.write(")");
+                    } else {
+                        self.write("(");
+                        self.newline();
+                        self.indent();
+                        for (i, arg) in args.iter().enumerate() {
+                            self.fmt_expression(arg);
+                            if i < args.len() - 1 {
+                                self.write(",");
+                            }
+                            self.newline();
+                        }
+                        self.dedent();
+                        self.write(")");
                     }
-                    self.write(")");
                 }
             }
             ExpressionKind::StructConstruct { name, fields } => {
                 self.write(name);
-                self.write(" { ");
-                for (i, (fname, val)) in fields.iter().enumerate() {
-                    self.write(fname);
-                    self.write(": ");
-                    self.fmt_expression(val);
-                    if i < fields.len() - 1 {
-                        self.write(", ");
-                    }
+                if fields.is_empty() {
+                    self.write(" {}");
+                    return;
                 }
-                self.write(" }");
+                let inline_len: usize = fields
+                    .iter()
+                    .map(|(k, v)| k.len() + 4 + self.expr_len(v))
+                    .sum();
+                if inline_len + name.len() < self.config.max_width / 2 {
+                    self.write(" { ");
+                    for (i, (fname, val)) in fields.iter().enumerate() {
+                        self.write(fname);
+                        self.write(": ");
+                        self.fmt_expression(val);
+                        if i < fields.len() - 1 {
+                            self.write(", ");
+                        }
+                    }
+                    self.write(" }");
+                } else {
+                    self.write(" {");
+                    self.newline();
+                    self.indent();
+                    for (i, (fname, val)) in fields.iter().enumerate() {
+                        self.write(fname);
+                        self.write(": ");
+                        self.fmt_expression(val);
+                        if i < fields.len() - 1 {
+                            self.write(",");
+                        }
+                        self.newline();
+                    }
+                    self.dedent();
+                    self.write("}");
+                }
             }
             ExpressionKind::TryPropagate(inner) => {
                 self.fmt_expression(inner);

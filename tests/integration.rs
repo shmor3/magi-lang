@@ -1573,3 +1573,268 @@ fn test_w202_reports_all_dead_code() {
         .count();
     assert!(w202_count >= 2, "expected at least 2 W202 diagnostics for all dead code, got {}", w202_count);
 }
+
+// ═══════════════════════════════════════════════════════════
+// Null coalesce
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_null_coalesce_non_null() {
+    assert_eq!(run("42 ?? 0"), DataType::Int64(42));
+}
+
+#[test]
+fn test_null_coalesce_null() {
+    assert_eq!(run("null ?? 99"), DataType::Int64(99));
+}
+
+#[test]
+fn test_null_coalesce_chain() {
+    assert_eq!(run("null ?? null ?? 7"), DataType::Int64(7));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Range expressions
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_range_exclusive() {
+    assert_eq!(run("1..5"), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4),
+    ]));
+}
+
+#[test]
+fn test_range_empty() {
+    assert_eq!(run("5..1"), DataType::Array(vec![]));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Spread operator
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_spread_in_array_literal() {
+    assert_eq!(
+        run("let a = [1, 2]; [0, ...a, 3]"),
+        DataType::Array(vec![
+            DataType::Int64(0), DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        ])
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Destructuring
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_array_destructure() {
+    assert_eq!(run("let [a, b, c] = [10, 20, 30]; b"), DataType::Int64(20));
+}
+
+#[test]
+fn test_array_destructure_rest() {
+    assert_eq!(
+        run("let [first, ...rest] = [1, 2, 3, 4]; rest"),
+        DataType::Array(vec![DataType::Int64(2), DataType::Int64(3), DataType::Int64(4)])
+    );
+}
+
+#[test]
+fn test_map_destructure() {
+    assert_eq!(
+        run(r#"let {name, age} = {"name": "Alice", "age": 30}; name"#),
+        DataType::String("Alice".into())
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// List comprehension
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_list_comprehension_doubled() {
+    assert_eq!(
+        run("[x * 2 for x in [1, 2, 3]]"),
+        DataType::Array(vec![DataType::Int64(2), DataType::Int64(4), DataType::Int64(6)])
+    );
+}
+
+#[test]
+fn test_list_comprehension_filtered() {
+    assert_eq!(
+        run("[x for x in [1, 2, 3, 4, 5] if x > 3]"),
+        DataType::Array(vec![DataType::Int64(4), DataType::Int64(5)])
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Ternary expression
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_ternary_true() {
+    assert_eq!(run("let x = 5; if x > 3 { \"big\" } else { \"small\" }"), DataType::String("big".into()));
+}
+
+#[test]
+fn test_ternary_false() {
+    assert_eq!(run("let x = 1; if x > 3 { \"big\" } else { \"small\" }"), DataType::String("small".into()));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Pipe operator
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_pipe_basic() {
+    assert_eq!(
+        run("fn double(x) { x * 2 }\n5 |> double(_)"),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_pipe_chain() {
+    assert_eq!(
+        run("fn add1(x) { x + 1 }\nfn double(x) { x * 2 }\n3 |> add1(_) |> double(_)"),
+        DataType::Int64(8)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Advanced match patterns
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_match_array_pattern() {
+    assert_eq!(
+        run("match [1, 2, 3] { [1, ...rest] => rest.sum(), _ => 0 }"),
+        DataType::Int64(5)
+    );
+}
+
+#[test]
+fn test_match_or_pattern() {
+    assert_eq!(
+        run("let x = 2; match x { 1 | 2 | 3 => \"small\", _ => \"big\" }"),
+        DataType::String("small".into())
+    );
+}
+
+#[test]
+fn test_match_guard() {
+    assert_eq!(
+        run("let x = 15; match x { n if n > 10 => \"big\", _ => \"small\" }"),
+        DataType::String("big".into())
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Enum with fields
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_enum_variant_with_field() {
+    assert_eq!(
+        run("enum Shape { Circle(radius), Square(side) }\nlet s = Shape::Circle(5);\nmatch s { Shape::Circle(r) => r, _ => 0 }"),
+        DataType::Int64(5)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Struct construction and field access
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_struct_field_access() {
+    assert_eq!(
+        run(r#"struct Point { x, y } let p = Point { x: 10, y: 20 }; p.x"#),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_struct_multiple_fields() {
+    assert_eq!(
+        run(r#"struct Point { x, y } let p = Point { x: 10, y: 20 }; p.x + p.y"#),
+        DataType::Int64(30)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// For loop patterns
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_for_loop_array_destructure() {
+    assert_eq!(
+        run("let mut sum = 0; for [a, b] in [[1, 2], [3, 4], [5, 6]] { sum = sum + a + b; } sum"),
+        DataType::Int64(21)
+    );
+}
+
+#[test]
+fn test_for_loop_map_destructure() {
+    assert_eq!(
+        run(r#"let mut total = 0; for {value} in [{"value": 10}, {"value": 20}] { total = total + value; } total"#),
+        DataType::Int64(30)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Try/catch/finally semantics
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_finally_always_runs_on_catch() {
+    // finally runs after catch handles the error
+    assert_eq!(
+        run(r#"
+            let mut log = "";
+            try {
+                throw "error";
+            } catch e {
+                log = log + "caught ";
+            } finally {
+                log = log + "finally";
+            }
+            log
+        "#),
+        DataType::String("caught finally".into())
+    );
+}
+
+#[test]
+fn test_finally_runs_on_success() {
+    assert_eq!(
+        run(r#"
+            let mut result = "";
+            try {
+                result = "ok";
+            } catch e {
+                result = "fail";
+            } finally {
+                result = result + " done";
+            }
+            result
+        "#),
+        DataType::String("ok done".into())
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Const definitions
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_const_definition() {
+    assert_eq!(run("const PI = 3.14; PI"), DataType::Float64(3.14));
+}
+
+#[test]
+fn test_const_immutable() {
+    let err = run_err("const X = 5; X = 10;");
+    assert!(matches!(err, InterpError::ImmutableAssignment { .. }));
+}
