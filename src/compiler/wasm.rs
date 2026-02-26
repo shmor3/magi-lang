@@ -293,6 +293,7 @@ impl WasmCodegen {
             Instruction::PushF32(n) => {
                 // Tag f32 value (fits in 32 bits, so no precision loss).
                 f.instruction(&WasmInst::F32Const((*n).into()));
+                f.instruction(&WasmInst::I32ReinterpretF32);
                 f.instruction(&WasmInst::I64ExtendI32U);
                 f.instruction(&WasmInst::I64Const((tag::F32 as i64) << 56));
                 f.instruction(&WasmInst::I64Or);
@@ -1623,13 +1624,45 @@ impl WasmCodegen {
                             f.instruction(&WasmInst::I64Const(0));
                         }
                         f.instruction(&WasmInst::Else);
-                        // Default: return "null" or other
+                        // Check bool
+                        f.instruction(&WasmInst::LocalGet(t0));
+                        f.instruction(&WasmInst::I64Const(56));
+                        f.instruction(&WasmInst::I64ShrU);
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(tag::BOOL as i32));
+                        f.instruction(&WasmInst::I32Eq);
+                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        if let Some(idx) = type_str_indices[1] {
+                            let offset = string_offsets[idx];
+                            f.instruction(&WasmInst::I64Const(((tag::STRING as i64) << 56) | (offset as i64)));
+                        } else {
+                            f.instruction(&WasmInst::I64Const(0));
+                        }
+                        f.instruction(&WasmInst::Else);
+                        // Check float64
+                        f.instruction(&WasmInst::LocalGet(t0));
+                        f.instruction(&WasmInst::I64Const(56));
+                        f.instruction(&WasmInst::I64ShrU);
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(tag::F64 as i32));
+                        f.instruction(&WasmInst::I32Eq);
+                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        if let Some(idx) = type_str_indices[3] {
+                            let offset = string_offsets[idx];
+                            f.instruction(&WasmInst::I64Const(((tag::STRING as i64) << 56) | (offset as i64)));
+                        } else {
+                            f.instruction(&WasmInst::I64Const(0));
+                        }
+                        f.instruction(&WasmInst::Else);
+                        // Default: return "null"
                         if let Some(idx) = type_str_indices[0] {
                             let offset = string_offsets[idx];
                             f.instruction(&WasmInst::I64Const(((tag::STRING as i64) << 56) | (offset as i64)));
                         } else {
                             f.instruction(&WasmInst::I64Const(0));
                         }
+                        f.instruction(&WasmInst::End);
+                        f.instruction(&WasmInst::End);
                         f.instruction(&WasmInst::End);
                         f.instruction(&WasmInst::End);
                         f.instruction(&WasmInst::End);

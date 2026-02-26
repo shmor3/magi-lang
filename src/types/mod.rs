@@ -132,7 +132,7 @@ impl DataType {
             DataType::Array(arr) => arr.len(),
             DataType::Map(map) => map.len(),
             DataType::Bytes(b) => b.len(),
-            DataType::String(s) => s.len(),
+            DataType::String(s) => s.chars().count(),
             _ => 0,
         }
     }
