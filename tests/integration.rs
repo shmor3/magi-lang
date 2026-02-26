@@ -3443,3 +3443,153 @@ fn test_lint_w200_for_loop_destructure() {
         .collect();
     assert_eq!(w200s.len(), 2, "Expected 2 W200 for firstName and lastName, got: {:?}", w200s);
 }
+
+// Round 21: Test coverage gaps
+
+#[test]
+fn test_catch_variable_scope_isolation() {
+    // Variables declared in catch block should not leak
+    assert_eq!(
+        run(r#"
+let mut result = "none";
+try {
+    throw "error";
+} catch e {
+    let x = 42;
+    result = "caught";
+}
+result
+"#),
+        DataType::String("caught".to_string())
+    );
+}
+
+#[test]
+fn test_rest_pattern_empty_array() {
+    assert_eq!(
+        run(r#"
+let [first, ...rest] = [42];
+[first, rest]
+"#),
+        DataType::Array(vec![
+            DataType::Int64(42),
+            DataType::Array(vec![]),
+        ])
+    );
+}
+
+#[test]
+fn test_rest_pattern_multiple_elements() {
+    assert_eq!(
+        run(r#"
+let [a, b, ...rest] = [1, 2, 3, 4, 5];
+rest
+"#),
+        DataType::Array(vec![
+            DataType::Int64(3),
+            DataType::Int64(4),
+            DataType::Int64(5),
+        ])
+    );
+}
+
+#[test]
+fn test_string_interpolation_with_method_calls() {
+    assert_eq!(
+        run(r#"
+let s = "hello";
+f"upper={s.to_upper()}, len={s.len()}"
+"#),
+        DataType::String("upper=HELLO, len=5".to_string())
+    );
+}
+
+#[test]
+fn test_mixed_numeric_chained_operations() {
+    assert_eq!(
+        run(r#"
+let i = 10;
+let f = 2.5;
+i * f + 5.0 - f / 2.0
+"#),
+        DataType::Float64(28.75)
+    );
+}
+
+#[test]
+fn test_int_min_max() {
+    assert_eq!(run("(5).min(3)"), DataType::Int64(3));
+    assert_eq!(run("(5).max(10)"), DataType::Int64(10));
+    assert_eq!(run("(5).clamp(1, 3)"), DataType::Int64(3));
+    assert_eq!(run("(5).clamp(7, 10)"), DataType::Int64(7));
+}
+
+#[test]
+fn test_float_min_max() {
+    assert_eq!(run("(5.0).min(3.0)"), DataType::Float64(3.0));
+    assert_eq!(run("(5.0).max(10.0)"), DataType::Float64(10.0));
+    assert_eq!(run("(5.0).clamp(1.0, 3.0)"), DataType::Float64(3.0));
+}
+
+#[test]
+fn test_float_math_methods() {
+    assert_eq!(run("(1.0).sin()"), DataType::Float64(1.0_f64.sin()));
+    assert_eq!(run("(0.0).cos()"), DataType::Float64(1.0));
+    assert_eq!(run("(1.0).ln()"), DataType::Float64(0.0));
+    assert_eq!(run("(100.0).log10()"), DataType::Float64(2.0));
+    assert_eq!(run("(8.0).log2()"), DataType::Float64(3.0));
+}
+
+#[test]
+fn test_int_pow() {
+    assert_eq!(run("(2).pow(10)"), DataType::Int64(1024));
+    assert_eq!(run("(2).pow(0)"), DataType::Int64(1));
+}
+
+#[test]
+fn test_float_pow() {
+    assert_eq!(run("(2.0).pow(0.5)"), DataType::Float64(2.0_f64.powf(0.5)));
+}
+
+#[test]
+fn test_array_min_max_empty() {
+    assert_eq!(run("[].min()"), DataType::Null);
+    assert_eq!(run("[].max()"), DataType::Null);
+}
+
+#[test]
+fn test_array_sum_product_empty() {
+    assert_eq!(run("[].sum()"), DataType::Int64(0));
+    assert_eq!(run("[].product()"), DataType::Int64(1));
+}
+
+#[test]
+fn test_array_first_last_empty() {
+    assert_eq!(run("[].first()"), DataType::Null);
+    assert_eq!(run("[].last()"), DataType::Null);
+}
+
+#[test]
+fn test_module_function_call() {
+    assert_eq!(
+        run(r#"
+mod math {
+    fn add(a, b) { a + b }
+}
+math::add(3, 4)
+"#),
+        DataType::Int64(7)
+    );
+}
+
+#[test]
+fn test_async_spawn_await() {
+    assert_eq!(
+        run(r#"
+async fn compute() { 42 }
+let t = spawn compute();
+await t
+"#),
+        DataType::Int64(42)
+    );
+}

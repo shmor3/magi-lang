@@ -406,6 +406,66 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Int64(n) => Ok(DataType::Float64((*n as f64).sqrt())),
                 _ => Ok(DataType::Null),
             },
+            OperationType::Power => {
+                let a = inputs.get("a").unwrap_or(&DataType::Null);
+                let b = inputs.get("b").unwrap_or(&DataType::Null);
+                match (a, b) {
+                    (DataType::Int64(base), DataType::Int64(exp)) => {
+                        if *exp < 0 {
+                            Ok(DataType::Float64((*base as f64).powi(*exp as i32)))
+                        } else {
+                            match base.checked_pow(*exp as u32) {
+                                Some(v) => Ok(DataType::Int64(v)),
+                                None => Ok(DataType::Float64((*base as f64).powi(*exp as i32))),
+                            }
+                        }
+                    }
+                    (DataType::Float64(base), DataType::Float64(exp)) => Ok(DataType::Float64(base.powf(*exp))),
+                    (DataType::Int64(base), DataType::Float64(exp)) => Ok(DataType::Float64((*base as f64).powf(*exp))),
+                    (DataType::Float64(base), DataType::Int64(exp)) => Ok(DataType::Float64(base.powi(*exp as i32))),
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::Sin => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.sin())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).sin())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Cos => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.cos())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).cos())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Tan => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.tan())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).tan())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Ln => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.ln())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).ln())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Log2 => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.log2())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).log2())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Log10 => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.log10())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).log10())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Exp => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.exp())),
+                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).exp())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Sign => match &input {
+                DataType::Float64(n) => Ok(DataType::Float64(n.signum())),
+                DataType::Int64(n) => Ok(DataType::Int64(n.signum())),
+                _ => Ok(DataType::Null),
+            },
 
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",

@@ -1450,19 +1450,23 @@ impl<'a> Interpreter<'a> {
                 }
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
-                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MAX);
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64)).unwrap_or(*n);
                     Ok(Some(DataType::Int64((*n).min(other))))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
-                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MIN);
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64)).unwrap_or(*n);
                     Ok(Some(DataType::Int64((*n).max(other))))
                 }
                 "sign" => Ok(Some(DataType::Int64(n.signum()))),
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
-                    let min_val = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MIN);
-                    let max_val = self.eval_expr(&args[1])?.to_i64().unwrap_or(i64::MAX);
+                    let lo_arg = self.eval_expr(&args[0])?;
+                    let hi_arg = self.eval_expr(&args[1])?;
+                    let min_val = lo_arg.to_i64().or_else(|| lo_arg.to_f64().map(|f| f as i64)).unwrap_or(i64::MIN);
+                    let max_val = hi_arg.to_i64().or_else(|| hi_arg.to_f64().map(|f| f as i64)).unwrap_or(i64::MAX);
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                     Ok(Some(DataType::Int64((*n).max(lo).min(hi))))
                 }
@@ -1493,12 +1497,14 @@ impl<'a> Interpreter<'a> {
                 }
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
-                    let other = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::INFINITY);
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_f64().unwrap_or(*n);
                     Ok(Some(DataType::Float64(n.min(other))))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
-                    let other = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::NEG_INFINITY);
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_f64().unwrap_or(*n);
                     Ok(Some(DataType::Float64(n.max(other))))
                 }
                 "sign" => Ok(Some(DataType::Float64(n.signum()))),
@@ -1510,8 +1516,10 @@ impl<'a> Interpreter<'a> {
                 "tan" => Ok(Some(DataType::Float64(n.tan()))),
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
-                    let min_val = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::NEG_INFINITY);
-                    let max_val = self.eval_expr(&args[1])?.to_f64().unwrap_or(f64::INFINITY);
+                    let lo_arg = self.eval_expr(&args[0])?;
+                    let hi_arg = self.eval_expr(&args[1])?;
+                    let min_val = lo_arg.to_f64().unwrap_or(f64::NEG_INFINITY);
+                    let max_val = hi_arg.to_f64().unwrap_or(f64::INFINITY);
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                     Ok(Some(DataType::Float64(n.max(lo).min(hi))))
                 }
