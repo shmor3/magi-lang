@@ -728,19 +728,25 @@ impl<'a> Interpreter<'a> {
                     }
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
-                    match pattern {
+                    let bind_result = match pattern {
                         ForPattern::Single(name) => {
                             let addr = self.heap.alloc(item);
                             self.define(name, addr, false);
+                            Ok(())
                         }
                         ForPattern::ArrayDestructure(elements) => {
                             let destr = DestructurePattern::Array(elements.clone());
-                            self.destructure_bind(&destr, &item, false, stmt.span)?;
+                            self.destructure_bind(&destr, &item, false, stmt.span)
                         }
                         ForPattern::MapDestructure(entries) => {
                             let destr = DestructurePattern::Map(entries.clone());
-                            self.destructure_bind(&destr, &item, false, stmt.span)?;
+                            self.destructure_bind(&destr, &item, false, stmt.span)
                         }
+                    };
+                    if let Err(e) = bind_result {
+                        self.heap.pop_scope();
+                        self.symbols.pop();
+                        return Err(e);
                     }
                     let result = self.exec_block(body);
                     self.heap.pop_scope();
@@ -2280,9 +2286,11 @@ impl<'a> Interpreter<'a> {
                 // In the synchronous interpreter, spawn is eager:
                 // evaluate immediately and wrap in Future(Resolved)
                 let val = self.eval_expr(inner)?;
-                Ok(DataType::Future(Box::new(FutureState::Resolved(Box::new(
-                    val,
-                )))))
+                if matches!(val, DataType::Future(_)) {
+                    Ok(val) // Already a Future (e.g. from async fn), don't double-wrap
+                } else {
+                    Ok(DataType::Future(Box::new(FutureState::Resolved(Box::new(val)))))
+                }
             }
 
             ExpressionKind::Range { start, end, inclusive } => {
@@ -2569,15 +2577,25 @@ impl<'a> Interpreter<'a> {
             }
 
             ExpressionKind::EnumConstruct { enum_name, variant, args } => {
-                // Validate enum exists
-                let variants = self.enum_defs.get(enum_name).cloned().ok_or_else(|| {
-                    InterpError::TypeError {
-                        expected: "defined enum".to_string(),
-                        actual: enum_name.clone(),
-                        context: "enum construction".to_string(),
-                        span: expr.span,
+                // Check if it's an enum construction or a qualified module function call.
+                // The parser treats `Foo::Bar(args)` as EnumConstruct, but it could also
+                // be a module function call like `math::double(5)`.
+                if !self.enum_defs.contains_key(enum_name.as_str()) {
+                    let qualified_name = format!("{}::{}", enum_name, variant);
+                    if self.functions.contains_key(qualified_name.as_str()) {
+                        let evaluated_args: Vec<DataType> = args.iter()
+                            .map(|a| self.eval_expr(a))
+                            .collect::<Result<_, _>>()?;
+                        return self.call_function(&qualified_name, &evaluated_args, expr.span);
                     }
-                })?;
+                    return Err(InterpError::TypeError {
+                        expected: "defined enum or module".to_string(),
+                        actual: enum_name.clone(),
+                        context: "enum construction or module call".to_string(),
+                        span: expr.span,
+                    });
+                }
+                let variants = self.enum_defs.get(enum_name).cloned().unwrap();
                 // Validate variant exists
                 let variant_def = variants.iter().find(|v| v.name == *variant).ok_or_else(|| {
                     InterpError::TypeError {

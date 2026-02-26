@@ -2274,3 +2274,158 @@ fn test_formatter_optional_chain_idempotent() {
     let second = format_program(&program2, &config);
     assert_eq!(first, second, "optional chain should be idempotent:\nfirst:  {}\nsecond: {}", first, second);
 }
+
+// ── Round 7: Scope leak, untested features, compound assignments ─────
+
+#[test]
+fn test_for_loop_destructure_error_no_scope_leak() {
+    // If destructure_bind errors, the scope should still be cleaned up.
+    // After the for loop error, the interpreter should be in a clean state.
+    let src = r#"
+        let items = [1, 2, 3];
+        let result = try {
+            for [a, b] in items {
+                a
+            }
+        } catch err {
+            "caught"
+        };
+        result
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("caught".to_string()));
+}
+
+#[test]
+fn test_compound_assign_subtract() {
+    let src = r#"
+        let mut x = 10;
+        x -= 3;
+        x
+    "#;
+    assert_eq!(run(src), DataType::Int64(7));
+}
+
+#[test]
+fn test_compound_assign_multiply() {
+    let src = r#"
+        let mut x = 5;
+        x *= 4;
+        x
+    "#;
+    assert_eq!(run(src), DataType::Int64(20));
+}
+
+#[test]
+fn test_compound_assign_divide() {
+    let src = r#"
+        let mut x = 20;
+        x /= 4;
+        x
+    "#;
+    assert_eq!(run(src), DataType::Int64(5));
+}
+
+#[test]
+fn test_compound_assign_modulo() {
+    let src = r#"
+        let mut x = 17;
+        x %= 5;
+        x
+    "#;
+    assert_eq!(run(src), DataType::Int64(2));
+}
+
+#[test]
+fn test_module_definition_and_call() {
+    let src = r#"
+        mod math {
+            fn double(x) { x * 2 }
+            fn triple(x) { x * 3 }
+        }
+        math::double(5) + math::triple(3)
+    "#;
+    assert_eq!(run(src), DataType::Int64(19));
+}
+
+#[test]
+fn test_type_alias_transparent() {
+    // Type aliases have no runtime effect; code should execute normally.
+    let src = r#"
+        type Score = int64;
+        let x: Score = 42;
+        x
+    "#;
+    assert_eq!(run(src), DataType::Int64(42));
+}
+
+#[test]
+fn test_test_definitions_via_run_tests() {
+    let src = r#"
+        fn add(a, b) { a + b }
+
+        test "addition" {
+            if add(2, 3) != 5 {
+                throw "addition failed";
+            }
+        }
+
+        test "subtraction" {
+            if add(10, -3) != 7 {
+                throw "subtraction failed";
+            }
+        }
+    "#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert_eq!(results.len(), 2);
+    assert!(results[0].passed, "first test should pass: {:?}", results[0].error_message);
+    assert!(results[1].passed, "second test should pass: {:?}", results[1].error_message);
+}
+
+#[test]
+fn test_test_definitions_skipped_during_normal_execution() {
+    // test blocks should NOT execute during normal `execute()`.
+    let src = r#"
+        test "should not run" {
+            assert false;
+        }
+        42
+    "#;
+    assert_eq!(run(src), DataType::Int64(42));
+}
+
+#[test]
+fn test_async_await_spawn_synchronous() {
+    // In the synchronous interpreter, spawn evaluates eagerly
+    // and await unwraps the resolved value.
+    let src = r#"
+        async fn compute() {
+            42
+        }
+        let task = spawn compute();
+        let result = await task;
+        result
+    "#;
+    assert_eq!(run(src), DataType::Int64(42));
+}
+
+#[test]
+fn test_for_loop_map_destructure_error_scope_cleanup() {
+    // Map destructure error should also clean up scope.
+    let src = r#"
+        let items = [1, 2, 3];
+        let result = try {
+            for {name, age} in items {
+                name
+            }
+        } catch err {
+            "caught map destructure error"
+        };
+        result
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("caught map destructure error".to_string()));
+}
