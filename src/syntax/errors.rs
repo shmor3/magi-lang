@@ -251,8 +251,10 @@ impl ErrorCode {
 
 /// Compute the Levenshtein edit distance between two strings.
 fn levenshtein(a: &str, b: &str) -> usize {
-    let a_len = a.len();
-    let b_len = b.len();
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
 
     if a_len == 0 {
         return b_len;
@@ -264,9 +266,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let mut prev: Vec<usize> = (0..=b_len).collect();
     let mut curr = vec![0usize; b_len + 1];
 
-    for (i, ca) in a.chars().enumerate() {
+    for (i, ca) in a_chars.iter().enumerate() {
         curr[0] = i + 1;
-        for (j, cb) in b.chars().enumerate() {
+        for (j, cb) in b_chars.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
             curr[j + 1] = (prev[j] + cost).min(curr[j] + 1).min(prev[j + 1] + 1);
         }
@@ -280,16 +282,18 @@ fn levenshtein(a: &str, b: &str) -> usize {
 ///
 /// Returns `Some("did you mean 'closest'?")` if a close match (distance ≤ 3) is found.
 pub fn suggest_name(name: &str, available: &[&str]) -> Option<String> {
-    let max_distance = 3.min(name.len() / 2 + 1);
+    let name_char_len = name.chars().count();
+    let max_distance = 3.min(name_char_len / 2 + 1);
 
     let mut best: Option<(&str, usize)> = None;
 
     for &candidate in available {
         // Quick skip: length difference too large
-        let len_diff = if name.len() > candidate.len() {
-            name.len() - candidate.len()
+        let cand_char_len = candidate.chars().count();
+        let len_diff = if name_char_len > cand_char_len {
+            name_char_len - cand_char_len
         } else {
-            candidate.len() - name.len()
+            cand_char_len - name_char_len
         };
         if len_diff > max_distance {
             continue;

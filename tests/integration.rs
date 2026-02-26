@@ -3949,6 +3949,67 @@ fn test_string_concat_no_type_checker_warning() {
 }
 
 #[test]
+fn test_pipe_with_lambda_variable() {
+    assert_eq!(
+        run("let double = |x| x * 2\n5 |> double(_)"),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_pipe_with_lambda_variable_chained() {
+    assert_eq!(
+        run("let inc = |x| x + 1\nlet dbl = |x| x * 2\n3 |> inc(_) |> dbl(_)"),
+        DataType::Int64(8)
+    );
+}
+
+#[test]
+fn test_pipe_len_on_string() {
+    assert_eq!(
+        run(r#""hello" |> len(_)"#),
+        DataType::Int64(5)
+    );
+}
+
+#[test]
+fn test_pipe_len_on_map() {
+    assert_eq!(
+        run("let m = {\"a\": 1, \"b\": 2, \"c\": 3}\nm |> len(_)"),
+        DataType::Int64(3)
+    );
+}
+
+#[test]
+fn test_pipe_len_implicit_piped_value() {
+    assert_eq!(
+        run("[10, 20, 30] |> len()"),
+        DataType::Int64(3)
+    );
+}
+
+#[test]
+fn test_pipe_len_errors_on_invalid_type() {
+    let err = run_err("42 |> len(_)");
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert_eq!(context, "len");
+        }
+        other => panic!("Expected TypeError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_levenshtein_unicode_suggestion() {
+    // Test that the Levenshtein distance works with multi-byte chars
+    use magi_lang::syntax::errors::suggest_name;
+    let available = ["café", "naïve", "résumé"];
+    // "cafè" is 1 edit from "café"
+    let result = suggest_name("cafè", &available);
+    assert_eq!(result, Some("did you mean 'café'?".to_string()));
+}
+
+#[test]
 fn test_type_checker_non_exhaustive_match_uses_w203() {
     let program = parse_v2(r#"
 let x = 42;

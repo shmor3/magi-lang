@@ -2955,17 +2955,23 @@ impl<'a> Interpreter<'a> {
                             }
                         })
                         .collect::<Result<_, _>>()?;
-                    if let Some(val) = evaluated_args.first() {
-                        let length = match val {
-                            DataType::Array(a) => a.len() as i64,
-                            DataType::String(s) => s.chars().count() as i64,
-                            DataType::Map(m) => m.len() as i64,
-                            DataType::Bytes(b) => b.len() as i64,
-                            _ => 0,
-                        };
-                        return Ok(DataType::Int64(length));
-                    }
-                    return Ok(DataType::Int64(0));
+                    // If no args provided, use the piped value
+                    let val = evaluated_args.first().unwrap_or(&piped_value);
+                    let length = match val {
+                        DataType::Array(a) => a.len() as i64,
+                        DataType::String(s) => s.chars().count() as i64,
+                        DataType::Map(m) => m.len() as i64,
+                        DataType::Bytes(b) => b.len() as i64,
+                        other => {
+                            return Err(InterpError::TypeError {
+                                expected: "Array, String, Map, or Bytes".to_string(),
+                                actual: datatype_type_name(other).to_string(),
+                                context: "len".to_string(),
+                                span: stage.span,
+                            });
+                        }
+                    };
+                    return Ok(DataType::Int64(length));
                 }
                 if fn_name == "typeof" {
                     let evaluated_args: Vec<DataType> = args.iter()
@@ -3016,8 +3022,33 @@ impl<'a> Interpreter<'a> {
                     return self.call_function(fn_name, &evaluated_args, stage.span);
                 }
 
+                // Check if it's a variable holding a function reference (lambda)
+                if let Some(entry) = self.lookup(fn_name) {
+                    let addr = entry.addr;
+                    if let Some(DataType::String(ref_name)) = self.heap.read(addr).cloned() {
+                        if self.functions.contains_key(ref_name.as_str()) {
+                            let evaluated_args: Vec<DataType> = args.iter()
+                                .map(|arg| {
+                                    if matches!(arg.kind, ExpressionKind::Placeholder) {
+                                        Ok(piped_value.clone())
+                                    } else {
+                                        self.eval_expr(arg)
+                                    }
+                                })
+                                .collect::<Result<_, _>>()?;
+                            return self.call_function(&ref_name, &evaluated_args, stage.span);
+                        }
+                    }
+                }
+
+                // Check std library aliases (from `use std::*` imports)
+                let resolved_name = self
+                    .std_op_aliases
+                    .get(fn_name.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| fn_name.clone());
                 let op_type =
-                    OperationType::parse(fn_name).ok_or_else(|| InterpError::UnknownOperation {
+                    OperationType::parse(&resolved_name).ok_or_else(|| InterpError::UnknownOperation {
                         name: fn_name.clone(),
                         span: stage.span,
                         suggestion: None,
