@@ -769,7 +769,11 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                let code = u8::from_str_radix(&hex, 16).unwrap();
+                let code = u8::from_str_radix(&hex, 16).map_err(|_| SyntaxError {
+                    line: self.line as usize,
+                    column: self.col as usize,
+                    message: format!("Invalid hex escape: \\x{}", hex),
+                })?;
                 Ok(code as char)
             }
             Some(b'u') => {
@@ -809,7 +813,11 @@ impl<'a> Lexer<'a> {
                         message: "Empty unicode escape \\u{}".to_string(),
                     });
                 }
-                let code = u32::from_str_radix(&hex, 16).unwrap();
+                let code = u32::from_str_radix(&hex, 16).map_err(|_| SyntaxError {
+                    line: self.line as usize,
+                    column: self.col as usize,
+                    message: format!("Invalid unicode escape: \\u{{{}}}", hex),
+                })?;
                 char::from_u32(code).ok_or_else(|| SyntaxError {
                     line: self.line as usize,
                     column: self.col as usize,

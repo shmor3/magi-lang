@@ -56,7 +56,7 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         ArrayGet => ChannelType::Null,
         ArraySet | ArrayPush | ArrayConcat | ArrayReverse | ArrayFlatten | ArraySort
         | ArrayFilterNulls | ArrayInsert | ArrayRemove => ChannelType::Array,
-        ArrayPop | ArrayShift => ChannelType::Map,
+        ArrayPop | ArrayShift => ChannelType::Null, // returns element (any type)
         ArrayFromMap => ChannelType::Array,
         ArrayLength => ChannelType::Int64,
         ArraySlice => ChannelType::Array,
