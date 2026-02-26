@@ -1,5 +1,96 @@
-use pkg::shared::{sum, range};
-use pkg::collections::{sorted_unique, flatten, chunk, zip, frequencies};
+// Data Tools — collection processing and higher-order patterns
+
+fn range(start, end) {
+    let mut result = [];
+    let mut i = start;
+    while i < end {
+        result = array_push(result, i);
+        i = i + 1;
+    }
+    result
+}
+
+fn sum(arr) {
+    let mut total = 0;
+    for item in arr {
+        total = total + item;
+    }
+    total
+}
+
+fn sorted_unique(arr) {
+    let sorted = arr.sort();
+    let mut result = [];
+    for item in sorted {
+        if len(result) == 0 {
+            result = array_push(result, item);
+        } else {
+            let last = result[len(result) - 1];
+            if last != item {
+                result = array_push(result, item);
+            }
+        }
+    }
+    result
+}
+
+fn flatten(arr) {
+    let mut result = [];
+    for item in arr {
+        if typeof(item) == "array" {
+            let inner = flatten(item);
+            for x in inner {
+                result = array_push(result, x);
+            }
+        } else {
+            result = array_push(result, item);
+        }
+    }
+    result
+}
+
+fn chunk(arr, size) {
+    let mut chunks = [];
+    let mut current = [];
+    for item in arr {
+        current = array_push(current, item);
+        if len(current) == size {
+            chunks = array_push(chunks, current);
+            current = [];
+        }
+    }
+    if len(current) > 0 {
+        chunks = array_push(chunks, current);
+    }
+    chunks
+}
+
+fn zip(a, b) {
+    let la = len(a);
+    let lb = len(b);
+    let l = if la < lb { la } else { lb };
+    let mut result = [];
+    let mut i = 0;
+    while i < l {
+        result = array_push(result, [a[i], b[i]]);
+        i = i + 1;
+    }
+    result
+}
+
+fn frequencies(arr) {
+    let mut counts = map_from_entries([]);
+    for item in arr {
+        let key = to_string(item);
+        let count = map_get(counts, key);
+        if count == null {
+            counts = map_set(counts, key, 1);
+        } else {
+            counts = map_set(counts, key, count + 1);
+        }
+    }
+    counts
+}
 
 output "--- Sorted Unique ---";
 let data = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
@@ -29,7 +120,6 @@ output f"Counts: {frequencies(words)}";
 
 output "--- Combined ---";
 let nums = range(1, 21);
-let squared = [];
 let mut squared = [];
 for n in nums {
     squared = array_push(squared, n * n);

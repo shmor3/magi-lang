@@ -28,6 +28,10 @@ impl OperationEvaluator for FullEvaluator {
             .or(inputs.get("value"))
             .cloned()
             .unwrap_or(DataType::Null);
+        let array = inputs.get("array").cloned().unwrap_or(DataType::Null);
+        let value = inputs.get("value").cloned().unwrap_or(DataType::Null);
+        let map = inputs.get("map").cloned().unwrap_or(DataType::Null);
+        let key = inputs.get("key").cloned().unwrap_or(DataType::Null);
 
         match op {
             // Arithmetic
@@ -86,55 +90,50 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::ToString => Ok(DataType::String(input.to_string_lossy())),
 
-            // Map access (used by FieldAccess and Index)
+            // Map access
             OperationType::MapGet => {
-                let map_val = inputs.get("map").or(inputs.get("a")).cloned().unwrap_or(DataType::Null);
-                let key_val = inputs.get("key").or(inputs.get("b")).cloned().unwrap_or(DataType::Null);
-                match (&map_val, &key_val) {
-                    (DataType::Map(map), DataType::String(key)) => {
-                        Ok(map.get(key).cloned().unwrap_or(DataType::Null))
+                match (&map, &key) {
+                    (DataType::Map(m), DataType::String(k)) => {
+                        Ok(m.get(k).cloned().unwrap_or(DataType::Null))
                     }
                     _ => Ok(DataType::Null),
                 }
             }
             OperationType::MapSet => {
-                let map_val = inputs.get("map").or(inputs.get("a")).cloned().unwrap_or(DataType::Null);
-                let key_val = inputs.get("key").or(inputs.get("b")).cloned().unwrap_or(DataType::String(String::new()));
-                let value = inputs.get("value").or(inputs.get("c")).cloned().unwrap_or(DataType::Null);
-                match (&map_val, &key_val) {
-                    (DataType::Map(map), DataType::String(k)) => {
-                        let mut new_map = map.clone();
-                        new_map.insert(k.clone(), value);
+                match (&map, &key) {
+                    (DataType::Map(m), DataType::String(k)) => {
+                        let mut new_map = m.clone();
+                        new_map.insert(k.clone(), value.clone());
                         Ok(DataType::Map(new_map))
                     }
                     _ => Ok(DataType::Null),
                 }
             }
-            OperationType::MapKeys => match &input {
-                DataType::Map(map) => Ok(DataType::Array(map.keys().map(|k| DataType::String(k.clone())).collect())),
+            OperationType::MapKeys => match &map {
+                DataType::Map(m) => Ok(DataType::Array(m.keys().map(|k| DataType::String(k.clone())).collect())),
                 _ => Ok(DataType::Array(vec![])),
             },
-            OperationType::MapValues => match &input {
-                DataType::Map(map) => Ok(DataType::Array(map.values().cloned().collect())),
+            OperationType::MapValues => match &map {
+                DataType::Map(m) => Ok(DataType::Array(m.values().cloned().collect())),
                 _ => Ok(DataType::Array(vec![])),
             },
 
             // Array
-            OperationType::ArrayLength => match &input {
+            OperationType::ArrayLength => match &array {
                 DataType::Array(arr) => Ok(DataType::Int64(arr.len() as i64)),
                 _ => Ok(DataType::Int64(0)),
             },
             OperationType::ArrayPush => {
-                let mut arr = match &a { DataType::Array(a) => a.clone(), _ => vec![] };
-                arr.push(b);
+                let mut arr = match &array { DataType::Array(a) => a.clone(), _ => vec![] };
+                arr.push(value.clone());
                 Ok(DataType::Array(arr))
             }
-            OperationType::ArrayPop => match &input {
+            OperationType::ArrayPop => match &array {
                 DataType::Array(arr) if !arr.is_empty() => Ok(arr.last().cloned().unwrap_or(DataType::Null)),
                 _ => Ok(DataType::Null),
             },
             OperationType::ArraySlice => Ok(DataType::Null),
-            OperationType::ArraySort => match &input {
+            OperationType::ArraySort => match &array {
                 DataType::Array(arr) => {
                     let mut sorted = arr.clone();
                     sorted.sort_by(|a, b| a.to_i64().unwrap_or(0).cmp(&b.to_i64().unwrap_or(0)));
@@ -142,18 +141,18 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArrayReverse => match &input {
+            OperationType::ArrayReverse => match &array {
                 DataType::Array(arr) => { let mut r = arr.clone(); r.reverse(); Ok(DataType::Array(r)) }
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArrayContains => match (&a, &b) {
+            OperationType::ArrayContains => match (&array, &value) {
                 (DataType::Array(arr), val) => Ok(DataType::Bool(arr.contains(val))),
                 _ => Ok(DataType::Bool(false)),
             },
-            OperationType::ArrayJoin => match (&a, &b) {
-                (DataType::Array(arr), DataType::String(sep)) => {
+            OperationType::ArrayJoin => match &array {
+                DataType::Array(arr) => {
                     let s: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
-                    Ok(DataType::String(s.join(sep)))
+                    Ok(DataType::String(s.join(",")))
                 }
                 _ => Ok(DataType::String(String::new())),
             },
@@ -163,23 +162,30 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::String(s) => Ok(DataType::Int64(s.chars().count() as i64)),
                 _ => Ok(DataType::Int64(0)),
             },
-            OperationType::Split => match (&a, &b) {
-                (DataType::String(s), DataType::String(sep)) => {
-                    Ok(DataType::Array(s.split(sep.as_str()).map(|p| DataType::String(p.to_string())).collect()))
+            OperationType::Split => {
+                let delim = inputs.get("delimiter").cloned().unwrap_or(DataType::Null);
+                match (&input, &delim) {
+                    (DataType::String(s), DataType::String(sep)) => {
+                        Ok(DataType::Array(s.split(sep.as_str()).map(|p| DataType::String(p.to_string())).collect()))
+                    }
+                    _ => Ok(DataType::Array(vec![])),
                 }
-                _ => Ok(DataType::Array(vec![])),
             },
-            OperationType::Contains => match (&a, &b) {
-                (DataType::String(s), DataType::String(sub)) => Ok(DataType::Bool(s.contains(sub.as_str()))),
-                _ => Ok(DataType::Bool(false)),
+            OperationType::Contains => {
+                let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::String(s), DataType::String(sub)) => Ok(DataType::Bool(s.contains(sub.as_str()))),
+                    _ => Ok(DataType::Bool(false)),
+                }
             },
             OperationType::Replace => {
-                let c = inputs.get("c").cloned().unwrap_or(DataType::Null);
-                match (&a, &b, &c) {
+                let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
+                let replace = inputs.get("replace").cloned().unwrap_or(DataType::Null);
+                match (&input, &search, &replace) {
                     (DataType::String(s), DataType::String(from), DataType::String(to)) => {
                         Ok(DataType::String(s.replacen(from.as_str(), to.as_str(), 1)))
                     }
-                    _ => Ok(a.clone()),
+                    _ => Ok(input.clone()),
                 }
             },
             OperationType::Trim => match &input {
@@ -202,65 +208,71 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::String(s) => Ok(DataType::String(s.to_lowercase())),
                 _ => Ok(DataType::Null),
             },
-            OperationType::StartsWith => match (&a, &b) {
-                (DataType::String(s), DataType::String(prefix)) => Ok(DataType::Bool(s.starts_with(prefix.as_str()))),
-                _ => Ok(DataType::Bool(false)),
+            OperationType::StartsWith => {
+                let prefix = inputs.get("prefix").cloned().unwrap_or(DataType::Null);
+                match (&input, &prefix) {
+                    (DataType::String(s), DataType::String(p)) => Ok(DataType::Bool(s.starts_with(p.as_str()))),
+                    _ => Ok(DataType::Bool(false)),
+                }
             },
-            OperationType::EndsWith => match (&a, &b) {
-                (DataType::String(s), DataType::String(suffix)) => Ok(DataType::Bool(s.ends_with(suffix.as_str()))),
-                _ => Ok(DataType::Bool(false)),
+            OperationType::EndsWith => {
+                let suffix = inputs.get("suffix").cloned().unwrap_or(DataType::Null);
+                match (&input, &suffix) {
+                    (DataType::String(s), DataType::String(sfx)) => Ok(DataType::Bool(s.ends_with(sfx.as_str()))),
+                    _ => Ok(DataType::Bool(false)),
+                }
             },
-            OperationType::Substring => {
-                let c = inputs.get("c").cloned().unwrap_or(DataType::Null);
-                match (&a, &b, &c) {
-                    (DataType::String(s), DataType::Int64(start), DataType::Int64(end)) => {
-                        let chars: Vec<char> = s.chars().collect();
-                        let start = (*start).max(0) as usize;
-                        let end = (*end).min(chars.len() as i64) as usize;
-                        if start <= end {
-                            Ok(DataType::String(chars[start..end].iter().collect()))
-                        } else {
-                            Ok(DataType::String(String::new()))
-                        }
+            OperationType::Substring => Ok(DataType::String(String::new())),
+            OperationType::IndexOf => {
+                let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::String(s), DataType::String(sub)) => {
+                        Ok(DataType::Int64(s.find(sub.as_str()).map(|i| i as i64).unwrap_or(-1)))
                     }
-                    _ => Ok(DataType::String(String::new())),
+                    _ => Ok(DataType::Int64(-1)),
                 }
-            },
-            OperationType::IndexOf => match (&a, &b) {
-                (DataType::String(s), DataType::String(sub)) => {
-                    Ok(DataType::Int64(s.find(sub.as_str()).map(|i| i as i64).unwrap_or(-1)))
-                }
-                _ => Ok(DataType::Int64(-1)),
             },
 
             // Map
-            OperationType::MapSize => match &input {
+            OperationType::MapSize => match &map {
                 DataType::Map(m) => Ok(DataType::Int64(m.len() as i64)),
                 _ => Ok(DataType::Int64(0)),
             },
-            OperationType::MapHas => match (&a, &b) {
+            OperationType::MapHas => match (&map, &key) {
                 (DataType::Map(m), DataType::String(k)) => Ok(DataType::Bool(m.contains_key(k))),
                 _ => Ok(DataType::Bool(false)),
             },
-            OperationType::MapDelete => {
-                let map_val = inputs.get("map").or(inputs.get("a")).cloned().unwrap_or(DataType::Null);
-                let key_val = inputs.get("key").or(inputs.get("b")).cloned().unwrap_or(DataType::Null);
-                match (&map_val, &key_val) {
-                    (DataType::Map(m), DataType::String(k)) => {
-                        let mut new_map = m.clone();
-                        new_map.remove(k);
-                        Ok(DataType::Map(new_map))
-                    }
-                    _ => Ok(DataType::Null),
+            OperationType::MapDelete => match (&map, &key) {
+                (DataType::Map(m), DataType::String(k)) => {
+                    let mut new_map = m.clone();
+                    new_map.remove(k);
+                    Ok(DataType::Map(new_map))
                 }
+                _ => Ok(DataType::Null),
             },
-            OperationType::MapEntries => match &input {
+            OperationType::MapEntries => match &map {
                 DataType::Map(m) => {
                     Ok(DataType::Array(m.iter().map(|(k, v)| {
                         DataType::Array(vec![DataType::String(k.clone()), v.clone()])
                     }).collect()))
                 }
                 _ => Ok(DataType::Array(vec![])),
+            },
+            OperationType::MapFromEntries => match &array {
+                DataType::Array(arr) => {
+                    let mut m = std::collections::BTreeMap::new();
+                    for item in arr {
+                        if let DataType::Array(pair) = item {
+                            if pair.len() >= 2 {
+                                if let DataType::String(k) = &pair[0] {
+                                    m.insert(k.clone(), pair[1].clone());
+                                }
+                            }
+                        }
+                    }
+                    Ok(DataType::Map(m))
+                }
+                _ => Ok(DataType::Map(std::collections::BTreeMap::new())),
             },
             OperationType::MapMerge => match (&a, &b) {
                 (DataType::Map(m1), DataType::Map(m2)) => {
@@ -274,28 +286,31 @@ impl OperationEvaluator for FullEvaluator {
             },
 
             // Array extras
-            OperationType::ArrayGet => match (&a, &b) {
-                (DataType::Array(arr), DataType::Int64(i)) => {
-                    let idx = *i as usize;
-                    Ok(arr.get(idx).cloned().unwrap_or(DataType::Null))
+            OperationType::ArrayGet => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match (&array, &index) {
+                    (DataType::Array(arr), DataType::Int64(i)) => {
+                        let idx = *i as usize;
+                        Ok(arr.get(idx).cloned().unwrap_or(DataType::Null))
+                    }
+                    _ => Ok(DataType::Null),
                 }
-                _ => Ok(DataType::Null),
             },
             OperationType::ArraySet => {
-                let c = inputs.get("c").cloned().unwrap_or(DataType::Null);
-                match (&a, &b) {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match (&array, &index) {
                     (DataType::Array(arr), DataType::Int64(i)) => {
                         let mut new_arr = arr.clone();
                         let idx = *i as usize;
                         if idx < new_arr.len() {
-                            new_arr[idx] = c;
+                            new_arr[idx] = value.clone();
                         }
                         Ok(DataType::Array(new_arr))
                     }
                     _ => Ok(DataType::Null),
                 }
             },
-            OperationType::ArrayFlatten => match &input {
+            OperationType::ArrayFlatten => match &array {
                 DataType::Array(arr) => {
                     let mut flat = Vec::new();
                     for item in arr {
@@ -317,7 +332,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArrayUnique => match &input {
+            OperationType::ArrayUnique => match &array {
                 DataType::Array(arr) => {
                     let mut seen = Vec::new();
                     for item in arr {
@@ -329,7 +344,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArrayFilterNulls => match &input {
+            OperationType::ArrayFilterNulls => match &array {
                 DataType::Array(arr) => {
                     Ok(DataType::Array(arr.iter().filter(|v| !matches!(v, DataType::Null)).cloned().collect()))
                 }
