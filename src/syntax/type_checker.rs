@@ -1076,6 +1076,13 @@ impl TypeChecker {
                 let ct = match self.lookup(name) {
                     Some(info) => info.channel_type,
                     None => {
+                        // Check if it's a known function name (first-class function reference).
+                        if self.function_sigs.contains_key(name.as_str()) {
+                            if let Some(sig) = self.function_sigs.get_mut(name.as_str()) {
+                                sig.used = true;
+                            }
+                            return ChannelType::Null; // function type is opaque
+                        }
                         let suggestion = self.suggest_variable(name);
                         self.emit_coded(
                             expr.span.start_line,
@@ -1552,6 +1559,19 @@ impl TypeChecker {
                     let _ = self.infer_expr(v);
                 }
 
+                // Mark receiver as mutated for known in-place mutating methods
+                const MUTATING_METHODS: &[&str] = &[
+                    "push", "pop", "set", "remove", "insert", "clear",
+                    "delete", "merge", "sort", "reverse", "extend",
+                ];
+                if MUTATING_METHODS.contains(&method.as_str()) {
+                    if let ExpressionKind::Variable(ref var_name) = object.kind {
+                        if let Some(info) = self.lookup_mut(var_name) {
+                            info.mutated = true;
+                        }
+                    }
+                }
+
                 // Resolve method to an OperationType based on receiver type + method name
                 let op_name = resolve_method_type(obj_ty, method);
                 if let Some(name) = op_name {
@@ -1586,6 +1606,8 @@ impl TypeChecker {
             ExpressionKind::Lambda { params, body } => {
                 self.push_scope();
                 self.function_depth += 1;
+                let saved_loop_depth = self.loop_depth;
+                self.loop_depth = 0;
                 let prev_return_type = std::mem::replace(&mut self.current_return_type, ChannelType::Null);
                 for param in params {
                     let ct = param
@@ -1606,6 +1628,7 @@ impl TypeChecker {
                 }
                 let _ = self.infer_expr(body);
                 self.function_depth -= 1;
+                self.loop_depth = saved_loop_depth;
                 self.current_return_type = prev_return_type;
                 self.pop_scope();
                 // Lambdas are callable values — Null since we don't have a function type
@@ -1918,9 +1941,10 @@ impl TypeChecker {
                 }
             }
             Pattern::Or(alternatives) => {
-                // Bind vars from all alternatives so all variable references resolve
-                for alt in alternatives {
-                    self.bind_pattern_vars(alt, val_type, span);
+                // Bind vars from the first alternative only to avoid duplicate W102 warnings.
+                // All alternatives should bind the same names in valid code.
+                if let Some(first) = alternatives.first() {
+                    self.bind_pattern_vars(first, val_type, span);
                 }
             }
             Pattern::Rest(name) => {

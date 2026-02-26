@@ -5201,3 +5201,56 @@ fn test_string_interpolation_basic() {
     "#);
     assert_eq!(result, DataType::String("hello world, number 42".to_string()));
 }
+
+// ═══════════════════════════════════════════════════════════
+// Round 39b: Type checker correctness fixes
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_w110_no_false_positive_method_mutation() {
+    // Calling .push() on a mut variable should not produce W110
+    let warnings = typecheck_warnings(r#"
+        let mut items = [1, 2, 3];
+        items.push(4);
+        items
+    "#);
+    let w110: Vec<_> = warnings.iter().filter(|w| w.contains("W110")).collect();
+    assert!(w110.is_empty(), "should not warn W110 for method mutation, got: {:?}", w110);
+}
+
+#[test]
+fn test_function_as_first_class_no_e200() {
+    // Using a function name as a value should not produce E200 "Undefined variable"
+    let warnings = typecheck_warnings(r#"
+        fn double(x) { x * 2 }
+        let f = double;
+        f
+    "#);
+    let e200: Vec<_> = warnings.iter().filter(|w| w.contains("E200") || w.contains("Undefined")).collect();
+    assert!(e200.is_empty(), "should not warn E200 for function reference, got: {:?}", e200);
+}
+
+#[test]
+fn test_function_as_callback_no_w103() {
+    // Passing a function as a callback should mark it as used (no W103)
+    let warnings = typecheck_warnings(r#"
+        fn helper(x) { x + 1 }
+        let result = helper;
+        result
+    "#);
+    let w103: Vec<_> = warnings.iter().filter(|w| w.contains("W103")).collect();
+    assert!(w103.is_empty(), "should not warn W103 for function used as value, got: {:?}", w103);
+}
+
+#[test]
+fn test_break_in_lambda_inside_loop_flagged() {
+    // break inside a lambda inside a loop should be flagged as E300
+    let warnings = typecheck_warnings(r#"
+        for x in [1, 2, 3] {
+            let f = || { break };
+            f
+        }
+    "#);
+    let e300: Vec<_> = warnings.iter().filter(|w| w.contains("E300") || w.contains("break")).collect();
+    assert!(!e300.is_empty(), "should flag break inside lambda as error, got: {:?}", warnings);
+}
