@@ -54,7 +54,7 @@ pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> 
 
 /// Check that a name uses PascalCase (for enums and structs).
 pub fn check_naming_pascal_case(name: &str, span: Span) -> Option<AstDiagnostic> {
-    if name.is_empty() {
+    if name.is_empty() || name.starts_with('_') {
         return None;
     }
     // PascalCase: starts with uppercase, no underscores

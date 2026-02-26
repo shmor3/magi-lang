@@ -2482,10 +2482,14 @@ impl WasmCodegen {
                     }
                     ("parse_int" | "parse_float" | "pop", _) => {
                         // Delegate to host runtime_call for these operations.
+                        // Drop args from stack first (same pattern as the catch-all).
+                        for _ in 0..*arg_count {
+                            f.instruction(&WasmInst::Drop);
+                        }
                         // runtime_call(name_offset: i32, arg_count: i32) -> i64
                         let name_offset = string_offsets.get(*name as usize).copied().unwrap_or(0);
                         f.instruction(&WasmInst::I32Const(name_offset as i32));
-                        f.instruction(&WasmInst::I32Const(*arg_count as i32));
+                        f.instruction(&WasmInst::I32Const(0)); // 0 args (already dropped)
                         f.instruction(&WasmInst::Call(1)); // runtime_call import
                     }
                     _ => {

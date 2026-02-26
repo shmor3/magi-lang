@@ -203,7 +203,15 @@ impl<'a> Formatter<'a> {
             }
             StatementKind::CompoundAssign { name, op, value } => {
                 self.write(name);
-                self.write(&format!(" {}= ", op));
+                let op_str = match op {
+                    BinOp::Add => "+=",
+                    BinOp::Sub => "-=",
+                    BinOp::Mul => "*=",
+                    BinOp::Div => "/=",
+                    BinOp::Mod => "%=",
+                    other => &format!("{}=", other),
+                };
+                self.write(&format!(" {} ", op_str));
                 self.fmt_expression(value);
                 self.write(";");
             }
@@ -846,8 +854,10 @@ impl<'a> Formatter<'a> {
             Literal::Int64(n) => self.write(&n.to_string()),
             Literal::Float64(f) => {
                 let s = f.to_string();
-                // Ensure there's a decimal point for readability
-                if !s.contains('.') {
+                if s.contains('e') || s.contains('E') {
+                    // Scientific notation: format with explicit decimal to ensure parsability
+                    self.write(&format!("{:.1e}", f));
+                } else if !s.contains('.') {
                     self.write(&format!("{}.0", s));
                 } else {
                     self.write(&s);

@@ -5254,3 +5254,44 @@ fn test_break_in_lambda_inside_loop_flagged() {
     let e300: Vec<_> = warnings.iter().filter(|w| w.contains("E300") || w.contains("break")).collect();
     assert!(!e300.is_empty(), "should flag break inside lambda as error, got: {:?}", warnings);
 }
+
+// ═══════════════════════════════════════════════════════════
+// Round 40: Formatter, linter, and WASM fixes
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_formatter_float_scientific_notation() {
+    // Floats that produce scientific notation should format to parseable output
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let src = "let x = 100000000000000000000.0;";
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    // Should contain a decimal point and be parseable
+    assert!(formatted.contains('.'), "formatted float should contain decimal point: {formatted}");
+    // Verify it round-trips (parse doesn't error)
+    let _reparsed = parse_v2(&formatted).expect("formatted output should be parseable");
+}
+
+#[test]
+fn test_formatter_compound_assign() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let src = "x += 1;";
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    assert!(formatted.contains("+="), "should format compound assign correctly: {formatted}");
+    assert!(!formatted.contains("==="), "should not produce triple-equals: {formatted}");
+}
+
+#[test]
+fn test_linter_pascal_case_underscore_prefix_suppressed() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        enum _InternalState { Active, Inactive }
+    "#;
+    let program = parse(src);
+    let result = lint(&program, &LintConfig::default());
+    let w201: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W201"))
+        .collect();
+    assert!(w201.is_empty(), "underscore-prefixed types should not get W201: {:?}", w201);
+}
