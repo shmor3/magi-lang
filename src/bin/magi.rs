@@ -35,7 +35,13 @@ impl OperationEvaluator for FullEvaluator {
 
         match op {
             // Arithmetic
-            OperationType::Add => num_binop(&a, &b, |x, y| x + y, |x, y| x + y),
+            OperationType::Add => {
+                // String concatenation for Add only
+                if let (DataType::String(x), DataType::String(y)) = (&a, &b) {
+                    return Ok(DataType::String(format!("{}{}", x, y)));
+                }
+                num_binop(&a, &b, |x, y| x + y, |x, y| x + y)
+            }
             OperationType::Subtract => num_binop(&a, &b, |x, y| x - y, |x, y| x - y),
             OperationType::Multiply => num_binop(&a, &b, |x, y| x * y, |x, y| x * y),
             OperationType::Divide => {
@@ -53,6 +59,8 @@ impl OperationEvaluator for FullEvaluator {
                     Ok(DataType::Int64(x % y))
                 }
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x % y)),
+                (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 % y)),
+                (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x % *y as f64)),
                 _ => Ok(DataType::Null),
             },
 
@@ -136,7 +144,14 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ArraySort => match &array {
                 DataType::Array(arr) => {
                     let mut sorted = arr.clone();
-                    sorted.sort_by(|a, b| a.to_i64().unwrap_or(0).cmp(&b.to_i64().unwrap_or(0)));
+                    sorted.sort_by(|a, b| {
+                        match (a, b) {
+                            (DataType::Int64(x), DataType::Int64(y)) => x.cmp(y),
+                            (DataType::Float64(x), DataType::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                            (DataType::String(x), DataType::String(y)) => x.cmp(y),
+                            _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
+                        }
+                    });
                     Ok(DataType::Array(sorted))
                 }
                 _ => Ok(DataType::Null),
@@ -183,7 +198,7 @@ impl OperationEvaluator for FullEvaluator {
                 let replace = inputs.get("replace").cloned().unwrap_or(DataType::Null);
                 match (&input, &search, &replace) {
                     (DataType::String(s), DataType::String(from), DataType::String(to)) => {
-                        Ok(DataType::String(s.replacen(from.as_str(), to.as_str(), 1)))
+                        Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
                     }
                     _ => Ok(input.clone()),
                 }
@@ -485,7 +500,6 @@ fn num_binop(
         (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x, *y))),
         (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x as f64, *y))),
         (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(float_op(*x, *y as f64))),
-        (DataType::String(x), DataType::String(y)) => Ok(DataType::String(format!("{}{}", x, y))),
         _ => Ok(DataType::Null),
     }
 }

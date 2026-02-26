@@ -1508,6 +1508,10 @@ impl TypeChecker {
                         arg_types.insert(0, obj_ty);
                         return refine_call_output(op, &arg_types);
                     }
+                    // Known built-in method handled by the interpreter directly
+                    // (e.g., array.first(), int.abs(), string.is_empty())
+                    // Return Null (unknown type) without warning
+                    return ChannelType::Null;
                 }
 
                 // Unknown method — warn (but suppress if receiver type is unknown/Null)
@@ -2490,15 +2494,15 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "len" | "length" => Some("string_length".into()),
             "split" => Some("split".into()),
             "trim" | "trim_start" | "trim_end" => Some("trim".into()),
-            "to_upper" | "upper" | "to_uppercase" => Some("to_upper".into()),
-            "to_lower" | "lower" | "to_lowercase" => Some("to_lower".into()),
+            "to_upper" | "to_uppercase" => Some("to_upper".into()),
+            "to_lower" | "to_lowercase" => Some("to_lower".into()),
             "contains" => Some("string_contains".into()),
             "starts_with" => Some("starts_with".into()),
             "ends_with" => Some("ends_with".into()),
             "replace" => Some("replace".into()),
             "chars" | "lines" => Some("string_chars".into()),
             "repeat" => Some("string_repeat".into()),
-            "substring" | "substr" | "slice" => Some("substring".into()),
+            "substring" | "slice" => Some("substring".into()),
             "index_of" => Some("index_of".into()),
             "pad_start" => Some("pad_start".into()),
             "pad_end" => Some("pad_end".into()),
