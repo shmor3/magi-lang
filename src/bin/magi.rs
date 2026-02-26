@@ -721,6 +721,7 @@ fn cmd_lint(path: &str) {
             }
         }
         eprintln!("{} warning(s) emitted.", result.diagnostics.len());
+        process::exit(1);
     }
 }
 
@@ -782,7 +783,7 @@ fn cmd_run(path: &str) {
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Parse error: {}", e);
+            eprintln!("{}:{}: parse error: {}", path, e.line, e);
             process::exit(1);
         }
     };
@@ -840,7 +841,7 @@ fn cmd_compile(path: &str) {
     let program = match parse_v2(&combined_source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Parse error: {}", e);
+            eprintln!("{}:{}: parse error: {}", path, e.line, e);
             process::exit(1);
         }
     };

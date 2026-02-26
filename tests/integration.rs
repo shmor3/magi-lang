@@ -2505,3 +2505,65 @@ fn test_range_inclusive_normal() {
         DataType::Int64(5),
     ]));
 }
+
+// ── Round 10: CLI, pow overflow, await tail expression ───────────────
+
+#[test]
+fn test_pow_overflow_returns_null() {
+    // 2^63 overflows i64, should return null instead of wrapping
+    let src = r#"
+        let n = 2;
+        n.pow(63)
+    "#;
+    assert_eq!(run(src), DataType::Null);
+}
+
+#[test]
+fn test_pow_normal() {
+    let src = r#"
+        let n = 2;
+        n.pow(10)
+    "#;
+    assert_eq!(run(src), DataType::Int64(1024));
+}
+
+#[test]
+fn test_await_as_tail_expression() {
+    // await should work correctly in tail position
+    let src = r#"
+        async fn compute() { 42 }
+        let result = { await spawn compute() };
+        result
+    "#;
+    assert_eq!(run(src), DataType::Int64(42));
+}
+
+#[test]
+fn test_sort_by_ascending() {
+    let src = r#"
+        let arr = [3, 1, 4, 1, 5];
+        arr.sort_by(|a, b| a - b)
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(1),
+        DataType::Int64(1),
+        DataType::Int64(3),
+        DataType::Int64(4),
+        DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_sort_by_descending() {
+    let src = r#"
+        let arr = [3, 1, 4, 1, 5];
+        arr.sort_by(|a, b| b - a)
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(5),
+        DataType::Int64(4),
+        DataType::Int64(3),
+        DataType::Int64(1),
+        DataType::Int64(1),
+    ]));
+}

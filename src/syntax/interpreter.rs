@@ -1425,7 +1425,10 @@ impl<'a> Interpreter<'a> {
                         else if *n == -1 { Ok(Some(DataType::Int64(if exp % 2 == 0 { 1 } else { -1 }))) }
                         else { Ok(Some(DataType::Int64(0))) }
                     } else {
-                        Ok(Some(DataType::Int64(n.wrapping_pow(exp as u32))))
+                        match n.checked_pow(exp as u32) {
+                            Some(result) => Ok(Some(DataType::Int64(result))),
+                            None => Ok(Some(DataType::Null)), // overflow
+                        }
                     }
                 }
                 "min" => {
