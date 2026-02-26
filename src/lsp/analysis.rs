@@ -228,24 +228,25 @@ pub fn to_lsp_diagnostic(d: &AstDiagnostic) -> Diagnostic {
 }
 
 /// Find the word (identifier) at a given cursor position in source text.
+/// Uses char indices (not byte indices) for correct Unicode handling.
 pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
     let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
     let col = character as usize;
 
-    if col > target_line.len() {
+    if col > chars.len() {
         return None;
     }
 
     // Scan backwards for start of identifier
-    let bytes = target_line.as_bytes();
     let mut start = col;
-    while start > 0 && is_ident_char(bytes[start - 1]) {
+    while start > 0 && is_ident_char_unicode(chars[start - 1]) {
         start -= 1;
     }
 
     // Scan forwards for end of identifier
     let mut end = col;
-    while end < bytes.len() && is_ident_char(bytes[end]) {
+    while end < chars.len() && is_ident_char_unicode(chars[end]) {
         end += 1;
     }
 
@@ -253,11 +254,11 @@ pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<
         return None;
     }
 
-    Some(target_line[start..end].to_string())
+    Some(chars[start..end].iter().collect())
 }
 
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+fn is_ident_char_unicode(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 // =============================================================================

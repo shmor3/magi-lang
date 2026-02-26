@@ -20,9 +20,17 @@ const BUILTINS: &[&str] = &[
 /// Handle a completion request.
 pub fn handle_completion(
     state: &DocumentState,
-    _params: &CompletionParams,
+    params: &CompletionParams,
 ) -> CompletionResponse {
     let mut items = Vec::new();
+
+    // Extract the prefix at cursor position for filtering
+    let prefix = super::analysis::find_word_at_position(
+        &state.source,
+        params.text_document_position.position.line,
+        params.text_document_position.position.character,
+    )
+    .unwrap_or_default();
 
     // Keywords
     for kw in KEYWORDS {
@@ -97,6 +105,12 @@ pub fn handle_completion(
             detail: Some(format!("struct {}", name)),
             ..Default::default()
         });
+    }
+
+    // Filter by prefix if one exists
+    if !prefix.is_empty() {
+        let prefix_lower = prefix.to_lowercase();
+        items.retain(|item| item.label.to_lowercase().starts_with(&prefix_lower));
     }
 
     CompletionResponse::Array(items)

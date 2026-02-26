@@ -174,14 +174,14 @@ impl DataType {
             DataType::Uint64(u) => i64::try_from(*u).ok(),
             DataType::Float32(f) => {
                 let v = *f as f64;
-                if v.is_finite() && v >= i64::MIN as f64 && v < i64::MAX as f64 {
+                if v.is_finite() && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
                     Some(v as i64)
                 } else {
                     None
                 }
             }
             DataType::Float64(f) => {
-                if f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
+                if f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
                     Some(*f as i64)
                 } else {
                     None

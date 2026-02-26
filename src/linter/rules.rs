@@ -5,6 +5,22 @@ use crate::syntax::errors::ErrorCode;
 use crate::syntax::type_checker::AstDiagnostic;
 use crate::eval::DiagnosticSeverity;
 
+/// Convert a name to snake_case.
+fn to_snake_case(name: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Check that a name uses snake_case (for functions and variables).
 pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> {
     // Skip names starting with _ (conventional suppression) or single-char names
@@ -17,6 +33,7 @@ pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> 
         return None;
     }
     let code = ErrorCode::W200;
+    let suggestion = to_snake_case(name);
     Some(AstDiagnostic {
         line: span.start_line,
         column: span.start_col,
@@ -24,7 +41,7 @@ pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> 
         severity: DiagnosticSeverity::Warning,
         code: Some(code.to_string()),
         help: Some(code.help().to_string()),
-        suggestion: None,
+        suggestion: Some(format!("Rename to `{}`", suggestion)),
     })
 }
 
@@ -149,6 +166,31 @@ pub fn check_unreachable_arms(arms: &[MatchArm]) -> Vec<AstDiagnostic> {
                 seen_catch_all = true;
             }
             _ => {}
+        }
+    }
+
+    diagnostics
+}
+
+/// Check for duplicate imports in a list of statements.
+pub fn check_duplicate_imports(stmts: &[Statement]) -> Vec<AstDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for stmt in stmts {
+        if let StatementKind::Import(path) = &stmt.kind {
+            if !seen.insert(path.clone()) {
+                let code = ErrorCode::W208;
+                diagnostics.push(AstDiagnostic {
+                    line: stmt.span.start_line,
+                    column: stmt.span.start_col,
+                    message: format!("duplicate import: \"{}\"", path),
+                    severity: DiagnosticSeverity::Warning,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: None,
+                });
+            }
         }
     }
 

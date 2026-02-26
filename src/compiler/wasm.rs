@@ -180,7 +180,7 @@ impl WasmCodegen {
                         "len" if *arg_count == 1 => 1,
                         "to_string" if *arg_count == 1 => 0, // uses host import, no temps
                         "typeof" if *arg_count == 1 => 1,
-                        "array_push" if *arg_count == 2 => 3,
+                        "array_push" | "__array_push" if *arg_count == 2 => 3,
                         "map_get" if *arg_count == 2 => 3,
                         "map_set" if *arg_count == 3 => 4,
                         "map_from_entries" if *arg_count == 1 => 2,
@@ -275,17 +275,27 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(val));
             }
             Instruction::PushF64(n) => {
+                // Store f64 as tagged value. Note: the upper 8 bits of the IEEE 754
+                // representation are overwritten by the tag, limiting precision for
+                // values with large exponents or negative sign. This is a known
+                // limitation of the 56-bit payload tagged value system.
                 f.instruction(&WasmInst::F64Const((*n).into()));
                 f.instruction(&WasmInst::I64ReinterpretF64);
-                // Tag it (simplified: store raw bits, tag separately).
+                f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const((tag::F64 as i64) << 56));
+                f.instruction(&WasmInst::I64Or);
             }
             Instruction::PushI32(n) => {
                 let val = ((tag::I32 as i64) << 56) | (*n as i64 & 0x00FFFFFFFFFFFFFF);
                 f.instruction(&WasmInst::I64Const(val));
             }
             Instruction::PushF32(n) => {
+                // Tag f32 value (fits in 32 bits, so no precision loss).
                 f.instruction(&WasmInst::F32Const((*n).into()));
                 f.instruction(&WasmInst::I64ExtendI32U);
+                f.instruction(&WasmInst::I64Const((tag::F32 as i64) << 56));
+                f.instruction(&WasmInst::I64Or);
             }
             Instruction::PushString(idx) => {
                 // Push pointer to string data as tagged string ref.
@@ -477,9 +487,15 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
             }
             Instruction::GetTag => {
+                // Extract type tag from upper 8 bits and tag as I64 so it can
+                // be compared with PushI64(tag_value) via I64Eq.
                 f.instruction(&WasmInst::I64Const(56));
                 f.instruction(&WasmInst::I64ShrU);
-                f.instruction(&WasmInst::I32WrapI64);
+                // Tag the extracted tag value as I64 for comparison compatibility.
+                f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const((tag::I64 as i64) << 56));
+                f.instruction(&WasmInst::I64Or);
             }
 
             // ── Control flow ─────────────────────────────
@@ -2319,12 +2335,110 @@ impl WasmCodegen {
                         // Push result
                         f.instruction(&WasmInst::LocalGet(t2));
                     }
+                    ("__array_push", 2) => {
+                        // Alias for array_push — used by list comprehensions.
+                        // Reuse the same logic: delegate by calling the array_push
+                        // compiled builtin function directly.
+                        // Stack: [array, element] → same as array_push.
+                        let t0 = temp_base;     // element
+                        let t1 = temp_base + 1; // old array ptr
+                        let t2 = temp_base + 2; // new array ptr
+
+                        f.instruction(&WasmInst::LocalSet(t0)); // save element
+                        f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
+                        f.instruction(&WasmInst::I64And);
+                        f.instruction(&WasmInst::LocalSet(t1)); // save old array ptr
+
+                        // Load old length
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        // Allocate: 8 + (old_len+1)*8
+                        f.instruction(&WasmInst::I32Const(1));
+                        f.instruction(&WasmInst::I32Add);
+
+                        f.instruction(&WasmInst::GlobalGet(0));
+                        f.instruction(&WasmInst::I64ExtendI32U);
+                        f.instruction(&WasmInst::LocalSet(t2));
+
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Mul);
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::GlobalGet(0));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::GlobalSet(0));
+
+                        // Store new length
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Const(1));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        // Store capacity
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Const(1));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                        // Copy old elements
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Mul);
+                        f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                        // Store new element
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Mul);
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::LocalGet(t0));
+                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        // Push tagged new array
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I64Const((tag::ARRAY as i64) << 56));
+                        f.instruction(&WasmInst::I64Or);
+                    }
+                    ("parse_int" | "parse_float" | "pop", _) => {
+                        // Delegate to host runtime_call for these operations.
+                        // runtime_call(name_offset: i32, arg_count: i32) -> i64
+                        let name_offset = string_offsets.get(*name as usize).copied().unwrap_or(0);
+                        f.instruction(&WasmInst::I32Const(name_offset as i32));
+                        f.instruction(&WasmInst::I32Const(*arg_count as i32));
+                        f.instruction(&WasmInst::Call(1)); // runtime_call import
+                    }
                     _ => {
-                        // Unknown runtime call: drop all args and push null.
+                        // Unknown runtime call: delegate to host runtime_call.
+                        // runtime_call(name_offset: i32, arg_count: i32) -> i64
+                        // Drop args from stack first (host will re-read from memory if needed).
                         for _ in 0..*arg_count {
                             f.instruction(&WasmInst::Drop);
                         }
-                        f.instruction(&WasmInst::I64Const(0)); // null result
+                        let name_offset = string_offsets.get(*name as usize).copied().unwrap_or(0);
+                        f.instruction(&WasmInst::I32Const(name_offset as i32));
+                        f.instruction(&WasmInst::I32Const(0)); // 0 args (already dropped)
+                        f.instruction(&WasmInst::Call(1)); // runtime_call import
                     }
                 }
             }

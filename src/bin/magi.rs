@@ -398,7 +398,10 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Ok(DataType::Null),
             },
 
-            _ => Ok(DataType::Null),
+            other => Err(EvalError::InvalidInput(format!(
+                "operation '{:?}' is not implemented in the standalone evaluator",
+                other,
+            ))),
         }
     }
 }

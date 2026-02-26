@@ -286,7 +286,7 @@ impl<'a> Lexer<'a> {
         Some(ch)
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), SyntaxError> {
         loop {
             // Skip whitespace
             while let Some(ch) = self.peek() {
@@ -309,12 +309,20 @@ impl<'a> Lexer<'a> {
 
             // Skip block comments (nested: /* ... /* ... */ ... */)
             if self.peek() == Some(b'/') && self.peek_at(1) == Some(b'*') {
+                let comment_line = self.line;
+                let comment_col = self.col;
                 self.advance(); // consume /
                 self.advance(); // consume *
                 let mut depth: u32 = 1;
                 while depth > 0 {
                     match self.advance() {
-                        None => break, // unterminated — let parser deal with it
+                        None => {
+                            return Err(SyntaxError {
+                                line: comment_line as usize,
+                                column: comment_col as usize,
+                                message: "Unterminated block comment".to_string(),
+                            });
+                        }
                         Some(b'/') if self.peek() == Some(b'*') => {
                             self.advance();
                             depth += 1;
@@ -331,10 +339,11 @@ impl<'a> Lexer<'a> {
 
             break;
         }
+        Ok(())
     }
 
     fn next_token(&mut self) -> Result<Token, SyntaxError> {
-        self.skip_whitespace_and_comments();
+        self.skip_whitespace_and_comments()?;
 
         let start_line = self.line;
         let start_col = self.col;
@@ -701,6 +710,97 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    /// Parse an escape sequence after consuming the backslash.
+    /// Returns the resulting character.
+    fn parse_escape_sequence(&mut self) -> Result<char, SyntaxError> {
+        match self.advance() {
+            Some(b'n') => Ok('\n'),
+            Some(b't') => Ok('\t'),
+            Some(b'r') => Ok('\r'),
+            Some(b'\\') => Ok('\\'),
+            Some(b'"') => Ok('"'),
+            Some(b'0') => Ok('\0'),
+            Some(b'{') => Ok('{'),
+            Some(b'}') => Ok('}'),
+            Some(b'x') => {
+                // \xHH — two hex digits
+                let mut hex = String::with_capacity(2);
+                for _ in 0..2 {
+                    match self.advance() {
+                        Some(ch) if (ch as char).is_ascii_hexdigit() => hex.push(ch as char),
+                        _ => {
+                            return Err(SyntaxError {
+                                line: self.line as usize,
+                                column: self.col as usize,
+                                message: "Expected two hex digits after \\x".to_string(),
+                            });
+                        }
+                    }
+                }
+                let code = u8::from_str_radix(&hex, 16).unwrap();
+                Ok(code as char)
+            }
+            Some(b'u') => {
+                // \u{HHHH} — 1-6 hex digits in braces
+                if self.peek() != Some(b'{') {
+                    return Err(SyntaxError {
+                        line: self.line as usize,
+                        column: self.col as usize,
+                        message: "Expected '{' after \\u".to_string(),
+                    });
+                }
+                self.advance(); // consume {
+                let mut hex = String::with_capacity(6);
+                loop {
+                    match self.peek() {
+                        Some(b'}') => {
+                            self.advance();
+                            break;
+                        }
+                        Some(ch) if (ch as char).is_ascii_hexdigit() && hex.len() < 6 => {
+                            hex.push(ch as char);
+                            self.advance();
+                        }
+                        _ => {
+                            return Err(SyntaxError {
+                                line: self.line as usize,
+                                column: self.col as usize,
+                                message: "Invalid unicode escape: expected hex digits and '}'".to_string(),
+                            });
+                        }
+                    }
+                }
+                if hex.is_empty() {
+                    return Err(SyntaxError {
+                        line: self.line as usize,
+                        column: self.col as usize,
+                        message: "Empty unicode escape \\u{}".to_string(),
+                    });
+                }
+                let code = u32::from_str_radix(&hex, 16).unwrap();
+                char::from_u32(code).ok_or_else(|| SyntaxError {
+                    line: self.line as usize,
+                    column: self.col as usize,
+                    message: format!("Invalid unicode code point: U+{:04X}", code),
+                })
+            }
+            Some(ch) => {
+                Err(SyntaxError {
+                    line: self.line as usize,
+                    column: (self.col - 1) as usize,
+                    message: format!("Invalid escape sequence: \\{}", ch as char),
+                })
+            }
+            None => {
+                Err(SyntaxError {
+                    line: self.line as usize,
+                    column: self.col as usize,
+                    message: "Unterminated escape sequence".to_string(),
+                })
+            }
+        }
+    }
+
     fn lex_string(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
         self.advance(); // consume opening "
         let mut value = String::new();
@@ -714,28 +814,10 @@ impl<'a> Lexer<'a> {
                     });
                 }
                 Some(b'"') => break,
-                Some(b'\\') => match self.advance() {
-                    Some(b'n') => value.push('\n'),
-                    Some(b't') => value.push('\t'),
-                    Some(b'r') => value.push('\r'),
-                    Some(b'\\') => value.push('\\'),
-                    Some(b'"') => value.push('"'),
-                    Some(b'0') => value.push('\0'),
-                    Some(ch) => {
-                        return Err(SyntaxError {
-                            line: self.line as usize,
-                            column: (self.col - 1) as usize,
-                            message: format!("Invalid escape sequence: \\{}", ch as char),
-                        });
-                    }
-                    None => {
-                        return Err(SyntaxError {
-                            line: start_line as usize,
-                            column: start_col as usize,
-                            message: "Unterminated string literal".to_string(),
-                        });
-                    }
-                },
+                Some(b'\\') => {
+                    let ch = self.parse_escape_sequence()?;
+                    value.push(ch);
+                }
                 Some(ch) => value.push(ch as char),
             }
         }
@@ -764,6 +846,10 @@ impl<'a> Lexer<'a> {
                     self.advance(); // consume second "
                     self.advance(); // consume third "
                     break;
+                }
+                Some(b'\\') => {
+                    let ch = self.parse_escape_sequence()?;
+                    value.push(ch);
                 }
                 Some(ch) => value.push(ch as char),
             }
@@ -822,30 +908,10 @@ impl<'a> Lexer<'a> {
                     }
                     value.push('}');
                 }
-                Some(b'\\') => match self.advance() {
-                    Some(b'n') => value.push('\n'),
-                    Some(b't') => value.push('\t'),
-                    Some(b'r') => value.push('\r'),
-                    Some(b'\\') => value.push('\\'),
-                    Some(b'"') => value.push('"'),
-                    Some(b'{') => value.push('{'),
-                    Some(b'}') => value.push('}'),
-                    Some(b'0') => value.push('\0'),
-                    Some(ch) => {
-                        return Err(SyntaxError {
-                            line: self.line as usize,
-                            column: (self.col - 1) as usize,
-                            message: format!("Invalid escape sequence: \\{}", ch as char),
-                        });
-                    }
-                    None => {
-                        return Err(SyntaxError {
-                            line: start_line as usize,
-                            column: start_col as usize,
-                            message: "Unterminated f-string literal".to_string(),
-                        });
-                    }
-                },
+                Some(b'\\') => {
+                    let ch = self.parse_escape_sequence()?;
+                    value.push(ch);
+                }
                 Some(ch) => value.push(ch as char),
             }
         }

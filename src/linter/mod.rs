@@ -79,6 +79,10 @@ impl<'a> LintContext<'a> {
         // Check dead code at program level
         let diags = rules::check_dead_code_in_block(&program.statements);
         self.emit_all(diags);
+
+        // Check duplicate imports
+        let diags = rules::check_duplicate_imports(&program.statements);
+        self.emit_all(diags);
     }
 
     fn check_statement(&mut self, stmt: &Statement) {
@@ -490,6 +494,27 @@ mod tests {
     fn test_w207_no_unreachable() {
         let codes = lint_codes("let x = 1;\nmatch x {\n  1 => 1,\n  _ => 0,\n}");
         assert!(!codes.contains(&"W207".to_string()), "should not warn: {:?}", codes);
+    }
+
+    // W200: snake_case suggestion
+    #[test]
+    fn test_w200_suggestion() {
+        let diags = lint_source("let myVar = 5;");
+        let w200 = diags.iter().find(|d| d.code.as_deref() == Some("W200")).unwrap();
+        assert!(w200.suggestion.as_ref().unwrap().contains("my_var"), "expected snake_case suggestion, got: {:?}", w200.suggestion);
+    }
+
+    // W208: duplicate imports
+    #[test]
+    fn test_w208_duplicate_import() {
+        let codes = lint_codes("import \"std\";\nimport \"std\";");
+        assert!(codes.contains(&"W208".to_string()), "expected W208, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w208_no_duplicate() {
+        let codes = lint_codes("import \"std\";\nimport \"io\";");
+        assert!(!codes.contains(&"W208".to_string()), "should not warn: {:?}", codes);
     }
 
     // Config: disabled rules

@@ -84,6 +84,8 @@ impl LanguageServer for MagiLanguageServer {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        // We advertise FULL sync, so take the last change which contains the full document.
+        // For FULL sync, there should be exactly one change, but last() is safe regardless.
         if let Some(change) = params.content_changes.into_iter().last() {
             self.on_change(params.text_document.uri, change.text)
                 .await;
@@ -149,7 +151,8 @@ impl LanguageServer for MagiLanguageServer {
         };
 
         let formatted = crate::formatter::format_program(program, &config);
-        let line_count = state.source.lines().count() as u32;
+        let last_line = state.source.lines().count().saturating_sub(1) as u32;
+        let last_line_len = state.source.lines().last().map_or(0, |l| l.len()) as u32;
 
         Ok(Some(vec![TextEdit {
             range: Range {
@@ -158,8 +161,8 @@ impl LanguageServer for MagiLanguageServer {
                     character: 0,
                 },
                 end: Position {
-                    line: line_count,
-                    character: 0,
+                    line: last_line,
+                    character: last_line_len,
                 },
             },
             new_text: formatted,

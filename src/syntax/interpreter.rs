@@ -708,7 +708,7 @@ impl<'a> Interpreter<'a> {
                     other => {
                         return Err(InterpError::TypeError {
                             expected: "Array".to_string(),
-                            actual: format!("{:?}", other),
+                            actual: other.type_name().to_string(),
                             context: "for loop iterable".to_string(),
                             span: iterable.span,
                         });
@@ -914,7 +914,8 @@ impl<'a> Interpreter<'a> {
                     Ok(val) => Ok(val),
                     Err(ref e) if is_control_flow(e) => {
                         if let Some(finally) = finally_block {
-                            let _ = self.exec_block(finally);
+                            // Finally errors propagate (override control flow).
+                            self.exec_block(finally)?;
                         }
                         return try_result;
                     }
@@ -933,7 +934,8 @@ impl<'a> Interpreter<'a> {
                     }
                 };
                 if let Some(finally) = finally_block {
-                    let _ = self.exec_block(finally);
+                    // Finally errors propagate (override try/catch result).
+                    self.exec_block(finally)?;
                 }
                 result
             }
@@ -1377,6 +1379,22 @@ impl<'a> Interpreter<'a> {
                 "abs" => Ok(Some(DataType::Int64(n.abs()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
+                "pow" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.wrapping_pow(exp as u32))))
+                }
+                "min" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MAX);
+                    Ok(Some(DataType::Int64((*n).min(other))))
+                }
+                "max" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MIN);
+                    Ok(Some(DataType::Int64((*n).max(other))))
+                }
+                "sign" => Ok(Some(DataType::Int64(n.signum()))),
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
                     let min_val = self.eval_expr(&args[0])?.to_i64().unwrap_or(i64::MIN);
@@ -1395,6 +1413,28 @@ impl<'a> Interpreter<'a> {
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "pow" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                    Ok(Some(DataType::Float64(n.powf(exp))))
+                }
+                "min" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::INFINITY);
+                    Ok(Some(DataType::Float64(n.min(other))))
+                }
+                "max" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::NEG_INFINITY);
+                    Ok(Some(DataType::Float64(n.max(other))))
+                }
+                "sign" => Ok(Some(DataType::Float64(n.signum()))),
+                "ln" => Ok(Some(DataType::Float64(n.ln()))),
+                "log2" => Ok(Some(DataType::Float64(n.log2()))),
+                "log10" => Ok(Some(DataType::Float64(n.log10()))),
+                "sin" => Ok(Some(DataType::Float64(n.sin()))),
+                "cos" => Ok(Some(DataType::Float64(n.cos()))),
+                "tan" => Ok(Some(DataType::Float64(n.tan()))),
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
                     let min_val = self.eval_expr(&args[0])?.to_f64().unwrap_or(f64::NEG_INFINITY);
@@ -1417,13 +1457,92 @@ impl<'a> Interpreter<'a> {
                 "abs" => Ok(Some(DataType::Int32(n.abs()))),
                 _ => Ok(None),
             },
-            // String methods (Phase 16)
+            // String methods (Phase 16+)
             DataType::String(s) => match method {
                 "is_empty" => Ok(Some(DataType::Bool(s.is_empty()))),
                 "is_numeric" => Ok(Some(DataType::Bool(s.chars().all(|c| c.is_numeric() || c == '.' || c == '-')))),
                 "is_alphabetic" => Ok(Some(DataType::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))),
                 "to_int" => Ok(Some(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null))),
                 "to_float" => Ok(Some(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null))),
+                "len" | "length" => Ok(Some(DataType::Int64(s.len() as i64))),
+                "trim" => Ok(Some(DataType::String(s.trim().to_string()))),
+                "trim_start" => Ok(Some(DataType::String(s.trim_start().to_string()))),
+                "trim_end" => Ok(Some(DataType::String(s.trim_end().to_string()))),
+                "to_upper" | "to_uppercase" => Ok(Some(DataType::String(s.to_uppercase()))),
+                "to_lower" | "to_lowercase" => Ok(Some(DataType::String(s.to_lowercase()))),
+                "reverse" => Ok(Some(DataType::String(s.chars().rev().collect()))),
+                "chars" => Ok(Some(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect()))),
+                "lines" => Ok(Some(DataType::Array(s.lines().map(|l| DataType::String(l.to_string())).collect()))),
+                "to_string" => Ok(Some(DataType::String(s.clone()))),
+                "split" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split".to_string(), expected: 1, actual: 0, span }); }
+                    let sep = match self.eval_expr(&args[0])? {
+                        DataType::String(sep) => sep,
+                        _ => return Err(InterpError::TypeError { expected: "String".to_string(), actual: "non-string".to_string(), context: "split separator".to_string(), span }),
+                    };
+                    Ok(Some(DataType::Array(s.split(&sep).map(|p| DataType::String(p.to_string())).collect())))
+                }
+                "replace" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "replace".to_string(), expected: 2, actual: args.len(), span }); }
+                    let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace pattern".to_string(), span }) };
+                    let to = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace replacement".to_string(), span }) };
+                    Ok(Some(DataType::String(s.replace(&from, &to))))
+                }
+                "contains" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains".to_string(), expected: 1, actual: 0, span }); }
+                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
+                    Ok(Some(DataType::Bool(s.contains(&needle))))
+                }
+                "starts_with" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "starts_with".to_string(), expected: 1, actual: 0, span }); }
+                    let prefix = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
+                    Ok(Some(DataType::Bool(s.starts_with(&prefix))))
+                }
+                "ends_with" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ends_with".to_string(), expected: 1, actual: 0, span }); }
+                    let suffix = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
+                    Ok(Some(DataType::Bool(s.ends_with(&suffix))))
+                }
+                "index_of" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "index_of".to_string(), expected: 1, actual: 0, span }); }
+                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Int64(-1))) };
+                    Ok(Some(match s.find(&needle) {
+                        Some(idx) => DataType::Int64(idx as i64),
+                        None => DataType::Int64(-1),
+                    }))
+                }
+                "repeat" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "repeat".to_string(), expected: 1, actual: 0, span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::String(s.repeat(n.max(0) as usize))))
+                }
+                "char_at" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_at".to_string(), expected: 1, actual: 0, span }); }
+                    let idx = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                    Ok(Some(s.chars().nth(idx.max(0) as usize).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null)))
+                }
+                "pad_start" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: 1, actual: 0, span }); }
+                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as usize;
+                    let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
+                    let pad_len = width.saturating_sub(s.len());
+                    Ok(Some(DataType::String(format!("{}{}", std::iter::repeat(pad_char).take(pad_len).collect::<String>(), s))))
+                }
+                "pad_end" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: 1, actual: 0, span }); }
+                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as usize;
+                    let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
+                    let pad_len = width.saturating_sub(s.len());
+                    Ok(Some(DataType::String(format!("{}{}", s, std::iter::repeat(pad_char).take(pad_len).collect::<String>()))))
+                }
+                "substring" | "slice" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: 1, actual: 0, span }); }
+                    let start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    let end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(s.len() as i64).max(0) as usize } else { s.len() };
+                    let start = start.min(s.len());
+                    let end = end.min(s.len());
+                    Ok(Some(DataType::String(s[start..end].to_string())))
+                }
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -1532,7 +1651,8 @@ impl<'a> Interpreter<'a> {
         };
 
         // Restore outer symbols and pop function's heap scope
-        self.symbols = self.saved_symbol_stacks.pop().unwrap_or_default();
+        self.symbols = self.saved_symbol_stacks.pop()
+            .expect("internal error: saved_symbol_stacks underflow in call_function");
         self.heap.pop_scope();
         self.call_depth -= 1;
 
@@ -1541,10 +1661,16 @@ impl<'a> Interpreter<'a> {
             debug.call_stack.pop();
         }
 
-        // Async functions return Future(Resolved(result))
+        // Async functions return Future(Resolved(result)), avoiding double-wrapping
         let is_async = self.async_fns.contains(name);
         if is_async {
-            result.map(|val| DataType::Future(Box::new(FutureState::Resolved(Box::new(val)))))
+            result.map(|val| {
+                if matches!(val, DataType::Future(_)) {
+                    val // Already a Future, don't double-wrap
+                } else {
+                    DataType::Future(Box::new(FutureState::Resolved(Box::new(val))))
+                }
+            })
         } else {
             result
         }
@@ -2320,7 +2446,7 @@ impl<'a> Interpreter<'a> {
                     }
                 })?;
                 // Validate variant exists
-                let _variant_def = variants.iter().find(|v| v.name == *variant).ok_or_else(|| {
+                let variant_def = variants.iter().find(|v| v.name == *variant).ok_or_else(|| {
                     InterpError::TypeError {
                         expected: format!("variant of {}", enum_name),
                         actual: variant.clone(),
@@ -2328,6 +2454,14 @@ impl<'a> Interpreter<'a> {
                         span: expr.span,
                     }
                 })?;
+                if args.len() != variant_def.fields.len() {
+                    return Err(InterpError::ArityMismatch {
+                        name: format!("{}::{}", enum_name, variant),
+                        expected: variant_def.fields.len(),
+                        actual: args.len(),
+                        span: expr.span,
+                    });
+                }
                 let evaluated_args: Vec<DataType> = args.iter()
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<_, _>>()?;
@@ -2365,6 +2499,18 @@ impl<'a> Interpreter<'a> {
                         });
                     }
                 }
+                // Reject unknown fields
+                let known_fields: Vec<&str> = field_defs.iter().map(|f| f.name.as_str()).collect();
+                for (field_name, _) in fields {
+                    if field_name != "__struct" && !known_fields.contains(&field_name.as_str()) {
+                        return Err(InterpError::TypeError {
+                            expected: format!("known field of struct '{}'", name),
+                            actual: field_name.clone(),
+                            context: format!("struct '{}' has no field '{}'", name, field_name),
+                            span: expr.span,
+                        });
+                    }
+                }
                 Ok(DataType::Map(map))
             }
 
@@ -2380,10 +2526,18 @@ impl<'a> Interpreter<'a> {
                         }
                         Ok(val)
                     }
-                    Err(e) if !is_control_flow(&e) => {
-                        Err(InterpError::ReturnSignal(DataType::String(format!("{}", e))))
+                    // Propagate control flow signals as-is
+                    Err(e) if is_control_flow(&e) => Err(e),
+                    // Convert runtime errors to ReturnSignal with error map
+                    Err(e) => {
+                        let mut err_map = std::collections::BTreeMap::new();
+                        err_map.insert("__enum".to_string(), DataType::String("Result".to_string()));
+                        err_map.insert("__variant".to_string(), DataType::String("Err".to_string()));
+                        err_map.insert("__data".to_string(), DataType::Array(vec![
+                            DataType::String(format!("{}", e)),
+                        ]));
+                        Err(InterpError::ReturnSignal(DataType::Map(err_map)))
                     }
-                    Err(e) => Err(e),
                 }
             }
 
@@ -2602,7 +2756,7 @@ impl<'a> Interpreter<'a> {
                         DestructureElement::Name(name) => {
                             let idx = if rest_pos.is_some_and(|rp| i > rp) {
                                 // Element after rest: index from end
-                                arr.len() - (elements.len() - i)
+                                arr.len().saturating_sub(elements.len().saturating_sub(i))
                             } else {
                                 i
                             };
@@ -2915,8 +3069,8 @@ impl<'a> Interpreter<'a> {
                     Err(e) if is_control_flow(&e) => {
                         results.push(TestResult {
                             name: name.clone(),
-                            passed: true,
-                            error_message: None,
+                            passed: false,
+                            error_message: Some(format!("unexpected control flow in test: {}", e)),
                         });
                     }
                     Err(e) => {
@@ -3543,13 +3697,22 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
 
 /// Match a value against a pattern, returning variable bindings on success.
 fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, DataType)>> {
+    match_pattern_depth(value, pattern, 0)
+}
+
+const MAX_PATTERN_DEPTH: usize = 64;
+
+fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Option<Vec<(String, DataType)>> {
+    if depth > MAX_PATTERN_DEPTH {
+        return None;
+    }
     match pattern {
         Pattern::Wildcard => Some(vec![]),
         Pattern::Variable(name) => Some(vec![(name.clone(), value.clone())]),
         Pattern::Literal(lit) => {
             let matches = match (lit, value) {
                 (Literal::Int64(a), DataType::Int64(b)) => a == b,
-                (Literal::Float64(a), DataType::Float64(b)) => (a - b).abs() < f64::EPSILON,
+                (Literal::Float64(a), DataType::Float64(b)) => a.to_bits() == b.to_bits(),
                 (Literal::String(a), DataType::String(b)) => a == b,
                 (Literal::Bool(a), DataType::Bool(b)) => a == b,
                 (Literal::Null, DataType::Null) => true,
@@ -3577,7 +3740,7 @@ fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, Dat
                 let mut bindings = vec![];
                 // Match elements before rest
                 for (i, pat) in patterns[..rp].iter().enumerate() {
-                    let sub = match_pattern(&arr[i], pat)?;
+                    let sub = match_pattern_depth(&arr[i], pat, depth + 1)?;
                     bindings.extend(sub);
                 }
                 // Match rest
@@ -3589,7 +3752,7 @@ fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, Dat
                 // Match elements after rest
                 for (i, pat) in patterns[rp + 1..].iter().enumerate() {
                     let idx = arr.len() - after + i;
-                    let sub = match_pattern(&arr[idx], pat)?;
+                    let sub = match_pattern_depth(&arr[idx], pat, depth + 1)?;
                     bindings.extend(sub);
                 }
                 Some(bindings)
@@ -3599,7 +3762,7 @@ fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, Dat
                 }
                 arr.iter().zip(patterns.iter())
                     .try_fold(vec![], |mut bindings, (elem, pat)| {
-                        bindings.extend(match_pattern(elem, pat)?);
+                        bindings.extend(match_pattern_depth(elem, pat, depth + 1)?);
                         Some(bindings)
                     })
             }
@@ -3611,13 +3774,13 @@ fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, Dat
             };
             entries.iter().try_fold(vec![], |mut bindings, (key, pat)| {
                 let val = map.get(key)?;
-                bindings.extend(match_pattern(val, pat)?);
+                bindings.extend(match_pattern_depth(val, pat, depth + 1)?);
                 Some(bindings)
             })
         }
         Pattern::Or(patterns) => {
             for pat in patterns {
-                if let Some(bindings) = match_pattern(value, pat) {
+                if let Some(bindings) = match_pattern_depth(value, pat, depth + 1) {
                     return Some(bindings);
                 }
             }
@@ -3648,7 +3811,7 @@ fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, Dat
             let mut all_bindings = Vec::new();
             for (i, pat) in bindings.iter().enumerate() {
                 if let Some(inner) = data.get(i) {
-                    let sub = match_pattern(inner, pat)?;
+                    let sub = match_pattern_depth(inner, pat, depth + 1)?;
                     all_bindings.extend(sub);
                 } else {
                     return None;

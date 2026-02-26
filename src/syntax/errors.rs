@@ -114,6 +114,8 @@ pub enum ErrorCode {
     W206,
     /// Unreachable match arm after wildcard
     W207,
+    /// Duplicate import
+    W208,
 }
 
 impl fmt::Display for ErrorCode {
@@ -162,6 +164,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W205 => "W205",
             ErrorCode::W206 => "W206",
             ErrorCode::W207 => "W207",
+            ErrorCode::W208 => "W208",
         };
         write!(f, "{}", code)
     }
@@ -225,6 +228,7 @@ impl ErrorCode {
             ErrorCode::W205 => "These parentheses are unnecessary and can be removed for cleaner code.",
             ErrorCode::W206 => "This block body is empty. Add statements or remove the block.",
             ErrorCode::W207 => "This match arm is unreachable because a previous wildcard or variable pattern already matches all values.",
+            ErrorCode::W208 => "This import path has already been imported. Remove the duplicate import.",
         }
     }
 }

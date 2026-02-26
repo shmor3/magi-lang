@@ -88,7 +88,7 @@ impl<'a> Formatter<'a> {
             return false;
         }
         match &block.tail_expr {
-            Some(expr) => self.expr_len(expr) < 40,
+            Some(expr) => self.expr_len(expr) < self.config.max_width / 2,
             None => true,
         }
     }
@@ -1109,6 +1109,21 @@ let origin = Point { x: 0.0, y: 0.0 };
 output f"Point: {origin}";
 "#;
         assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_short_block_respects_max_width() {
+        let source = "fn f() { some_long_variable_name + another_long_variable_name }";
+        // With narrow max_width, the block should be multiline
+        let program = parse_v2(source).expect("parse failed");
+        let narrow_config = FormatConfig { indent_width: 4, max_width: 40 };
+        let result = format_program(&program, &narrow_config);
+        assert!(result.contains('\n'), "expected multiline with narrow max_width: {}", result);
+
+        // With wide max_width, the block should inline
+        let wide_config = FormatConfig { indent_width: 4, max_width: 200 };
+        let result = format_program(&program, &wide_config);
+        assert!(result.contains("{ some_long_variable_name + another_long_variable_name }"), "expected inline with wide max_width: {}", result);
     }
 
     #[test]
