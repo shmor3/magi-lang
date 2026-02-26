@@ -110,6 +110,8 @@ struct TypeChecker {
     loop_depth: usize,
     /// Depth of function nesting (for return validation).
     function_depth: usize,
+    /// Declared return type of the current function (for return statement validation).
+    current_return_type: ChannelType,
 }
 
 impl TypeChecker {
@@ -123,6 +125,7 @@ impl TypeChecker {
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
+            current_return_type: ChannelType::Null,
         }
     }
 
@@ -566,6 +569,12 @@ impl TypeChecker {
             StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) => {
                 self.push_scope();
                 self.function_depth += 1;
+                let prev_return_type = std::mem::replace(
+                    &mut self.current_return_type,
+                    def.return_type.as_deref()
+                        .and_then(ChannelType::parse)
+                        .unwrap_or(ChannelType::Null),
+                );
                 // Define params as immutable variables
                 for param in &def.params {
                     let ct = param
@@ -621,6 +630,7 @@ impl TypeChecker {
                     }
                 }
                 self.function_depth -= 1;
+                self.current_return_type = prev_return_type;
                 self.pop_scope();
             }
 
@@ -659,7 +669,23 @@ impl TypeChecker {
                     );
                 }
                 if let Some(expr) = val_expr {
-                    let _ = self.infer_expr(expr);
+                    let ret_type = self.infer_expr(expr);
+                    // Validate return value against declared return type
+                    if self.current_return_type != ChannelType::Null
+                        && ret_type != ChannelType::Null
+                        && !ret_type.is_compatible_with(&self.current_return_type)
+                    {
+                        self.emit(
+                            stmt.span.start_line,
+                            stmt.span.start_col,
+                            format!(
+                                "return type mismatch: expected '{}' but returning '{}'",
+                                self.current_return_type.as_str(),
+                                ret_type.as_str(),
+                            ),
+                            DiagnosticSeverity::Error,
+                        );
+                    }
                 }
             }
 
@@ -875,7 +901,10 @@ impl TypeChecker {
                 if path.first().map(|s| s.as_str()) == Some("std") && path.len() >= 2 {
                     let known_modules = [
                         "math", "cmp", "logic", "bits", "str", "convert", "array", "map", "bytes",
-                        "json", "time", "hash", "io", "control",
+                        "json", "time", "hash", "io", "control", "rand", "fs", "env", "net", "tcp",
+                        "udp", "ws", "sse", "http_server", "path", "yaml", "csv", "toml", "regex",
+                        "uuid", "crypto", "compress", "fmt", "stats", "text", "encode", "reflect",
+                        "collections", "sort", "cert",
                     ];
                     if !known_modules.contains(&path[1].as_str()) {
                         self.emit(
@@ -1448,6 +1477,7 @@ impl TypeChecker {
             ExpressionKind::Lambda { params, body } => {
                 self.push_scope();
                 self.function_depth += 1;
+                let prev_return_type = std::mem::replace(&mut self.current_return_type, ChannelType::Null);
                 for param in params {
                     let ct = param
                         .type_annotation
@@ -1467,6 +1497,7 @@ impl TypeChecker {
                 }
                 let _ = self.infer_expr(body);
                 self.function_depth -= 1;
+                self.current_return_type = prev_return_type;
                 self.pop_scope();
                 // Lambdas are callable values — Null since we don't have a function type
                 ChannelType::Null
@@ -1766,7 +1797,7 @@ impl TypeChecker {
             Pattern::Or(alternatives) => {
                 // Bind vars from the first alternative (all should bind same names)
                 if let Some(first) = alternatives.first() {
-                    self.bind_pattern_vars(first, ChannelType::Null, span);
+                    self.bind_pattern_vars(first, val_type, span);
                 }
             }
             Pattern::Rest(name) => {

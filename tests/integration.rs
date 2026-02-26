@@ -2671,3 +2671,97 @@ fn test_formatter_nested_pipe_idempotency() {
     let second = format_program(&program2, &config);
     assert_eq!(first, second, "Nested pipe formatter should be idempotent");
 }
+
+// ===== Round 12: Method dispatch, type checker, and overflow fixes =====
+
+#[test]
+fn test_sort_by_floats() {
+    let src = r#"
+        let arr = [0.9, 0.1, 0.5, 0.3, 0.7];
+        arr.sort_by(|a, b| a - b)
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Float64(0.1),
+        DataType::Float64(0.3),
+        DataType::Float64(0.5),
+        DataType::Float64(0.7),
+        DataType::Float64(0.9),
+    ]));
+}
+
+#[test]
+fn test_sort_by_floats_descending() {
+    let src = r#"
+        let arr = [0.1, 0.9, 0.5];
+        arr.sort_by(|a, b| b - a)
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Float64(0.9),
+        DataType::Float64(0.5),
+        DataType::Float64(0.1),
+    ]));
+}
+
+#[test]
+fn test_abs_i64_min_overflow() {
+    // abs(i64::MIN) should return null instead of panicking
+    let src = r#"
+        let x = -9223372036854775807 - 1;
+        x.abs()
+    "#;
+    assert_eq!(run(src), DataType::Null);
+}
+
+#[test]
+fn test_pow_exponent_too_large() {
+    // Exponents > u32::MAX should return null, not wrap
+    let src = r#"
+        2.pow(4294967296)
+    "#;
+    assert_eq!(run(src), DataType::Null);
+}
+
+#[test]
+fn test_array_min_max_strings() {
+    let src = r#"
+        let arr = ["banana", "apple", "cherry"];
+        [arr.min(), arr.max()]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::String("apple".to_string()),
+        DataType::String("cherry".to_string()),
+    ]));
+}
+
+#[test]
+fn test_min_by_float_comparator() {
+    let src = r#"
+        let arr = [0.9, 0.1, 0.5];
+        arr.min_by(|a, b| a - b)
+    "#;
+    assert_eq!(run(src), DataType::Float64(0.1));
+}
+
+#[test]
+fn test_max_by_float_comparator() {
+    let src = r#"
+        let arr = [0.9, 0.1, 0.5];
+        arr.max_by(|a, b| a - b)
+    "#;
+    assert_eq!(run(src), DataType::Float64(0.9));
+}
+
+#[test]
+fn test_return_type_mismatch_caught() {
+    // Type checker should catch return type mismatches with explicit return
+    use magi_lang::syntax::parser::parse_v2;
+    use magi_lang::syntax::type_checker::check_types;
+    let src = r#"fn bad() -> int64 { return "not an int"; }
+let r = bad();
+output r;"#;
+    let program = parse_v2(src).unwrap();
+    let analysis = check_types(&program, &std::collections::HashSet::new());
+    assert!(analysis.diagnostics.iter().any(|d| d.message.contains("return type mismatch")),
+        "Expected return type mismatch error. Diagnostics: {:?}",
+        analysis.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>());
+}

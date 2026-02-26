@@ -1211,13 +1211,13 @@ impl<'a> Interpreter<'a> {
                             let mut j = i;
                             while j > 0 {
                                 let cmp = self.call_lambda_with_args(&args[0], &[sorted[j - 1].clone(), key.clone()], span)?;
-                                let cmp_val = cmp.to_i64().ok_or_else(|| InterpError::TypeError {
-                                    expected: "int64".to_string(),
+                                let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
+                                    expected: "number".to_string(),
                                     actual: datatype_type_name(&cmp).to_string(),
-                                    context: "sort_by comparator must return an integer".to_string(),
+                                    context: "sort_by comparator must return a number".to_string(),
                                     span,
                                 })?;
-                                if cmp_val > 0 {
+                                if cmp_val > 0.0 {
                                     sorted[j] = sorted[j - 1].clone();
                                     j -= 1;
                                 } else {
@@ -1242,34 +1242,36 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Map(map)))
                     }
                     "min_by" => {
-                        if args.is_empty() || arr.is_empty() { return Ok(Some(DataType::Null)); }
+                        if arr.is_empty() { return Ok(Some(DataType::Null)); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min_by".to_string(), expected: 1, actual: 0, span }); }
                         let mut min = arr[0].clone();
                         for item in &arr[1..] {
                             let cmp = self.call_lambda_with_args(&args[0], &[min.clone(), item.clone()], span)?;
-                            let cmp_val = cmp.to_i64().ok_or_else(|| InterpError::TypeError {
-                                expected: "int64".to_string(),
+                            let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
+                                expected: "number".to_string(),
                                 actual: datatype_type_name(&cmp).to_string(),
-                                context: "min_by comparator must return an integer".to_string(),
+                                context: "min_by comparator must return a number".to_string(),
                                 span,
                             })?;
-                            if cmp_val > 0 {
+                            if cmp_val > 0.0 {
                                 min = item.clone();
                             }
                         }
                         Ok(Some(min))
                     }
                     "max_by" => {
-                        if args.is_empty() || arr.is_empty() { return Ok(Some(DataType::Null)); }
+                        if arr.is_empty() { return Ok(Some(DataType::Null)); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max_by".to_string(), expected: 1, actual: 0, span }); }
                         let mut max = arr[0].clone();
                         for item in &arr[1..] {
                             let cmp = self.call_lambda_with_args(&args[0], &[max.clone(), item.clone()], span)?;
-                            let cmp_val = cmp.to_i64().ok_or_else(|| InterpError::TypeError {
-                                expected: "int64".to_string(),
+                            let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
+                                expected: "number".to_string(),
                                 actual: datatype_type_name(&cmp).to_string(),
-                                context: "max_by comparator must return an integer".to_string(),
+                                context: "max_by comparator must return a number".to_string(),
                                 span,
                             })?;
-                            if cmp_val < 0 {
+                            if cmp_val < 0.0 {
                                 max = item.clone();
                             }
                         }
@@ -1412,7 +1414,10 @@ impl<'a> Interpreter<'a> {
         match obj {
             // Number methods (Phase 13)
             DataType::Int64(n) => match method {
-                "abs" => Ok(Some(DataType::Int64(n.abs()))),
+                "abs" => Ok(Some(match n.checked_abs() {
+                    Some(v) => DataType::Int64(v),
+                    None => DataType::Null, // i64::MIN overflow
+                })),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "pow" => {
@@ -1424,6 +1429,8 @@ impl<'a> Interpreter<'a> {
                         if *n == 1 { Ok(Some(DataType::Int64(1))) }
                         else if *n == -1 { Ok(Some(DataType::Int64(if exp % 2 == 0 { 1 } else { -1 }))) }
                         else { Ok(Some(DataType::Int64(0))) }
+                    } else if exp > u32::MAX as i64 {
+                        Ok(Some(DataType::Null)) // exponent too large
                     } else {
                         match n.checked_pow(exp as u32) {
                             Some(result) => Ok(Some(DataType::Int64(result))),
@@ -1659,6 +1666,7 @@ impl<'a> Interpreter<'a> {
                             (DataType::Float64(a), DataType::Float64(b)) => *a > *b,
                             (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) > *b,
                             (DataType::Float64(a), DataType::Int64(b)) => *a > (*b as f64),
+                            (DataType::String(a), DataType::String(b)) => a > b,
                             _ => false,
                         };
                         if cmp { min = item.clone(); }
@@ -1674,6 +1682,7 @@ impl<'a> Interpreter<'a> {
                             (DataType::Float64(a), DataType::Float64(b)) => *a < *b,
                             (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) < *b,
                             (DataType::Float64(a), DataType::Int64(b)) => *a < (*b as f64),
+                            (DataType::String(a), DataType::String(b)) => a < b,
                             _ => false,
                         };
                         if cmp { max = item.clone(); }
@@ -2020,7 +2029,7 @@ impl<'a> Interpreter<'a> {
                             };
                             return Ok(DataType::Int64(length));
                         }
-                        return Ok(DataType::Int64(0));
+                        return Err(InterpError::ArityMismatch { name: "len".to_string(), expected: 1, actual: 0, span: expr.span });
                     }
                     "assert" => {
                         if let Some(arg) = args.first() {
