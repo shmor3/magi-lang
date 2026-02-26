@@ -405,6 +405,17 @@ impl<'a> Formatter<'a> {
         self.fmt_expression_prec(expr, 0);
     }
 
+    /// Flatten a chain of Pipe expressions into a list of stages (left-to-right).
+    fn collect_pipe_stages<'b>(&self, expr: &'b Expression, stages: &mut Vec<&'b Expression>) {
+        match &expr.kind {
+            ExpressionKind::Pipe { left, right } => {
+                self.collect_pipe_stages(left, stages);
+                self.collect_pipe_stages(right, stages);
+            }
+            _ => stages.push(expr),
+        }
+    }
+
     fn fmt_expression_prec(&mut self, expr: &Expression, parent_prec: u8) {
         match &expr.kind {
             ExpressionKind::Literal(lit) => self.fmt_literal(lit),
@@ -450,12 +461,17 @@ impl<'a> Formatter<'a> {
                 self.fmt_args(args, kwargs);
                 self.write(")");
             }
-            ExpressionKind::Pipe { left, right } => {
-                self.fmt_expression(left);
-                self.newline();
+            ExpressionKind::Pipe { .. } => {
+                // Flatten the pipe chain to avoid non-idempotent nested indentation
+                let mut stages = Vec::new();
+                self.collect_pipe_stages(expr, &mut stages);
+                self.fmt_expression(stages[0]);
                 self.indent();
-                self.write("|> ");
-                self.fmt_expression(right);
+                for stage in &stages[1..] {
+                    self.newline();
+                    self.write("|> ");
+                    self.fmt_expression(stage);
+                }
                 self.dedent();
             }
             ExpressionKind::IfElse {

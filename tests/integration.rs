@@ -2567,3 +2567,107 @@ fn test_sort_by_descending() {
         DataType::Int64(1),
     ]));
 }
+
+// ===== Round 11: Comprehension scope leaks and formatter fixes =====
+
+#[test]
+fn test_list_comprehension_error_scope_cleanup() {
+    // If an error occurs during list comprehension body eval,
+    // the scope must still be cleaned up properly. After the try/catch,
+    // subsequent code should work fine (no stale scopes).
+    let src = r#"
+        let result = try {
+            [1 / (x - 2) for x in [1, 2, 3]]
+        } catch e {
+            "caught"
+        };
+        let after = 42;
+        [result, after]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::String("caught".to_string()),
+        DataType::Int64(42),
+    ]));
+}
+
+#[test]
+fn test_list_comprehension_filter_error_scope_cleanup() {
+    // Error in the filter condition should also clean up scope
+    let src = r#"
+        let result = try {
+            [x for x in [1, 0, 3] if 1 / x > 0]
+        } catch e {
+            "filter_error"
+        };
+        let after = 99;
+        [result, after]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::String("filter_error".to_string()),
+        DataType::Int64(99),
+    ]));
+}
+
+#[test]
+fn test_map_comprehension_error_scope_cleanup() {
+    // Error in map comprehension value expression should clean up scope
+    let src = r#"
+        let result = try {
+            {"k": 1 / (x - 2) for x in [1, 2, 3]}
+        } catch e {
+            "map_caught"
+        };
+        let after = 77;
+        [result, after]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::String("map_caught".to_string()),
+        DataType::Int64(77),
+    ]));
+}
+
+#[test]
+fn test_map_comprehension_destructure_error_scope_cleanup() {
+    // Error in map comprehension destructure binding should clean up scope
+    let src = r#"
+        let result = try {
+            {"k": v for [k, v] in [[1, 2], "bad", [3, 4]]}
+        } catch e {
+            "destr_error"
+        };
+        let after = 55;
+        [result, after]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::String("destr_error".to_string()),
+        DataType::Int64(55),
+    ]));
+}
+
+#[test]
+fn test_formatter_pipe_idempotency() {
+    // Formatter should be idempotent: format(format(x)) == format(x)
+    use magi_lang::formatter::{format_program, FormatConfig};
+    use magi_lang::syntax::parser::parse_v2;
+    let src = "let x = a |> (b |> c);";
+    let program = parse_v2(src).unwrap();
+    let config = FormatConfig::default();
+    let first = format_program(&program, &config);
+    let program2 = parse_v2(&first).unwrap();
+    let second = format_program(&program2, &config);
+    assert_eq!(first, second, "Pipe formatter should be idempotent");
+}
+
+#[test]
+fn test_formatter_nested_pipe_idempotency() {
+    // More complex nested pipes
+    use magi_lang::formatter::{format_program, FormatConfig};
+    use magi_lang::syntax::parser::parse_v2;
+    let src = "let x = (a |> b) |> (c |> d);";
+    let program = parse_v2(src).unwrap();
+    let config = FormatConfig::default();
+    let first = format_program(&program, &config);
+    let program2 = parse_v2(&first).unwrap();
+    let second = format_program(&program2, &config);
+    assert_eq!(first, second, "Nested pipe formatter should be idempotent");
+}

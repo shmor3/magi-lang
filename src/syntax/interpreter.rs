@@ -2531,17 +2531,24 @@ impl<'a> Interpreter<'a> {
                         self.symbols.pop();
                         return Err(e);
                     }
-                    let include = if let Some(cond) = condition {
-                        let cond_val = self.eval_expr(cond)?;
-                        cond_val.to_bool()
-                    } else {
-                        true
-                    };
-                    if include {
-                        result.push(self.eval_expr(body_expr)?);
-                    }
+                    let iter_result = (|| {
+                        let include = if let Some(cond) = condition {
+                            let cond_val = self.eval_expr(cond)?;
+                            cond_val.to_bool()
+                        } else {
+                            true
+                        };
+                        if include {
+                            Ok(Some(self.eval_expr(body_expr)?))
+                        } else {
+                            Ok(None)
+                        }
+                    })();
                     self.heap.pop_scope();
                     self.symbols.pop();
+                    if let Some(val) = iter_result? {
+                        result.push(val);
+                    }
                 }
                 Ok(DataType::Array(result))
             }
@@ -2561,37 +2568,46 @@ impl<'a> Interpreter<'a> {
                 for item in items {
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
-                    match pattern {
-                        ForPattern::Single(name) => {
-                            let addr = self.heap.alloc(item);
-                            self.define(name, addr, false);
-                        }
-                        ForPattern::ArrayDestructure(elements) => {
-                            let destr = DestructurePattern::Array(elements.clone());
-                            self.destructure_bind(&destr, &item, false, expr.span)?;
-                        }
-                        ForPattern::MapDestructure(entries) => {
-                            let destr = DestructurePattern::Map(entries.clone());
-                            self.destructure_bind(&destr, &item, false, expr.span)?;
-                        }
-                    }
-                    let include = if let Some(cond) = condition {
-                        let cond_val = self.eval_expr(cond)?;
-                        cond_val.to_bool()
-                    } else {
-                        true
-                    };
-                    if include {
-                        let k = self.eval_expr(key_expr)?;
-                        let v = self.eval_expr(value_expr)?;
-                        let key_str = match k {
-                            DataType::String(s) => s,
-                            other => other.to_string_lossy(),
+                    let iter_result = (|| {
+                        let bind_result = match pattern {
+                            ForPattern::Single(name) => {
+                                let addr = self.heap.alloc(item);
+                                self.define(name, addr, false);
+                                Ok(())
+                            }
+                            ForPattern::ArrayDestructure(elements) => {
+                                let destr = DestructurePattern::Array(elements.clone());
+                                self.destructure_bind(&destr, &item, false, expr.span)
+                            }
+                            ForPattern::MapDestructure(entries) => {
+                                let destr = DestructurePattern::Map(entries.clone());
+                                self.destructure_bind(&destr, &item, false, expr.span)
+                            }
                         };
-                        result.insert(key_str, v);
-                    }
+                        bind_result?;
+                        let include = if let Some(cond) = condition {
+                            let cond_val = self.eval_expr(cond)?;
+                            cond_val.to_bool()
+                        } else {
+                            true
+                        };
+                        if include {
+                            let k = self.eval_expr(key_expr)?;
+                            let v = self.eval_expr(value_expr)?;
+                            let key_str = match k {
+                                DataType::String(s) => s,
+                                other => other.to_string_lossy(),
+                            };
+                            Ok(Some((key_str, v)))
+                        } else {
+                            Ok(None)
+                        }
+                    })();
                     self.heap.pop_scope();
                     self.symbols.pop();
+                    if let Some((k, v)) = iter_result? {
+                        result.insert(k, v);
+                    }
                 }
                 Ok(DataType::Map(result))
             }
