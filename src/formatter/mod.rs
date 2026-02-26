@@ -232,7 +232,15 @@ impl<'a> Formatter<'a> {
             }
             StatementKind::ExprStatement(expr) => {
                 self.fmt_expression(expr);
-                self.write(";");
+                // Skip semicolons for block-ending expressions
+                match &expr.kind {
+                    ExpressionKind::IfElse { .. }
+                    | ExpressionKind::Match { .. }
+                    | ExpressionKind::Loop { .. }
+                    | ExpressionKind::Block(_)
+                    | ExpressionKind::TryCatchExpr { .. } => {}
+                    _ => self.write(";"),
+                }
             }
             StatementKind::FunctionDef(fdef) => {
                 self.write("fn ");
@@ -519,6 +527,17 @@ impl<'a> Formatter<'a> {
                 self.write(" ");
                 self.fmt_block(then_block);
                 if let Some(eb) = else_block {
+                    // Detect else-if chain: else block has no statements and
+                    // its tail_expr is another IfElse
+                    if eb.statements.is_empty() {
+                        if let Some(tail) = &eb.tail_expr {
+                            if matches!(tail.kind, ExpressionKind::IfElse { .. }) {
+                                self.write(" else ");
+                                self.fmt_expression(tail);
+                                return;
+                            }
+                        }
+                    }
                     self.write(" else ");
                     self.fmt_block(eb);
                 }
@@ -878,8 +897,7 @@ impl<'a> Formatter<'a> {
                 if inline_len < self.config.max_width / 2 {
                     self.write("{");
                     for (i, (key, val)) in entries.iter().enumerate() {
-                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
-                        self.write(&format!("\"{}\": ", escaped_key));
+                        self.write(&format!("\"{}\": ", escape_string_contents(key)));
                         self.fmt_expression(val);
                         if i < entries.len() - 1 {
                             self.write(", ");
@@ -891,8 +909,7 @@ impl<'a> Formatter<'a> {
                     self.newline();
                     self.indent();
                     for (i, (key, val)) in entries.iter().enumerate() {
-                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
-                        self.write(&format!("\"{}\": ", escaped_key));
+                        self.write(&format!("\"{}\": ", escape_string_contents(key)));
                         self.fmt_expression(val);
                         if i < entries.len() - 1 {
                             self.write(",");

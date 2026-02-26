@@ -1958,14 +1958,18 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::LocalSet(t3)); // inclusive flag
 
-                        // Save end, untag to raw i64
-                        f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
-                        f.instruction(&WasmInst::I64And);
+                        // Save end, sign-extend from 56 bits to full i64
+                        f.instruction(&WasmInst::I64Const(8));
+                        f.instruction(&WasmInst::I64Shl);
+                        f.instruction(&WasmInst::I64Const(8));
+                        f.instruction(&WasmInst::I64ShrS);
                         f.instruction(&WasmInst::LocalSet(t1)); // end
 
-                        // Save start, untag to raw i64
-                        f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
-                        f.instruction(&WasmInst::I64And);
+                        // Save start, sign-extend from 56 bits to full i64
+                        f.instruction(&WasmInst::I64Const(8));
+                        f.instruction(&WasmInst::I64Shl);
+                        f.instruction(&WasmInst::I64Const(8));
+                        f.instruction(&WasmInst::I64ShrS);
                         f.instruction(&WasmInst::LocalSet(t0)); // start
 
                         // If inclusive, end = end + 1

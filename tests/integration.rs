@@ -4646,3 +4646,136 @@ fn test_incomplete_enum_match_warns() {
         .collect();
     assert!(!w203.is_empty(), "should warn W203 on incomplete enum match");
 }
+
+// ── Round 34: Formatter, LSP, and WASM compiler fixes ──────────────
+
+#[test]
+fn test_formatter_else_if_chain() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+
+    let src = r#"
+let x = if true { 1 } else if false { 2 } else { 3 }
+"#;
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    // Should format as `else if`, not `else { if ... }`
+    assert!(
+        formatted.contains("else if"),
+        "else-if chain should be formatted as 'else if', got:\n{}",
+        formatted
+    );
+    assert!(
+        !formatted.contains("else {\n    if"),
+        "else-if should not be wrapped in a block, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn test_formatter_no_semicolon_after_block_expr() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+
+    let src = "if true { 1 } else { 2 }";
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    // Expression statement ending with if/else should not have semicolon
+    assert!(
+        !formatted.trim().ends_with(';'),
+        "block expression statement should not end with semicolon, got: '{}'",
+        formatted.trim()
+    );
+}
+
+#[test]
+fn test_formatter_map_key_escaping() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+
+    let src = r#"let m = {"hello\nworld": 1, "tab\there": 2}"#;
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    // Keys with \n and \t should be properly escaped
+    assert!(
+        formatted.contains(r#"hello\nworld"#),
+        "newline in key should be escaped, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains(r#"tab\there"#),
+        "tab in key should be escaped, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn test_wasm_null_coalesce_compiles() {
+    use magi_lang::compiler::compile_to_wasm;
+
+    let src = r#"
+let x = null
+let y = x ?? "default"
+output y
+"#;
+    let program = parse(src);
+    let result = compile_to_wasm(&program);
+    assert!(
+        result.is_ok(),
+        "null coalesce should compile to valid WASM, got error: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_wasm_null_coalesce_with_value() {
+    use magi_lang::compiler::compile_to_wasm;
+
+    let src = r#"
+let x = 42
+let y = x ?? 0
+output y
+"#;
+    let program = parse(src);
+    let result = compile_to_wasm(&program);
+    assert!(result.is_ok(), "null coalesce with non-null should compile");
+}
+
+#[test]
+fn test_formatter_match_no_semicolon() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+
+    let src = r#"
+match x {
+    1 => "one",
+    _ => "other",
+}
+"#;
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    let trimmed = formatted.trim();
+    assert!(
+        !trimmed.ends_with("};"),
+        "match expression statement should not end with semicolon after closing brace, got: '{}'",
+        trimmed
+    );
+}
+
+#[test]
+fn test_formatter_idempotent_else_if() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+
+    let src = r#"
+let x = 5
+let result = if x > 10 {
+    "big"
+} else if x > 5 {
+    "medium"
+} else {
+    "small"
+}
+"#;
+    let program = parse(src);
+    let config = FormatConfig::default();
+    let first = format_program(&program, &config);
+    let program2 = parse(&first);
+    let second = format_program(&program2, &config);
+    assert_eq!(first, second, "else-if formatting should be idempotent");
+}

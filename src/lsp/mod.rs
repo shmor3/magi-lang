@@ -164,7 +164,9 @@ impl LanguageServer for MagiLanguageServer {
         } else if lines.is_empty() {
             (0u32, 0u32)
         } else {
-            ((lines.len().saturating_sub(1)) as u32, lines.last().map_or(0, |l| l.chars().count()) as u32)
+            let last = lines.last().unwrap();
+            let utf16_len: u32 = last.chars().map(|c| c.len_utf16() as u32).sum();
+            ((lines.len().saturating_sub(1)) as u32, utf16_len)
         };
 
         Ok(Some(vec![TextEdit {

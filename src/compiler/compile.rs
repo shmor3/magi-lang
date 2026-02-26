@@ -868,15 +868,17 @@ impl Compiler {
 
             ExpressionKind::NullCoalesce { left, right } => {
                 self.compile_expr(left)?;
-                // If not null, keep; else evaluate right.
+                // If null, evaluate right; else keep left.
                 let temp = self.ensure_temp_local()?;
-                self.emit(Instruction::LocalTee(temp));
+                self.emit(Instruction::LocalSet(temp));
+                self.emit(Instruction::LocalGet(temp));
                 self.emit(Instruction::GetTag);
                 self.emit(Instruction::PushI64(tag::NULL as i64));
                 self.emit(Instruction::I64Eq);
                 self.emit(Instruction::If);
-                self.emit(Instruction::Drop);
                 self.compile_expr(right)?;
+                self.emit(Instruction::Else);
+                self.emit(Instruction::LocalGet(temp));
                 self.emit(Instruction::End);
             }
 

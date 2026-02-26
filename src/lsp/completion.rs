@@ -1,6 +1,6 @@
 //! Completion provider for the MAGI LSP.
 
-use super::analysis::DocumentState;
+use super::analysis::{utf16_to_char_col, DocumentState};
 use tower_lsp::lsp_types::*;
 
 /// MAGI language keywords.
@@ -18,10 +18,11 @@ const BUILTINS: &[&str] = &[
 ];
 
 /// Find the word prefix (text before cursor only) at a given position.
+/// `character` is a 0-based UTF-16 code unit offset (per LSP spec).
 fn find_prefix_at_position(source: &str, line: u32, character: u32) -> Option<String> {
     let target_line = source.lines().nth(line as usize)?;
     let chars: Vec<char> = target_line.chars().collect();
-    let col = character as usize;
+    let col = utf16_to_char_col(target_line, character) as usize;
 
     if col > chars.len() {
         return None;
