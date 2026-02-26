@@ -880,24 +880,30 @@ fn test_const_binding() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-fn test_compile_showcase() {
+fn test_compile_showcase_rejects_guards() {
+    // The showcase uses match guards which are not yet supported in WASM compilation.
     let src = include_str!("../examples/showcase/main.magi");
     let program = parse(src);
     let mut compiler_inst = compiler::Compiler::new();
-    let module = compiler_inst.compile(&program).unwrap();
-
-    // Verify basic structure.
-    assert!(module.functions.iter().any(|f| f.name == "__main"));
-    assert!(module.functions.iter().any(|f| f.name == "distance"));
-    assert!(module.functions.iter().any(|f| f.name == "area"));
-    assert!(module.functions.iter().any(|f| f.name == "sum"));
-    assert!(module.functions.iter().any(|f| f.name == "safe_divide"));
-    assert!(module.functions.iter().any(|f| f.name == "classify"));
+    let result = compiler_inst.compile(&program);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("match guards"), "expected match guard error, got: {err}");
 }
 
 #[test]
-fn test_compile_to_wasm_showcase() {
-    let src = include_str!("../examples/showcase/main.magi");
+fn test_compile_to_wasm_basic() {
+    // Test WASM compilation with a program that doesn't use unsupported features.
+    let src = r#"
+        fn distance(x1, y1, x2, y2) {
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            dx * dx + dy * dy
+        }
+        fn area(w, h) { w * h }
+        let result = distance(0, 0, 3, 4);
+        let a = area(5, 10);
+    "#;
     let program = parse(src);
     let wasm = compiler::compile_to_wasm(&program).unwrap();
 
@@ -5032,4 +5038,85 @@ result
         }
         other => panic!("expected Map, got {:?}", other),
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Round 38: Lexer, method, and WASM compiler fixes
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_fstring_unmatched_closing_brace_error() {
+    let result = parse_v2(r#"f"hello }"#);
+    assert!(result.is_err(), "expected parse error for unmatched closing brace in f-string");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Unmatched '}'"), "expected brace error, got: {err}");
+}
+
+#[test]
+fn test_fstring_interpolation_still_works() {
+    let result = run(r#"let x = 42; f"value is {x}""#);
+    assert_eq!(result, DataType::String("value is 42".to_string()));
+}
+
+#[test]
+fn test_split_empty_separator_error() {
+    let err = run_err(r#""hello".split("")"#).to_string();
+    assert!(err.contains("non-empty separator") || err.contains("empty string"),
+        "expected empty separator error, got: {err}");
+}
+
+#[test]
+fn test_split_nonempty_sep_works() {
+    let result = run(r#""a,b,c".split(",")"#);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 3);
+            assert_eq!(arr[0], DataType::String("a".to_string()));
+            assert_eq!(arr[1], DataType::String("b".to_string()));
+            assert_eq!(arr[2], DataType::String("c".to_string()));
+        }
+        other => panic!("expected Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_min_max_mixed_types_error() {
+    let err = run_err(r#"[1, "hello"].min()"#).to_string();
+    assert!(err.contains("comparable"), "expected comparable error, got: {err}");
+}
+
+#[test]
+fn test_min_max_mixed_numeric_ok() {
+    let result = run(r#"[5, 3.0, 7, 1.5].min()"#);
+    assert_eq!(result, DataType::Float64(1.5));
+}
+
+#[test]
+fn test_wasm_match_guard_rejected() {
+    let src = r#"
+        fn classify(x) {
+            match x {
+                n if n > 10 => "big",
+                _ => "small",
+            }
+        }
+    "#;
+    let program = parse(src);
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("match guards"), "expected guard error, got: {err}");
+}
+
+#[test]
+fn test_wasm_array_spread_rejected() {
+    let src = r#"
+        let a = [1, 2, 3];
+        let b = [0, ...a, 4];
+    "#;
+    let program = parse(src);
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("spread"), "expected spread error, got: {err}");
 }

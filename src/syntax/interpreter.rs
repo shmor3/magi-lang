@@ -1623,6 +1623,9 @@ impl<'a> Interpreter<'a> {
                         DataType::String(sep) => sep,
                         _ => return Err(InterpError::TypeError { expected: "String".to_string(), actual: "non-string".to_string(), context: "split separator".to_string(), span }),
                     };
+                    if sep.is_empty() {
+                        return Err(InterpError::TypeError { expected: "non-empty separator".to_string(), actual: "empty string".to_string(), context: "split separator".to_string(), span });
+                    }
                     let parts: Vec<DataType> = s.split(&sep).take(MAX_ARRAY_ELEMENTS + 1).map(|p| DataType::String(p.to_string())).collect();
                     if parts.len() > MAX_ARRAY_ELEMENTS {
                         return Err(InterpError::TypeError { expected: format!("split result at most {} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "string split".to_string(), span });
@@ -1817,7 +1820,7 @@ impl<'a> Interpreter<'a> {
                             (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) > *b,
                             (DataType::Float64(a), DataType::Int64(b)) => *a > (*b as f64),
                             (DataType::String(a), DataType::String(b)) => a > b,
-                            _ => false,
+                            _ => return Err(InterpError::TypeError { expected: "comparable types (all numbers or all strings)".to_string(), actual: format!("{} and {}", min.type_name(), item.type_name()), context: "array min".to_string(), span }),
                         };
                         if cmp { min = item.clone(); }
                     }
@@ -1833,7 +1836,7 @@ impl<'a> Interpreter<'a> {
                             (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) < *b,
                             (DataType::Float64(a), DataType::Int64(b)) => *a < (*b as f64),
                             (DataType::String(a), DataType::String(b)) => a < b,
-                            _ => false,
+                            _ => return Err(InterpError::TypeError { expected: "comparable types (all numbers or all strings)".to_string(), actual: format!("{} and {}", max.type_name(), item.type_name()), context: "array max".to_string(), span }),
                         };
                         if cmp { max = item.clone(); }
                     }

@@ -962,6 +962,12 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     if brace_depth > 0 {
                         brace_depth -= 1;
+                    } else {
+                        return Err(SyntaxError {
+                            line: self.line as usize,
+                            column: self.col as usize,
+                            message: "Unmatched '}' in f-string; use '\\}' for a literal brace".to_string(),
+                        });
                     }
                     value.push('}');
                 }

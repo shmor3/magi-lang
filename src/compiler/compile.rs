@@ -1015,6 +1015,11 @@ impl Compiler {
             Literal::Null => self.emit(Instruction::PushNull),
             Literal::Array(elems) => {
                 for elem in elems {
+                    if matches!(&elem.kind, ExpressionKind::Spread(_)) {
+                        return Err(CompileError::Internal(
+                            "spread in array literals is not yet supported in WASM compilation".into(),
+                        ));
+                    }
                     self.compile_expr(elem)?;
                 }
                 self.emit(Instruction::ArrayNew(elems.len() as u32));
@@ -1318,6 +1323,17 @@ impl Compiler {
         self.compile_expr(value)?;
         let val_local = self.define_local("__match_val", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(val_local));
+
+        // Check for unsupported features — match guards.
+        for arm in arms {
+            if arm.guard.is_some() {
+                return Err(CompileError::at(
+                    arm.span.start_line,
+                    arm.span.start_col,
+                    "match guards (`if` conditions) are not yet supported in WASM compilation".to_string(),
+                ));
+            }
+        }
 
         // Compile as chain of if-else.
         for (i, arm) in arms.iter().enumerate() {
