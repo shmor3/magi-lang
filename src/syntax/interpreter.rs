@@ -714,9 +714,24 @@ impl<'a> Interpreter<'a> {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     DataType::Array(arr) => arr,
+                    DataType::Map(map) => {
+                        map.into_iter()
+                            .map(|(k, v)| {
+                                let mut entry = std::collections::BTreeMap::new();
+                                entry.insert("key".to_string(), DataType::String(k));
+                                entry.insert("value".to_string(), v);
+                                DataType::Map(entry)
+                            })
+                            .collect()
+                    }
+                    DataType::String(s) => {
+                        s.chars()
+                            .map(|c| DataType::String(c.to_string()))
+                            .collect()
+                    }
                     other => {
                         return Err(InterpError::TypeError {
-                            expected: "Array".to_string(),
+                            expected: "Array, Map, or String".to_string(),
                             actual: other.type_name().to_string(),
                             context: "for loop iterable".to_string(),
                             span: iterable.span,
@@ -2740,8 +2755,23 @@ impl<'a> Interpreter<'a> {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     DataType::Array(arr) => arr,
+                    DataType::Map(map) => {
+                        map.into_iter()
+                            .map(|(k, v)| {
+                                let mut entry = std::collections::BTreeMap::new();
+                                entry.insert("key".to_string(), DataType::String(k));
+                                entry.insert("value".to_string(), v);
+                                DataType::Map(entry)
+                            })
+                            .collect()
+                    }
+                    DataType::String(s) => {
+                        s.chars()
+                            .map(|c| DataType::String(c.to_string()))
+                            .collect()
+                    }
                     other => return Err(InterpError::TypeError {
-                        expected: "Array".to_string(),
+                        expected: "Array, Map, or String".to_string(),
                         actual: datatype_type_name(&other).to_string(),
                         context: "list comprehension".to_string(),
                         span: iterable.span,
@@ -2800,8 +2830,23 @@ impl<'a> Interpreter<'a> {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     DataType::Array(arr) => arr,
+                    DataType::Map(map) => {
+                        map.into_iter()
+                            .map(|(k, v)| {
+                                let mut entry = std::collections::BTreeMap::new();
+                                entry.insert("key".to_string(), DataType::String(k));
+                                entry.insert("value".to_string(), v);
+                                DataType::Map(entry)
+                            })
+                            .collect()
+                    }
+                    DataType::String(s) => {
+                        s.chars()
+                            .map(|c| DataType::String(c.to_string()))
+                            .collect()
+                    }
                     other => return Err(InterpError::TypeError {
-                        expected: "Array".to_string(),
+                        expected: "Array, Map, or String".to_string(),
                         actual: datatype_type_name(&other).to_string(),
                         context: "map comprehension".to_string(),
                         span: iterable.span,

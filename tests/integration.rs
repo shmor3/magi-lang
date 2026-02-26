@@ -4904,3 +4904,132 @@ p
         other => panic!("expected Map, got {:?}", other),
     }
 }
+
+// ── Round 37: Map and string iteration ───────────────────────────────
+
+#[test]
+fn test_for_loop_string_iteration() {
+    // Use a counter to verify iteration count; can't use .concat() with StubEvaluator
+    let src = r#"
+let mut count = 0
+let mut last = ""
+for ch in "hello" {
+    count = count + 1
+    last = ch
+}
+[count, last]
+"#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr[0], DataType::Int64(5));
+            assert_eq!(arr[1], DataType::String("o".to_string()));
+        }
+        other => panic!("expected Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_for_loop_map_iteration() {
+    let src = r#"
+let m = {"a": 1, "b": 2}
+let mut count = 0
+let mut last_key = ""
+for {key} in m {
+    count = count + 1
+    last_key = key
+}
+[count, last_key]
+"#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr[0], DataType::Int64(2));
+            // BTreeMap is ordered — last key is "b"
+            assert_eq!(arr[1], DataType::String("b".to_string()));
+        }
+        other => panic!("expected Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_for_loop_map_key_value() {
+    let src = r#"
+let m = {"x": 10}
+let mut total = 0
+for {key, value} in m {
+    total = value
+}
+total
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_list_comprehension_string() {
+    let src = r#"
+let chars = [ch for ch in "abc"]
+chars
+"#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 3);
+            assert_eq!(arr[0], DataType::String("a".to_string()));
+            assert_eq!(arr[2], DataType::String("c".to_string()));
+        }
+        other => panic!("expected Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_list_comprehension_map_iteration() {
+    // Iterate over map using single variable (each item is a {key, value} map)
+    let src = r#"
+let m = {"a": 1, "b": 2, "c": 3}
+let entries = [entry for entry in m]
+entries
+"#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 3);
+        }
+        other => panic!("expected Array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_for_loop_empty_string() {
+    let src = r#"
+let mut count = 0
+for ch in "" {
+    count = count + 1
+}
+count
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(0));
+}
+
+#[test]
+fn test_for_loop_map_single_var() {
+    // Iterate map with single variable: each item is {key: "...", value: ...}
+    let src = r#"
+let m = {"x": 42}
+let mut result = null
+for entry in m {
+    result = entry
+}
+result
+"#;
+    let result = run(src);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("key"), Some(&DataType::String("x".to_string())));
+            assert_eq!(m.get("value"), Some(&DataType::Int64(42)));
+        }
+        other => panic!("expected Map, got {:?}", other),
+    }
+}
