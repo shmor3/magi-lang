@@ -22,6 +22,12 @@ const MAX_CALL_DEPTH: usize = 48;
 /// GC trigger threshold: collect after this many allocations since last GC.
 const GC_ALLOC_THRESHOLD: usize = 256;
 
+/// Maximum output string length (10 MB).
+const MAX_STRING_OUTPUT: usize = 10_000_000;
+
+/// Maximum array element count.
+const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
+
 /// A resolved package with its functions pre-extracted
 #[derive(Debug, Clone)]
 pub struct ResolvedPackage {
@@ -1133,6 +1139,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             result.push(self.call_lambda_with_args(&args[0], &[item.clone()], span)?);
                         }
                         Ok(Some(DataType::Array(result)))
@@ -1141,6 +1148,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let keep = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if keep.to_bool() {
                                 result.push(item.clone());
@@ -1152,6 +1160,7 @@ impl<'a> Interpreter<'a> {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "reduce".to_string(), expected: 2, actual: args.len(), span }); }
                         let mut acc = self.eval_expr(&args[0])?;
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             acc = self.call_lambda_with_args(&args[1], &[acc, item.clone()], span)?;
                         }
                         Ok(Some(acc))
@@ -1159,6 +1168,7 @@ impl<'a> Interpreter<'a> {
                     "find" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find".to_string(), expected: 1, actual: 0, span }); }
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if matches.to_bool() {
                                 return Ok(Some(item.clone()));
@@ -1169,6 +1179,7 @@ impl<'a> Interpreter<'a> {
                     "find_index" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find_index".to_string(), expected: 1, actual: 0, span }); }
                         for (i, item) in arr.iter().enumerate() {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if matches.to_bool() {
                                 return Ok(Some(DataType::Int64(i as i64)));
@@ -1179,6 +1190,7 @@ impl<'a> Interpreter<'a> {
                     "any" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "any".to_string(), expected: 1, actual: 0, span }); }
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if matches.to_bool() {
                                 return Ok(Some(DataType::Bool(true)));
@@ -1189,6 +1201,7 @@ impl<'a> Interpreter<'a> {
                     "all" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "all".to_string(), expected: 1, actual: 0, span }); }
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if !matches.to_bool() {
                                 return Ok(Some(DataType::Bool(false)));
@@ -1200,6 +1213,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "flat_map".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let mapped = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             match mapped {
                                 DataType::Array(inner) => result.extend(inner),
@@ -1211,6 +1225,7 @@ impl<'a> Interpreter<'a> {
                     "each" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "each".to_string(), expected: 1, actual: 0, span }); }
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                         }
                         Ok(Some(DataType::Null))
@@ -1220,6 +1235,7 @@ impl<'a> Interpreter<'a> {
                         let mut sorted = arr.clone();
                         // Simple insertion sort with comparator
                         for i in 1..sorted.len() {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let key = sorted[i].clone();
                             let mut j = i;
                             while j > 0 {
@@ -1245,6 +1261,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "group_by".to_string(), expected: 1, actual: 0, span }); }
                         let mut groups: std::collections::BTreeMap<String, Vec<DataType>> = std::collections::BTreeMap::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let key = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             let key_str = key.to_string_lossy();
                             groups.entry(key_str).or_default().push(item.clone());
@@ -1259,6 +1276,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min_by".to_string(), expected: 1, actual: 0, span }); }
                         let mut min = arr[0].clone();
                         for item in &arr[1..] {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let cmp = self.call_lambda_with_args(&args[0], &[min.clone(), item.clone()], span)?;
                             let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
                                 expected: "number".to_string(),
@@ -1277,6 +1295,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max_by".to_string(), expected: 1, actual: 0, span }); }
                         let mut max = arr[0].clone();
                         for item in &arr[1..] {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let cmp = self.call_lambda_with_args(&args[0], &[max.clone(), item.clone()], span)?;
                             let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
                                 expected: "number".to_string(),
@@ -1294,6 +1313,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "take_while".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let keep = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if !keep.to_bool() { break; }
                             result.push(item.clone());
@@ -1305,6 +1325,7 @@ impl<'a> Interpreter<'a> {
                         let mut skipping = true;
                         let mut result = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             if skipping {
                                 let skip = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                                 if skip.to_bool() { continue; }
@@ -1319,6 +1340,7 @@ impl<'a> Interpreter<'a> {
                         let mut trues = Vec::new();
                         let mut falses = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
                             if matches.to_bool() {
                                 trues.push(item.clone());
@@ -1336,6 +1358,7 @@ impl<'a> Interpreter<'a> {
                         let mut acc = self.eval_expr(&args[0])?;
                         let mut result = Vec::new();
                         for item in arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             acc = self.call_lambda_with_args(&args[1], &[acc.clone(), item.clone()], span)?;
                             result.push(acc.clone());
                         }
@@ -1383,6 +1406,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter_entries".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let keep = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
                             if keep.to_bool() {
                                 result.insert(k.clone(), v.clone());
@@ -1394,6 +1418,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_values".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let new_v = self.call_lambda_with_args(&args[0], &[v.clone()], span)?;
                             result.insert(k.clone(), new_v);
                         }
@@ -1403,6 +1428,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_keys".to_string(), expected: 1, actual: 0, span }); }
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let new_k = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone())], span)?;
                             let key_str = match new_k {
                                 DataType::String(s) => s,
@@ -1559,8 +1585,19 @@ impl<'a> Interpreter<'a> {
                 "to_upper" | "to_uppercase" => Ok(Some(DataType::String(s.to_uppercase()))),
                 "to_lower" | "to_lowercase" => Ok(Some(DataType::String(s.to_lowercase()))),
                 "reverse" => Ok(Some(DataType::String(s.chars().rev().collect()))),
-                "chars" => Ok(Some(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect()))),
-                "lines" => Ok(Some(DataType::Array(s.lines().map(|l| DataType::String(l.to_string())).collect()))),
+                "chars" => {
+                    if s.chars().count() > MAX_ARRAY_ELEMENTS {
+                        return Err(InterpError::TypeError { expected: format!("string at most {} chars for chars()", MAX_ARRAY_ELEMENTS), actual: format!("{}", s.chars().count()), context: "string chars".to_string(), span });
+                    }
+                    Ok(Some(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect())))
+                }
+                "lines" => {
+                    let lines: Vec<DataType> = s.lines().map(|l| DataType::String(l.to_string())).collect();
+                    if lines.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(InterpError::TypeError { expected: format!("string at most {} lines for lines()", MAX_ARRAY_ELEMENTS), actual: format!("{}", lines.len()), context: "string lines".to_string(), span });
+                    }
+                    Ok(Some(DataType::Array(lines)))
+                }
                 "to_string" => Ok(Some(DataType::String(s.clone()))),
                 "split" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split".to_string(), expected: 1, actual: 0, span }); }
@@ -1568,12 +1605,23 @@ impl<'a> Interpreter<'a> {
                         DataType::String(sep) => sep,
                         _ => return Err(InterpError::TypeError { expected: "String".to_string(), actual: "non-string".to_string(), context: "split separator".to_string(), span }),
                     };
-                    Ok(Some(DataType::Array(s.split(&sep).map(|p| DataType::String(p.to_string())).collect())))
+                    let parts: Vec<DataType> = s.split(&sep).take(MAX_ARRAY_ELEMENTS + 1).map(|p| DataType::String(p.to_string())).collect();
+                    if parts.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(InterpError::TypeError { expected: format!("split result at most {} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "string split".to_string(), span });
+                    }
+                    Ok(Some(DataType::Array(parts)))
                 }
                 "replace" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "replace".to_string(), expected: 2, actual: args.len(), span }); }
                     let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace pattern".to_string(), span }) };
                     let to = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace replacement".to_string(), span }) };
+                    if !from.is_empty() && to.len() > from.len() {
+                        let match_count = s.matches(&from).count();
+                        let growth = match_count.saturating_mul(to.len().saturating_sub(from.len()));
+                        if s.len().saturating_add(growth) > MAX_STRING_OUTPUT {
+                            return Err(InterpError::TypeError { expected: format!("replace result at most {} bytes", MAX_STRING_OUTPUT), actual: format!("{}", s.len().saturating_add(growth)), context: "string replace".to_string(), span });
+                        }
+                    }
                     Ok(Some(DataType::String(s.replace(&from, &to))))
                 }
                 "contains" => {
@@ -1783,6 +1831,10 @@ impl<'a> Interpreter<'a> {
                         ",".to_string()
                     };
                     let parts: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
+                    let estimated_len: usize = parts.iter().map(|p| p.len()).sum::<usize>() + separator.len().saturating_mul(parts.len().saturating_sub(1));
+                    if estimated_len > MAX_STRING_OUTPUT {
+                        return Err(InterpError::TypeError { expected: format!("join result at most {} bytes", MAX_STRING_OUTPUT), actual: format!("{}", estimated_len), context: "array join".to_string(), span });
+                    }
                     Ok(Some(DataType::String(parts.join(&separator))))
                 }
                 _ => Ok(None),

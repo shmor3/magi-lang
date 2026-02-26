@@ -4174,3 +4174,149 @@ fn test_formatter_range_in_method_call_gets_parens() {
     let formatted = format_program(&program, &config);
     assert!(formatted.contains("(1..10)"), "Range should be parenthesized: {}", formatted);
 }
+
+// ── Round 31: Resource limits & safety ────────────────────
+
+#[test]
+fn test_split_normal_works() {
+    assert_eq!(
+        run(r#""a,b,c".split(",")"#),
+        DataType::Array(vec![
+            DataType::String("a".to_string()),
+            DataType::String("b".to_string()),
+            DataType::String("c".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_replace_normal_works() {
+    assert_eq!(
+        run(r#""hello world".replace("world", "magi")"#),
+        DataType::String("hello magi".to_string())
+    );
+}
+
+#[test]
+fn test_join_normal_works() {
+    assert_eq!(
+        run(r#"[1, 2, 3].join("-")"#),
+        DataType::String("1-2-3".to_string())
+    );
+}
+
+#[test]
+fn test_chars_normal_works() {
+    assert_eq!(
+        run(r#""abc".chars()"#),
+        DataType::Array(vec![
+            DataType::String("a".to_string()),
+            DataType::String("b".to_string()),
+            DataType::String("c".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_lines_normal_works() {
+    // Use a string with embedded newlines
+    assert_eq!(
+        run(r#""a\nb\nc".lines()"#),
+        DataType::Array(vec![
+            DataType::String("a".to_string()),
+            DataType::String("b".to_string()),
+            DataType::String("c".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_map_with_cancellation_support() {
+    // Just verify map still works correctly — cancellation is tested via the cancel token
+    assert_eq!(
+        run("[1, 2, 3].map(|x| x * 2)"),
+        DataType::Array(vec![
+            DataType::Int64(2),
+            DataType::Int64(4),
+            DataType::Int64(6),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_filter_works() {
+    assert_eq!(
+        run("[1, 2, 3, 4].filter(|x| x > 2)"),
+        DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)])
+    );
+}
+
+#[test]
+fn test_hof_reduce_works() {
+    assert_eq!(
+        run("[1, 2, 3].reduce(0, |acc, x| acc + x)"),
+        DataType::Int64(6)
+    );
+}
+
+#[test]
+fn test_hof_flat_map_works() {
+    assert_eq!(
+        run("[1, 2].flat_map(|x| [x, x * 10])"),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(10),
+            DataType::Int64(2),
+            DataType::Int64(20),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_scan_works() {
+    assert_eq!(
+        run("[1, 2, 3].scan(0, |acc, x| acc + x)"),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(3),
+            DataType::Int64(6),
+        ])
+    );
+}
+
+#[test]
+fn test_lsp_diagnostic_nonzero_width() {
+    use magi_lang::lsp::analysis::to_lsp_diagnostic_with_source;
+    use magi_lang::syntax::type_checker::AstDiagnostic;
+    use magi_lang::eval::DiagnosticSeverity;
+
+    let d = AstDiagnostic {
+        line: 1,
+        column: 5,
+        message: "unknown var".to_string(),
+        severity: DiagnosticSeverity::Error,
+        code: Some("E100".to_string()),
+        help: None,
+        suggestion: None,
+    };
+    let source = "let my_var = 42;";
+    let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
+    // start at col 4 ('m' of my_var), end at col 10 (end of my_var)
+    assert_eq!(lsp_d.range.start.character, 4);
+    assert_eq!(lsp_d.range.end.character, 10);
+    assert!(lsp_d.range.end.character > lsp_d.range.start.character, "range should be non-zero-width");
+}
+
+#[test]
+fn test_lsp_utf16_column_conversion() {
+    use magi_lang::lsp::analysis::{char_col_to_utf16, utf16_to_char_col};
+
+    // ASCII: char col == UTF-16 col
+    assert_eq!(char_col_to_utf16("hello world", 5), 5);
+    assert_eq!(utf16_to_char_col("hello world", 5), 5);
+
+    // Multi-byte but BMP: each char is 1 UTF-16 code unit
+    // "café" — é is 2 bytes in UTF-8 but 1 UTF-16 code unit
+    assert_eq!(char_col_to_utf16("café", 4), 4);
+    assert_eq!(utf16_to_char_col("café", 4), 4);
+}

@@ -11,6 +11,12 @@ use magi_lang::syntax::interpreter::{resolve_package_from_source, Interpreter, R
 use magi_lang::syntax::parser::parse_v2;
 use magi_lang::types::{DataType, OperationType};
 
+/// Maximum output string length (10 MB).
+const MAX_STRING_OUTPUT: usize = 10_000_000;
+
+/// Maximum array element count.
+const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
+
 /// A full-featured operation evaluator for standalone execution.
 struct FullEvaluator;
 
@@ -167,6 +173,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ArrayJoin => match &array {
                 DataType::Array(arr) => {
                     let s: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
+                    let estimated_len: usize = s.iter().map(|p| p.len()).sum::<usize>() + s.len().saturating_sub(1);
+                    if estimated_len > MAX_STRING_OUTPUT {
+                        return Err(EvalError::InvalidInput(format!("join result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                    }
                     Ok(DataType::String(s.join(",")))
                 }
                 _ => Ok(DataType::String(String::new())),
@@ -181,7 +191,11 @@ impl OperationEvaluator for FullEvaluator {
                 let delim = inputs.get("delimiter").cloned().unwrap_or(DataType::Null);
                 match (&input, &delim) {
                     (DataType::String(s), DataType::String(sep)) => {
-                        Ok(DataType::Array(s.split(sep.as_str()).map(|p| DataType::String(p.to_string())).collect()))
+                        let parts: Vec<DataType> = s.split(sep.as_str()).take(MAX_ARRAY_ELEMENTS + 1).map(|p| DataType::String(p.to_string())).collect();
+                        if parts.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("split result exceeds {} element limit", MAX_ARRAY_ELEMENTS)));
+                        }
+                        Ok(DataType::Array(parts))
                     }
                     _ => Ok(DataType::Array(vec![])),
                 }
@@ -198,6 +212,13 @@ impl OperationEvaluator for FullEvaluator {
                 let replace = inputs.get("replace").cloned().unwrap_or(DataType::Null);
                 match (&input, &search, &replace) {
                     (DataType::String(s), DataType::String(from), DataType::String(to)) => {
+                        if !from.is_empty() && to.len() > from.len() {
+                            let match_count = s.matches(from.as_str()).count();
+                            let growth = match_count.saturating_mul(to.len().saturating_sub(from.len()));
+                            if s.len().saturating_add(growth) > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!("replace result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                            }
+                        }
                         Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
                     }
                     _ => Ok(input.clone()),

@@ -198,9 +198,38 @@ pub fn extract_symbols(
 }
 
 /// Convert an AstDiagnostic (1-based) to an LSP Diagnostic (0-based).
+/// Uses source text to give diagnostics a non-zero-width range when possible.
 pub fn to_lsp_diagnostic(d: &AstDiagnostic) -> Diagnostic {
+    to_lsp_diagnostic_with_source(d, None)
+}
+
+/// Convert an AstDiagnostic (1-based) to an LSP Diagnostic (0-based),
+/// optionally using source text to compute a better end position.
+pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) -> Diagnostic {
     let line = d.line.saturating_sub(1);
     let col = d.column.saturating_sub(1);
+
+    // Try to compute a non-zero-width end position and convert to UTF-16
+    let (start_utf16, end_utf16) = if let Some(src) = source {
+        if let Some(src_line) = src.lines().nth(line as usize) {
+            let chars: Vec<char> = src_line.chars().collect();
+            let start = col as usize;
+            let end_char = if start < chars.len() && is_ident_start(chars[start]) {
+                let mut end = start;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                    end += 1;
+                }
+                end as u32
+            } else {
+                (col + 1).min(chars.len() as u32)
+            };
+            (char_col_to_utf16(src_line, col), char_col_to_utf16(src_line, end_char))
+        } else {
+            (col, col + 1)
+        }
+    } else {
+        (col, col + 1)
+    };
 
     let severity = match d.severity {
         crate::eval::DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
@@ -220,8 +249,8 @@ pub fn to_lsp_diagnostic(d: &AstDiagnostic) -> Diagnostic {
 
     Diagnostic {
         range: Range {
-            start: Position { line, character: col },
-            end: Position { line, character: col },
+            start: Position { line, character: start_utf16 },
+            end: Position { line, character: end_utf16 },
         },
         severity: Some(severity),
         code: d.code.as_ref().map(|c| NumberOrString::String(c.clone())),
@@ -231,12 +260,42 @@ pub fn to_lsp_diagnostic(d: &AstDiagnostic) -> Diagnostic {
     }
 }
 
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+/// Convert a 0-based char column to a 0-based UTF-16 code unit offset.
+/// For ASCII-only lines this is identity. For non-BMP characters, each
+/// character may occupy 2 UTF-16 code units.
+pub fn char_col_to_utf16(line_text: &str, char_col: u32) -> u32 {
+    let mut utf16_offset: u32 = 0;
+    for (i, ch) in line_text.chars().enumerate() {
+        if i as u32 >= char_col {
+            break;
+        }
+        utf16_offset += ch.len_utf16() as u32;
+    }
+    utf16_offset
+}
+
+/// Convert a 0-based UTF-16 code unit offset to a 0-based char column.
+pub fn utf16_to_char_col(line_text: &str, utf16_col: u32) -> u32 {
+    let mut utf16_offset: u32 = 0;
+    for (i, ch) in line_text.chars().enumerate() {
+        if utf16_offset >= utf16_col {
+            return i as u32;
+        }
+        utf16_offset += ch.len_utf16() as u32;
+    }
+    line_text.chars().count() as u32
+}
+
 /// Find the word (identifier) at a given cursor position in source text.
-/// Uses char indices (not byte indices) for correct Unicode handling.
+/// `character` is a 0-based UTF-16 code unit offset (per LSP spec).
 pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
     let target_line = source.lines().nth(line as usize)?;
     let chars: Vec<char> = target_line.chars().collect();
-    let col = character as usize;
+    let col = utf16_to_char_col(target_line, character) as usize;
 
     if col > chars.len() {
         return None;
@@ -343,6 +402,36 @@ mod tests {
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.range.start.line, 0);
         assert_eq!(lsp_d.range.start.character, 4);
+        // Without source, end is start + 1
+        assert_eq!(lsp_d.range.end.character, 5);
         assert_eq!(lsp_d.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn test_to_lsp_diagnostic_with_source_ident_range() {
+        let d = AstDiagnostic {
+            line: 1,
+            column: 5,
+            message: "unknown variable".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Error,
+            code: Some("E100".to_string()),
+            help: None,
+            suggestion: None,
+        };
+        let source = "let my_var = 42;";
+        let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
+        assert_eq!(lsp_d.range.start.line, 0);
+        assert_eq!(lsp_d.range.start.character, 4); // 'm' in my_var
+        assert_eq!(lsp_d.range.end.character, 10); // end of 'my_var'
+    }
+
+    #[test]
+    fn test_char_col_to_utf16_ascii() {
+        assert_eq!(char_col_to_utf16("hello", 3), 3);
+    }
+
+    #[test]
+    fn test_utf16_to_char_col_ascii() {
+        assert_eq!(utf16_to_char_col("hello", 3), 3);
     }
 }

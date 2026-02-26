@@ -7,7 +7,7 @@ pub mod completion;
 pub mod definition;
 pub mod hover;
 
-use analysis::{analyze_document, to_lsp_diagnostic, DocumentState};
+use analysis::{analyze_document, to_lsp_diagnostic_with_source, DocumentState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -32,7 +32,10 @@ impl MagiLanguageServer {
     async fn on_change(&self, uri: Url, text: String) {
         let (state, diagnostics) = analyze_document(&text);
 
-        let lsp_diagnostics: Vec<Diagnostic> = diagnostics.iter().map(to_lsp_diagnostic).collect();
+        let lsp_diagnostics: Vec<Diagnostic> = diagnostics
+            .iter()
+            .map(|d| to_lsp_diagnostic_with_source(d, Some(&text)))
+            .collect();
 
         self.documents.write().await.insert(uri.clone(), state);
         self.client
