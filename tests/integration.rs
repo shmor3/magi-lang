@@ -2429,3 +2429,79 @@ fn test_for_loop_map_destructure_error_scope_cleanup() {
     let result = run(src);
     assert_eq!(result, DataType::String("caught map destructure error".to_string()));
 }
+
+// ── Round 8: Range overflow, slice safety, comprehension scope ───────
+
+#[test]
+fn test_range_inclusive_overflow_error() {
+    // 0..=i64::MAX should error, not overflow
+    let src = "0..=9223372036854775807";
+    let err = run_err(src);
+    match err {
+        InterpError::TypeError { ref context, .. } => {
+            assert!(context.contains("inclusive range"), "expected inclusive range error, got: {:?}", err);
+        }
+        _ => panic!("expected TypeError for range overflow, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_range_non_inclusive_max_ok() {
+    // 0..3 should work fine (non-inclusive, no +1)
+    let src = "0..3";
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(0),
+        DataType::Int64(1),
+        DataType::Int64(2),
+    ]));
+}
+
+#[test]
+fn test_slice_negative_start_clamps_to_zero() {
+    // Negative slice start should clamp to 0, not wrap to huge usize
+    let src = r#"
+        let arr = [10, 20, 30, 40, 50];
+        arr[(-1)..3]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(10),
+        DataType::Int64(20),
+        DataType::Int64(30),
+    ]));
+}
+
+#[test]
+fn test_slice_negative_end_produces_empty() {
+    let src = r#"
+        let arr = [10, 20, 30];
+        arr[0..(-1)]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![]));
+}
+
+#[test]
+fn test_comprehension_scope_leak_on_destructure_error() {
+    // List comprehension destructure error should clean up scope
+    let src = r#"
+        let items = [1, 2, 3];
+        let result = try {
+            [x for [x, y] in items]
+        } catch err {
+            "caught"
+        };
+        result
+    "#;
+    assert_eq!(run(src), DataType::String("caught".to_string()));
+}
+
+#[test]
+fn test_range_inclusive_normal() {
+    let src = "1..=5";
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(1),
+        DataType::Int64(2),
+        DataType::Int64(3),
+        DataType::Int64(4),
+        DataType::Int64(5),
+    ]));
+}

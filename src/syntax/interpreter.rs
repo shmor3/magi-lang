@@ -1063,9 +1063,11 @@ impl<'a> Interpreter<'a> {
     // =========================================================================
 
     fn eval_slice(&self, obj: &DataType, start: &DataType, end: &DataType, inclusive: bool, span: Span) -> Result<DataType, InterpError> {
-        let s = start.to_i64().unwrap_or(0) as usize;
-        let e_raw = end.to_i64().unwrap_or(0) as usize;
-        let e = if inclusive { e_raw + 1 } else { e_raw };
+        let s_raw = start.to_i64().unwrap_or(0);
+        let e_raw_i = end.to_i64().unwrap_or(0);
+        let s = if s_raw < 0 { 0usize } else { s_raw as usize };
+        let e_raw = if e_raw_i < 0 { 0usize } else { e_raw_i as usize };
+        let e = if inclusive { e_raw.saturating_add(1) } else { e_raw };
 
         match obj {
             DataType::Array(arr) => {
@@ -2298,7 +2300,16 @@ impl<'a> Interpreter<'a> {
                 let end_val = self.eval_expr(end)?;
                 match (&start_val, &end_val) {
                     (DataType::Int64(a), DataType::Int64(b)) => {
-                        let end_v = if *inclusive { b + 1 } else { *b };
+                        let end_v = if *inclusive {
+                            b.checked_add(1).ok_or_else(|| InterpError::TypeError {
+                                expected: "range end within i64 bounds".to_string(),
+                                actual: format!("{}..={} overflows", a, b),
+                                context: "inclusive range".to_string(),
+                                span: expr.span,
+                            })?
+                        } else {
+                            *b
+                        };
                         let arr: Vec<DataType> = (*a..end_v).map(DataType::Int64).collect();
                         Ok(DataType::Array(arr))
                     }
@@ -2497,19 +2508,25 @@ impl<'a> Interpreter<'a> {
                 for item in items {
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
-                    match pattern {
+                    let bind_result = match pattern {
                         ForPattern::Single(name) => {
                             let addr = self.heap.alloc(item);
                             self.define(name, addr, false);
+                            Ok(())
                         }
                         ForPattern::ArrayDestructure(elements) => {
                             let destr = DestructurePattern::Array(elements.clone());
-                            self.destructure_bind(&destr, &item, false, expr.span)?;
+                            self.destructure_bind(&destr, &item, false, expr.span)
                         }
                         ForPattern::MapDestructure(entries) => {
                             let destr = DestructurePattern::Map(entries.clone());
-                            self.destructure_bind(&destr, &item, false, expr.span)?;
+                            self.destructure_bind(&destr, &item, false, expr.span)
                         }
+                    };
+                    if let Err(e) = bind_result {
+                        self.heap.pop_scope();
+                        self.symbols.pop();
+                        return Err(e);
                     }
                     let include = if let Some(cond) = condition {
                         let cond_val = self.eval_expr(cond)?;
