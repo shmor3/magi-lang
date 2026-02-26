@@ -455,6 +455,8 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Or);
             }
             Instruction::TagF64 => {
+                f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
+                f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const((tag::F64 as i64) << 56));
                 f.instruction(&WasmInst::I64Or);
             }

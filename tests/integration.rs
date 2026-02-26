@@ -1838,3 +1838,151 @@ fn test_const_immutable() {
     let err = run_err("const X = 5; X = 10;");
     assert!(matches!(err, InterpError::ImmutableAssignment { .. }));
 }
+
+// ═══════════════════════════════════════════════════════════
+// UTF-8 string method correctness
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_string_len_unicode() {
+    // "café" is 4 chars, 5 bytes — len should return 4
+    assert_eq!(
+        run(r#"
+            let s = "café";
+            s.len()
+        "#),
+        DataType::Int64(4)
+    );
+}
+
+#[test]
+fn test_string_len_emoji() {
+    // Each emoji is 1 char (possibly multiple bytes)
+    assert_eq!(
+        run(r#"
+            let s = "hi😊";
+            s.length()
+        "#),
+        DataType::Int64(3)
+    );
+}
+
+#[test]
+fn test_substring_unicode() {
+    // Substring on multi-byte string should work by char index
+    assert_eq!(
+        run(r#"
+            let s = "café";
+            s.substring(0, 3)
+        "#),
+        DataType::String("caf".into())
+    );
+}
+
+#[test]
+fn test_substring_unicode_middle() {
+    assert_eq!(
+        run(r#"
+            let s = "héllo";
+            s.substring(1, 4)
+        "#),
+        DataType::String("éll".into())
+    );
+}
+
+#[test]
+fn test_index_of_unicode() {
+    // "café" — 'é' is at char index 3
+    assert_eq!(
+        run(r#"
+            let s = "café";
+            s.index_of("é")
+        "#),
+        DataType::Int64(3)
+    );
+}
+
+#[test]
+fn test_index_of_not_found() {
+    assert_eq!(
+        run(r#""hello".index_of("z")"#),
+        DataType::Int64(-1)
+    );
+}
+
+#[test]
+fn test_pad_start_unicode() {
+    // "café" is 4 chars — padding to width 6 should add 2 chars
+    assert_eq!(
+        run(r#"
+            let s = "café";
+            s.pad_start(6, ".")
+        "#),
+        DataType::String("..café".into())
+    );
+}
+
+#[test]
+fn test_pad_end_unicode() {
+    assert_eq!(
+        run(r#"
+            let s = "café";
+            s.pad_end(7, "-")
+        "#),
+        DataType::String("café---".into())
+    );
+}
+
+#[test]
+fn test_char_at_unicode() {
+    assert_eq!(
+        run(r#"
+            let s = "café";
+            s.char_at(3)
+        "#),
+        DataType::String("é".into())
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Compiler break/continue error handling
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_compile_break_outside_loop_errors() {
+    use magi_lang::compiler::compile_to_wasm;
+    let program = magi_lang::syntax::parser::parse_v2("break;").unwrap();
+    let result = compile_to_wasm(&program);
+    assert!(result.is_err(), "break outside loop should be a compile error");
+}
+
+#[test]
+fn test_compile_continue_outside_loop_errors() {
+    use magi_lang::compiler::compile_to_wasm;
+    let program = magi_lang::syntax::parser::parse_v2("continue;").unwrap();
+    let result = compile_to_wasm(&program);
+    assert!(result.is_err(), "continue outside loop should be a compile error");
+}
+
+// ═══════════════════════════════════════════════════════════
+// Linter Or-pattern exhaustiveness
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_lint_or_pattern_exhaustiveness() {
+    use magi_lang::linter;
+    let program = magi_lang::syntax::parser::parse_v2(r#"
+        enum Color { Red, Green, Blue }
+        let c = Color::Red;
+        match c {
+            Color::Red | Color::Green => "warm"
+            Color::Blue => "cool"
+        }
+    "#).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    // All variants covered (Red, Green, Blue) — no W203
+    let w203: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(w203.is_empty(), "all variants covered via or-pattern, should not warn: {:?}", w203);
+}

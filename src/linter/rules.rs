@@ -197,6 +197,34 @@ pub fn check_duplicate_imports(stmts: &[Statement]) -> Vec<AstDiagnostic> {
     diagnostics
 }
 
+/// Returns true if a pattern is a catch-all (matches everything).
+fn is_catch_all_pattern(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Wildcard => true,
+        Pattern::Variable(_) => true,
+        Pattern::Or(alternatives) => alternatives.iter().any(is_catch_all_pattern),
+        _ => false,
+    }
+}
+
+/// Recursively collect enum variant names from a pattern, including inside Or-patterns.
+fn collect_enum_variants(
+    pattern: &Pattern,
+    map: &mut std::collections::HashMap<String, Vec<String>>,
+) {
+    match pattern {
+        Pattern::EnumPattern { enum_name, variant, .. } => {
+            map.entry(enum_name.clone()).or_default().push(variant.clone());
+        }
+        Pattern::Or(alternatives) => {
+            for alt in alternatives {
+                collect_enum_variants(alt, map);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Check match exhaustiveness for enum patterns.
 /// If all arms use EnumPattern for the same enum and there's no wildcard/variable catch-all,
 /// check that all variants of that enum are covered.
@@ -208,10 +236,8 @@ pub fn check_match_exhaustiveness(
 
     // Check if any arm is a catch-all
     for arm in arms {
-        match &arm.pattern {
-            Pattern::Wildcard => return diagnostics,
-            Pattern::Variable(_) if arm.guard.is_none() => return diagnostics,
-            _ => {}
+        if is_catch_all_pattern(&arm.pattern) && arm.guard.is_none() {
+            return diagnostics;
         }
     }
 
@@ -220,12 +246,7 @@ pub fn check_match_exhaustiveness(
         std::collections::HashMap::new();
 
     for arm in arms {
-        if let Pattern::EnumPattern { enum_name, variant, .. } = &arm.pattern {
-            enum_variants_used
-                .entry(enum_name.clone())
-                .or_default()
-                .push(variant.clone());
-        }
+        collect_enum_variants(&arm.pattern, &mut enum_variants_used);
     }
 
     // For each enum referenced, check if all its variants are covered

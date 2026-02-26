@@ -1483,7 +1483,7 @@ impl<'a> Interpreter<'a> {
                 "is_alphabetic" => Ok(Some(DataType::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))),
                 "to_int" => Ok(Some(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null))),
                 "to_float" => Ok(Some(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null))),
-                "len" | "length" => Ok(Some(DataType::Int64(s.len() as i64))),
+                "len" | "length" => Ok(Some(DataType::Int64(s.chars().count() as i64))),
                 "trim" => Ok(Some(DataType::String(s.trim().to_string()))),
                 "trim_start" => Ok(Some(DataType::String(s.trim_start().to_string()))),
                 "trim_end" => Ok(Some(DataType::String(s.trim_end().to_string()))),
@@ -1526,7 +1526,7 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "index_of".to_string(), expected: 1, actual: 0, span }); }
                     let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Int64(-1))) };
                     Ok(Some(match s.find(&needle) {
-                        Some(idx) => DataType::Int64(idx as i64),
+                        Some(byte_idx) => DataType::Int64(s[..byte_idx].chars().count() as i64),
                         None => DataType::Int64(-1),
                     }))
                 }
@@ -1548,26 +1548,27 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: 1, actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as usize;
                     let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
-                    let pad_len = width.saturating_sub(s.len());
+                    let pad_len = width.saturating_sub(s.chars().count());
                     Ok(Some(DataType::String(format!("{}{}", std::iter::repeat(pad_char).take(pad_len).collect::<String>(), s))))
                 }
                 "pad_end" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: 1, actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as usize;
                     let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
-                    let pad_len = width.saturating_sub(s.len());
+                    let pad_len = width.saturating_sub(s.chars().count());
                     Ok(Some(DataType::String(format!("{}{}", s, std::iter::repeat(pad_char).take(pad_len).collect::<String>()))))
                 }
                 "substring" | "slice" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: 1, actual: 0, span }); }
+                    let char_len = s.chars().count();
                     let start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
-                    let end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(s.len() as i64).max(0) as usize } else { s.len() };
-                    let start = start.min(s.len());
-                    let end = end.min(s.len());
+                    let end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(char_len as i64).max(0) as usize } else { char_len };
+                    let start = start.min(char_len);
+                    let end = end.min(char_len);
                     if start >= end {
                         Ok(Some(DataType::String(String::new())))
                     } else {
-                        Ok(Some(DataType::String(s[start..end].to_string())))
+                        Ok(Some(DataType::String(s.chars().skip(start).take(end - start).collect())))
                     }
                 }
                 _ => Ok(None),

@@ -286,6 +286,28 @@ impl<'a> Lexer<'a> {
         Some(ch)
     }
 
+    /// Advance and decode one full UTF-8 character from the source.
+    /// Used inside string literals to correctly handle multi-byte characters.
+    fn advance_char(&mut self) -> Option<char> {
+        let first = self.source.get(self.pos).copied()?;
+        // Determine UTF-8 sequence length from the first byte
+        let byte_len = if first < 0x80 { 1 }
+            else if first < 0xE0 { 2 }
+            else if first < 0xF0 { 3 }
+            else { 4 };
+        let end = (self.pos + byte_len).min(self.source.len());
+        let slice = &self.source[self.pos..end];
+        let ch = std::str::from_utf8(slice).ok()?.chars().next()?;
+        self.pos += byte_len;
+        if ch == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        Some(ch)
+    }
+
     fn skip_whitespace_and_comments(&mut self) -> Result<(), SyntaxError> {
         loop {
             // Skip whitespace
@@ -805,7 +827,7 @@ impl<'a> Lexer<'a> {
         self.advance(); // consume opening "
         let mut value = String::new();
         loop {
-            match self.advance() {
+            match self.peek() {
                 None => {
                     return Err(SyntaxError {
                         line: start_line as usize,
@@ -813,12 +835,17 @@ impl<'a> Lexer<'a> {
                         message: "Unterminated string literal".to_string(),
                     });
                 }
-                Some(b'"') => break,
+                Some(b'"') => { self.advance(); break; }
                 Some(b'\\') => {
+                    self.advance(); // consume backslash
                     let ch = self.parse_escape_sequence()?;
                     value.push(ch);
                 }
-                Some(ch) => value.push(ch as char),
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
+                }
             }
         }
         Ok(Token {
@@ -834,7 +861,7 @@ impl<'a> Lexer<'a> {
         self.advance(); // consume third "
         let mut value = String::new();
         loop {
-            match self.advance() {
+            match self.peek() {
                 None => {
                     return Err(SyntaxError {
                         line: start_line as usize,
@@ -842,16 +869,22 @@ impl<'a> Lexer<'a> {
                         message: "Unterminated triple-quoted string".to_string(),
                     });
                 }
-                Some(b'"') if self.peek() == Some(b'"') && self.peek_at(1) == Some(b'"') => {
+                Some(b'"') if self.peek_at(1) == Some(b'"') && self.peek_at(2) == Some(b'"') => {
+                    self.advance(); // consume first "
                     self.advance(); // consume second "
                     self.advance(); // consume third "
                     break;
                 }
                 Some(b'\\') => {
+                    self.advance(); // consume backslash
                     let ch = self.parse_escape_sequence()?;
                     value.push(ch);
                 }
-                Some(ch) => value.push(ch as char),
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
+                }
             }
         }
         Ok(Token {
@@ -865,7 +898,7 @@ impl<'a> Lexer<'a> {
         self.advance(); // consume opening "
         let mut value = String::new();
         loop {
-            match self.advance() {
+            match self.peek() {
                 None => {
                     return Err(SyntaxError {
                         line: start_line as usize,
@@ -873,8 +906,12 @@ impl<'a> Lexer<'a> {
                         message: "Unterminated raw string literal".to_string(),
                     });
                 }
-                Some(b'"') => break,
-                Some(ch) => value.push(ch as char),
+                Some(b'"') => { self.advance(); break; }
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
+                }
             }
         }
         Ok(Token {
@@ -889,7 +926,7 @@ impl<'a> Lexer<'a> {
         let mut value = String::new();
         let mut brace_depth = 0;
         loop {
-            match self.advance() {
+            match self.peek() {
                 None => {
                     return Err(SyntaxError {
                         line: start_line as usize,
@@ -897,22 +934,29 @@ impl<'a> Lexer<'a> {
                         message: "Unterminated f-string literal".to_string(),
                     });
                 }
-                Some(b'"') if brace_depth == 0 => break,
+                Some(b'"') if brace_depth == 0 => { self.advance(); break; }
                 Some(b'{') => {
+                    self.advance();
                     brace_depth += 1;
                     value.push('{');
                 }
                 Some(b'}') => {
+                    self.advance();
                     if brace_depth > 0 {
                         brace_depth -= 1;
                     }
                     value.push('}');
                 }
                 Some(b'\\') => {
+                    self.advance(); // consume backslash
                     let ch = self.parse_escape_sequence()?;
                     value.push(ch);
                 }
-                Some(ch) => value.push(ch as char),
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
+                }
             }
         }
         Ok(Token {

@@ -466,6 +466,12 @@ impl Compiler {
                 if let Some(ctx) = self.loop_stack.last() {
                     let label = ctx.break_label;
                     self.emit(Instruction::Br(label));
+                } else {
+                    return Err(CompileError::at(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        "break outside of loop",
+                    ));
                 }
             }
 
@@ -473,6 +479,12 @@ impl Compiler {
                 if let Some(ctx) = self.loop_stack.last() {
                     let label = ctx.continue_label;
                     self.emit(Instruction::Br(label));
+                } else {
+                    return Err(CompileError::at(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        "continue outside of loop",
+                    ));
                 }
             }
 
