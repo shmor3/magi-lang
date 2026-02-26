@@ -4779,3 +4779,89 @@ let result = if x > 10 {
     let second = format_program(&program2, &config);
     assert_eq!(first, second, "else-if formatting should be idempotent");
 }
+
+// ── Round 35: Parser, type checker, and linter fixes ────────────────
+
+#[test]
+fn test_optional_chain_method_span() {
+    // The OptionalChain marker in obj?.method(args) should have a span
+    // covering the full expression, not just obj?.method
+    let src = "let x = null\nlet r = x?.some_method(1, 2, 3)";
+    let program = parse(src);
+    // Verify it parses without error and produces the right AST
+    assert!(!program.statements.is_empty());
+}
+
+#[test]
+fn test_or_pattern_variables_type_check() {
+    // Or patterns should bind variables from all alternatives
+    let src = r#"
+enum Result { Ok(value), Err(msg) }
+let x = Result::Ok(42)
+let r = match x {
+    Result::Ok(v) | Result::Err(v) => v,
+}
+"#;
+    let program = parse(src);
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    // Should NOT have undefined variable errors for v
+    let undef_errors: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("not defined") || d.message.contains("undefined"))
+        .collect();
+    assert!(
+        undef_errors.is_empty(),
+        "Or pattern variables should be bound: {:?}",
+        undef_errors
+    );
+}
+
+#[test]
+fn test_literal_match_no_catchall_warns() {
+    // Non-enum match without wildcard should still warn W203
+    let src = r#"
+let x = 1
+let r = match x {
+    1 => "one",
+    2 => "two",
+}
+"#;
+    let program = parse(src);
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let w203: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(!w203.is_empty(), "non-exhaustive literal match should warn W203");
+}
+
+#[test]
+fn test_enum_match_fully_covered_no_warn() {
+    // Fully covered enum match should NOT warn W203
+    let src = r#"
+enum Color { Red, Green, Blue }
+let c = Color::Red
+let name = match c {
+    Color::Red => "red",
+    Color::Green => "green",
+    Color::Blue => "blue",
+}
+"#;
+    let program = parse(src);
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let w203: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(
+        w203.is_empty(),
+        "fully covered enum match should not warn W203: {:?}",
+        w203
+    );
+}

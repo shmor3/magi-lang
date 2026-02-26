@@ -1918,9 +1918,9 @@ impl TypeChecker {
                 }
             }
             Pattern::Or(alternatives) => {
-                // Bind vars from the first alternative (all should bind same names)
-                if let Some(first) = alternatives.first() {
-                    self.bind_pattern_vars(first, val_type, span);
+                // Bind vars from all alternatives so all variable references resolve
+                for alt in alternatives {
+                    self.bind_pattern_vars(alt, val_type, span);
                 }
             }
             Pattern::Rest(name) => {

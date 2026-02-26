@@ -235,7 +235,7 @@ impl ErrorCode {
             ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",
             ErrorCode::W201 => "Enum and struct names should use PascalCase. Rename `my_enum` to `MyEnum`.",
             ErrorCode::W202 => "Code after `return`, `break`, `continue`, or `throw` is unreachable and will never execute. Remove the dead code.",
-            ErrorCode::W203 => "This match expression may not cover all enum variants. Add missing variant arms or a wildcard `_` arm.",
+            ErrorCode::W203 => "This match expression may not cover all possible cases. Add missing arms or a wildcard `_` arm.",
             ErrorCode::W204 => "The condition is always `true` or `false`. This makes the branch unconditional or dead code.",
             ErrorCode::W205 => "These parentheses are unnecessary and can be removed for cleaner code.",
             ErrorCode::W206 => "This block body is empty. Add statements or remove the block.",

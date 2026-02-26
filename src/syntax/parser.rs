@@ -1167,7 +1167,7 @@ impl Parser {
                             object: Box::new(expr),
                             field: String::new(), // empty field = method call marker
                         },
-                        span,
+                        span: method_span,
                     };
                     expr = Expression {
                         kind: ExpressionKind::MethodCall {
