@@ -96,6 +96,24 @@ pub enum ErrorCode {
     W106,
     /// Suspicious arithmetic (modulo by 1, multiply by 0, etc.)
     W107,
+
+    // Lint warnings (W2xx)
+    /// Naming convention: functions/variables should be snake_case
+    W200,
+    /// Naming convention: enums/structs should be PascalCase
+    W201,
+    /// Dead code after return/break/continue/throw
+    W202,
+    /// Non-exhaustive match (missing enum variants, no wildcard)
+    W203,
+    /// Constant condition in if/while
+    W204,
+    /// Unnecessary parentheses (reserved)
+    W205,
+    /// Empty block body
+    W206,
+    /// Unreachable match arm after wildcard
+    W207,
 }
 
 impl fmt::Display for ErrorCode {
@@ -136,6 +154,14 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W105 => "W105",
             ErrorCode::W106 => "W106",
             ErrorCode::W107 => "W107",
+            ErrorCode::W200 => "W200",
+            ErrorCode::W201 => "W201",
+            ErrorCode::W202 => "W202",
+            ErrorCode::W203 => "W203",
+            ErrorCode::W204 => "W204",
+            ErrorCode::W205 => "W205",
+            ErrorCode::W206 => "W206",
+            ErrorCode::W207 => "W207",
         };
         write!(f, "{}", code)
     }
@@ -189,6 +215,16 @@ impl ErrorCode {
             ErrorCode::W105 => "This loop has a literal `true` condition and no `break` statement, creating an infinite loop.",
             ErrorCode::W106 => "This operation is redundant (e.g., comparing a value to itself, double negation). Simplify the expression.",
             ErrorCode::W107 => "This arithmetic operation has a suspicious pattern (e.g., modulo by 1 always returns 0, multiply by 0 always returns 0).",
+
+            // Lint warnings
+            ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",
+            ErrorCode::W201 => "Enum and struct names should use PascalCase. Rename `my_enum` to `MyEnum`.",
+            ErrorCode::W202 => "Code after `return`, `break`, `continue`, or `throw` is unreachable and will never execute. Remove the dead code.",
+            ErrorCode::W203 => "This match expression may not cover all enum variants. Add missing variant arms or a wildcard `_` arm.",
+            ErrorCode::W204 => "The condition is always `true` or `false`. This makes the branch unconditional or dead code.",
+            ErrorCode::W205 => "These parentheses are unnecessary and can be removed for cleaner code.",
+            ErrorCode::W206 => "This block body is empty. Add statements or remove the block.",
+            ErrorCode::W207 => "This match arm is unreachable because a previous wildcard or variable pattern already matches all values.",
         }
     }
 }

@@ -6,7 +6,7 @@ use std::fs;
 use std::process;
 
 use magi_lang::compiler;
-use magi_lang::eval::{EvalError, OperationEvaluator};
+use magi_lang::eval::{DiagnosticSeverity, EvalError, OperationEvaluator};
 use magi_lang::syntax::interpreter::{resolve_package_from_source, Interpreter, ResolvedPackage};
 use magi_lang::syntax::parser::parse_v2;
 use magi_lang::types::{DataType, OperationType};
@@ -439,6 +439,12 @@ fn print_usage() {
     eprintln!("  magi run <file.magi>           Interpret a .magi file");
     eprintln!("  magi compile <file.magi>       Compile to .wasm");
     eprintln!("  magi run-wasm <file.wasm>      Run a compiled .wasm file");
+    eprintln!("  magi check <file.magi>         Type-check and lint a file");
+    eprintln!("  magi lint <file.magi>          Lint a file for style issues");
+    eprintln!("  magi fmt <file.magi>           Format a file");
+    eprintln!("  magi fmt --write <file.magi>   Format a file in-place");
+    eprintln!("  magi fmt --check <file.magi>   Check if a file is formatted");
+    eprintln!("  magi lsp                       Start the LSP server");
     eprintln!("  magi version                   Show version info");
 }
 
@@ -474,6 +480,48 @@ fn main() {
                 process::exit(1);
             }
             cmd_run_wasm(&args[2]);
+        }
+        "check" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing file argument");
+                eprintln!("Usage: magi check <file.magi>");
+                process::exit(1);
+            }
+            cmd_check(&args[2]);
+        }
+        "lint" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing file argument");
+                eprintln!("Usage: magi lint <file.magi>");
+                process::exit(1);
+            }
+            cmd_lint(&args[2]);
+        }
+        "fmt" => {
+            // Parse flags: --write, --check
+            let mut write_in_place = false;
+            let mut check_only = false;
+            let mut file_path = None;
+
+            for arg in &args[2..] {
+                match arg.as_str() {
+                    "--write" | "-w" => write_in_place = true,
+                    "--check" | "-c" => check_only = true,
+                    _ => file_path = Some(arg.as_str()),
+                }
+            }
+
+            match file_path {
+                Some(path) => cmd_fmt(path, write_in_place, check_only),
+                None => {
+                    eprintln!("Error: missing file argument");
+                    eprintln!("Usage: magi fmt [--write] [--check] <file.magi>");
+                    process::exit(1);
+                }
+            }
+        }
+        "lsp" => {
+            cmd_lsp();
         }
         "version" => {
             println!("MAGI Language v{}", magi_lang::version::version_string());
@@ -579,6 +627,139 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
     }
 
     sources
+}
+
+fn cmd_check(path: &str) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", path, e);
+            process::exit(1);
+        }
+    };
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}:{}: error: {}", path, e.line, e);
+            process::exit(1);
+        }
+    };
+
+    // Type check
+    let imports = std::collections::HashSet::new();
+    let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
+
+    // Lint
+    let lint_config = magi_lang::linter::LintConfig::default();
+    let lint_result = magi_lang::linter::lint(&program, &lint_config);
+
+    let mut has_errors = false;
+    let mut count = 0;
+
+    for d in analysis.diagnostics.iter().chain(lint_result.diagnostics.iter()) {
+        let severity = match d.severity {
+            DiagnosticSeverity::Error => { has_errors = true; "error" }
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Info => "info",
+        };
+        let code = d.code.as_deref().unwrap_or("");
+        eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
+        if let Some(ref help) = d.help {
+            eprintln!("  help: {}", help);
+        }
+        count += 1;
+    }
+
+    if count == 0 {
+        println!("No issues found.");
+    } else {
+        eprintln!("{} diagnostic(s) emitted.", count);
+    }
+
+    if has_errors {
+        process::exit(1);
+    }
+}
+
+fn cmd_lint(path: &str) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", path, e);
+            process::exit(1);
+        }
+    };
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}:{}: parse error: {}", path, e.line, e);
+            process::exit(1);
+        }
+    };
+
+    let config = magi_lang::linter::LintConfig::default();
+    let result = magi_lang::linter::lint(&program, &config);
+
+    if result.diagnostics.is_empty() {
+        println!("No lint warnings.");
+    } else {
+        for d in &result.diagnostics {
+            let code = d.code.as_deref().unwrap_or("");
+            eprintln!("{}:{}:{}: warning [{}]: {}", path, d.line, d.column, code, d.message);
+            if let Some(ref help) = d.help {
+                eprintln!("  help: {}", help);
+            }
+        }
+        eprintln!("{} warning(s) emitted.", result.diagnostics.len());
+    }
+}
+
+fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", path, e);
+            process::exit(1);
+        }
+    };
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}:{}: parse error: {}", path, e.line, e);
+            process::exit(1);
+        }
+    };
+
+    let config = magi_lang::formatter::FormatConfig::default();
+    let formatted = magi_lang::formatter::format_program(&program, &config);
+
+    if check_only {
+        if formatted == source {
+            println!("{} is formatted.", path);
+        } else {
+            eprintln!("{} is not formatted.", path);
+            process::exit(1);
+        }
+    } else if write_in_place {
+        match fs::write(path, &formatted) {
+            Ok(_) => println!("Formatted {}.", path),
+            Err(e) => {
+                eprintln!("Error writing {}: {}", path, e);
+                process::exit(1);
+            }
+        }
+    } else {
+        print!("{}", formatted);
+    }
+}
+
+fn cmd_lsp() {
+    tokio::runtime::Runtime::new()
+        .expect("failed to create tokio runtime")
+        .block_on(magi_lang::lsp::run_server());
 }
 
 fn cmd_run(path: &str) {

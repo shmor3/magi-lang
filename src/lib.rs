@@ -1,5 +1,8 @@
 pub mod compiler;
 pub mod eval;
+pub mod formatter;
+pub mod linter;
+pub mod lsp;
 pub mod ops;
 pub mod syntax;
 pub mod types;
