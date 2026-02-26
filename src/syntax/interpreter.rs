@@ -2656,6 +2656,9 @@ impl<'a> Interpreter<'a> {
                 };
                 let mut result = Vec::new();
                 for item in items {
+                    if self.is_cancelled() {
+                        return Err(InterpError::Cancelled);
+                    }
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
                     let bind_result = match pattern {
@@ -2713,6 +2716,9 @@ impl<'a> Interpreter<'a> {
                 };
                 let mut result = std::collections::BTreeMap::new();
                 for item in items {
+                    if self.is_cancelled() {
+                        return Err(InterpError::Cancelled);
+                    }
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
                     let iter_result = (|| {
@@ -3135,16 +3141,23 @@ impl<'a> Interpreter<'a> {
                     .position(|e| matches!(e, DestructureElement::Rest(_)));
                 let trailing_count = rest_pos.map_or(0, |p| elements.len() - p - 1);
 
+                // Count non-rest elements before and after rest
+                let before_rest = rest_pos.unwrap_or(elements.len());
                 for (i, elem) in elements.iter().enumerate() {
                     match elem {
                         DestructureElement::Name(name) => {
-                            let idx = if rest_pos.is_some_and(|rp| i > rp) {
-                                // Element after rest: index from end
-                                arr.len().saturating_sub(elements.len().saturating_sub(i))
+                            let val = if rest_pos.is_some_and(|rp| i > rp) {
+                                // Element after rest: index from end, but only if
+                                // there are enough elements to avoid overlap
+                                let idx = arr.len().saturating_sub(elements.len().saturating_sub(i));
+                                if idx >= before_rest && idx < arr.len() {
+                                    arr[idx].clone()
+                                } else {
+                                    DataType::Null
+                                }
                             } else {
-                                i
+                                arr.get(i).cloned().unwrap_or(DataType::Null)
                             };
-                            let val = arr.get(idx).cloned().unwrap_or(DataType::Null);
                             let addr = self.heap.alloc(val);
                             self.define(name, addr, mutable);
                         }

@@ -5,6 +5,31 @@
 
 use crate::syntax::ast::*;
 
+/// Re-escape a string's contents so that control characters are represented
+/// as their escape sequences (e.g., newline → `\n`). This ensures the
+/// formatter produces valid, parseable string literals.
+fn escape_string_contents(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c if c.is_control() => {
+                // Escape other control chars as \xHH
+                for b in c.to_string().bytes() {
+                    out.push_str(&format!("\\x{:02x}", b));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Configuration for the formatter.
 #[derive(Debug, Clone)]
 pub struct FormatConfig {
@@ -454,7 +479,7 @@ impl<'a> Formatter<'a> {
                 args,
                 kwargs,
             } => {
-                self.fmt_expression(object);
+                self.fmt_expression_prec(object, 9);
                 self.write(".");
                 self.write(method);
                 self.write("(");
@@ -462,6 +487,10 @@ impl<'a> Formatter<'a> {
                 self.write(")");
             }
             ExpressionKind::Pipe { .. } => {
+                let needs_parens = parent_prec > 0;
+                if needs_parens {
+                    self.write("(");
+                }
                 // Flatten the pipe chain to avoid non-idempotent nested indentation
                 let mut stages = Vec::new();
                 self.collect_pipe_stages(expr, &mut stages);
@@ -473,6 +502,9 @@ impl<'a> Formatter<'a> {
                     self.fmt_expression(stage);
                 }
                 self.dedent();
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::IfElse {
                 condition,
@@ -492,13 +524,13 @@ impl<'a> Formatter<'a> {
                 self.fmt_block(block);
             }
             ExpressionKind::Index { object, index } => {
-                self.fmt_expression(object);
+                self.fmt_expression_prec(object, 9);
                 self.write("[");
                 self.fmt_expression(index);
                 self.write("]");
             }
             ExpressionKind::FieldAccess { object, field } => {
-                self.fmt_expression(object);
+                self.fmt_expression_prec(object, 9);
                 self.write(".");
                 self.write(field);
             }
@@ -510,6 +542,10 @@ impl<'a> Formatter<'a> {
                 end,
                 inclusive,
             } => {
+                let needs_parens = parent_prec > 0;
+                if needs_parens {
+                    self.write("(");
+                }
                 self.fmt_expression(start);
                 if *inclusive {
                     self.write("..=");
@@ -517,6 +553,9 @@ impl<'a> Formatter<'a> {
                     self.write("..");
                 }
                 self.fmt_expression(end);
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::Await(inner) => {
                 self.write("await ");
@@ -527,6 +566,10 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression(inner);
             }
             ExpressionKind::Lambda { params, body } => {
+                let needs_parens = parent_prec > 0;
+                if needs_parens {
+                    self.write("(");
+                }
                 self.write("|");
                 for (i, param) in params.iter().enumerate() {
                     if param.rest {
@@ -543,6 +586,9 @@ impl<'a> Formatter<'a> {
                 }
                 self.write("| ");
                 self.fmt_expression(body);
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::Match { value, arms } => {
                 self.write("match ");
@@ -582,11 +628,8 @@ impl<'a> Formatter<'a> {
                         StringPart::Literal(s) => {
                             // Escape special characters in the literal.
                             // Braces must be doubled so they round-trip through the parser.
-                            let escaped = s
-                                .replace('\\', "\\\\")
-                                .replace('"', "\\\"")
-                                .replace('{', "{{")
-                                .replace('}', "}}");
+                            let escaped = escape_string_contents(s);
+                            let escaped = escaped.replace('{', "{{").replace('}', "}}");
                             self.write(&escaped);
                         }
                         StringPart::Expr(e) => {
@@ -789,7 +832,7 @@ impl<'a> Formatter<'a> {
                 }
             }
             Literal::String(s) => {
-                self.write(&format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")));
+                self.write(&format!("\"{}\"", escape_string_contents(s)));
             }
             Literal::Bool(b) => self.write(if *b { "true" } else { "false" }),
             Literal::Null => self.write("null"),

@@ -4112,3 +4112,65 @@ fn test_run_tests_isolation_variables() {
     assert!(results[0].passed, "First test should pass: {:?}", results[0].error_message);
     assert!(results[1].passed, "Second test should pass (isolation): {:?}", results[1].error_message);
 }
+
+// ═══════════════════════════════════════════════════════════
+// Round 28: Formatter escaping, destructuring, formatter parens
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_formatter_preserves_string_escapes() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let source = "let x = \"hello\\nworld\\t!\"";
+    let program = parse(source);
+    let config = FormatConfig::default();
+    let formatted = format_program(&program, &config);
+    assert!(formatted.contains("\\n"), "Formatter should preserve \\n escape: {}", formatted);
+    assert!(formatted.contains("\\t"), "Formatter should preserve \\t escape: {}", formatted);
+}
+
+#[test]
+fn test_formatter_fstring_preserves_escapes() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let source = "let x = f\"line1\\nline2 {name}\"";
+    let program = parse(source);
+    let config = FormatConfig::default();
+    let formatted = format_program(&program, &config);
+    assert!(formatted.contains("\\n"), "Formatter should preserve \\n in f-string: {}", formatted);
+}
+
+#[test]
+fn test_destructure_rest_end() {
+    // Rest at end: [a, b, ...rest] = [1, 2, 3, 4]
+    assert_eq!(
+        run("let [a, b, ...rest] = [1, 2, 3, 4]\nrest"),
+        DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)])
+    );
+}
+
+#[test]
+fn test_destructure_rest_empty() {
+    // Rest at end with exact match: [a, b, ...rest] = [1, 2]
+    assert_eq!(
+        run("let [a, b, ...rest] = [1, 2]\nrest"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_destructure_array_basic() {
+    assert_eq!(
+        run("let [x, y] = [10, 20]\nx + y"),
+        DataType::Int64(30)
+    );
+}
+
+#[test]
+fn test_formatter_range_in_method_call_gets_parens() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    // This tests that Range expressions get parens when used as method call object
+    let source = "let x = (1..10).len()";
+    let program = parse(source);
+    let config = FormatConfig::default();
+    let formatted = format_program(&program, &config);
+    assert!(formatted.contains("(1..10)"), "Range should be parenthesized: {}", formatted);
+}
