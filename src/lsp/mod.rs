@@ -93,10 +93,12 @@ impl LanguageServer for MagiLanguageServer {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.documents
-            .write()
-            .await
-            .remove(&params.text_document.uri);
+        let uri = params.text_document.uri;
+        self.documents.write().await.remove(&uri);
+        // Clear published diagnostics for the closed document
+        self.client
+            .publish_diagnostics(uri, vec![], None)
+            .await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

@@ -354,7 +354,13 @@ impl OperationEvaluator for FullEvaluator {
             // Type conversions
             OperationType::ToInt64 => match &input {
                 DataType::Int64(_) => Ok(input.clone()),
-                DataType::Float64(f) => Ok(DataType::Int64(*f as i64)),
+                DataType::Float64(f) => {
+                    if f.is_nan() || f.is_infinite() {
+                        Ok(DataType::Null)
+                    } else {
+                        Ok(DataType::Int64(*f as i64))
+                    }
+                }
                 DataType::String(s) => Ok(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null)),
                 DataType::Bool(b) => Ok(DataType::Int64(if *b { 1 } else { 0 })),
                 _ => Ok(DataType::Null),
@@ -376,7 +382,10 @@ impl OperationEvaluator for FullEvaluator {
 
             // Math
             OperationType::Abs => match &input {
-                DataType::Int64(n) => Ok(DataType::Int64(n.abs())),
+                DataType::Int64(n) => Ok(match n.checked_abs() {
+                    Some(v) => DataType::Int64(v),
+                    None => DataType::Null, // i64::MIN overflow
+                }),
                 DataType::Float64(n) => Ok(DataType::Float64(n.abs())),
                 _ => Ok(DataType::Null),
             },

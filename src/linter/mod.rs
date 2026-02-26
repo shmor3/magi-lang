@@ -112,6 +112,11 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_naming_snake_case(&fdef.name, fdef.span) {
                     self.emit(d);
                 }
+                for param in &fdef.params {
+                    if let Some(d) = rules::check_naming_snake_case(&param.name, param.span) {
+                        self.emit(d);
+                    }
+                }
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
                 }
@@ -120,6 +125,11 @@ impl<'a> LintContext<'a> {
             StatementKind::AsyncFunctionDef(fdef) => {
                 if let Some(d) = rules::check_naming_snake_case(&fdef.name, fdef.span) {
                     self.emit(d);
+                }
+                for param in &fdef.params {
+                    if let Some(d) = rules::check_naming_snake_case(&param.name, param.span) {
+                        self.emit(d);
+                    }
                 }
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
@@ -141,12 +151,23 @@ impl<'a> LintContext<'a> {
                     self.emit(d);
                 }
             }
-            StatementKind::ForLoop { iterable, body, .. } => {
+            StatementKind::ForLoop { pattern, iterable, body } => {
+                if let ForPattern::Single(name) = pattern {
+                    if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                        self.emit(d);
+                    }
+                }
+                if let Some(d) = rules::check_empty_block(body, "for-loop", stmt.span) {
+                    self.emit(d);
+                }
                 self.check_expression(iterable);
                 self.check_block(body);
             }
             StatementKind::WhileLoop { condition, body } => {
                 if let Some(d) = rules::check_constant_condition(condition) {
+                    self.emit(d);
+                }
+                if let Some(d) = rules::check_empty_block(body, "while-loop", stmt.span) {
                     self.emit(d);
                 }
                 self.check_expression(condition);
@@ -216,6 +237,14 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_constant_condition(condition) {
                     self.emit(d);
                 }
+                if let Some(d) = rules::check_empty_block(then_block, "if", expr.span) {
+                    self.emit(d);
+                }
+                if let Some(eb) = else_block {
+                    if let Some(d) = rules::check_empty_block(eb, "else", expr.span) {
+                        self.emit(d);
+                    }
+                }
                 self.check_expression(condition);
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
@@ -280,7 +309,12 @@ impl<'a> LintContext<'a> {
             ExpressionKind::FieldAccess { object, .. } => {
                 self.check_expression(object);
             }
-            ExpressionKind::Lambda { body, .. } => {
+            ExpressionKind::Lambda { params, body } => {
+                for param in params {
+                    if let Some(d) = rules::check_naming_snake_case(&param.name, param.span) {
+                        self.emit(d);
+                    }
+                }
                 self.check_expression(body);
             }
             ExpressionKind::Loop(block) => {

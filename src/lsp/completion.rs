@@ -8,7 +8,7 @@ const KEYWORDS: &[&str] = &[
     "let", "mut", "fn", "async", "if", "else", "for", "while", "loop", "match",
     "return", "break", "continue", "throw", "try", "catch", "finally", "output",
     "import", "use", "const", "type", "mod", "enum", "struct", "test", "true",
-    "false", "null", "in", "as", "spawn", "await",
+    "false", "null", "in", "as", "spawn", "await", "pub",
 ];
 
 /// Built-in functions available without import.
@@ -17,6 +17,29 @@ const BUILTINS: &[&str] = &[
     "to_float", "abs", "round", "floor", "ceil", "sqrt",
 ];
 
+/// Find the word prefix (text before cursor only) at a given position.
+fn find_prefix_at_position(source: &str, line: u32, character: u32) -> Option<String> {
+    let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
+    let col = character as usize;
+
+    if col > chars.len() {
+        return None;
+    }
+
+    // Scan backwards only for start of identifier
+    let mut start = col;
+    while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') {
+        start -= 1;
+    }
+
+    if start == col {
+        return None;
+    }
+
+    Some(chars[start..col].iter().collect())
+}
+
 /// Handle a completion request.
 pub fn handle_completion(
     state: &DocumentState,
@@ -24,8 +47,8 @@ pub fn handle_completion(
 ) -> CompletionResponse {
     let mut items = Vec::new();
 
-    // Extract the prefix at cursor position for filtering
-    let prefix = super::analysis::find_word_at_position(
+    // Extract the prefix at cursor position for filtering (only text before cursor)
+    let prefix = find_prefix_at_position(
         &state.source,
         params.text_document_position.position.line,
         params.text_document_position.position.character,
@@ -65,14 +88,21 @@ pub fn handle_completion(
 
     // User-defined variables
     for (name, var) in &state.variables {
-        let detail = if var.mutable {
+        let detail = if var.constant {
+            format!("const {}", name)
+        } else if var.mutable {
             format!("let mut {}", name)
         } else {
             format!("let {}", name)
         };
+        let kind = if var.constant {
+            CompletionItemKind::CONSTANT
+        } else {
+            CompletionItemKind::VARIABLE
+        };
         items.push(CompletionItem {
             label: name.clone(),
-            kind: Some(CompletionItemKind::VARIABLE),
+            kind: Some(kind),
             detail: Some(detail),
             ..Default::default()
         });

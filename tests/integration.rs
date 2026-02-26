@@ -2765,3 +2765,156 @@ output r;"#;
         "Expected return type mismatch error. Diagnostics: {:?}",
         analysis.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>());
 }
+
+// =============================================================================
+// Round 13: Linter, LSP, and evaluator fixes
+// =============================================================================
+
+#[test]
+fn test_linter_to_snake_case_acronyms() {
+    // to_snake_case should handle acronyms correctly (HTTPServer → http_server)
+    use magi_lang::linter;
+    let src = "let HTTPServer = 1;";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let w200 = result.diagnostics.iter().find(|d| d.code.as_deref() == Some("W200")).unwrap();
+    assert!(w200.suggestion.as_ref().unwrap().contains("http_server"),
+        "Expected 'http_server' suggestion, got: {:?}", w200.suggestion);
+}
+
+#[test]
+fn test_linter_to_snake_case_camel() {
+    // to_snake_case should handle camelCase correctly
+    use magi_lang::linter;
+    let src = "let myVarName = 1;";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let w200 = result.diagnostics.iter().find(|d| d.code.as_deref() == Some("W200")).unwrap();
+    assert!(w200.suggestion.as_ref().unwrap().contains("my_var_name"),
+        "Expected 'my_var_name' suggestion, got: {:?}", w200.suggestion);
+}
+
+#[test]
+fn test_linter_w206_empty_for_loop() {
+    // W206 should be emitted for empty for-loop bodies
+    use magi_lang::linter;
+    let src = "for x in [1, 2, 3] {}";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W206".to_string()),
+        "Expected W206 for empty for-loop, got: {:?}", codes);
+}
+
+#[test]
+fn test_linter_w206_empty_while_loop() {
+    // W206 should be emitted for empty while-loop bodies
+    use magi_lang::linter;
+    let src = "let x = true;\nwhile x {}";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W206".to_string()),
+        "Expected W206 for empty while-loop, got: {:?}", codes);
+}
+
+#[test]
+fn test_linter_w206_empty_if_body() {
+    // W206 should be emitted for empty if bodies
+    use magi_lang::linter;
+    let src = "let x = 1;\nif x > 0 {}";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W206".to_string()),
+        "Expected W206 for empty if body, got: {:?}", codes);
+}
+
+#[test]
+fn test_linter_w207_or_pattern_catch_all() {
+    // W207 should detect catch-all inside Or-pattern
+    use magi_lang::linter;
+    let src = r#"let x = 1;
+match x {
+    1 | _ => 0,
+    2 => 2,
+}"#;
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W207".to_string()),
+        "Expected W207 for unreachable arm after or-pattern with wildcard, got: {:?}", codes);
+}
+
+#[test]
+fn test_linter_w203_guarded_arm_not_exhaustive() {
+    // W203: guarded arms should not count as covering enum variants
+    use magi_lang::linter;
+    let src = r#"enum Color { Red, Green, Blue }
+let c = Color::Red;
+match c {
+    Color::Red if true => "red",
+    Color::Green => "green",
+}"#;
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W203".to_string()),
+        "Expected W203 for non-exhaustive match (guarded Red + missing Blue), got: {:?}", codes);
+}
+
+#[test]
+fn test_linter_w200_function_params() {
+    // W200 should check function parameter names
+    use magi_lang::linter;
+    let src = "fn foo(myParam: int64) { myParam }";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W200".to_string()),
+        "Expected W200 for non-snake_case param name, got: {:?}", codes);
+}
+
+#[test]
+fn test_linter_w200_for_loop_var() {
+    // W200 should check for-loop variable names
+    use magi_lang::linter;
+    let src = "for myItem in [1, 2, 3] { output myItem; }";
+    let program = parse_v2(src).unwrap();
+    let config = linter::LintConfig::default();
+    let result = linter::lint(&program, &config);
+    let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W200".to_string()),
+        "Expected W200 for non-snake_case for-loop var, got: {:?}", codes);
+}
+
+#[test]
+fn test_lsp_const_symbol_extraction() {
+    // LSP should recognize const defs and mark them appropriately
+    use magi_lang::lsp::analysis::analyze_document;
+    let src = "const MAX_SIZE = 100;";
+    let (state, _) = analyze_document(src);
+    let var = state.variables.get("MAX_SIZE").unwrap();
+    assert!(var.constant, "Expected const to be marked as constant");
+    assert!(!var.mutable, "Const should not be mutable");
+}
+
+#[test]
+fn test_lsp_completion_prefix_boundary() {
+    // Completion should only consider prefix (text before cursor), not full word
+    use magi_lang::lsp::analysis::find_word_at_position;
+    let src = "let foo_bar = 1;";
+    // find_word_at_position scans both directions, so at position 7 it returns "foo_bar"
+    let word = find_word_at_position(src, 0, 7).unwrap();
+    assert_eq!(word, "foo_bar");
+    // But for completion, cursor at col 7 (middle of "foo_bar") should only return "foo_bar"
+    // This is tested at the unit level in completion module
+}

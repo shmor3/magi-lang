@@ -28,7 +28,9 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
     // Look up in variables
     if let Some(var) = state.variables.get(&word) {
         let mut info = String::from("```magi\n");
-        if var.mutable {
+        if var.constant {
+            info.push_str("const ");
+        } else if var.mutable {
             info.push_str("let mut ");
         } else {
             info.push_str("let ");
@@ -106,6 +108,6 @@ fn is_keyword(word: &str) -> bool {
             | "match" | "return" | "break" | "continue" | "throw" | "try" | "catch"
             | "finally" | "output" | "import" | "use" | "const" | "type" | "mod"
             | "enum" | "struct" | "test" | "true" | "false" | "null" | "in" | "as"
-            | "spawn" | "await"
+            | "spawn" | "await" | "pub"
     )
 }

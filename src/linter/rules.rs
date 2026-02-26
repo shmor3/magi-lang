@@ -5,12 +5,19 @@ use crate::syntax::errors::ErrorCode;
 use crate::syntax::type_checker::AstDiagnostic;
 use crate::eval::DiagnosticSeverity;
 
-/// Convert a name to snake_case.
+/// Convert a name to snake_case, handling acronyms correctly.
+/// e.g. "HTTPServer" → "http_server", "myFunc" → "my_func"
 fn to_snake_case(name: &str) -> String {
     let mut result = String::new();
-    for (i, c) in name.chars().enumerate() {
+    let chars: Vec<char> = name.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
         if c.is_ascii_uppercase() {
-            if i > 0 {
+            let prev_upper = i > 0 && chars[i - 1].is_ascii_uppercase();
+            let next_lower = i + 1 < chars.len() && chars[i + 1].is_ascii_lowercase();
+            // Insert underscore before:
+            // 1. A capital that follows a lowercase (camelCase boundary)
+            // 2. A capital in an acronym run that precedes a lowercase (e.g. the S in HTTPServer)
+            if i > 0 && (!prev_upper || next_lower) {
                 result.push('_');
             }
             result.push(c.to_ascii_lowercase());
@@ -157,15 +164,9 @@ pub fn check_unreachable_arms(arms: &[MatchArm]) -> Vec<AstDiagnostic> {
             continue;
         }
 
-        // A wildcard or unguarded variable pattern catches everything
-        match &arm.pattern {
-            Pattern::Wildcard if arm.guard.is_none() => {
-                seen_catch_all = true;
-            }
-            Pattern::Variable(_) if arm.guard.is_none() => {
-                seen_catch_all = true;
-            }
-            _ => {}
+        // A wildcard, unguarded variable, or Or-pattern containing a catch-all
+        if arm.guard.is_none() && is_catch_all_pattern(&arm.pattern) {
+            seen_catch_all = true;
         }
     }
 
@@ -246,7 +247,10 @@ pub fn check_match_exhaustiveness(
         std::collections::HashMap::new();
 
     for arm in arms {
-        collect_enum_variants(&arm.pattern, &mut enum_variants_used);
+        // Only count unguarded arms as covering a variant — guarded arms may not match
+        if arm.guard.is_none() {
+            collect_enum_variants(&arm.pattern, &mut enum_variants_used);
+        }
     }
 
     // For each enum referenced, check if all its variants are covered

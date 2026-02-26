@@ -22,6 +22,7 @@ pub struct FunctionSymbol {
 pub struct VariableSymbol {
     pub name: String,
     pub mutable: bool,
+    pub constant: bool,
     pub type_annotation: Option<String>,
     pub line: u32,
     pub col: u32,
@@ -145,6 +146,7 @@ pub fn extract_symbols(
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
                     mutable: false,
+                    constant: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
                     col: stmt.span.start_col,
@@ -154,6 +156,7 @@ pub fn extract_symbols(
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
                     mutable: true,
+                    constant: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
                     col: stmt.span.start_col,
@@ -163,6 +166,7 @@ pub fn extract_symbols(
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
                     mutable: false,
+                    constant: true,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
                     col: stmt.span.start_col,
