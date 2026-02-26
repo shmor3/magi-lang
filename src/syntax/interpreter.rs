@@ -925,7 +925,12 @@ impl<'a> Interpreter<'a> {
                     Err(ref e) if is_control_flow(e) => {
                         if let Some(finally) = finally_block {
                             // Finally errors propagate (override control flow).
-                            self.exec_block(finally)?;
+                            self.symbols.push(HashMap::new());
+                            self.heap.push_scope();
+                            let finally_result = self.exec_block(finally);
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            finally_result?;
                         }
                         return try_result;
                     }
@@ -945,7 +950,12 @@ impl<'a> Interpreter<'a> {
                 };
                 if let Some(finally) = finally_block {
                     // Finally errors propagate (override try/catch result).
-                    self.exec_block(finally)?;
+                    self.symbols.push(HashMap::new());
+                    self.heap.push_scope();
+                    let finally_result = self.exec_block(finally);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
+                    finally_result?;
                 }
                 result
             }

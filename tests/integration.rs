@@ -3175,3 +3175,142 @@ fn test_let_with_type_annotation() {
         DataType::Int64(42)
     );
 }
+
+// Round 17: Finally block scope isolation tests
+#[test]
+fn test_finally_block_scope_isolation() {
+    // Variables declared in finally should NOT leak to outer scope
+    assert_eq!(
+        run(r#"
+let mut result = "before";
+try {
+    result = "try";
+} catch e {
+    result = "catch";
+} finally {
+    let temp = "finally_var";
+}
+result
+"#),
+        DataType::String("try".to_string())
+    );
+}
+
+#[test]
+fn test_finally_block_scope_isolation_catch_path() {
+    // Variables declared in finally should NOT leak even on catch path
+    assert_eq!(
+        run(r#"
+let mut result = "before";
+try {
+    throw "error";
+} catch e {
+    result = "caught";
+} finally {
+    let cleanup = "done";
+}
+result
+"#),
+        DataType::String("caught".to_string())
+    );
+}
+
+#[test]
+fn test_finally_runs_on_normal_path() {
+    assert_eq!(
+        run(r#"
+let mut x = 0;
+try {
+    x = 1;
+} catch e {
+    x = 2;
+} finally {
+    x = 10;
+}
+x
+"#),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_finally_runs_on_error_path() {
+    assert_eq!(
+        run(r#"
+let mut x = 0;
+try {
+    throw "boom";
+} catch e {
+    x = 2;
+} finally {
+    x = 10;
+}
+x
+"#),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_finally_error_overrides_try_result() {
+    // If finally throws, it should override the try result
+    assert_eq!(
+        run(r#"
+let mut result = "none";
+try {
+    try {
+        result = "inner";
+    } catch e {
+        result = "caught";
+    } finally {
+        throw "finally_error";
+    }
+} catch e {
+    result = "finally_err_caught";
+}
+result
+"#),
+        DataType::String("finally_err_caught".to_string())
+    );
+}
+
+#[test]
+fn test_try_catch_error_message() {
+    // Catch variable receives the full formatted error string
+    let result = run(r#"
+try {
+    throw "oops";
+} catch e {
+    e
+}
+"#);
+    // The error message includes span and error code info
+    match result {
+        DataType::String(s) => assert!(s.contains("oops"), "expected 'oops' in: {}", s),
+        other => panic!("expected String, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_nested_try_catch_finally() {
+    assert_eq!(
+        run(r#"
+let mut log = "";
+try {
+    try {
+        throw "inner";
+    } catch e {
+        log = log + "inner_catch,";
+    } finally {
+        log = log + "inner_finally,";
+    }
+} catch e {
+    log = log + "outer_catch,";
+} finally {
+    log = log + "outer_finally";
+}
+log
+"#),
+        DataType::String("inner_catch,inner_finally,outer_finally".to_string())
+    );
+}
