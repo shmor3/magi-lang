@@ -3405,3 +3405,41 @@ greet(42)
         assert!(d.code.is_some(), "Diagnostic without error code: {}", d.message);
     }
 }
+
+// Round 19: Linter destructuring naming checks
+#[test]
+fn test_lint_w200_destructure_array() {
+    use magi_lang::linter;
+    let source = r#"let [firstName, last_name] = ["Alice", "Smith"];"#;
+    let program = parse_v2(source).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    let w200s: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W200"))
+        .collect();
+    assert_eq!(w200s.len(), 1, "Expected 1 W200 for firstName, got: {:?}", w200s);
+    assert!(w200s[0].message.contains("firstName"), "Should warn about firstName");
+}
+
+#[test]
+fn test_lint_w200_destructure_map() {
+    use magi_lang::linter;
+    let source = r#"let {key: myValue} = {"key": 1};"#;
+    let program = parse_v2(source).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    let w200s: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W200"))
+        .collect();
+    assert_eq!(w200s.len(), 1, "Expected 1 W200 for myValue, got: {:?}", w200s);
+}
+
+#[test]
+fn test_lint_w200_for_loop_destructure() {
+    use magi_lang::linter;
+    let source = r#"for [firstName, lastName] in [[1, 2]] { firstName }"#;
+    let program = parse_v2(source).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    let w200s: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W200"))
+        .collect();
+    assert_eq!(w200s.len(), 2, "Expected 2 W200 for firstName and lastName, got: {:?}", w200s);
+}

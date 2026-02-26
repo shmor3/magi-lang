@@ -99,7 +99,28 @@ impl<'a> LintContext<'a> {
                 }
                 self.check_expression(value);
             }
-            StatementKind::LetDestructure { value, .. } => {
+            StatementKind::LetDestructure { pattern, value, .. } => {
+                match pattern {
+                    DestructurePattern::Array(elements) => {
+                        for elem in elements {
+                            let name = match elem {
+                                DestructureElement::Name(n) => n,
+                                DestructureElement::Rest(n) => n,
+                            };
+                            if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                                self.emit(d);
+                            }
+                        }
+                    }
+                    DestructurePattern::Map(entries) => {
+                        for (key, alias) in entries {
+                            let name = alias.as_deref().unwrap_or(key.as_str());
+                            if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                                self.emit(d);
+                            }
+                        }
+                    }
+                }
                 self.check_expression(value);
             }
             StatementKind::Assignment { value, .. } => {
@@ -152,9 +173,30 @@ impl<'a> LintContext<'a> {
                 }
             }
             StatementKind::ForLoop { pattern, iterable, body } => {
-                if let ForPattern::Single(name) = pattern {
-                    if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
-                        self.emit(d);
+                match pattern {
+                    ForPattern::Single(name) => {
+                        if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                            self.emit(d);
+                        }
+                    }
+                    ForPattern::ArrayDestructure(elements) => {
+                        for elem in elements {
+                            let name = match elem {
+                                DestructureElement::Name(n) => n,
+                                DestructureElement::Rest(n) => n,
+                            };
+                            if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                                self.emit(d);
+                            }
+                        }
+                    }
+                    ForPattern::MapDestructure(entries) => {
+                        for (key, alias) in entries {
+                            let name = alias.as_deref().unwrap_or(key.as_str());
+                            if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                                self.emit(d);
+                            }
+                        }
                     }
                 }
                 if let Some(d) = rules::check_empty_block(body, "for-loop", stmt.span) {
@@ -195,6 +237,7 @@ impl<'a> LintContext<'a> {
                 ..
             } => {
                 self.check_block(try_block);
+                // Don't emit W206 for empty catch blocks — intentional error suppression is idiomatic
                 self.check_block(catch_block);
                 if let Some(fb) = finally_block {
                     self.check_block(fb);
