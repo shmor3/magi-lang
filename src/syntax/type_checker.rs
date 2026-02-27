@@ -961,7 +961,7 @@ impl TypeChecker {
                             stmt.span.start_line,
                             stmt.span.start_col,
                             format!("Unknown standard library module 'std::{}'", path[1]),
-                            DiagnosticSeverity::Warning,
+                            DiagnosticSeverity::Error,
                             super::errors::ErrorCode::E203,
                             None,
                         );
@@ -4104,10 +4104,10 @@ output result;"#,
     }
 
     #[test]
-    fn test_use_unknown_std_module_warns() {
+    fn test_use_unknown_std_module_errors() {
         let a = check("use std::nonexistent::thing;");
-        let w = warnings(&a);
-        assert!(w
+        let e = errors(&a);
+        assert!(e
             .iter()
             .any(|d| d.message.contains("Unknown standard library module")));
     }

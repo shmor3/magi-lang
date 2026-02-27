@@ -3640,6 +3640,16 @@ impl<'a> Interpreter<'a> {
 
                 // Count non-rest elements before and after rest
                 let before_rest = rest_pos.unwrap_or(elements.len());
+                // Validate array has enough elements for fixed positions
+                let required = before_rest + trailing_count;
+                if arr.len() < required {
+                    return Err(InterpError::TypeError {
+                        expected: format!("at least {} elements", required),
+                        actual: format!("{} elements", arr.len()),
+                        context: "array destructuring".to_string(),
+                        span,
+                    });
+                }
                 for (i, elem) in elements.iter().enumerate() {
                     match elem {
                         DestructureElement::Name(name) => {

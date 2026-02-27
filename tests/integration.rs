@@ -3584,6 +3584,38 @@ rest
 }
 
 #[test]
+fn test_destructure_too_few_elements_errors() {
+    // [a, b, c] with only 1 element — non-rest positions get Null
+    // But [a, b, ...rest] requires at least 2 elements
+    let err = run_err(r#"
+let [a, b, ...rest] = "not_array";
+a
+"#);
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert_eq!(context, "array destructuring");
+        }
+        other => panic!("expected TypeError, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_destructure_rest_at_end() {
+    // [a, b, ...rest] with exactly 2 elements: a=1, b=2, rest=[]
+    assert_eq!(
+        run(r#"
+let [a, b, ...rest] = [1, 2];
+[a, b, rest]
+"#),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Array(vec![]),
+        ])
+    );
+}
+
+#[test]
 fn test_string_interpolation_with_method_calls() {
     assert_eq!(
         run(r#"

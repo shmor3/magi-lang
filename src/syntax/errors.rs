@@ -66,7 +66,7 @@ pub enum ErrorCode {
     E401,
     /// Assertion failed
     E402,
-    /// User-thrown error (throw)
+    /// Uncaught user-thrown error (throw)
     E403,
     /// Assignment to immutable variable
     E404,
@@ -340,14 +340,22 @@ mod tests {
     #[test]
     fn test_error_code_help_non_empty() {
         let codes = [
-            ErrorCode::E100,
-            ErrorCode::E200,
-            ErrorCode::E201,
-            ErrorCode::E300,
-            ErrorCode::E400,
-            ErrorCode::E404,
-            ErrorCode::W100,
-            ErrorCode::W102,
+            ErrorCode::E100, ErrorCode::E101, ErrorCode::E102, ErrorCode::E103,
+            ErrorCode::E104, ErrorCode::E105, ErrorCode::E106, ErrorCode::E107,
+            ErrorCode::E200, ErrorCode::E201, ErrorCode::E202, ErrorCode::E203,
+            ErrorCode::E204,
+            ErrorCode::E300, ErrorCode::E301, ErrorCode::E302, ErrorCode::E303,
+            ErrorCode::E304,
+            ErrorCode::E400, ErrorCode::E401, ErrorCode::E402, ErrorCode::E403,
+            ErrorCode::E404, ErrorCode::E405, ErrorCode::E406, ErrorCode::E407,
+            ErrorCode::E408,
+            ErrorCode::W100, ErrorCode::W101, ErrorCode::W102, ErrorCode::W103,
+            ErrorCode::W104, ErrorCode::W105, ErrorCode::W106, ErrorCode::W107,
+            ErrorCode::W108, ErrorCode::W109, ErrorCode::W110, ErrorCode::W111,
+            ErrorCode::W112,
+            ErrorCode::W200, ErrorCode::W201, ErrorCode::W202, ErrorCode::W203,
+            ErrorCode::W204, ErrorCode::W205, ErrorCode::W206, ErrorCode::W207,
+            ErrorCode::W208,
         ];
         for code in codes {
             let help = code.help();
