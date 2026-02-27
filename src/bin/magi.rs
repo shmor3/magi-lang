@@ -2145,8 +2145,11 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlEncode => {
                 match &input {
                     DataType::String(s) => {
-                        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-                        Ok(DataType::String(utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()))
+                        use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+                        // RFC 3986 unreserved characters: A-Z a-z 0-9 - _ . ~
+                        const RFC3986_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+                            .remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+                        Ok(DataType::String(utf8_percent_encode(s, RFC3986_ENCODE_SET).to_string()))
                     }
                     _ => Ok(DataType::Null),
                 }
