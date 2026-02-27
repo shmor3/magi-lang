@@ -13132,3 +13132,885 @@ fn test_unicode_position_tracking_block_comment() {
         "After '/* 日 */' (7 chars), x should be at col 8, got col {}",
         x_tok.span.start_col);
 }
+
+// ── Round 82: module/use audit tests ─────────────────────────
+
+#[test]
+fn test_use_glob_imports_module_enums() {
+    // Bug fix: glob import should also bring in enums from a module
+    assert_eq!(run(r#"
+        mod colors {
+            enum Color { Red, Green, Blue }
+            fn make_green() { Color::Green() }
+        }
+        use colors::*;
+        output make_green();
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__enum".to_string(), DataType::String("Color".to_string()));
+        m.insert("__variant".to_string(), DataType::String("Green".to_string()));
+        m
+    }));
+}
+
+#[test]
+fn test_use_glob_imports_module_structs() {
+    // Bug fix: glob import should also bring in structs from a module
+    assert_eq!(run(r#"
+        mod geo {
+            struct Point { x, y }
+            fn origin() { Point { x: 0, y: 0 } }
+        }
+        use geo::*;
+        let p = Point { x: 5, y: 10 };
+        output p.x + p.y;
+    "#), DataType::Int64(15));
+}
+
+#[test]
+fn test_use_enum_by_name() {
+    // Bug fix: `use mod::Enum` should work for enum definitions
+    assert_eq!(run(r#"
+        mod shapes {
+            enum Shape { Circle, Square }
+        }
+        use shapes::Shape;
+        output Shape::Circle();
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__enum".to_string(), DataType::String("Shape".to_string()));
+        m.insert("__variant".to_string(), DataType::String("Circle".to_string()));
+        m
+    }));
+}
+
+#[test]
+fn test_use_struct_by_name() {
+    // Bug fix: `use mod::Struct` should work for struct definitions
+    assert_eq!(run(r#"
+        mod geo {
+            struct Vec2 { x, y }
+        }
+        use geo::Vec2;
+        let v = Vec2 { x: 3, y: 4 };
+        output v.x;
+    "#), DataType::Int64(3));
+}
+
+#[test]
+fn test_use_enum_with_alias() {
+    // `use mod::Enum as Alias` should register enum under alias name
+    assert_eq!(run(r#"
+        mod colors {
+            enum Color { Red, Green, Blue }
+        }
+        use colors::Color as Hue;
+        output Hue::Blue();
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__enum".to_string(), DataType::String("Hue".to_string()));
+        m.insert("__variant".to_string(), DataType::String("Blue".to_string()));
+        m
+    }));
+}
+
+#[test]
+fn test_use_struct_with_alias() {
+    // `use mod::Struct as Alias` should register struct under alias name
+    assert_eq!(run(r#"
+        mod geo {
+            struct Point { x, y }
+        }
+        use geo::Point as Pt;
+        let p = Pt { x: 1, y: 2 };
+        output p.y;
+    "#), DataType::Int64(2));
+}
+
+#[test]
+fn test_nested_module_function_via_use() {
+    // Bug fix: nested modules should register functions with multi-level qualified names.
+    // Direct call `outer::inner::greet()` is not supported (parser only handles one :: level),
+    // but `use` supports multi-level paths.
+    assert_eq!(run(r#"
+        mod outer {
+            mod inner {
+                fn greet() { "hello" }
+            }
+        }
+        use outer::inner::greet;
+        output greet();
+    "#), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_nested_module_use_glob() {
+    // Glob import from a nested module should import its functions
+    assert_eq!(run(r#"
+        mod a {
+            mod b {
+                fn double(x) { x * 2 }
+                fn triple(x) { x * 3 }
+            }
+        }
+        use a::b::*;
+        output double(5) + triple(5);
+    "#), DataType::Int64(25));
+}
+
+#[test]
+fn test_nested_module_use_specific() {
+    // Import a specific function from a nested module
+    assert_eq!(run(r#"
+        mod a {
+            mod b {
+                fn add(x, y) { x + y }
+            }
+        }
+        use a::b::add;
+        output add(3, 4);
+    "#), DataType::Int64(7));
+}
+
+#[test]
+fn test_nested_module_enum_via_use() {
+    // Nested module registers enums; access via use import and module function
+    assert_eq!(run(r#"
+        mod outer {
+            mod inner {
+                enum Status { Ok, Err }
+                fn make_ok() { Status::Ok() }
+            }
+        }
+        use outer::inner::make_ok;
+        output make_ok();
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__enum".to_string(), DataType::String("Status".to_string()));
+        m.insert("__variant".to_string(), DataType::String("Ok".to_string()));
+        m
+    }));
+}
+
+#[test]
+fn test_use_nonexistent_enum_errors() {
+    // Using a non-existent item from a module should give error with suggestions
+    let err = run_err(r#"
+        mod m {
+            enum Color { Red }
+            fn foo() { 1 }
+        }
+        use m::Colour;
+    "#);
+    match err {
+        InterpError::UnknownOperation { name, suggestion, .. } => {
+            assert!(name.contains("Colour"), "expected 'Colour' in name: {}", name);
+            // Should suggest 'Color' since it's close
+            assert_eq!(suggestion, Some("did you mean 'Color'?".to_string()));
+        }
+        other => panic!("expected UnknownOperation, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_use_nonexistent_item_includes_enum_struct_suggestions() {
+    // When looking up a non-existent item, suggestions should include enums and structs
+    let err = run_err(r#"
+        mod m {
+            struct Point { x, y }
+        }
+        use m::Poont;
+    "#);
+    match err {
+        InterpError::UnknownOperation { suggestion, .. } => {
+            assert_eq!(suggestion, Some("did you mean 'Point'?".to_string()));
+        }
+        other => panic!("expected UnknownOperation, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_module_cross_module_enum_match() {
+    // Cross-module type visibility: function in one module can match on enum from another.
+    // Module enums are registered unqualified, so Color::Red() works directly.
+    // Use a helper function since `types::Color::Red()` needs multi-level :: (parser limitation).
+    assert_eq!(run(r#"
+        mod types {
+            enum Color { Red, Green, Blue }
+            fn make_red() { Color::Red() }
+        }
+        mod logic {
+            fn is_red(c) {
+                match c {
+                    Color::Red() => true,
+                    _ => false,
+                }
+            }
+        }
+        let r = types::make_red();
+        output logic::is_red(r);
+    "#), DataType::Bool(true));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SMOKE TESTS — holistic subsystem sanity checks
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Smoke test: every literal type parses, type-checks, and interprets correctly.
+#[test]
+fn test_smoke_all_literal_types() {
+    // Int64
+    assert_eq!(run("42"), DataType::Int64(42));
+    assert_eq!(run("-1"), DataType::Int64(-1));
+    assert_eq!(run("0"), DataType::Int64(0));
+
+    // Float64
+    assert_eq!(run("3.14"), DataType::Float64(3.14));
+    assert_eq!(run("-0.5"), DataType::Float64(-0.5));
+    assert_eq!(run("0.0"), DataType::Float64(0.0));
+
+    // Bool
+    assert_eq!(run("true"), DataType::Bool(true));
+    assert_eq!(run("false"), DataType::Bool(false));
+
+    // Null
+    assert_eq!(run("null"), DataType::Null);
+
+    // String
+    assert_eq!(run(r#""hello""#), DataType::String("hello".to_string()));
+    assert_eq!(run(r#""""#), DataType::String("".to_string()));
+
+    // Array
+    assert_eq!(
+        run("[1, 2, 3]"),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)])
+    );
+    assert_eq!(run("[]"), DataType::Array(vec![]));
+
+    // Map
+    let result = run(r#"{"a": 1, "b": 2}"#);
+    match &result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("b"), Some(&DataType::Int64(2)));
+        }
+        _ => panic!("Expected Map, got {:?}", result),
+    }
+
+    // Nested: array of maps
+    let result = run(r#"[{"x": 1}, {"x": 2}]"#);
+    match &result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 2);
+            match &arr[0] {
+                DataType::Map(m) => assert_eq!(m.get("x"), Some(&DataType::Int64(1))),
+                other => panic!("Expected Map in array, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Array, got {:?}", result),
+    }
+
+    // All literals also type-check without errors
+    let src = r#"
+        let a = 42;
+        let b = 3.14;
+        let c = true;
+        let d = null;
+        let e = "hello";
+        let f = [1, 2, 3];
+        let g = {"x": 1};
+        output a;
+        output b;
+        output c;
+        output d;
+        output e;
+        output f;
+        output g;
+    "#;
+    let program = parse_v2(src).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let errors: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.severity == magi_lang::eval::DiagnosticSeverity::Error)
+        .collect();
+    assert!(errors.is_empty(), "No type errors expected for literals: {:?}", errors);
+}
+
+/// Smoke test: a single program covering every statement type.
+#[test]
+fn test_smoke_all_statement_types() {
+    // This program exercises: let, let_mut, const, for, while, loop, fn,
+    // async fn, enum, struct, match, if, try-catch-finally, throw, return,
+    // break, continue, import, use, type, module, test, output, assignment,
+    // compound assignment, expression statement, let-destructure.
+    let src = r#"
+        import "some_plugin";
+
+        use std::math;
+
+        type IntAlias = int64;
+
+        mod helpers {
+            fn identity(x) { x }
+        }
+
+        const PI = 3;
+
+        enum Color {
+            Red,
+            Green,
+            Blue(value),
+        }
+
+        struct Point {
+            x,
+            y,
+        }
+
+        fn add(a, b) {
+            return a + b;
+        }
+
+        async fn fetch_data() {
+            42
+        }
+
+        test "basic" {
+            let result = add(1, 2);
+            assert(result == 3);
+        }
+
+        let x = 10;
+        let mut y = 0;
+        let [a, b] = [1, 2];
+        let {name} = {"name": "magi"};
+
+        y = 5;
+        y += 1;
+
+        for i in [1, 2, 3] {
+            output i;
+        }
+
+        while y > 10 {
+            y = y - 1;
+        }
+
+        let loop_val = loop {
+            break 99;
+        };
+
+        if x > 5 {
+            output x;
+        } else {
+            output 0;
+        }
+
+        let color = Color::Red;
+        let result = match color {
+            Color::Red => "red",
+            Color::Green => "green",
+            Color::Blue(v) => "blue",
+            _ => "unknown",
+        };
+
+        let point = Point { x: 1, y: 2 };
+
+        try {
+            throw "oops";
+        } catch err {
+            output err;
+        } finally {
+            let _cleanup = true;
+        }
+
+        fn with_continue() {
+            for i in [1, 2, 3, 4] {
+                if i == 2 { continue; }
+                output i;
+            }
+        }
+        with_continue();
+
+        output result;
+    "#;
+
+    // Should parse without errors
+    let program = parse_v2(src).unwrap();
+
+    // Should type-check (warnings are fine, no panics)
+    let imports = std::collections::HashSet::new();
+    let _analysis = check_types(&program, &imports);
+
+    // Should interpret without panics (import/use will be no-ops in stub)
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let result = interp.execute(&program);
+    // We don't assert the exact value since import/use stubs may differ,
+    // but it should not panic
+    assert!(result.is_ok(), "Execution failed: {:?}", result.err());
+}
+
+/// Smoke test: a program exercising every expression kind.
+#[test]
+fn test_smoke_all_expression_types() {
+    let src = r#"
+        enum Option {
+            Some(val),
+            None,
+        }
+
+        struct Pair {
+            first,
+            second,
+        }
+
+        fn double(x) { x * 2 }
+        fn add_one(x) { x + 1 }
+
+        // Binary ops
+        let bin_add = 1 + 2;
+        let bin_sub = 5 - 3;
+        let bin_mul = 4 * 5;
+        let bin_div = 10 / 2;
+        let bin_mod = 7 % 3;
+        let bin_and = true && false;
+        let bin_or = true || false;
+        let bin_eq = 1 == 1;
+        let bin_neq = 1 != 2;
+        let bin_gt = 2 > 1;
+        let bin_lt = 1 < 2;
+        let bin_gte = 2 >= 2;
+        let bin_lte = 1 <= 2;
+
+        // Unary ops
+        let neg = -42;
+        let not_val = !true;
+
+        // Call
+        let call_result = double(5);
+
+        // Method call
+        let arr = [3, 1, 2];
+        let len = arr.length();
+
+        // Field access
+        let map = {"name": "magi"};
+        let name = map.name;
+
+        // Index
+        let indexed = arr[0];
+
+        // Pipe
+        let piped = 5 |> double(_);
+
+        // If-else expression
+        let ternary = if true { "yes" } else { "no" };
+
+        // Match expression
+        let matched = match 42 {
+            0 => "zero",
+            42 => "answer",
+            _ => "other",
+        };
+
+        // Lambda
+        let square = |x| x * x;
+        let squared = square(4);
+
+        // Spread (in array)
+        let base = [1, 2];
+        let spread_arr = [0, ...base, 3];
+
+        // Range
+        let rng = 0..5;
+
+        // Null coalesce
+        let nullable = null;
+        let coalesced = nullable ?? "default";
+
+        // Optional chain
+        let obj = {"inner": {"val": 10}};
+        let chained = obj?.inner;
+
+        // Await / Spawn (just parse, execution is stub)
+        async fn async_val() { 1 }
+        let spawned = spawn async_val();
+        let awaited = await spawned;
+
+        // String interpolation
+        let who = "world";
+        let greeting = f"hello {who}";
+
+        // List comprehension
+        let comp = [x * 2 for x in [1, 2, 3] if x > 1];
+
+        // Map comprehension
+        let mcomp = {"key": v * 10 for [k, v] in [["a", 1], ["b", 2]]};
+
+        // Enum construct
+        let opt = Option::Some(42);
+
+        // Struct construct
+        let pair = Pair { first: 1, second: 2 };
+
+        // Block expression
+        let block_val = {
+            let tmp = 10;
+            tmp + 5
+        };
+
+        // Loop expression
+        let loop_val = loop {
+            break 77;
+        };
+
+        // TryCatchExpr
+        let safe = try { 1 / 0 } catch _e { -1 };
+
+        // Try propagate (inside a function that returns)
+        fn maybe_fail() {
+            let val = try { 42 } catch _e { null };
+            val
+        }
+        let propagated = maybe_fail();
+
+        output [
+            bin_add, bin_sub, bin_mul, bin_div, bin_mod,
+            neg, call_result, len, indexed, piped,
+            squared, coalesced, block_val, loop_val, propagated
+        ];
+    "#;
+
+    // Parse
+    let program = parse_v2(src).unwrap();
+
+    // Type check (no panics)
+    let imports = std::collections::HashSet::new();
+    let _analysis = check_types(&program, &imports);
+
+    // Interpret
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let result = interp.execute(&program).unwrap();
+
+    // Verify the output array has the expected values
+    match &result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 15, "Expected 15 elements in output array, got {}", arr.len());
+            assert_eq!(arr[0], DataType::Int64(3));    // 1 + 2
+            assert_eq!(arr[1], DataType::Int64(2));    // 5 - 3
+            assert_eq!(arr[2], DataType::Int64(20));   // 4 * 5
+            assert_eq!(arr[3], DataType::Int64(5));    // 10 / 2
+            assert_eq!(arr[4], DataType::Int64(1));    // 7 % 3
+            assert_eq!(arr[5], DataType::Int64(-42));  // -42
+            assert_eq!(arr[6], DataType::Int64(10));   // double(5)
+            assert_eq!(arr[7], DataType::Int64(3));    // [3,1,2].length()
+            assert_eq!(arr[8], DataType::Int64(3));    // arr[0]
+            assert_eq!(arr[9], DataType::Int64(10));   // 5 |> double(_)
+            assert_eq!(arr[10], DataType::Int64(16));  // square(4)
+            assert_eq!(arr[11], DataType::String("default".to_string())); // null ?? "default"
+            assert_eq!(arr[12], DataType::Int64(15));  // block: 10 + 5
+            assert_eq!(arr[13], DataType::Int64(77));  // loop { break 77 }
+            assert_eq!(arr[14], DataType::Int64(42));  // maybe_fail()
+        }
+        _ => panic!("Expected Array, got {:?}", result),
+    }
+}
+
+/// Smoke test: trigger every type-checker warning code (W100-W113) and verify emission.
+#[test]
+fn test_smoke_type_checker_all_codes() {
+    // W100: Unused variable
+    let codes = typecheck_warnings("let x = 5;");
+    assert!(codes.contains(&"W100".to_string()), "W100 (unused variable) missing, got: {:?}", codes);
+
+    // W101: Unused import (needs import registered in imports set)
+    {
+        let program = parse_v2(r#"import "unused_plugin"; output 1;"#).unwrap();
+        let mut imports = std::collections::HashSet::new();
+        imports.insert("unused_plugin".to_string());
+        let analysis = check_types(&program, &imports);
+        let codes: Vec<_> = analysis.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+        assert!(codes.contains(&"W101".to_string()), "W101 (unused import) missing, got: {:?}", codes);
+    }
+
+    // W103: Unused function
+    let codes = typecheck_warnings("fn unused() { 1 }");
+    assert!(codes.contains(&"W103".to_string()), "W103 (unused function) missing, got: {:?}", codes);
+
+    // W106: Self-comparison (redundant operation)
+    let codes = typecheck_warnings("let x = 5; let y = x == x; output y;");
+    assert!(codes.contains(&"W106".to_string()), "W106 (self-comparison) missing, got: {:?}", codes);
+
+    // W106: Double negation
+    let codes = typecheck_warnings("let x = 5; let y = --x; output y;");
+    assert!(codes.contains(&"W106".to_string()), "W106 (double negation) missing, got: {:?}", codes);
+
+    // W107: Modulo by 1
+    let codes = typecheck_warnings("let x = 5; let y = x % 1; output y;");
+    assert!(codes.contains(&"W107".to_string()), "W107 (modulo by 1) missing, got: {:?}", codes);
+
+    // W107: Multiply by 0
+    let codes = typecheck_warnings("let x = 5; let y = x * 0; output y;");
+    assert!(codes.contains(&"W107".to_string()), "W107 (multiply by 0) missing, got: {:?}", codes);
+
+    // W108: Unnecessary return in tail position
+    let codes = typecheck_warnings("fn foo() { return 42; }");
+    assert!(codes.contains(&"W108".to_string()), "W108 (unnecessary return) missing, got: {:?}", codes);
+
+    // W109: Unused function parameter
+    let codes = typecheck_warnings("fn foo(x, y) { output x; }");
+    assert!(codes.contains(&"W109".to_string()), "W109 (unused param) missing, got: {:?}", codes);
+
+    // W110: Unnecessary let mut (never reassigned)
+    let codes = typecheck_warnings("let mut x = 5; output x;");
+    assert!(codes.contains(&"W110".to_string()), "W110 (unnecessary mut) missing, got: {:?}", codes);
+
+    // W111: Reserved keyword used as identifier.
+    // Note: W111 is checked in define_var(), but reserved keywords (trait, impl, etc.)
+    // are tokenized as TokenKind::Reserved by the lexer and rejected by the parser before
+    // the type checker runs. W111 is only reachable via direct define_var() calls in unit
+    // tests. We verify it does NOT trigger for non-reserved names:
+    let codes = typecheck_warnings("let my_var = 5; output my_var;");
+    assert!(!codes.contains(&"W111".to_string()), "W111 should not trigger for non-reserved name");
+
+    // W112: Default parameter type mismatch
+    let codes = typecheck_warnings(r#"fn foo(x: int64 = "hello") { output x; }"#);
+    assert!(codes.contains(&"W112".to_string()), "W112 (default param mismatch) missing, got: {:?}", codes);
+
+    // W113: Or-pattern variable mismatch
+    let codes = typecheck_warnings(r#"
+        let val = 5;
+        let result = match val {
+            x | 0 => x,
+            _ => 0,
+        };
+        output result;
+    "#);
+    assert!(codes.contains(&"W113".to_string()), "W113 (or-pattern mismatch) missing, got: {:?}", codes);
+}
+
+/// Smoke test: trigger every linter rule and verify the correct code is emitted.
+#[test]
+fn test_smoke_linter_all_rules() {
+    use magi_lang::linter::{lint, LintConfig};
+    let config = LintConfig::default();
+
+    // Helper to get lint codes for a source
+    let lint_codes = |src: &str| -> Vec<String> {
+        let program = parse_v2(src).unwrap();
+        let result = lint(&program, &config);
+        result.diagnostics.iter()
+            .filter_map(|d| d.code.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // W200: Non-snake_case variable/function name
+    let codes = lint_codes("let myVar = 5; output myVar;");
+    assert!(codes.contains(&"W200".to_string()), "W200 (snake_case) missing, got: {:?}", codes);
+
+    // W201: Non-PascalCase enum/struct name
+    let codes = lint_codes("enum my_color { Red, Blue }");
+    assert!(codes.contains(&"W201".to_string()), "W201 (PascalCase) missing, got: {:?}", codes);
+
+    // W202: Dead code after return
+    let codes = lint_codes("fn foo() { return 1; let x = 2; }");
+    assert!(codes.contains(&"W202".to_string()), "W202 (dead code) missing, got: {:?}", codes);
+
+    // W203: Non-exhaustive match (missing enum variants)
+    let codes = lint_codes(r#"
+        enum Dir { North, South, East, West }
+        let d = Dir::North;
+        let r = match d {
+            Dir::North => 1,
+            Dir::South => 2,
+        };
+    "#);
+    assert!(codes.contains(&"W203".to_string()), "W203 (non-exhaustive match) missing, got: {:?}", codes);
+
+    // W204: Constant condition in while
+    let codes = lint_codes("while false { output 1; }");
+    assert!(codes.contains(&"W204".to_string()), "W204 (constant condition) missing, got: {:?}", codes);
+
+    // W206: Empty block body
+    let codes = lint_codes("fn foo() {}");
+    assert!(codes.contains(&"W206".to_string()), "W206 (empty block) missing, got: {:?}", codes);
+
+    // W207: Unreachable match arm after wildcard
+    let codes = lint_codes(r#"
+        let x = 1;
+        let r = match x {
+            1 => "one",
+            _ => "other",
+            2 => "two",
+        };
+    "#);
+    assert!(codes.contains(&"W207".to_string()), "W207 (unreachable arm) missing, got: {:?}", codes);
+
+    // W208: Duplicate import
+    let codes = lint_codes(r#"
+        import "plugin_a";
+        import "plugin_a";
+    "#);
+    assert!(codes.contains(&"W208".to_string()), "W208 (duplicate import) missing, got: {:?}", codes);
+
+    // W209: Shadowed variable in same scope
+    let codes = lint_codes("let x = 1; let x = 2; output x;");
+    assert!(codes.contains(&"W209".to_string()), "W209 (shadow in same scope) missing, got: {:?}", codes);
+
+    // W211: Unused function parameter — now handled by type checker as W109, no longer emitted by linter.
+    // Verify it is NOT emitted by the linter:
+    let codes = lint_codes("fn foo(x, y) { output x; }");
+    assert!(!codes.contains(&"W211".to_string()), "W211 should no longer be emitted by linter, got: {:?}", codes);
+
+    // W212: Control flow in finally block
+    let codes = lint_codes(r#"
+        try {
+            output 1;
+        } catch e {
+            output e;
+        } finally {
+            return 0;
+        }
+    "#);
+    assert!(codes.contains(&"W212".to_string()), "W212 (finally control flow) missing, got: {:?}", codes);
+}
+
+/// Smoke test: format a complex program and verify parse(format(x)) roundtrip.
+#[test]
+fn test_smoke_formatter_roundtrip() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+
+    let src = r#"
+        const MAX = 100;
+        type Id = int64;
+
+        enum Shape {
+            Circle(radius),
+            Rect(w, h),
+        }
+
+        struct Point {
+            x,
+            y,
+        }
+
+        fn area(shape) {
+            match shape {
+                Shape::Circle(r) => 3 * r * r,
+                Shape::Rect(w, h) => w * h,
+                _ => 0,
+            }
+        }
+
+        fn process(items, threshold = 10) {
+            let filtered = [x * 2 for x in items if x > threshold];
+            let mapped = {"key": v for [k, v] in [["a", 1], ["b", 2]]};
+            let result = filtered |> double(_);
+            let safe = try { risky() } catch e { null };
+            let val = null ?? "default";
+            let greeting = f"count: {filtered.length()}";
+            let rng = 0..10;
+            for i in [1, 2, 3] {
+                if i == 2 { continue; }
+                output i;
+            }
+            while false {
+                break;
+            }
+            let loop_val = loop {
+                break 42;
+            };
+            try {
+                throw "error";
+            } catch e {
+                output e;
+            } finally {
+                let _done = true;
+            }
+            filtered
+        }
+
+        fn double(x) { x * 2 }
+
+        let p = Point { x: 1, y: 2 };
+        let s = Shape::Circle(5);
+        let a = area(s);
+        output a;
+    "#;
+
+    let program = parse_v2(src).unwrap();
+    let config = FormatConfig::default();
+    let formatted = format_program(&program, &config);
+
+    // The formatted output must be non-empty
+    assert!(!formatted.is_empty(), "Formatted output should not be empty");
+
+    // The formatted output must re-parse successfully
+    let reparsed = parse_v2(&formatted);
+    assert!(reparsed.is_ok(),
+        "Failed to re-parse formatted output.\nFormatted:\n{}\nError: {}",
+        formatted, reparsed.err().unwrap());
+
+    // Double-format should be idempotent
+    let reparsed_program = reparsed.unwrap();
+    let reformatted = format_program(&reparsed_program, &config);
+    assert_eq!(formatted, reformatted,
+        "Formatter is not idempotent.\nFirst format:\n{}\nSecond format:\n{}", formatted, reformatted);
+}
+
+/// Smoke test: error recovery parser produces partial AST and collects errors.
+#[test]
+fn test_smoke_error_recovery() {
+    use magi_lang::syntax::parser::parse_v2_recovering;
+
+    // A program with multiple syntax errors
+    let src = r#"
+        let x = 10;
+        let y = ;
+        fn foo( { }
+        let good = 42;
+        output good;
+        let z = +++
+    "#;
+
+    let (program, errors) = parse_v2_recovering(src);
+
+    // Should have recovered some errors
+    assert!(!errors.is_empty(),
+        "Expected syntax errors from malformed input, got none");
+
+    // Should have recovered at least some valid statements
+    assert!(!program.statements.is_empty(),
+        "Expected some recovered statements, got empty program");
+
+    // Verify that at least one valid statement was recovered
+    // (the `let x = 10;` or `let good = 42;` or `output good;`)
+    let has_let = program.statements.iter().any(|s| {
+        matches!(&s.kind,
+            magi_lang::syntax::ast::StatementKind::Let { .. } |
+            magi_lang::syntax::ast::StatementKind::Output(_))
+    });
+    assert!(has_let, "Expected at least one Let or Output statement to survive recovery");
+
+    // Another test: lexer error (unterminated string)
+    let (prog2, errs2) = parse_v2_recovering(r#"let x = "unterminated"#);
+    assert!(!errs2.is_empty(), "Expected error for unterminated string");
+    // Program may be empty since lexer fails first
+    let _ = prog2;
+
+    // Mixed: some good, some bad expressions
+    let (prog3, errs3) = parse_v2_recovering(r#"
+        let a = 1;
+        let b = @invalid;
+        let c = 3;
+    "#);
+    assert!(!errs3.is_empty(), "Expected error for @ token");
+    // Should still have some recovered statements
+    let _ = prog3;
+}

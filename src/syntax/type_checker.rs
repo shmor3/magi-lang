@@ -127,6 +127,8 @@ struct TypeChecker {
     seen_imports: HashSet<String>,
     /// Names brought into scope by `use` statements (suppresses E201).
     use_aliases: HashSet<String>,
+    /// Type alias definitions: alias name → target type string.
+    type_aliases: HashMap<String, String>,
 }
 
 impl TypeChecker {
@@ -142,6 +144,7 @@ impl TypeChecker {
             struct_defs: HashMap::new(),
             seen_imports: HashSet::new(),
             use_aliases: HashSet::new(),
+            type_aliases: HashMap::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -305,11 +308,39 @@ impl TypeChecker {
     }
 
     // =========================================================================
+    // Type alias collection
+    // =========================================================================
+
+    /// Collect type alias definitions from a list of statements.
+    /// Handles both top-level and module-scoped aliases (with module:: prefix).
+    fn collect_type_aliases(&mut self, statements: &[Statement]) {
+        for stmt in statements {
+            if let StatementKind::TypeAlias { name, target } = &stmt.kind {
+                self.type_aliases.insert(name.clone(), target.clone());
+            }
+            // Also collect from module bodies (both qualified and unqualified)
+            if let StatementKind::ModuleDef { name: mod_name, body } = &stmt.kind {
+                for s in &body.statements {
+                    if let StatementKind::TypeAlias { name, target } = &s.kind {
+                        let qualified = format!("{}::{}", mod_name, name);
+                        self.type_aliases.insert(qualified, target.clone());
+                        // Also register unqualified so it resolves inside the module body
+                        self.type_aliases.entry(name.clone()).or_insert_with(|| target.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
     // Program / statement checking
     // =========================================================================
 
     fn check_program(&mut self, program: &Program) {
-        // Pass 1: collect function signatures, enum definitions, and struct definitions
+        // Pass 1a: collect type aliases first (so they're available for function sigs)
+        self.collect_type_aliases(&program.statements);
+
+        // Pass 1b: collect function signatures, enum definitions, and struct definitions
         for stmt in &program.statements {
             if let StatementKind::EnumDef { name, variants } = &stmt.kind {
                 let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
@@ -329,7 +360,7 @@ impl TypeChecker {
                         let ct = p
                             .type_annotation
                             .as_deref()
-                            .and_then(ChannelType::parse)
+                            .and_then(|s| self.resolve_type(s))
                             .unwrap_or(ChannelType::Null);
                         (p.name.clone(), ct)
                     })
@@ -339,7 +370,7 @@ impl TypeChecker {
                 let return_type = def
                     .return_type
                     .as_deref()
-                    .and_then(ChannelType::parse)
+                    .and_then(|s| self.resolve_type(s))
                     .unwrap_or(ChannelType::Null);
                 self.function_sigs.insert(
                     def.name.clone(),
@@ -410,7 +441,7 @@ impl TypeChecker {
                 );
                 self.define_var(name, ct, true, stmt.span.start_line, stmt.span.start_col);
                 // Store declared type annotation for reassignment checks.
-                if let Some(ann) = type_annotation.as_deref().and_then(ChannelType::parse) {
+                if let Some(ann) = type_annotation.as_deref().and_then(|s| self.resolve_type(s)) {
                     if let Some(info) = self.lookup_mut(name) {
                         info.declared_type = Some(ann);
                     }
@@ -589,18 +620,19 @@ impl TypeChecker {
                 self.function_depth += 1;
                 let saved_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
+                let resolved_return = def.return_type.as_deref()
+                    .and_then(|s| self.resolve_type(s))
+                    .unwrap_or(ChannelType::Null);
                 let prev_return_type = std::mem::replace(
                     &mut self.current_return_type,
-                    def.return_type.as_deref()
-                        .and_then(ChannelType::parse)
-                        .unwrap_or(ChannelType::Null),
+                    resolved_return,
                 );
                 // Define params as immutable variables
                 for param in &def.params {
                     let ct = param
                         .type_annotation
                         .as_deref()
-                        .and_then(ChannelType::parse)
+                        .and_then(|s| self.resolve_type(s))
                         .unwrap_or(ChannelType::Null);
                     // Type-check default param expression if present
                     if let Some(default_expr) = &param.default {
@@ -640,7 +672,7 @@ impl TypeChecker {
                 let declared_return = def
                     .return_type
                     .as_deref()
-                    .and_then(ChannelType::parse)
+                    .and_then(|s| self.resolve_type(s))
                     .unwrap_or(ChannelType::Null);
                 if declared_return != ChannelType::Null
                     && body_type != ChannelType::Null
@@ -985,8 +1017,8 @@ impl TypeChecker {
             // type Name = target;
             // -----------------------------------------------------------------
             StatementKind::TypeAlias { name, target } => {
-                // Validate the target type exists
-                if ChannelType::parse(target).is_none() {
+                // Validate the target type resolves (could be a built-in or another alias)
+                if self.resolve_type(target).is_none() {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
@@ -1860,7 +1892,7 @@ impl TypeChecker {
                     let ct = param
                         .type_annotation
                         .as_deref()
-                        .and_then(ChannelType::parse)
+                        .and_then(|s| self.resolve_type(s))
                         .unwrap_or(ChannelType::Null);
                     // Type-check default param expression if present
                     if let Some(default_expr) = &param.default {
@@ -2370,8 +2402,9 @@ impl TypeChecker {
                 }
             }
             Pattern::TypePattern { name, type_name } => {
-                let ct = ChannelType::parse(type_name).unwrap_or(ChannelType::Null);
-                if ChannelType::parse(type_name).is_none() {
+                let resolved = self.resolve_type(type_name);
+                let ct = resolved.unwrap_or(ChannelType::Null);
+                if resolved.is_none() {
                     self.emit_coded(
                         span.start_line,
                         span.start_col,
@@ -2436,7 +2469,7 @@ impl TypeChecker {
             }
             Pattern::TypePattern { name, type_name } => {
                 if bound.insert(name.clone()) {
-                    let ct = ChannelType::parse(type_name).unwrap_or(ChannelType::Null);
+                    let ct = self.resolve_type(type_name).unwrap_or(ChannelType::Null);
                     self.define_var(name, ct, false, span.start_line, span.start_col);
                 }
             }
@@ -2672,6 +2705,34 @@ impl TypeChecker {
     }
 
     // =========================================================================
+    // Type alias resolution
+    // =========================================================================
+
+    /// Resolve a type name, following type aliases if necessary.
+    /// Returns `Some(ChannelType)` if the name is a built-in type or resolves
+    /// through aliases to one. Follows chains (A → B → int64) with a depth
+    /// limit to guard against cycles.
+    fn resolve_type(&self, name: &str) -> Option<ChannelType> {
+        if let Some(ct) = ChannelType::parse(name) {
+            return Some(ct);
+        }
+        // Follow alias chain with depth limit to prevent infinite loops on cycles.
+        let mut current = name;
+        for _ in 0..32 {
+            match self.type_aliases.get(current) {
+                Some(target) => {
+                    if let Some(ct) = ChannelType::parse(target) {
+                        return Some(ct);
+                    }
+                    current = target;
+                }
+                None => return None,
+            }
+        }
+        None // cycle detected or chain too long
+    }
+
+    // =========================================================================
     // Annotation reconciliation
     // =========================================================================
 
@@ -2690,7 +2751,7 @@ impl TypeChecker {
             None => return inferred,
         };
 
-        let ann_type = match ChannelType::parse(ann_str) {
+        let ann_type = match self.resolve_type(ann_str) {
             Some(ct) => ct,
             None => {
                 self.emit_coded(
@@ -5495,6 +5556,153 @@ test "reads outer" { let r = x + 1; output r; }"#,
             .filter(|d| d.message.contains("Comparing"))
             .collect();
         assert!(w.is_empty(), "Expected no comparison warning for cross-numeric, got: {:?}", w);
+    }
+
+    // =========================================================================
+    // Type alias resolution
+    // =========================================================================
+
+    #[test]
+    fn test_type_alias_basic() {
+        // type Score = int64; let x: Score = 42; should resolve without errors.
+        let a = check("type Score = int64;\nlet x: Score = 42;\noutput x;");
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors, got: {:?}", e);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_type_alias_chained() {
+        // type A = int64; type B = A; let x: B = 10;
+        let a = check("type A = int64;\ntype B = A;\nlet x: B = 10;\noutput x;");
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors for chained alias, got: {:?}", e);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_type_alias_in_function_params() {
+        // type Score = float64; fn add(a: Score, b: Score) -> Score { a }
+        let a = check(r#"
+            type Score = float64;
+            fn add(a: Score, b: Score) -> Score { a }
+            let x = add(1.0, 2.0);
+            output x;
+        "#);
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors, got: {:?}", e);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_type_alias_in_const() {
+        let a = check("type Name = string;\nconst greeting: Name = \"hello\";\noutput greeting;");
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors, got: {:?}", e);
+        assert_eq!(a.variable_types.get("greeting"), Some(&ChannelType::String));
+    }
+
+    #[test]
+    fn test_type_alias_in_let_mut() {
+        let a = check("type Count = int64;\nlet mut c: Count = 0;\nc = 5;\noutput c;");
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors, got: {:?}", e);
+        assert_eq!(a.variable_types.get("c"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_type_alias_unknown_target() {
+        // type Bad = nonexistent; should warn about unknown target type
+        let a = check("type Bad = nonexistent;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Unknown type 'nonexistent'")),
+            "Expected unknown type warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_type_alias_annotation_mismatch() {
+        // type Score = int64; let x: Score = "hello"; should warn about mismatch
+        let a = check(r#"type Score = int64; let x: Score = "hello"; output x;"#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("conflicts with inferred type")),
+            "Expected type mismatch warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_type_alias_triple_chain() {
+        // type A = int64; type B = A; type C = B;
+        let a = check("type A = int64;\ntype B = A;\ntype C = B;\nlet x: C = 1;\noutput x;");
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors for triple chain, got: {:?}", e);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_type_alias_in_lambda() {
+        let a = check(r#"
+            type Num = float64;
+            let f = |x: Num| x;
+            let _y = f(3.14);
+        "#);
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors, got: {:?}", e);
+    }
+
+    #[test]
+    fn test_type_alias_inside_module() {
+        // Type aliases inside a module body resolve for code within that module.
+        let a = check(r#"
+            mod math {
+                type Scalar = float64;
+                fn scale(x: Scalar) -> Scalar { x }
+            }
+        "#);
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors for alias inside module, got: {:?}", e);
+    }
+
+    #[test]
+    fn test_type_alias_various_types() {
+        let a = check(r#"
+            type Flag = bool;
+            type Text = string;
+            type Data = bytes;
+            type Items = array;
+            type Dict = map;
+            let f: Flag = true;
+            let t: Text = "hi";
+            let b: Data = null;
+            let i: Items = [1, 2];
+            let d: Dict = null;
+            output f;
+            output t;
+            output b;
+            output i;
+            output d;
+        "#);
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors, got: {:?}", e);
+        assert_eq!(a.variable_types.get("f"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("t"), Some(&ChannelType::String));
+        assert_eq!(a.variable_types.get("i"), Some(&ChannelType::Array));
+    }
+
+    #[test]
+    fn test_type_alias_function_return_type_check() {
+        // Verify that function return type mismatch is caught when using alias
+        let a = check(r#"
+            type Score = int64;
+            fn get_score() -> Score { "not a number" }
+        "#);
+        let e = errors(&a);
+        assert!(
+            e.iter().any(|d| d.message.contains("declares return type") && d.message.contains("body evaluates to")),
+            "Expected return type mismatch error, got: {:?}", e
+        );
     }
 
 }

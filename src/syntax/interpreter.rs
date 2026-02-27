@@ -562,6 +562,42 @@ impl<'a> Interpreter<'a> {
         self.heap.values.len()
     }
 
+    /// Recursively register all functions, enums, and structs from a module body
+    /// with qualified names (e.g., `math::double`, `math::inner::helper`).
+    /// Enums and structs are also registered unqualified for use within module functions.
+    fn register_module(&mut self, prefix: &str, body: &Block) {
+        for inner in &body.statements {
+            match &inner.kind {
+                StatementKind::FunctionDef(def) => {
+                    let qualified = format!("{}::{}", prefix, def.name);
+                    self.functions.insert(qualified, def.clone());
+                }
+                StatementKind::AsyncFunctionDef(def) => {
+                    let qualified = format!("{}::{}", prefix, def.name);
+                    self.async_fns.insert(qualified.clone());
+                    self.functions.insert(qualified, def.clone());
+                }
+                StatementKind::EnumDef { name, variants } => {
+                    let qualified = format!("{}::{}", prefix, name);
+                    self.enum_defs.insert(qualified, variants.clone());
+                    // Also register unqualified for use within module functions
+                    self.enum_defs.insert(name.clone(), variants.clone());
+                }
+                StatementKind::StructDef { name, fields } => {
+                    let qualified = format!("{}::{}", prefix, name);
+                    self.struct_defs.insert(qualified, fields.clone());
+                    // Also register unqualified for use within module functions
+                    self.struct_defs.insert(name.clone(), fields.clone());
+                }
+                StatementKind::ModuleDef { name, body: inner_body } => {
+                    let nested_prefix = format!("{}::{}", prefix, name);
+                    self.register_module(&nested_prefix, inner_body);
+                }
+                _ => {}
+            }
+        }
+    }
+
     // =========================================================================
     // Program execution
     // =========================================================================
@@ -590,33 +626,7 @@ impl<'a> Interpreter<'a> {
                     self.struct_defs.insert(name.clone(), fields.clone());
                 }
                 StatementKind::ModuleDef { name, body } => {
-                    // Register module functions, enums, and structs with qualified names
-                    for inner in &body.statements {
-                        match &inner.kind {
-                            StatementKind::FunctionDef(def) => {
-                                let qualified = format!("{}::{}", name, def.name);
-                                self.functions.insert(qualified, def.clone());
-                            }
-                            StatementKind::AsyncFunctionDef(def) => {
-                                let qualified = format!("{}::{}", name, def.name);
-                                self.async_fns.insert(qualified.clone());
-                                self.functions.insert(qualified, def.clone());
-                            }
-                            StatementKind::EnumDef { name: ename, variants } => {
-                                let qualified = format!("{}::{}", name, ename);
-                                self.enum_defs.insert(qualified, variants.clone());
-                                // Also register unqualified for use within module functions
-                                self.enum_defs.insert(ename.clone(), variants.clone());
-                            }
-                            StatementKind::StructDef { name: sname, fields } => {
-                                let qualified = format!("{}::{}", name, sname);
-                                self.struct_defs.insert(qualified, fields.clone());
-                                // Also register unqualified for use within module functions
-                                self.struct_defs.insert(sname.clone(), fields.clone());
-                            }
-                            _ => {}
-                        }
-                    }
+                    self.register_module(name, body);
                 }
                 _ => {}
             }
@@ -1088,8 +1098,9 @@ impl<'a> Interpreter<'a> {
                 }
                 let full_path = path.join("::");
                 if *glob {
+                    // Glob import: import all functions, enums, and structs from the module
                     let prefix = format!("{}::", full_path);
-                    let matching: Vec<(String, FunctionDef)> = self
+                    let matching_fns: Vec<(String, FunctionDef)> = self
                         .functions
                         .iter()
                         .filter(|(k, _)| k.starts_with(&prefix))
@@ -1098,26 +1109,71 @@ impl<'a> Interpreter<'a> {
                             (short_name, v.clone())
                         })
                         .collect();
-                    for (short_name, def) in matching {
+                    for (short_name, def) in matching_fns {
                         self.functions.insert(short_name, def);
                     }
+                    // Also import enums with qualified names under the prefix
+                    let matching_enums: Vec<(String, Vec<EnumVariant>)> = self
+                        .enum_defs
+                        .iter()
+                        .filter(|(k, _)| k.starts_with(&prefix))
+                        .map(|(k, v)| {
+                            let short_name = k[prefix.len()..].to_string();
+                            (short_name, v.clone())
+                        })
+                        .collect();
+                    for (short_name, variants) in matching_enums {
+                        self.enum_defs.insert(short_name, variants);
+                    }
+                    // Also import structs with qualified names under the prefix
+                    let matching_structs: Vec<(String, Vec<StructField>)> = self
+                        .struct_defs
+                        .iter()
+                        .filter(|(k, _)| k.starts_with(&prefix))
+                        .map(|(k, v)| {
+                            let short_name = k[prefix.len()..].to_string();
+                            (short_name, v.clone())
+                        })
+                        .collect();
+                    for (short_name, fields) in matching_structs {
+                        self.struct_defs.insert(short_name, fields);
+                    }
                 } else {
-                    let func_name = path.last().cloned().unwrap_or_default();
+                    let item_name = path.last().cloned().unwrap_or_default();
+                    let local_name = alias.as_ref().unwrap_or(&item_name).clone();
+                    // Try function first
                     if let Some(func) = self.functions.get(&full_path).cloned() {
-                        let local_name = alias.as_ref().unwrap_or(&func_name).clone();
                         self.functions.insert(local_name, func.clone());
                         // Also register under unqualified name for recursive calls
-                        if alias.is_some() && !self.functions.contains_key(&func_name) {
-                            self.functions.insert(func_name, func);
+                        if alias.is_some() && !self.functions.contains_key(&item_name) {
+                            self.functions.insert(item_name, func);
                         }
+                    } else if let Some(variants) = self.enum_defs.get(&full_path).cloned() {
+                        // Try enum
+                        self.enum_defs.insert(local_name, variants);
+                    } else if let Some(fields) = self.struct_defs.get(&full_path).cloned() {
+                        // Try struct
+                        self.struct_defs.insert(local_name, fields);
                     } else {
-                        let prefix = format!("{}::", path[..path.len()-1].join("::"));
-                        let available: Vec<String> = self.functions.keys()
-                            .filter(|k| k.starts_with(&prefix))
-                            .map(|k| k[prefix.len()..].to_string())
+                        // Collect available items from the module for suggestions
+                        let module_prefix = format!("{}::", path[..path.len()-1].join("::"));
+                        let mut available: Vec<String> = self.functions.keys()
+                            .filter(|k| k.starts_with(&module_prefix))
+                            .map(|k| k[module_prefix.len()..].to_string())
                             .collect();
+                        // Also include enum and struct names
+                        for k in self.enum_defs.keys() {
+                            if k.starts_with(&module_prefix) {
+                                available.push(k[module_prefix.len()..].to_string());
+                            }
+                        }
+                        for k in self.struct_defs.keys() {
+                            if k.starts_with(&module_prefix) {
+                                available.push(k[module_prefix.len()..].to_string());
+                            }
+                        }
                         let refs: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
-                        let suggestion = super::errors::suggest_name(&func_name, &refs);
+                        let suggestion = super::errors::suggest_name(&item_name, &refs);
                         return Err(InterpError::UnknownOperation {
                             name: full_path,
                             span: stmt.span,
@@ -4124,30 +4180,7 @@ impl<'a> Interpreter<'a> {
                     self.struct_defs.insert(name.clone(), fields.clone());
                 }
                 StatementKind::ModuleDef { name, body } => {
-                    for inner in &body.statements {
-                        match &inner.kind {
-                            StatementKind::FunctionDef(def) => {
-                                let qualified = format!("{}::{}", name, def.name);
-                                self.functions.insert(qualified, def.clone());
-                            }
-                            StatementKind::AsyncFunctionDef(def) => {
-                                let qualified = format!("{}::{}", name, def.name);
-                                self.async_fns.insert(qualified.clone());
-                                self.functions.insert(qualified, def.clone());
-                            }
-                            StatementKind::EnumDef { name: enum_name, variants } => {
-                                let qualified = format!("{}::{}", name, enum_name);
-                                self.enum_defs.insert(qualified, variants.clone());
-                                self.enum_defs.insert(enum_name.clone(), variants.clone());
-                            }
-                            StatementKind::StructDef { name: struct_name, fields } => {
-                                let qualified = format!("{}::{}", name, struct_name);
-                                self.struct_defs.insert(qualified, fields.clone());
-                                self.struct_defs.insert(struct_name.clone(), fields.clone());
-                            }
-                            _ => {}
-                        }
-                    }
+                    self.register_module(name, body);
                 }
                 StatementKind::TestDef { .. } => {
                     // Skip tests in pass 1
