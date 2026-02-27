@@ -1454,9 +1454,11 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "enumerate" => {
-                        let result: Vec<DataType> = arr.iter().enumerate()
-                            .map(|(i, item)| DataType::Array(vec![DataType::Int64(i as i64), item.clone()]))
-                            .collect();
+                        let mut result = Vec::with_capacity(arr.len());
+                        for (i, item) in arr.iter().enumerate() {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            result.push(DataType::Array(vec![DataType::Int64(i as i64), item.clone()]));
+                        }
                         Ok(Some(DataType::Array(result)))
                     }
                     "zip" => {
@@ -1472,18 +1474,22 @@ impl<'a> Interpreter<'a> {
                             }),
                         };
                         let len = arr.len().min(other_arr.len());
-                        let result: Vec<DataType> = (0..len)
-                            .map(|i| DataType::Array(vec![arr[i].clone(), other_arr[i].clone()]))
-                            .collect();
+                        let mut result = Vec::with_capacity(len);
+                        for i in 0..len {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            result.push(DataType::Array(vec![arr[i].clone(), other_arr[i].clone()]));
+                        }
                         Ok(Some(DataType::Array(result)))
                     }
                     "chunk" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "chunk".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let size_val = self.eval_expr(&args[0])?;
                         let size = size_val.to_i64().unwrap_or(1).max(1) as usize;
-                        let result: Vec<DataType> = arr.chunks(size)
-                            .map(|chunk| DataType::Array(chunk.to_vec()))
-                            .collect();
+                        let mut result = Vec::new();
+                        for chunk in arr.chunks(size) {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            result.push(DataType::Array(chunk.to_vec()));
+                        }
                         Ok(Some(DataType::Array(result)))
                     }
                     _ => Ok(None),
@@ -1985,6 +1991,15 @@ impl<'a> Interpreter<'a> {
                     }
                     let pad_str = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) if !c.is_empty() => c, _ => " ".to_string() } } else { " ".to_string() };
                     let pad_len = width.saturating_sub(s.chars().count());
+                    let max_pad_bytes = pad_len.saturating_mul(pad_str.len());
+                    if s.len().saturating_add(max_pad_bytes) > MAX_STRING_OUTPUT {
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{} bytes", MAX_STRING_OUTPUT),
+                            actual: format!("{}", s.len().saturating_add(max_pad_bytes)),
+                            context: "pad_start result".to_string(),
+                            span,
+                        });
+                    }
                     let padding: String = pad_str.chars().cycle().take(pad_len).collect();
                     Ok(Some(DataType::String(format!("{}{}", padding, s))))
                 }
@@ -2002,6 +2017,15 @@ impl<'a> Interpreter<'a> {
                     }
                     let pad_str = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) if !c.is_empty() => c, _ => " ".to_string() } } else { " ".to_string() };
                     let pad_len = width.saturating_sub(s.chars().count());
+                    let max_pad_bytes = pad_len.saturating_mul(pad_str.len());
+                    if s.len().saturating_add(max_pad_bytes) > MAX_STRING_OUTPUT {
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{} bytes", MAX_STRING_OUTPUT),
+                            actual: format!("{}", s.len().saturating_add(max_pad_bytes)),
+                            context: "pad_end result".to_string(),
+                            span,
+                        });
+                    }
                     let padding: String = pad_str.chars().cycle().take(pad_len).collect();
                     Ok(Some(DataType::String(format!("{}{}", s, padding))))
                 }

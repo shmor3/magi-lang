@@ -7782,3 +7782,72 @@ fn test_to_bool_method_no_false_positive() {
     }).collect();
     assert!(e201_warnings.is_empty(), "to_bool should not produce E201: {:?}", e201_warnings);
 }
+
+// ── Round 76: HOF cancellation and pad byte limits ────────────────────
+
+#[test]
+fn test_enumerate_produces_pairs() {
+    let result = run(r#"
+        let arr = ["a", "b", "c"];
+        let pairs = arr.enumerate();
+        output pairs;
+    "#);
+    match result {
+        DataType::Array(items) => {
+            assert_eq!(items.len(), 3);
+            // First pair should be [0, "a"]
+            match &items[0] {
+                DataType::Array(pair) => {
+                    assert_eq!(pair[0], DataType::Int64(0));
+                    assert_eq!(pair[1], DataType::String("a".to_string()));
+                }
+                other => panic!("Expected array pair, got {:?}", other),
+            }
+        }
+        other => panic!("Expected array, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_zip_produces_pairs() {
+    let result = run(r#"
+        let a = [1, 2, 3];
+        let b = ["x", "y", "z"];
+        let zipped = a.zip(b);
+        output zipped.length();
+    "#);
+    assert_eq!(result, DataType::Int64(3));
+}
+
+#[test]
+fn test_chunk_produces_chunks() {
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5];
+        let chunks = arr.chunk(2);
+        output chunks.length();
+    "#);
+    assert_eq!(result, DataType::Int64(3)); // [1,2], [3,4], [5]
+}
+
+#[test]
+fn test_pad_start_multibyte_byte_limit() {
+    // Padding with a multibyte fill string should be caught by byte limit
+    let err = run_err(r#"
+        let s = "x".pad_start(5_000_000, "你好");
+        output s;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("E409") || msg.contains("resource") || msg.contains("limit"),
+        "Expected resource limit error, got: {}", msg);
+}
+
+#[test]
+fn test_pad_end_multibyte_byte_limit() {
+    let err = run_err(r#"
+        let s = "x".pad_end(5_000_000, "你好");
+        output s;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("E409") || msg.contains("resource") || msg.contains("limit"),
+        "Expected resource limit error, got: {}", msg);
+}
