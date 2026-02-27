@@ -762,9 +762,9 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::StringLines => match &input {
                 DataType::String(s) => {
-                    let lines: Vec<DataType> = s.lines().map(|l| DataType::String(l.to_string())).collect();
+                    let lines: Vec<DataType> = s.lines().take(MAX_ARRAY_ELEMENTS + 1).map(|l| DataType::String(l.to_string())).collect();
                     if lines.len() > MAX_ARRAY_ELEMENTS {
-                        return Err(EvalError::InvalidInput(format!("lines() would produce {} elements (max {})", lines.len(), MAX_ARRAY_ELEMENTS)));
+                        return Err(EvalError::InvalidInput(format!("lines() would produce more than {} elements", MAX_ARRAY_ELEMENTS)));
                     }
                     Ok(DataType::Array(lines))
                 }
@@ -772,7 +772,11 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::StringWords => match &input {
                 DataType::String(s) => {
-                    Ok(DataType::Array(s.split_whitespace().map(|w| DataType::String(w.to_string())).collect()))
+                    let words: Vec<DataType> = s.split_whitespace().take(MAX_ARRAY_ELEMENTS + 1).map(|w| DataType::String(w.to_string())).collect();
+                    if words.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!("words() would produce more than {} elements", MAX_ARRAY_ELEMENTS)));
+                    }
+                    Ok(DataType::Array(words))
                 }
                 _ => Ok(DataType::Null),
             },

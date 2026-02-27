@@ -1883,8 +1883,9 @@ impl<'a> Interpreter<'a> {
                 "to_lower" | "to_lowercase" => Ok(Some(DataType::String(s.to_lowercase()))),
                 "reverse" => Ok(Some(DataType::String(s.chars().rev().collect()))),
                 "chars" => {
-                    if s.chars().count() > MAX_ARRAY_ELEMENTS {
-                        return Err(InterpError::ResourceLimit { limit: format!("{} chars", MAX_ARRAY_ELEMENTS), actual: format!("{}", s.chars().count()), context: "string chars".to_string(), span });
+                    let char_count = s.chars().count();
+                    if char_count > MAX_ARRAY_ELEMENTS {
+                        return Err(InterpError::ResourceLimit { limit: format!("{} chars", MAX_ARRAY_ELEMENTS), actual: format!("{}", char_count), context: "string chars".to_string(), span });
                     }
                     Ok(Some(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect())))
                 }
@@ -4740,8 +4741,6 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
 /// Get available method names for a DataType (for error suggestions).
 fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
     let mut methods: Vec<&'static str> = Vec::new();
-    // Generic methods available on any type
-    methods.extend_from_slice(&["to_string", "to_int64", "to_float64", "to_bool", "to_json"]);
     match obj {
         DataType::Array(_) => {
             // Direct methods

@@ -7961,3 +7961,135 @@ fn test_formatter_fstring_sentinel_roundtrip() {
     assert!(!formatted.contains('\u{FFF1}'), "Formatted output should not contain sentinel chars");
     assert!(formatted.contains("\\{"), "Formatted output should contain escaped braces: {}", formatted);
 }
+
+// ── Round 78 continued: coverage gap tests ───────────────
+
+#[test]
+fn test_for_loop_over_exclusive_range() {
+    assert_eq!(run(r#"
+        let mut sum = 0;
+        for i in 0..5 { sum = sum + i; }
+        output sum;
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_for_loop_over_inclusive_range() {
+    assert_eq!(run(r#"
+        let mut sum = 0;
+        for i in 1..=5 { sum = sum + i; }
+        output sum;
+    "#), DataType::Int64(15));
+}
+
+#[test]
+fn test_for_loop_empty_range() {
+    assert_eq!(run(r#"
+        let mut count = 0;
+        for _x in 5..1 { count = count + 1; }
+        output count;
+    "#), DataType::Int64(0));
+}
+
+#[test]
+fn test_closure_captures_mutable_variable_snapshot() {
+    assert_eq!(run(r#"
+        let mut x = 10;
+        let f = |y| x + y;
+        x = 99;
+        output f(5);
+    "#), DataType::Int64(15));
+}
+
+#[test]
+fn test_closure_in_map_captures_outer() {
+    assert_eq!(run(r#"
+        let factor = 3;
+        let result = [1, 2, 3, 4].map(|x| x * factor);
+        output result;
+    "#), DataType::Array(vec![
+        DataType::Int64(3), DataType::Int64(6),
+        DataType::Int64(9), DataType::Int64(12),
+    ]));
+}
+
+#[test]
+fn test_function_returning_closure() {
+    assert_eq!(run(r#"
+        fn make_adder(n) { |x| x + n }
+        let add5 = make_adder(5);
+        let add10 = make_adder(10);
+        output [add5(3), add10(3)];
+    "#), DataType::Array(vec![DataType::Int64(8), DataType::Int64(13)]));
+}
+
+#[test]
+fn test_string_to_int() {
+    assert_eq!(run(r#"output "42".to_int();"#), DataType::Int64(42));
+}
+
+#[test]
+fn test_string_to_int_invalid() {
+    assert_eq!(run(r#"output "abc".to_int();"#), DataType::Null);
+}
+
+#[test]
+fn test_string_to_int_empty() {
+    assert_eq!(run(r#"output "".to_int();"#), DataType::Null);
+}
+
+#[test]
+fn test_string_to_float_valid() {
+    assert_eq!(run(r#"output "3.14".to_float();"#), DataType::Float64(3.14));
+}
+
+#[test]
+fn test_numeric_conversion_chain() {
+    assert_eq!(run(r#"
+        let f = 3.7;
+        let i = f.to_int64();
+        let s = i.to_string();
+        output s;
+    "#), DataType::String("3".to_string()));
+}
+
+#[test]
+fn test_pipe_chain_three_stages() {
+    assert_eq!(run(r#"
+        fn only_even(arr) { arr.filter(|x| x % 2 == 0) }
+        fn double_all(arr) { arr.map(|x| x * 2) }
+        fn total(arr) { arr.reduce(0, |acc, x| acc + x) }
+        output [1, 2, 3, 4, 5, 6] |> only_even(_) |> double_all(_) |> total(_);
+    "#), DataType::Int64(24));
+}
+
+#[test]
+fn test_multiple_spawns_and_awaits() {
+    assert_eq!(run(r#"
+        async fn double(x) { x * 2 }
+        let t1 = spawn double(5);
+        let t2 = spawn double(10);
+        let r1 = await t1;
+        let r2 = await t2;
+        output [r1, r2];
+    "#), DataType::Array(vec![DataType::Int64(10), DataType::Int64(20)]));
+}
+
+#[test]
+fn test_use_import_and_call() {
+    assert_eq!(run(r#"
+        mod math {
+            fn square(x) { x * x }
+            fn cube(x) { x * x * x }
+        }
+        use math::square;
+        use math::cube;
+        output square(3) + cube(2);
+    "#), DataType::Int64(17));
+}
+
+#[test]
+fn test_triple_quoted_string() {
+    let result = run("output \"\"\"hello world\"\"\";");
+    assert_eq!(result, DataType::String("hello world".to_string()));
+}
