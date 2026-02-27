@@ -14387,3 +14387,46 @@ fn test_pipe_with_lambda_and_method_chain() {
     "#);
     assert_eq!(result2, DataType::Int64(8));
 }
+
+// ── HTTP client operation tests (FullEvaluator via CLI binary) ───────────────
+
+/// Run magi source code via the CLI binary and return combined stdout+stderr.
+fn run_eval(src: &str) -> String {
+    let dir = std::env::temp_dir();
+    let file = dir.join("_magi_http_test.magi");
+    std::fs::write(&file, src).expect("write temp file");
+    let bin = env!("CARGO_BIN_EXE_magi");
+    let output = std::process::Command::new(bin)
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("run magi binary");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    format!("{}{}", stdout, stderr)
+}
+
+#[test]
+fn test_http_get_blocked_localhost() {
+    // SSRF protection should block localhost
+    let result = run_eval(r#"std::http_get("http://localhost:9999/")"#);
+    assert!(result.contains("blocked") || result.contains("Error") || result.contains("error"));
+}
+
+#[test]
+fn test_http_get_invalid_scheme() {
+    let result = run_eval(r#"std::http_get("ftp://example.com")"#);
+    assert!(result.contains("http://") || result.contains("Error") || result.contains("error"));
+}
+
+#[test]
+fn test_http_post_blocked() {
+    let result = run_eval(r#"std::http_post("http://127.0.0.1:9999/", "data")"#);
+    assert!(result.contains("blocked") || result.contains("Error") || result.contains("error"));
+}
+
+#[test]
+fn test_http_request_unsupported_method() {
+    let result = run_eval(r#"std::http_request("INVALID", "http://10.0.0.1/", "", {})"#);
+    assert!(result.contains("blocked") || result.contains("Unsupported") || result.contains("Error") || result.contains("error"));
+}

@@ -4547,8 +4547,186 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
+            // HTTP client operations (ureq)
+            // ================================================================
+
+            OperationType::HttpGet => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let body: String = ureq::get(url)
+                    .call()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_get: {}", e)))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_get read: {}", e)))?;
+                Ok(DataType::String(body))
+            }
+
+            OperationType::HttpPost => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let payload = inputs.get("body").map(|d| d.to_string());
+                let body: String = ureq::post(url)
+                    .header("Content-Type", "application/json")
+                    .send(payload.as_deref().unwrap_or("").as_bytes())
+                    .map_err(|e| EvalError::InvalidInput(format!("http_post: {}", e)))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_post read: {}", e)))?;
+                Ok(DataType::String(body))
+            }
+
+            OperationType::HttpPut => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let payload = inputs.get("body").map(|d| d.to_string());
+                let body: String = ureq::put(url)
+                    .header("Content-Type", "application/json")
+                    .send(payload.as_deref().unwrap_or("").as_bytes())
+                    .map_err(|e| EvalError::InvalidInput(format!("http_put: {}", e)))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_put read: {}", e)))?;
+                Ok(DataType::String(body))
+            }
+
+            OperationType::HttpDelete => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let body: String = ureq::delete(url)
+                    .call()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_delete: {}", e)))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_delete read: {}", e)))?;
+                Ok(DataType::String(body))
+            }
+
+            OperationType::HttpRequest => {
+                let method = get_string(inputs, "method")?;
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let headers = inputs.get("headers").and_then(|d| d.as_map()).cloned();
+                let payload = inputs.get("body").map(|d| d.to_string());
+                let method_upper = method.to_uppercase();
+
+                let resp = match method_upper.as_str() {
+                    "POST" | "PUT" | "PATCH" => {
+                        let req = headers.iter().flat_map(|h| h.iter()).fold(
+                            match method_upper.as_str() {
+                                "POST" => ureq::post(url),
+                                "PUT" => ureq::put(url),
+                                _ => ureq::patch(url),
+                            },
+                            |r, (k, v)| r.header(k.as_str(), &v.to_string()),
+                        );
+                        req.send(payload.as_deref().unwrap_or("").as_bytes())
+                            .map_err(|e| EvalError::InvalidInput(format!("http_request: {}", e)))?
+                    }
+                    "GET" | "DELETE" | "HEAD" => {
+                        let req = headers.iter().flat_map(|h| h.iter()).fold(
+                            match method_upper.as_str() {
+                                "DELETE" => ureq::delete(url),
+                                "HEAD" => ureq::head(url),
+                                _ => ureq::get(url),
+                            },
+                            |r, (k, v)| r.header(k.as_str(), &v.to_string()),
+                        );
+                        req.call()
+                            .map_err(|e| EvalError::InvalidInput(format!("http_request: {}", e)))?
+                    }
+                    other => {
+                        return Err(EvalError::InvalidInput(format!(
+                            "Unsupported HTTP method: {}",
+                            other
+                        )));
+                    }
+                };
+                let status = resp.status().as_u16();
+                let body: String = resp
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_request read: {}", e)))?;
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("status".into(), DataType::Int64(status as i64)),
+                    ("body".into(), DataType::String(body)),
+                ])))
+            }
+
+            OperationType::HttpHead => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let resp = ureq::head(url)
+                    .call()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_head: {}", e)))?;
+                let status = resp.status().as_u16();
+                let headers: std::collections::BTreeMap<String, DataType> = resp
+                    .headers()
+                    .keys()
+                    .map(|name| {
+                        let value = resp
+                            .headers()
+                            .get(name)
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        (name.as_str().to_string(), DataType::String(value))
+                    })
+                    .collect();
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("status".into(), DataType::Int64(status as i64)),
+                    ("headers".into(), DataType::Map(headers)),
+                ])))
+            }
+
+            OperationType::HttpOptions => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let agent = ureq::Agent::new_with_defaults();
+                let resp = agent
+                    .options(url)
+                    .call()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_options: {}", e)))?;
+                let status = resp.status().as_u16();
+                let headers: std::collections::BTreeMap<String, DataType> = resp
+                    .headers()
+                    .keys()
+                    .map(|name| {
+                        let value = resp
+                            .headers()
+                            .get(name)
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        (name.as_str().to_string(), DataType::String(value))
+                    })
+                    .collect();
+                let allow = headers
+                    .get("allow")
+                    .cloned()
+                    .unwrap_or(DataType::String(String::new()));
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("status".into(), DataType::Int64(status as i64)),
+                    ("headers".into(), DataType::Map(headers)),
+                    ("allow".into(), allow),
+                ])))
+            }
+
+            OperationType::HttpPatch => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let payload = inputs.get("body").map(|d| d.to_string());
+                let body: String = ureq::patch(url)
+                    .header("Content-Type", "application/json")
+                    .send(payload.as_deref().unwrap_or("").as_bytes())
+                    .map_err(|e| EvalError::InvalidInput(format!("http_patch: {}", e)))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| EvalError::InvalidInput(format!("http_patch read: {}", e)))?;
+                Ok(DataType::String(body))
+            }
+
+            // ================================================================
             // Remaining operations that require external dependencies
-            // (network, compression, certificates)
+            // (compression, certificates, etc.)
             // ================================================================
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
