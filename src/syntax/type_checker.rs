@@ -2834,6 +2834,8 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "is_empty" | "is_numeric" | "is_alphabetic" => Some("string_predicate".into()),
             "to_int" | "to_float" => Some("string_convert".into()),
             "char_at" => Some("string_char_at".into()),
+            "words" => Some("string_words".into()),
+            "count" => Some("string_count".into()),
             _ => None,
         },
         ChannelType::Map => match method {
@@ -2864,7 +2866,7 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
         },
         ChannelType::Float64 | ChannelType::Float32 => match method {
             "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
-            | "to_int64" | "pow" | "min" | "max" | "clamp" | "is_nan"
+            | "to_int64" | "to_float64" | "pow" | "min" | "max" | "clamp" | "is_nan"
             | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
             | "tan" => Some("numeric_method".into()),
             _ => None,

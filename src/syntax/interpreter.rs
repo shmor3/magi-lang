@@ -1940,7 +1940,7 @@ impl<'a> Interpreter<'a> {
                     const MAX_REPEAT_LEN: usize = 10_000_000;
                     if n > 0 && s.len().saturating_mul(n) > MAX_REPEAT_LEN {
                         return Err(InterpError::ResourceLimit {
-                            limit: format!("{} chars", MAX_REPEAT_LEN),
+                            limit: format!("{} bytes", MAX_REPEAT_LEN),
                             actual: format!("{} * {} = {}", s.len(), n, s.len().saturating_mul(n)),
                             context: "string repeat".to_string(),
                             span,
