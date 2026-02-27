@@ -29,6 +29,7 @@ fn to_snake_case(name: &str) -> String {
 }
 
 /// Check that a name uses snake_case (for functions and variables).
+/// Also accepts SCREAMING_SNAKE_CASE (e.g., `MAX_SIZE`) for constants.
 pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> {
     // Skip names starting with _ (conventional suppression) or single-char names
     if name.starts_with('_') || name.len() <= 1 {
@@ -37,6 +38,11 @@ pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> 
     // snake_case: only lowercase letters, digits, and underscores
     let is_snake = name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     if is_snake {
+        return None;
+    }
+    // SCREAMING_SNAKE_CASE: only uppercase letters, digits, and underscores (for constants)
+    let is_screaming = name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if is_screaming {
         return None;
     }
     let code = ErrorCode::W200;

@@ -106,6 +106,8 @@ pub enum ErrorCode {
     W111,
     /// Default parameter type mismatch
     W112,
+    /// Or-pattern alternatives bind different variables
+    W113,
 
     // Lint warnings (W2xx)
     /// Naming convention: functions/variables should be snake_case
@@ -171,6 +173,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W110 => "W110",
             ErrorCode::W111 => "W111",
             ErrorCode::W112 => "W112",
+            ErrorCode::W113 => "W113",
             ErrorCode::W200 => "W200",
             ErrorCode::W201 => "W201",
             ErrorCode::W202 => "W202",
@@ -238,6 +241,7 @@ impl ErrorCode {
             ErrorCode::W110 => "This variable is declared as `let mut` but is never reassigned. Use `let` instead.",
             ErrorCode::W111 => "This name is a reserved keyword in MAGI. Using it as an identifier may cause issues in future versions.",
             ErrorCode::W112 => "The default value type does not match the parameter's type annotation. This may cause unexpected behavior.",
+            ErrorCode::W113 => "All alternatives in an or-pattern must bind the same set of variable names.",
 
             // Lint warnings
             ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",
@@ -352,7 +356,7 @@ mod tests {
             ErrorCode::W100, ErrorCode::W101, ErrorCode::W102, ErrorCode::W103,
             ErrorCode::W104, ErrorCode::W105, ErrorCode::W106, ErrorCode::W107,
             ErrorCode::W108, ErrorCode::W109, ErrorCode::W110, ErrorCode::W111,
-            ErrorCode::W112,
+            ErrorCode::W112, ErrorCode::W113,
             ErrorCode::W200, ErrorCode::W201, ErrorCode::W202, ErrorCode::W203,
             ErrorCode::W204, ErrorCode::W205, ErrorCode::W206, ErrorCode::W207,
             ErrorCode::W208,

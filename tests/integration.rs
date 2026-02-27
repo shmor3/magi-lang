@@ -7459,3 +7459,77 @@ fn test_destructure_mutable_lsp_symbol() {
     let b = state.variables.get("b").unwrap();
     assert!(b.mutable);
 }
+
+#[test]
+fn test_use_import_no_e201() {
+    // use statement should register the imported name, no E201 false positive
+    let src = r#"
+        mod MyMod {
+            fn helper() { 42 }
+        }
+        use MyMod::helper;
+        let x = helper();
+        output x;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let analysis = check_types(&prog, &std::collections::HashSet::new());
+    let e201s: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("E201"))
+        .collect();
+    assert!(e201s.is_empty(), "E201 false positive for use-imported name: {:?}", e201s);
+}
+
+#[test]
+fn test_use_alias_no_e201() {
+    // use with alias should register the aliased name
+    let src = r#"
+        mod MyMod {
+            fn helper() { 42 }
+        }
+        use MyMod::helper as h;
+        let x = h();
+        output x;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let analysis = check_types(&prog, &std::collections::HashSet::new());
+    let e201s: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("E201"))
+        .collect();
+    assert!(e201s.is_empty(), "E201 false positive for use-aliased name: {:?}", e201s);
+}
+
+#[test]
+fn test_w113_or_pattern_variable_mismatch() {
+    // Or-pattern alternatives that bind different variables should use W113
+    let src = r#"
+        let val = 5;
+        let result = match val {
+            x | 0 => x,
+            _ => 0,
+        };
+        output result;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let analysis = check_types(&prog, &std::collections::HashSet::new());
+    let w113s: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W113"))
+        .collect();
+    assert!(!w113s.is_empty(), "Expected W113 for or-pattern variable mismatch");
+}
+
+#[test]
+fn test_screaming_snake_case_no_w200() {
+    // SCREAMING_SNAKE_CASE constants should not trigger W200
+    let src = r#"
+        const MAX_SIZE = 100;
+        const HTTP_PORT = 8080;
+        output MAX_SIZE;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let lint_config = magi_lang::linter::LintConfig::default();
+    let lint_result = magi_lang::linter::lint(&prog, &lint_config);
+    let w200s: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W200"))
+        .collect();
+    assert!(w200s.is_empty(), "W200 false positive for SCREAMING_SNAKE_CASE: {:?}", w200s);
+}

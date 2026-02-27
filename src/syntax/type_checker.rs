@@ -121,6 +121,8 @@ struct TypeChecker {
     enum_variants: HashMap<String, Vec<String>>,
     /// Tracks seen `use` import paths for duplicate detection.
     seen_imports: HashSet<String>,
+    /// Names brought into scope by `use` statements (suppresses E201).
+    use_aliases: HashSet<String>,
 }
 
 impl TypeChecker {
@@ -134,6 +136,7 @@ impl TypeChecker {
             function_sigs: HashMap::new(),
             enum_variants: HashMap::new(),
             seen_imports: HashSet::new(),
+            use_aliases: HashSet::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -958,7 +961,7 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // use path::to::item;
             // -----------------------------------------------------------------
-            StatementKind::Use { path, .. } => {
+            StatementKind::Use { path, alias, glob } => {
                 // W208: Duplicate import detection
                 let import_key = path.join("::");
                 if !self.seen_imports.insert(import_key.clone()) {
@@ -989,6 +992,12 @@ impl TypeChecker {
                             super::errors::ErrorCode::E203,
                             None,
                         );
+                    }
+                }
+                // Register the imported name so it's recognized in call resolution
+                if !*glob {
+                    if let Some(local_name) = alias.as_ref().or_else(|| path.last()) {
+                        self.use_aliases.insert(local_name.clone());
                     }
                 }
             }
@@ -1420,6 +1429,11 @@ impl TypeChecker {
                     }
 
                     return refine_call_output(op, &arg_types);
+                }
+
+                // Is it a use-imported name?
+                if self.use_aliases.contains(name.as_str()) {
+                    return ChannelType::Null;
                 }
 
                 // Unknown function.
@@ -2144,7 +2158,7 @@ impl TypeChecker {
                                 span.start_col,
                                 "Or-pattern alternatives bind different variables; all alternatives must bind the same names".to_string(),
                                 DiagnosticSeverity::Warning,
-                                super::errors::ErrorCode::W106,
+                                super::errors::ErrorCode::W113,
                                 None,
                             );
                             break;
@@ -2880,7 +2894,7 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             // HOF methods handled by interpreter directly
             "any" | "all" | "flat_map" | "each" | "sort_by" | "min_by"
             | "max_by" | "partition" | "group_by" | "scan" | "take_while"
-            | "skip_while" | "zip" | "enumerate" | "chunk" | "windows" => {
+            | "skip_while" | "zip" | "enumerate" | "chunk" => {
                 Some("array_hof".into())
             }
             // Evaluator-dispatched methods
