@@ -4790,7 +4790,7 @@ impl OperationEvaluator for FullEvaluator {
                 };
                 type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
                 conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
-                    let ws = mtx.get_mut().unwrap();
+                    let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     ws.send(msg).map_err(|e| EvalError::InvalidInput(format!("ws_send: {}", e)))?;
                     Ok(DataType::Null)
                 })
@@ -4799,7 +4799,7 @@ impl OperationEvaluator for FullEvaluator {
                 let cid = get_string(inputs, "conn_id")?;
                 type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
                 conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
-                    let ws = mtx.get_mut().unwrap();
+                    let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     let msg = ws.read().map_err(|e| EvalError::InvalidInput(format!("ws_receive: {}", e)))?;
                     match msg {
                         tungstenite::Message::Text(t) => Ok(DataType::String(t.to_string())),
@@ -4813,7 +4813,7 @@ impl OperationEvaluator for FullEvaluator {
                 let cid = get_string(inputs, "conn_id")?;
                 type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
                 let _ = conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
-                    let ws = mtx.get_mut().unwrap();
+                    let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     let _ = ws.close(None);
                     Ok(())
                 });
@@ -4840,7 +4840,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::SseReadEvent => {
                 let cid = get_string(inputs, "conn_id")?;
                 conn_with::<Mutex<Box<dyn std::io::BufRead + Send>>, _>(cid, |mtx| {
-                    let reader = mtx.get_mut().unwrap();
+                    let reader = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     let mut event_type = String::new();
                     let mut data_lines = Vec::new();
                     let mut event_id = String::new();
@@ -4898,7 +4898,7 @@ impl OperationEvaluator for FullEvaluator {
                 let sid = get_string(inputs, "server_id")?;
                 // Accept and parse outside conn_with to avoid deadlock when storing client
                 let (stream, addr) = conn_with::<Mutex<std::net::TcpListener>, _>(sid, |mtx| {
-                    let listener = mtx.get_mut().unwrap();
+                    let listener = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     listener.accept().map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))
                 })?;
                 // Parse HTTP request from the accepted stream
@@ -4969,7 +4969,7 @@ impl OperationEvaluator for FullEvaluator {
                 );
                 conn_with::<Mutex<std::net::TcpStream>, _>(cid, |mtx| {
                     use std::io::Write;
-                    let stream = mtx.get_mut().unwrap();
+                    let stream = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     stream.write_all(response.as_bytes())
                         .map_err(|e| EvalError::InvalidInput(format!("http_server_respond: {}", e)))?;
                     stream.flush()
