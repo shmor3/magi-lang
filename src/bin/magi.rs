@@ -310,7 +310,13 @@ impl OperationEvaluator for FullEvaluator {
                 let replace = inputs.get("replace").cloned().unwrap_or(DataType::Null);
                 match (&input, &search, &replace) {
                     (DataType::String(s), DataType::String(from), DataType::String(to)) => {
-                        if !from.is_empty() && to.len() > from.len() {
+                        if from.is_empty() {
+                            // Empty search: inserts between every char + start/end
+                            let result_len = (s.chars().count() + 1).saturating_mul(to.len()).saturating_add(s.len());
+                            if result_len > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!("replace result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                            }
+                        } else if to.len() > from.len() {
                             let match_count = s.matches(from.as_str()).count();
                             let growth = match_count.saturating_mul(to.len().saturating_sub(from.len()));
                             if s.len().saturating_add(growth) > MAX_STRING_OUTPUT {
