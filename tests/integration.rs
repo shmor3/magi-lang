@@ -7851,3 +7851,45 @@ fn test_pad_end_multibyte_byte_limit() {
     assert!(msg.contains("E409") || msg.contains("resource") || msg.contains("limit"),
         "Expected resource limit error, got: {}", msg);
 }
+
+// ── Round 77: arity message and Power fixes ──────────────
+
+#[test]
+fn test_pad_start_arity_message() {
+    let err = run_err(r#"
+        let s = "hello".pad_start();
+        output s;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("1-2"), "Expected arity '1-2', got: {}", msg);
+}
+
+#[test]
+fn test_pad_end_arity_message() {
+    let err = run_err(r#"
+        let s = "hello".pad_end();
+        output s;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("1-2"), "Expected arity '1-2', got: {}", msg);
+}
+
+#[test]
+fn test_substring_arity_message() {
+    let err = run_err(r#"
+        let s = "hello".substring();
+        output s;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("1-2"), "Expected arity '1-2', got: {}", msg);
+}
+
+#[test]
+fn test_pad_start_with_two_args() {
+    assert_eq!(run(r#"output "hi".pad_start(5, "*");"#), DataType::String("***hi".to_string()));
+}
+
+#[test]
+fn test_substring_with_two_args() {
+    assert_eq!(run(r#"output "hello".substring(1, 4);"#), DataType::String("ell".to_string()));
+}

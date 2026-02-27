@@ -621,11 +621,7 @@ impl OperationEvaluator for FullEvaluator {
                 match (promote_numeric(a), promote_numeric(b)) {
                     (Some(Ok(base)), Some(Ok(exp))) => {
                         if exp < 0 {
-                            if exp < i32::MIN as i64 || exp > i32::MAX as i64 {
-                                Ok(DataType::Float64(0.0))
-                            } else {
-                                Ok(DataType::Float64((base as f64).powi(exp as i32)))
-                            }
+                            Ok(DataType::Float64((base as f64).powf(exp as f64)))
                         } else if exp > u32::MAX as i64 {
                             Ok(DataType::Null)
                         } else {

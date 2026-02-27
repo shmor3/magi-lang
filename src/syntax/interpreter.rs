@@ -1978,7 +1978,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "pad_start" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
@@ -2004,7 +2004,7 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::String(format!("{}{}", padding, s))))
                 }
                 "pad_end" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
@@ -2030,7 +2030,7 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::String(format!("{}{}", s, padding))))
                 }
                 "substring" | "slice" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
                     let char_len = s.chars().count() as i64;
                     let raw_start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     let raw_end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(char_len) } else { char_len };
