@@ -277,35 +277,6 @@ impl ErrorCode {
 // "Did you mean?" suggestions via Levenshtein distance
 // =============================================================================
 
-/// Compute the Levenshtein edit distance between two strings.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let a_len = a_chars.len();
-    let b_len = b_chars.len();
-
-    if a_len == 0 {
-        return b_len;
-    }
-    if b_len == 0 {
-        return a_len;
-    }
-
-    let mut prev: Vec<usize> = (0..=b_len).collect();
-    let mut curr = vec![0usize; b_len + 1];
-
-    for (i, ca) in a_chars.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b_chars.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (prev[j] + cost).min(curr[j] + 1).min(prev[j + 1] + 1);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-
-    prev[b_len]
-}
-
 /// Suggest the closest matching name from a list of available names.
 ///
 /// Returns `Some("did you mean 'closest'?")` if a close match (distance ≤ 3) is found.
@@ -323,7 +294,7 @@ pub fn suggest_name(name: &str, available: &[&str]) -> Option<String> {
             continue;
         }
 
-        let dist = levenshtein(name, candidate);
+        let dist = strsim::levenshtein(name, candidate);
         if dist > 0 && dist <= max_distance {
             match best {
                 None => best = Some((candidate, dist)),
@@ -382,26 +353,26 @@ mod tests {
 
     #[test]
     fn test_levenshtein_identical() {
-        assert_eq!(levenshtein("hello", "hello"), 0);
+        assert_eq!(strsim::levenshtein("hello", "hello"), 0);
     }
 
     #[test]
     fn test_levenshtein_empty() {
-        assert_eq!(levenshtein("", "abc"), 3);
-        assert_eq!(levenshtein("abc", ""), 3);
-        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(strsim::levenshtein("", "abc"), 3);
+        assert_eq!(strsim::levenshtein("abc", ""), 3);
+        assert_eq!(strsim::levenshtein("", ""), 0);
     }
 
     #[test]
     fn test_levenshtein_one_edit() {
-        assert_eq!(levenshtein("cat", "hat"), 1); // substitution
-        assert_eq!(levenshtein("cat", "cats"), 1); // insertion
-        assert_eq!(levenshtein("cats", "cat"), 1); // deletion
+        assert_eq!(strsim::levenshtein("cat", "hat"), 1); // substitution
+        assert_eq!(strsim::levenshtein("cat", "cats"), 1); // insertion
+        assert_eq!(strsim::levenshtein("cats", "cat"), 1); // deletion
     }
 
     #[test]
     fn test_levenshtein_multiple_edits() {
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(strsim::levenshtein("kitten", "sitting"), 3);
     }
 
     #[test]

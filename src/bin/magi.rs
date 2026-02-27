@@ -1295,40 +1295,8 @@ impl OperationEvaluator for FullEvaluator {
 
             // ToJson
             OperationType::ToJson => {
-                fn to_json(val: &DataType) -> String {
-                    match val {
-                        DataType::Null => "null".to_string(),
-                        DataType::Bool(b) => format!("{}", b),
-                        DataType::Int64(n) => format!("{}", n),
-                        DataType::Int32(n) => format!("{}", n),
-                        DataType::Uint32(n) => format!("{}", n),
-                        DataType::Uint64(n) => format!("{}", n),
-                        DataType::Float64(f) => {
-                            if !f.is_finite() { "null".to_string() }
-                            else if *f == (*f as i64 as f64) && f.abs() < 1e15 { format!("{}.0", *f as i64) }
-                            else { format!("{}", f) }
-                        }
-                        DataType::Float32(f) => to_json(&DataType::Float64(*f as f64)),
-                        DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")),
-                        DataType::Array(arr) => {
-                            let parts: Vec<String> = arr.iter().map(to_json).collect();
-                            format!("[{}]", parts.join(","))
-                        }
-                        DataType::Map(m) => {
-                            let parts: Vec<String> = m.iter()
-                                .filter(|(k, _)| !k.starts_with("__"))
-                                .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), to_json(v)))
-                                .collect();
-                            format!("{{{}}}", parts.join(","))
-                        }
-                        DataType::Bytes(b) => {
-                            let parts: Vec<String> = b.iter().map(|byte| format!("{}", byte)).collect();
-                            format!("[{}]", parts.join(","))
-                        }
-                        DataType::Future(_) => "null".to_string(),
-                    }
-                }
-                Ok(DataType::String(to_json(&input)))
+                let json_val = datatype_to_serde_json(&input);
+                Ok(DataType::String(serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string())))
             },
 
             // Bitwise operations
@@ -1505,75 +1473,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ParseJson => {
                 match &input {
                     DataType::String(s) => {
-                        fn parse_json_value(s: &str) -> std::result::Result<DataType, String> {
-                            let s = s.trim();
-                            if s == "null" { return Ok(DataType::Null); }
-                            if s == "true" { return Ok(DataType::Bool(true)); }
-                            if s == "false" { return Ok(DataType::Bool(false)); }
-                            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                                let inner = &s[1..s.len()-1];
-                                return Ok(DataType::String(inner.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")));
-                            }
-                            if s.starts_with('[') && s.ends_with(']') {
-                                let inner = &s[1..s.len()-1];
-                                if inner.trim().is_empty() { return Ok(DataType::Array(vec![])); }
-                                let mut items = Vec::new();
-                                let mut depth = 0i32;
-                                let mut start = 0;
-                                for (i, ch) in inner.char_indices() {
-                                    match ch {
-                                        '[' | '{' => depth += 1,
-                                        ']' | '}' => depth -= 1,
-                                        '"' => {} // simplified — doesn't handle escaped quotes in deeply nested JSON
-                                        ',' if depth == 0 => {
-                                            items.push(parse_json_value(&inner[start..i])?);
-                                            start = i + 1;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                items.push(parse_json_value(&inner[start..])?);
-                                return Ok(DataType::Array(items));
-                            }
-                            if s.starts_with('{') && s.ends_with('}') {
-                                let inner = &s[1..s.len()-1];
-                                if inner.trim().is_empty() { return Ok(DataType::Map(std::collections::BTreeMap::new())); }
-                                let mut map = std::collections::BTreeMap::new();
-                                let mut depth = 0i32;
-                                let mut start = 0;
-                                let mut entries = Vec::new();
-                                for (i, ch) in inner.char_indices() {
-                                    match ch {
-                                        '[' | '{' => depth += 1,
-                                        ']' | '}' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            entries.push(&inner[start..i]);
-                                            start = i + 1;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                entries.push(&inner[start..]);
-                                for entry in entries {
-                                    if let Some(colon_pos) = entry.find(':') {
-                                        let key = entry[..colon_pos].trim();
-                                        let val = entry[colon_pos+1..].trim();
-                                        let key_str = if key.starts_with('"') && key.ends_with('"') && key.len() >= 2 {
-                                            key[1..key.len()-1].to_string()
-                                        } else {
-                                            key.to_string()
-                                        };
-                                        map.insert(key_str, parse_json_value(val)?);
-                                    }
-                                }
-                                return Ok(DataType::Map(map));
-                            }
-                            // Try number
-                            if let Ok(i) = s.parse::<i64>() { return Ok(DataType::Int64(i)); }
-                            if let Ok(f) = s.parse::<f64>() { return Ok(DataType::Float64(f)); }
-                            Err(format!("Invalid JSON: {}", s))
+                        match serde_json::from_str::<serde_json::Value>(s) {
+                            Ok(val) => Ok(json_value_to_datatype(&val)),
+                            Err(e) => Err(EvalError::InvalidInput(format!("Invalid JSON: {}", e))),
                         }
-                        parse_json_value(s).map_err(EvalError::InvalidInput)
                     }
                     _ => Err(EvalError::InvalidInput(format!("ParseJson expects String, got {:?}", input))),
                 }
@@ -2227,17 +2130,10 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let s = s.trim();
                         let s = s.strip_prefix("0x").or(s.strip_prefix("0X")).unwrap_or(s);
-                        if s.len() % 2 != 0 {
-                            return Err(EvalError::InvalidInput("hex_decode: odd-length string".to_string()));
+                        match hex::decode(s) {
+                            Ok(bytes) => Ok(DataType::Bytes(bytes)),
+                            Err(e) => Err(EvalError::InvalidInput(format!("hex_decode: {}", e))),
                         }
-                        let mut bytes = Vec::with_capacity(s.len() / 2);
-                        for i in (0..s.len()).step_by(2) {
-                            match u8::from_str_radix(&s[i..i+2], 16) {
-                                Ok(b) => bytes.push(b),
-                                Err(_) => return Err(EvalError::InvalidInput(format!("hex_decode: invalid hex at position {}", i))),
-                            }
-                        }
-                        Ok(DataType::Bytes(bytes))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2249,18 +2145,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlEncode => {
                 match &input {
                     DataType::String(s) => {
-                        let mut encoded = String::new();
-                        for byte in s.bytes() {
-                            match byte {
-                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                                    encoded.push(byte as char);
-                                }
-                                _ => {
-                                    encoded.push_str(&format!("%{:02X}", byte));
-                                }
-                            }
-                        }
-                        Ok(DataType::String(encoded))
+                        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+                        Ok(DataType::String(utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2268,29 +2154,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlDecode => {
                 match &input {
                     DataType::String(s) => {
-                        let mut decoded = Vec::new();
-                        let bytes = s.as_bytes();
-                        let mut i = 0;
-                        while i < bytes.len() {
-                            if bytes[i] == b'%' && i + 2 < bytes.len() {
-                                if let Ok(b) = u8::from_str_radix(
-                                    std::str::from_utf8(&bytes[i+1..i+3]).unwrap_or(""),
-                                    16,
-                                ) {
-                                    decoded.push(b);
-                                    i += 3;
-                                    continue;
-                                }
-                            }
-                            if bytes[i] == b'+' {
-                                decoded.push(b' ');
-                            } else {
-                                decoded.push(bytes[i]);
-                            }
-                            i += 1;
-                        }
-                        match String::from_utf8(decoded) {
-                            Ok(s) => Ok(DataType::String(s)),
+                        use percent_encoding::percent_decode_str;
+                        let s = s.replace('+', " ");
+                        match percent_decode_str(&s).decode_utf8() {
+                            Ok(decoded) => Ok(DataType::String(decoded.into_owned())),
                             Err(_) => Err(EvalError::InvalidInput("url_decode: invalid UTF-8".to_string())),
                         }
                     }
@@ -2405,72 +2272,12 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::JsonPrettyPrint => {
-                fn to_json_pretty(val: &DataType, indent: usize) -> String {
-                    let pad = "  ".repeat(indent);
-                    let pad_inner = "  ".repeat(indent + 1);
-                    match val {
-                        DataType::Null => "null".to_string(),
-                        DataType::Bool(b) => format!("{}", b),
-                        DataType::Int64(n) => format!("{}", n),
-                        DataType::Int32(n) => format!("{}", n),
-                        DataType::Uint32(n) => format!("{}", n),
-                        DataType::Uint64(n) => format!("{}", n),
-                        DataType::Float64(f) => {
-                            if !f.is_finite() { "null".to_string() }
-                            else if *f == (*f as i64 as f64) && f.abs() < 1e15 { format!("{}.0", *f as i64) }
-                            else { format!("{}", f) }
-                        }
-                        DataType::Float32(f) => to_json_pretty(&DataType::Float64(*f as f64), indent),
-                        DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")),
-                        DataType::Array(arr) => {
-                            if arr.is_empty() { return "[]".to_string(); }
-                            let parts: Vec<String> = arr.iter().map(|v| format!("{}{}", pad_inner, to_json_pretty(v, indent + 1))).collect();
-                            format!("[\n{}\n{}]", parts.join(",\n"), pad)
-                        }
-                        DataType::Map(m) => {
-                            if m.is_empty() { return "{}".to_string(); }
-                            let parts: Vec<String> = m.iter()
-                                .filter(|(k, _)| !k.starts_with("__"))
-                                .map(|(k, v)| format!("{}\"{}\": {}", pad_inner, k.replace('\\', "\\\\").replace('"', "\\\""), to_json_pretty(v, indent + 1)))
-                                .collect();
-                            format!("{{\n{}\n{}}}", parts.join(",\n"), pad)
-                        }
-                        _ => "null".to_string(),
-                    }
-                }
-                Ok(DataType::String(to_json_pretty(&input, 0)))
+                let json_val = datatype_to_serde_json(&input);
+                Ok(DataType::String(serde_json::to_string_pretty(&json_val).unwrap_or_else(|_| "null".to_string())))
             }
             OperationType::JsonCompact => {
-                fn to_json_compact(val: &DataType) -> String {
-                    match val {
-                        DataType::Null => "null".to_string(),
-                        DataType::Bool(b) => format!("{}", b),
-                        DataType::Int64(n) => format!("{}", n),
-                        DataType::Int32(n) => format!("{}", n),
-                        DataType::Uint32(n) => format!("{}", n),
-                        DataType::Uint64(n) => format!("{}", n),
-                        DataType::Float64(f) => {
-                            if !f.is_finite() { "null".to_string() }
-                            else if *f == (*f as i64 as f64) && f.abs() < 1e15 { format!("{}.0", *f as i64) }
-                            else { format!("{}", f) }
-                        }
-                        DataType::Float32(f) => to_json_compact(&DataType::Float64(*f as f64)),
-                        DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")),
-                        DataType::Array(arr) => {
-                            let parts: Vec<String> = arr.iter().map(to_json_compact).collect();
-                            format!("[{}]", parts.join(","))
-                        }
-                        DataType::Map(m) => {
-                            let parts: Vec<String> = m.iter()
-                                .filter(|(k, _)| !k.starts_with("__"))
-                                .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), to_json_compact(v)))
-                                .collect();
-                            format!("{{{}}}", parts.join(","))
-                        }
-                        _ => "null".to_string(),
-                    }
-                }
-                Ok(DataType::String(to_json_compact(&input)))
+                let json_val = datatype_to_serde_json(&input);
+                Ok(DataType::String(serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string())))
             }
             OperationType::JsonValidate => {
                 match &input {
@@ -5349,37 +5156,38 @@ fn datatype_to_yaml_value(data: &DataType) -> serde_yaml::Value {
     }
 }
 
-fn datatype_to_json_string(val: &DataType) -> String {
+fn datatype_to_serde_json(val: &DataType) -> serde_json::Value {
     match val {
-        DataType::Null => "null".to_string(),
-        DataType::Bool(b) => b.to_string(),
-        DataType::Int32(n) => n.to_string(),
-        DataType::Int64(n) => n.to_string(),
-        DataType::Uint32(n) => n.to_string(),
-        DataType::Uint64(n) => n.to_string(),
-        DataType::Float32(f) => if f.is_nan() || f.is_infinite() { "null".to_string() } else { format!("{}", f) },
-        DataType::Float64(f) => if f.is_nan() || f.is_infinite() { "null".to_string() } else { format!("{}", f) },
-        DataType::String(s) => {
-            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
-            format!("\"{}\"", escaped)
+        DataType::Null | DataType::Future(_) => serde_json::Value::Null,
+        DataType::Bool(b) => serde_json::Value::Bool(*b),
+        DataType::Int64(n) => serde_json::json!(*n),
+        DataType::Int32(n) => serde_json::json!(*n),
+        DataType::Uint32(n) => serde_json::json!(*n),
+        DataType::Uint64(n) => serde_json::json!(*n),
+        DataType::Float64(f) => {
+            if f.is_finite() { serde_json::json!(*f) } else { serde_json::Value::Null }
         }
-        DataType::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(datatype_to_json_string).collect();
-            format!("[{}]", parts.join(","))
+        DataType::Float32(f) => {
+            if f.is_finite() { serde_json::json!(*f as f64) } else { serde_json::Value::Null }
         }
+        DataType::String(s) => serde_json::Value::String(s.clone()),
+        DataType::Array(arr) => serde_json::Value::Array(arr.iter().map(datatype_to_serde_json).collect()),
         DataType::Map(m) => {
-            let parts: Vec<String> = m.iter()
+            let obj: serde_json::Map<String, serde_json::Value> = m.iter()
                 .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), datatype_to_json_string(v)))
+                .map(|(k, v)| (k.clone(), datatype_to_serde_json(v)))
                 .collect();
-            format!("{{{}}}", parts.join(","))
+            serde_json::Value::Object(obj)
         }
         DataType::Bytes(b) => {
             use base64::Engine;
-            format!("\"{}\"", base64::engine::general_purpose::STANDARD.encode(b))
-        },
-        DataType::Future(_) => "null".to_string(),
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+        }
     }
+}
+
+fn datatype_to_json_string(val: &DataType) -> String {
+    serde_json::to_string(&datatype_to_serde_json(val)).unwrap_or_else(|_| "null".to_string())
 }
 
 fn json_value_to_datatype(val: &serde_json::Value) -> DataType {
