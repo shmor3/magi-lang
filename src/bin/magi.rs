@@ -121,13 +121,15 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::LessEq => num_cmp(&a, &b, |x, y| x <= y, |x, y| x <= y, |x, y| x <= y),
 
             // Logical
-            OperationType::And => match (&a, &b) {
-                (DataType::Bool(x), DataType::Bool(y)) => Ok(DataType::Bool(*x && *y)),
-                _ => Ok(DataType::Bool(false)),
+            OperationType::And => {
+                let ta = is_truthy(&a);
+                let tb = is_truthy(&b);
+                Ok(DataType::Bool(ta && tb))
             },
-            OperationType::Or => match (&a, &b) {
-                (DataType::Bool(x), DataType::Bool(y)) => Ok(DataType::Bool(*x || *y)),
-                _ => Ok(DataType::Bool(false)),
+            OperationType::Or => {
+                let ta = is_truthy(&a);
+                let tb = is_truthy(&b);
+                Ok(DataType::Bool(ta || tb))
             },
             OperationType::Not => {
                 let truthy = match &input {
@@ -147,9 +149,12 @@ impl OperationEvaluator for FullEvaluator {
                     Some(v) => Ok(DataType::Int64(v)),
                     None => Err(EvalError::InvalidInput("integer overflow".to_string())),
                 },
-                DataType::Int32(x) => Ok(DataType::Int64(-(*x as i64))),
+                DataType::Int32(x) => match x.checked_neg() {
+                    Some(v) => Ok(DataType::Int32(v)),
+                    None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                },
                 DataType::Float64(x) => Ok(DataType::Float64(-x)),
-                DataType::Float32(x) => Ok(DataType::Float64(-(*x as f64))),
+                DataType::Float32(x) => Ok(DataType::Float32(-x)),
                 _ => Ok(DataType::Null),
             },
 
@@ -580,34 +585,46 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ToBool => match &input {
                 DataType::Bool(_) => Ok(input.clone()),
                 DataType::Int64(n) => Ok(DataType::Bool(*n != 0)),
-                DataType::Float64(f) => Ok(DataType::Bool(*f != 0.0)),
+                DataType::Int32(n) => Ok(DataType::Bool(*n != 0)),
+                DataType::Uint32(n) => Ok(DataType::Bool(*n != 0)),
+                DataType::Uint64(n) => Ok(DataType::Bool(*n != 0)),
+                DataType::Float64(f) => Ok(DataType::Bool(*f != 0.0 && !f.is_nan())),
+                DataType::Float32(f) => Ok(DataType::Bool(*f != 0.0 && !f.is_nan())),
                 DataType::String(s) => Ok(DataType::Bool(!s.is_empty())),
                 DataType::Null => Ok(DataType::Bool(false)),
+                DataType::Array(a) => Ok(DataType::Bool(!a.is_empty())),
+                DataType::Map(m) => Ok(DataType::Bool(!m.is_empty())),
                 _ => Ok(DataType::Bool(true)),
             },
 
             // Math
-            OperationType::Abs => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(match n.checked_abs() {
+            OperationType::Abs => match &input {
+                DataType::Int64(n) => Ok(match n.checked_abs() {
                     Some(v) => DataType::Int64(v),
-                    None => DataType::Null, // i64::MIN overflow
+                    None => DataType::Null,
                 }),
-                Some(Err(f)) => Ok(DataType::Float64(f.abs())),
-                None => Ok(DataType::Null),
+                DataType::Int32(n) => Ok(match n.checked_abs() {
+                    Some(v) => DataType::Int32(v),
+                    None => DataType::Null,
+                }),
+                DataType::Uint32(_) | DataType::Uint64(_) => Ok(input.clone()),
+                DataType::Float64(f) => Ok(DataType::Float64(f.abs())),
+                DataType::Float32(f) => Ok(DataType::Float32(f.abs())),
+                _ => Ok(DataType::Null),
             },
             OperationType::Round => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.round())),
-                DataType::Float32(n) => Ok(DataType::Float64((*n as f64).round())),
+                DataType::Float32(n) => Ok(DataType::Float32(n.round())),
                 other => Ok(other.clone()),
             },
             OperationType::Floor => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.floor())),
-                DataType::Float32(n) => Ok(DataType::Float64((*n as f64).floor())),
+                DataType::Float32(n) => Ok(DataType::Float32(n.floor())),
                 other => Ok(other.clone()),
             },
             OperationType::Ceil => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.ceil())),
-                DataType::Float32(n) => Ok(DataType::Float64((*n as f64).ceil())),
+                DataType::Float32(n) => Ok(DataType::Float32(n.ceil())),
                 other => Ok(other.clone()),
             },
             OperationType::Sqrt => match promote_numeric(&input) {
@@ -1001,6 +1018,23 @@ impl OperationEvaluator for FullEvaluator {
 }
 
 /// Promote a DataType to either i64 or f64 for arithmetic.
+fn is_truthy(val: &DataType) -> bool {
+    match val {
+        DataType::Bool(b) => *b,
+        DataType::Int64(n) => *n != 0,
+        DataType::Int32(n) => *n != 0,
+        DataType::Uint32(n) => *n != 0,
+        DataType::Uint64(n) => *n != 0,
+        DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
+        DataType::Float32(f) => *f != 0.0 && !f.is_nan(),
+        DataType::String(s) => !s.is_empty(),
+        DataType::Null => false,
+        DataType::Array(a) => !a.is_empty(),
+        DataType::Map(m) => !m.is_empty(),
+        _ => true,
+    }
+}
+
 fn promote_numeric(val: &DataType) -> Option<Result<i64, f64>> {
     match val {
         DataType::Int64(x) => Some(Ok(*x)),
