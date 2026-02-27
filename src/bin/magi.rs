@@ -129,9 +129,18 @@ impl OperationEvaluator for FullEvaluator {
                 (DataType::Bool(x), DataType::Bool(y)) => Ok(DataType::Bool(*x || *y)),
                 _ => Ok(DataType::Bool(false)),
             },
-            OperationType::Not => match &input {
-                DataType::Bool(x) => Ok(DataType::Bool(!x)),
-                _ => Ok(DataType::Bool(true)),
+            OperationType::Not => {
+                let truthy = match &input {
+                    DataType::Bool(b) => *b,
+                    DataType::Int64(n) => *n != 0,
+                    DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
+                    DataType::String(s) => !s.is_empty(),
+                    DataType::Null => false,
+                    DataType::Array(a) => !a.is_empty(),
+                    DataType::Map(m) => !m.is_empty(),
+                    _ => true,
+                };
+                Ok(DataType::Bool(!truthy))
             },
             OperationType::Negate => match &input {
                 DataType::Int64(x) => match x.checked_neg() {

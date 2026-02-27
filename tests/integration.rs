@@ -7307,3 +7307,24 @@ fn test_array_first_last_is_empty() {
     assert_eq!(run("[].is_empty()"), DataType::Bool(true));
     assert_eq!(run("[1].is_empty()"), DataType::Bool(false));
 }
+
+#[test]
+fn test_int64_to_int64_identity() {
+    assert_eq!(run("(42).to_int64()"), DataType::Int64(42));
+}
+
+#[test]
+fn test_float64_to_float64_identity() {
+    assert_eq!(run("(3.14).to_float64()"), DataType::Float64(3.14));
+}
+
+#[test]
+fn test_not_operator_truthiness() {
+    assert_eq!(run("!true"), DataType::Bool(false));
+    assert_eq!(run("!false"), DataType::Bool(true));
+    assert_eq!(run("!0"), DataType::Bool(true));
+    assert_eq!(run("!42"), DataType::Bool(false));
+    assert_eq!(run("!null"), DataType::Bool(true));
+    assert_eq!(run(r#"!"""#), DataType::Bool(true));
+    assert_eq!(run(r#"!"hello""#), DataType::Bool(false));
+}

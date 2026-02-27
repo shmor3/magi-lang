@@ -1543,6 +1543,7 @@ impl<'a> Interpreter<'a> {
                 })),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
+                "to_int64" => Ok(Some(DataType::Int64(*n))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
@@ -1598,6 +1599,7 @@ impl<'a> Interpreter<'a> {
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_float64" => Ok(Some(DataType::Float64(*n))),
                 "to_int64" => {
                     if !n.is_finite() {
                         Ok(Some(DataType::Null))
@@ -1700,12 +1702,12 @@ impl<'a> Interpreter<'a> {
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                     Ok(Some(DataType::Float32(v.max(lo).min(hi) as f32)))
                 }
-                "ln" => Ok(Some(DataType::Float64((*n as f64).ln()))),
-                "log2" => Ok(Some(DataType::Float64((*n as f64).log2()))),
-                "log10" => Ok(Some(DataType::Float64((*n as f64).log10()))),
-                "sin" => Ok(Some(DataType::Float64((*n as f64).sin()))),
-                "cos" => Ok(Some(DataType::Float64((*n as f64).cos()))),
-                "tan" => Ok(Some(DataType::Float64((*n as f64).tan()))),
+                "ln" => Ok(Some(DataType::Float32((*n as f64).ln() as f32))),
+                "log2" => Ok(Some(DataType::Float32((*n as f64).log2() as f32))),
+                "log10" => Ok(Some(DataType::Float32((*n as f64).log10() as f32))),
+                "sin" => Ok(Some(DataType::Float32((*n as f64).sin() as f32))),
+                "cos" => Ok(Some(DataType::Float32((*n as f64).cos() as f32))),
+                "tan" => Ok(Some(DataType::Float32((*n as f64).tan() as f32))),
                 _ => Ok(None),
             },
             DataType::Int32(n) => match method {
@@ -2405,6 +2407,26 @@ impl<'a> Interpreter<'a> {
 
             ExpressionKind::UnaryOp { op, operand } => {
                 let val = self.eval_expr(operand)?;
+
+                // Handle `!` (Not) directly in the interpreter with truthiness semantics,
+                // so it works regardless of evaluator implementation.
+                if *op == UnOp::Not {
+                    let truthy = match &val {
+                        DataType::Bool(b) => *b,
+                        DataType::Int32(n) => *n != 0,
+                        DataType::Int64(n) => *n != 0,
+                        DataType::Uint32(n) => *n != 0,
+                        DataType::Uint64(n) => *n != 0,
+                        DataType::Float32(f) => *f != 0.0 && !f.is_nan(),
+                        DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
+                        DataType::String(s) => !s.is_empty(),
+                        DataType::Null => false,
+                        DataType::Array(a) => !a.is_empty(),
+                        DataType::Map(m) => !m.is_empty(),
+                        _ => true,
+                    };
+                    return Ok(DataType::Bool(!truthy));
+                }
 
                 let op_type = OperationType::parse(op.operation_name()).ok_or_else(|| {
                     InterpError::UnknownOperation {
