@@ -7689,3 +7689,43 @@ fn test_array_spread_resource_limit() {
     assert!(msg.contains("limit") || msg.contains("resource") || msg.contains("element") || msg.contains("iteration"),
         "Expected resource limit error: {}", msg);
 }
+
+// ── Round 74: E409 resource limit error code ────────────────────
+
+#[test]
+fn test_resource_limit_uses_e409() {
+    let err = run_err(r#"
+        let s = "a".repeat(20_000_000);
+        output s;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("E409"), "Expected E409 error code, got: {}", msg);
+}
+
+#[test]
+fn test_max_iterations_uses_e400() {
+    let err = run_err(r#"
+        let mut i = 0;
+        while true {
+            i = i + 1;
+        }
+        output i;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("E400"), "Expected E400 error code, got: {}", msg);
+}
+
+#[test]
+fn test_e409_error_code_help() {
+    let help = magi_lang::syntax::errors::ErrorCode::E409.help();
+    assert!(help.contains("resource limit"), "E409 help should mention resource limit: {}", help);
+}
+
+#[test]
+fn test_e400_e409_distinct_codes() {
+    // E400 = MaxIterations, E409 = ResourceLimit — they should be distinct
+    assert_ne!(
+        magi_lang::syntax::errors::ErrorCode::E400.to_string(),
+        magi_lang::syntax::errors::ErrorCode::E409.to_string(),
+    );
+}

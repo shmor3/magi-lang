@@ -1678,7 +1678,7 @@ impl<'a> Interpreter<'a> {
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
-                    Ok(Some(DataType::Float64((*n as f64).powf(exp))))
+                    Ok(Some(DataType::Float32((*n as f64).powf(exp) as f32)))
                 }
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
@@ -1772,7 +1772,7 @@ impl<'a> Interpreter<'a> {
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
                 "abs" => Ok(Some(DataType::Uint32(*n))),
-                "sign" => Ok(Some(DataType::Int64(if *n == 0 { 0 } else { 1 }))),
+                "sign" => Ok(Some(DataType::Uint32(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
@@ -1819,7 +1819,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "abs" => Ok(Some(DataType::Uint64(*n))),
-                "sign" => Ok(Some(DataType::Int64(if *n == 0 { 0 } else { 1 }))),
+                "sign" => Ok(Some(DataType::Uint64(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
@@ -5138,7 +5138,7 @@ impl std::fmt::Display for InterpError {
                 write!(f, "{} [E302]: 'return' used outside of a function", span)
             }
             InterpError::ResourceLimit { limit, actual, context, span } => {
-                write!(f, "{} [E400]: Resource limit in {}: max {}, got {}", span, context, limit, actual)
+                write!(f, "{} [E409]: Resource limit in {}: max {}, got {}", span, context, limit, actual)
             }
             InterpError::NotImplemented { message, span } => {
                 write!(f, "{} [E408]: {}", span, message)
@@ -5183,4 +5183,88 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
         functions,
         use_statements,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::ast::{Expression, ExpressionKind, Span};
+
+    struct NoOpEvaluator;
+    impl crate::eval::OperationEvaluator for NoOpEvaluator {
+        fn eval_operation(
+            &self,
+            _op: crate::types::OperationType,
+            _inputs: &std::collections::HashMap<String, DataType>,
+            _config: &std::collections::HashMap<String, DataType>,
+        ) -> Result<DataType, crate::eval::EvalError> {
+            Ok(DataType::Null)
+        }
+    }
+
+    fn make_interp() -> Interpreter<'static> {
+        let evaluator: &'static dyn crate::eval::OperationEvaluator = Box::leak(Box::new(NoOpEvaluator));
+        Interpreter::new(evaluator)
+    }
+
+    fn make_float_literal(val: f64) -> Expression {
+        use crate::syntax::ast::Literal;
+        Expression {
+            kind: ExpressionKind::Literal(Literal::Float64(val)),
+            span: Span::new(1, 1, 1, 1),
+        }
+    }
+
+    #[test]
+    fn test_float32_pow_returns_float32() {
+        let mut interp = make_interp();
+        let obj = DataType::Float32(2.0);
+        let args = vec![make_float_literal(3.0)];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "pow", &args, span).unwrap();
+        match result {
+            Some(DataType::Float32(v)) => assert!((v - 8.0).abs() < 0.001, "Expected ~8.0, got {}", v),
+            other => panic!("Expected Float32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_uint32_sign_returns_uint32() {
+        let mut interp = make_interp();
+        let obj = DataType::Uint32(42);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "sign", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Uint32(1)));
+    }
+
+    #[test]
+    fn test_uint32_sign_zero_returns_uint32() {
+        let mut interp = make_interp();
+        let obj = DataType::Uint32(0);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "sign", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Uint32(0)));
+    }
+
+    #[test]
+    fn test_uint64_sign_returns_uint64() {
+        let mut interp = make_interp();
+        let obj = DataType::Uint64(99);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "sign", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Uint64(1)));
+    }
+
+    #[test]
+    fn test_uint64_sign_zero_returns_uint64() {
+        let mut interp = make_interp();
+        let obj = DataType::Uint64(0);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "sign", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Uint64(0)));
+    }
 }

@@ -78,6 +78,8 @@ pub enum ErrorCode {
     E407,
     /// Feature not implemented
     E408,
+    /// Resource limit exceeded (string/array size)
+    E409,
 
     // Warnings (W1xx)
     /// Unused variable
@@ -160,6 +162,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::E406 => "E406",
             ErrorCode::E407 => "E407",
             ErrorCode::E408 => "E408",
+            ErrorCode::E409 => "E409",
             ErrorCode::W100 => "W100",
             ErrorCode::W101 => "W101",
             ErrorCode::W102 => "W102",
@@ -226,6 +229,7 @@ impl ErrorCode {
             ErrorCode::E406 => "An operation failed during evaluation. Check the input types and values.",
             ErrorCode::E407 => "Execution was cancelled by the user or system.",
             ErrorCode::E408 => "This feature is not yet implemented in the current version.",
+            ErrorCode::E409 => "A resource limit was exceeded (e.g. string or array grew too large). Check for unbounded growth in string concatenation, array construction, or similar operations.",
 
             // Warnings
             ErrorCode::W100 => "This variable is declared but never used. Prefix it with `_` to suppress this warning, or remove it.",
@@ -352,7 +356,7 @@ mod tests {
             ErrorCode::E304,
             ErrorCode::E400, ErrorCode::E401, ErrorCode::E402, ErrorCode::E403,
             ErrorCode::E404, ErrorCode::E405, ErrorCode::E406, ErrorCode::E407,
-            ErrorCode::E408,
+            ErrorCode::E408, ErrorCode::E409,
             ErrorCode::W100, ErrorCode::W101, ErrorCode::W102, ErrorCode::W103,
             ErrorCode::W104, ErrorCode::W105, ErrorCode::W106, ErrorCode::W107,
             ErrorCode::W108, ErrorCode::W109, ErrorCode::W110, ErrorCode::W111,
