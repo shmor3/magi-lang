@@ -2311,6 +2311,13 @@ impl Parser {
                 }
                 self.expect(&TokenKind::RParen)?;
             }
+            if var_tok.text.starts_with("__") {
+                return Err(SyntaxError {
+                    line: var_start.start_line as usize,
+                    column: var_start.start_col as usize,
+                    message: format!("variant name '{}' is reserved (double-underscore prefix)", var_tok.text),
+                });
+            }
             let var_end = self.peek().span;
             variants.push(EnumVariant {
                 name: var_tok.text,

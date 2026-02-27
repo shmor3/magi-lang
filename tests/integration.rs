@@ -7273,3 +7273,37 @@ m.values().sum()
         DataType::Int64(30)
     );
 }
+
+#[test]
+fn test_enum_double_underscore_variant_rejected() {
+    let result = parse_v2("enum Foo { __hidden, Bar }");
+    assert!(result.is_err(), "Enum variant with __ prefix should be rejected");
+    let err = result.unwrap_err();
+    assert!(err.message.contains("reserved"), "Error should mention reserved: {}", err.message);
+}
+
+#[test]
+fn test_enum_normal_variants_accepted() {
+    let result = parse_v2("enum Color { Red, Green, Blue }");
+    assert!(result.is_ok(), "Normal enum variants should be accepted");
+}
+
+#[test]
+fn test_array_shift_method() {
+    assert_eq!(
+        run(r#"
+let mut arr = [10, 20, 30];
+let first = arr.shift();
+output first;
+"#),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_array_first_last_is_empty() {
+    assert_eq!(run("[10, 20, 30].first()"), DataType::Int64(10));
+    assert_eq!(run("[10, 20, 30].last()"), DataType::Int64(30));
+    assert_eq!(run("[].is_empty()"), DataType::Bool(true));
+    assert_eq!(run("[1].is_empty()"), DataType::Bool(false));
+}

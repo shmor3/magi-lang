@@ -116,6 +116,8 @@ struct TypeChecker {
     current_return_type: ChannelType,
     /// Known enum definitions: enum_name → list of variant names.
     enum_variants: HashMap<String, Vec<String>>,
+    /// Tracks seen `use` import paths for duplicate detection.
+    seen_imports: HashSet<String>,
 }
 
 impl TypeChecker {
@@ -127,6 +129,7 @@ impl TypeChecker {
             used_imports: HashSet::new(),
             function_sigs: HashMap::new(),
             enum_variants: HashMap::new(),
+            seen_imports: HashSet::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -240,19 +243,22 @@ impl TypeChecker {
             );
         }
         // W102: Variable shadowing within the same scope.
-        if let Some(scope) = self.env.last() {
-            if let Some(prev) = scope.get(name) {
-                self.emit_coded(
-                    line,
-                    col,
-                    format!(
-                        "Variable '{}' shadows previous definition on line {}",
-                        name, prev.def_line
-                    ),
-                    DiagnosticSeverity::Warning,
-                    super::errors::ErrorCode::W102,
-                    None,
-                );
+        // Suppress for _-prefixed names (intentional discard pattern).
+        if !name.starts_with('_') {
+            if let Some(scope) = self.env.last() {
+                if let Some(prev) = scope.get(name) {
+                    self.emit_coded(
+                        line,
+                        col,
+                        format!(
+                            "Variable '{}' shadows previous definition on line {}",
+                            name, prev.def_line
+                        ),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W102,
+                        None,
+                    );
+                }
             }
         }
         if let Some(scope) = self.env.last_mut() {
@@ -947,6 +953,18 @@ impl TypeChecker {
             // use path::to::item;
             // -----------------------------------------------------------------
             StatementKind::Use { path, .. } => {
+                // W208: Duplicate import detection
+                let import_key = path.join("::");
+                if !self.seen_imports.insert(import_key.clone()) {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        format!("Duplicate import '{}'", import_key),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W208,
+                        None,
+                    );
+                }
                 // Validate that std module paths are known
                 if path.first().map(|s| s.as_str()) == Some("std") && path.len() >= 2 {
                     let known_modules = [
@@ -2855,6 +2873,11 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             | "skip_while" | "zip" | "enumerate" | "chunk" | "windows" => {
                 Some("array_hof".into())
             }
+            // Evaluator-dispatched methods
+            "insert" => Some("array_insert".into()),
+            "remove" => Some("array_remove".into()),
+            "shift" => Some("array_shift".into()),
+            "filter_nulls" => Some("array_filter_nulls".into()),
             // Direct methods
             "first" | "last" | "is_empty" | "sum" | "product" | "min"
             | "max" => Some("array_direct".into()),
@@ -4661,6 +4684,46 @@ test "reads outer" { let r = x + 1; output r; }"#,
             "Test body should access outer scope variables: {:?}",
             undef_errs
         );
+    }
+
+    #[test]
+    fn test_w208_duplicate_import() {
+        let a = check("use std::math;\nuse std::math;\noutput 1;");
+        let warns = warnings(&a);
+        let dup = warns.iter().find(|d| d.code.as_deref() == Some("W208"));
+        assert!(dup.is_some(), "Expected W208 for duplicate import");
+    }
+
+    #[test]
+    fn test_w208_no_false_positive() {
+        let a = check("use std::math;\nuse std::json;\noutput 1;");
+        let warns = warnings(&a);
+        let dup = warns.iter().find(|d| d.code.as_deref() == Some("W208"));
+        assert!(dup.is_none(), "No W208 for different imports");
+    }
+
+    #[test]
+    fn test_w102_suppressed_for_underscore_prefix() {
+        let a = check("let _x = 1;\nlet _x = 2;\noutput _x;");
+        let warns = warnings(&a);
+        let shadow = warns.iter().find(|d| d.code.as_deref() == Some("W102"));
+        assert!(shadow.is_none(), "W102 should be suppressed for _-prefixed names");
+    }
+
+    #[test]
+    fn test_no_e201_for_array_insert_remove() {
+        // These methods exist in the interpreter; should not produce E201 warnings
+        let a = check(r#"
+            let arr = [1, 2, 3];
+            arr.insert(1, 99);
+            arr.remove(0);
+            arr.shift();
+            arr.filter_nulls();
+            output arr;
+        "#);
+        let warns = warnings(&a);
+        let unknown = warns.iter().filter(|d| d.message.contains("Unknown method")).collect::<Vec<_>>();
+        assert!(unknown.is_empty(), "Expected no E201 for known array methods, got: {:?}", unknown);
     }
 
 }
