@@ -4808,8 +4808,16 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
             let matches = match (lit, value) {
                 (Literal::Int64(a), DataType::Int64(b)) => a == b,
                 (Literal::Int64(a), DataType::Float64(b)) => (*a as f64) == *b,
+                (Literal::Int64(a), DataType::Int32(b)) => *a == (*b as i64),
+                (Literal::Int64(a), DataType::Uint32(b)) => *a == (*b as i64),
+                (Literal::Int64(a), DataType::Uint64(b)) => *a >= 0 && (*a as u64) == *b,
+                (Literal::Int64(a), DataType::Float32(b)) => (*a as f64) == (*b as f64),
                 (Literal::Float64(a), DataType::Float64(b)) => a.to_bits() == b.to_bits(),
                 (Literal::Float64(a), DataType::Int64(b)) => *a == (*b as f64),
+                (Literal::Float64(a), DataType::Float32(b)) => *a == (*b as f64),
+                (Literal::Float64(a), DataType::Int32(b)) => *a == (*b as f64),
+                (Literal::Float64(a), DataType::Uint32(b)) => *a == (*b as f64),
+                (Literal::Float64(a), DataType::Uint64(b)) => *a == (*b as f64),
                 (Literal::String(a), DataType::String(b)) => a == b,
                 (Literal::Bool(a), DataType::Bool(b)) => a == b,
                 (Literal::Null, DataType::Null) => true,
@@ -5334,5 +5342,51 @@ mod tests {
         let span = Span::new(1, 1, 1, 1);
         let result = interp.try_eval_direct_method(&obj, "to_uint64", &args, span).unwrap();
         assert_eq!(result, Some(DataType::Uint64(12345)));
+    }
+
+    #[test]
+    fn test_literal_pattern_matches_int32() {
+        use crate::syntax::ast::{Literal, Pattern};
+        let value = DataType::Int32(42);
+        let pattern = Pattern::Literal(Literal::Int64(42));
+        let result = match_pattern_depth(&value, &pattern, 0);
+        assert!(result.is_some(), "Int64(42) pattern should match Int32(42)");
+    }
+
+    #[test]
+    fn test_literal_pattern_matches_uint32() {
+        use crate::syntax::ast::{Literal, Pattern};
+        let value = DataType::Uint32(100);
+        let pattern = Pattern::Literal(Literal::Int64(100));
+        let result = match_pattern_depth(&value, &pattern, 0);
+        assert!(result.is_some(), "Int64(100) pattern should match Uint32(100)");
+    }
+
+    #[test]
+    fn test_literal_pattern_matches_uint64() {
+        use crate::syntax::ast::{Literal, Pattern};
+        let value = DataType::Uint64(999);
+        let pattern = Pattern::Literal(Literal::Int64(999));
+        let result = match_pattern_depth(&value, &pattern, 0);
+        assert!(result.is_some(), "Int64(999) pattern should match Uint64(999)");
+    }
+
+    #[test]
+    fn test_literal_pattern_matches_float32() {
+        use crate::syntax::ast::{Literal, Pattern};
+        // Use 2.0 which is exactly representable in both f32 and f64
+        let value = DataType::Float32(2.0);
+        let pattern = Pattern::Literal(Literal::Float64(2.0));
+        let result = match_pattern_depth(&value, &pattern, 0);
+        assert!(result.is_some(), "Float64(2.0) pattern should match Float32(2.0)");
+    }
+
+    #[test]
+    fn test_literal_pattern_no_match_wrong_value() {
+        use crate::syntax::ast::{Literal, Pattern};
+        let value = DataType::Uint32(42);
+        let pattern = Pattern::Literal(Literal::Int64(43));
+        let result = match_pattern_depth(&value, &pattern, 0);
+        assert!(result.is_none(), "Int64(43) should NOT match Uint32(42)");
     }
 }
