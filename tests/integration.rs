@@ -7062,3 +7062,214 @@ fn test_string_starts_ends_with() {
     assert_eq!(run(r#""hello".ends_with("llo")"#), DataType::Bool(true));
     assert_eq!(run(r#""hello".ends_with("world")"#), DataType::Bool(false));
 }
+
+// =========================================================================
+// Round 61: Coverage gap tests
+// =========================================================================
+
+#[test]
+fn test_match_guard_complex_boolean() {
+    assert_eq!(
+        run(r#"
+let x = 5;
+let y = 10;
+match x {
+    n if n > 0 && y > n => "valid",
+    n if n < 0 => "negative",
+    _ => "other",
+}
+"#),
+        DataType::String("valid".to_string())
+    );
+}
+
+#[test]
+fn test_match_guard_short_circuit() {
+    // Guard with || short-circuit: first condition true, second not evaluated
+    assert_eq!(
+        run(r#"
+match 5 {
+    n if n > 3 || n < 0 => "match",
+    _ => "no",
+}
+"#),
+        DataType::String("match".to_string())
+    );
+}
+
+#[test]
+fn test_string_split_multichar_separator() {
+    assert_eq!(
+        run(r#""a::b::c".split("::")"#),
+        DataType::Array(vec![
+            DataType::String("a".to_string()),
+            DataType::String("b".to_string()),
+            DataType::String("c".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_array_hof_chain() {
+    assert_eq!(
+        run(r#"
+let data = [1, 2, 3, 4, 5];
+data.map(|x| x * 2).filter(|x| x > 4)
+"#),
+        DataType::Array(vec![
+            DataType::Int64(6),
+            DataType::Int64(8),
+            DataType::Int64(10),
+        ])
+    );
+}
+
+#[test]
+fn test_array_take_while_skip_while() {
+    assert_eq!(
+        run("[1, 2, 3, 4, 5].take_while(|x| x < 4)"),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Int64(3),
+        ])
+    );
+    assert_eq!(
+        run("[1, 2, 3, 4, 5].skip_while(|x| x < 3)"),
+        DataType::Array(vec![
+            DataType::Int64(3),
+            DataType::Int64(4),
+            DataType::Int64(5),
+        ])
+    );
+}
+
+#[test]
+fn test_loop_break_array_value() {
+    // Loop break with a computed value
+    assert_eq!(
+        run(r#"
+let result = loop {
+    break 42;
+};
+result
+"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_nested_enum_pattern() {
+    assert_eq!(
+        run(r#"
+enum Outer { Some(inner), None }
+enum Inner { Ok(value), Err(code) }
+
+let x = Outer::Some(Inner::Ok(42));
+match x {
+    Outer::Some(Inner::Ok(v)) => v,
+    Outer::Some(Inner::Err(e)) => 0 - e,
+    _ => -999,
+}
+"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_for_map_destructure() {
+    assert_eq!(
+        run(r#"
+let mut sum = 0;
+for {x} in [{"x": 1, "y": 2}, {"x": 3, "y": 4}] {
+    sum = sum + x;
+}
+sum
+"#),
+        DataType::Int64(4)
+    );
+}
+
+#[test]
+fn test_null_coalesce_lazy_evaluation() {
+    // Right side should not be evaluated when left is non-null
+    assert_eq!(
+        run(r#"
+let mut counter = 0;
+fn incr() { counter = counter + 1; 99 }
+let result = 42 ?? incr();
+[result, counter]
+"#),
+        DataType::Array(vec![DataType::Int64(42), DataType::Int64(0)])
+    );
+}
+
+#[test]
+fn test_async_spawn_error_propagation() {
+    assert_eq!(
+        run(r#"
+async fn failing() {
+    throw "async error";
+}
+try {
+    let f = spawn failing();
+    await f
+} catch e {
+    "caught"
+}
+"#),
+        DataType::String("caught".to_string())
+    );
+}
+
+#[test]
+fn test_try_catch_finally_return_value() {
+    assert_eq!(
+        run(r#"
+let mut log = "";
+let result = try {
+    42
+} catch e {
+    0
+} finally {
+    log = "done";
+};
+[result, log]
+"#),
+        DataType::Array(vec![
+            DataType::Int64(42),
+            DataType::String("done".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_float64_min_max_clamp() {
+    // Verify min/max/clamp work correctly
+    assert_eq!(run("(5.0).min(3.0)"), DataType::Float64(3.0));
+    assert_eq!(run("(5.0).max(7.0)"), DataType::Float64(7.0));
+    assert_eq!(run("(5.0).clamp(1.0, 3.0)"), DataType::Float64(3.0));
+    assert_eq!(run("(0.5).clamp(1.0, 3.0)"), DataType::Float64(1.0));
+}
+
+#[test]
+fn test_map_keys_values() {
+    // Test map keys() and values() methods
+    assert_eq!(
+        run(r#"
+let m = {"a": 1, "b": 2};
+m.keys()
+"#),
+        DataType::Array(vec![
+            DataType::String("a".to_string()),
+            DataType::String("b".to_string()),
+        ])
+    );
+    assert_eq!(
+        run(r#"
+let m = {"x": 10, "y": 20};
+m.values().sum()
+"#),
+        DataType::Int64(30)
+    );
+}
