@@ -95,7 +95,7 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
         all_diagnostics.extend(lint_result.diagnostics);
 
         // Extract symbols
-        extract_symbols(prog, &mut functions, &mut variables, &mut enums, &mut structs);
+        extract_symbols(prog, source, &mut functions, &mut variables, &mut enums, &mut structs);
     }
 
     let state = DocumentState {
@@ -110,9 +110,18 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
     (state, all_diagnostics)
 }
 
+/// Find the 1-based column of `name` in the given 1-based source line.
+fn find_name_col(source: &str, line: u32, name: &str) -> Option<u32> {
+    let line_text = source.lines().nth(line.saturating_sub(1) as usize)?;
+    let byte_offset = line_text.find(name)?;
+    let char_col = line_text[..byte_offset].chars().count() as u32;
+    Some(char_col + 1) // 1-based
+}
+
 /// Extract top-level symbols from a program.
 pub fn extract_symbols(
     program: &Program,
+    source: &str,
     functions: &mut HashMap<String, FunctionSymbol>,
     variables: &mut HashMap<String, VariableSymbol>,
     enums: &mut HashMap<String, EnumSymbol>,
@@ -134,62 +143,74 @@ pub fn extract_symbols(
                     s
                 }).collect();
 
+                let name_col = find_name_col(source, fdef.span.start_line, &fdef.name)
+                    .unwrap_or(fdef.span.start_col);
                 functions.insert(fdef.name.clone(), FunctionSymbol {
                     name: fdef.name.clone(),
                     params,
                     return_type: fdef.return_type.clone(),
                     line: fdef.span.start_line,
-                    col: fdef.span.start_col,
+                    col: name_col,
                 });
             }
             StatementKind::Let { name, type_annotation, .. } => {
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
                     mutable: false,
                     constant: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
-                    col: stmt.span.start_col,
+                    col: name_col,
                 });
             }
             StatementKind::LetMut { name, type_annotation, .. } => {
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
                     mutable: true,
                     constant: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
-                    col: stmt.span.start_col,
+                    col: name_col,
                 });
             }
             StatementKind::ConstDef { name, type_annotation, .. } => {
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
                     mutable: false,
                     constant: true,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
-                    col: stmt.span.start_col,
+                    col: name_col,
                 });
             }
             StatementKind::EnumDef { name, variants } => {
                 let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
                 enums.insert(name.clone(), EnumSymbol {
                     name: name.clone(),
                     variants: variant_names,
                     line: stmt.span.start_line,
-                    col: stmt.span.start_col,
+                    col: name_col,
                 });
             }
             StatementKind::StructDef { name, fields } => {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| {
                     (f.name.clone(), f.type_annotation.clone())
                 }).collect();
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
                 structs.insert(name.clone(), StructSymbol {
                     name: name.clone(),
                     fields: field_info,
                     line: stmt.span.start_line,
-                    col: stmt.span.start_col,
+                    col: name_col,
                 });
             }
             _ => {}
@@ -216,7 +237,7 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
             let start = col as usize;
             let end_char = if start < chars.len() && is_ident_start(chars[start]) {
                 let mut end = start;
-                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                while end < chars.len() && is_ident_char_unicode(chars[end]) {
                     end += 1;
                 }
                 end as u32

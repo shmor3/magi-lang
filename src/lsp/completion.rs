@@ -117,12 +117,14 @@ pub fn handle_completion(
             detail: Some(format!("enum {} ({} variants)", name, en.variants.len())),
             ..Default::default()
         });
-        // Also suggest enum variants
+        // Also suggest enum variants (filterable by variant name or full path)
         for variant in &en.variants {
+            let full_name = format!("{}::{}", name, variant);
             items.push(CompletionItem {
-                label: format!("{}::{}", name, variant),
+                label: full_name.clone(),
                 kind: Some(CompletionItemKind::ENUM_MEMBER),
-                detail: Some(format!("{}::{}", name, variant)),
+                detail: Some(full_name.clone()),
+                filter_text: Some(format!("{} {}", full_name, variant)),
                 ..Default::default()
             });
         }
@@ -141,7 +143,10 @@ pub fn handle_completion(
     // Filter by prefix if one exists
     if !prefix.is_empty() {
         let prefix_lower = prefix.to_lowercase();
-        items.retain(|item| item.label.to_lowercase().starts_with(&prefix_lower));
+        items.retain(|item| {
+            let text = item.filter_text.as_ref().unwrap_or(&item.label);
+            text.to_lowercase().contains(&prefix_lower)
+        });
     }
 
     CompletionResponse::Array(items)

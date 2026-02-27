@@ -92,6 +92,14 @@ impl LanguageServer for MagiLanguageServer {
         if let Some(change) = params.content_changes.into_iter().last() {
             self.on_change(params.text_document.uri, change.text)
                 .await;
+        } else {
+            // Empty content_changes: re-analyze with current source to avoid stale state.
+            let docs = self.documents.read().await;
+            if let Some(state) = docs.get(&params.text_document.uri) {
+                let source = state.source.clone();
+                drop(docs);
+                self.on_change(params.text_document.uri, source).await;
+            }
         }
     }
 
