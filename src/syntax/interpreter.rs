@@ -37,6 +37,10 @@ pub struct ResolvedPackage {
     pub functions: HashMap<String, FunctionDef>,
     /// Use statements that need to be executed to set up std aliases
     pub use_statements: Vec<Statement>,
+    /// Enum definitions from the package source
+    pub enum_defs: Vec<(String, Vec<super::ast::EnumVariant>)>,
+    /// Struct definitions from the package source
+    pub struct_defs: Vec<(String, Vec<super::ast::StructField>)>,
 }
 
 // =============================================================================
@@ -1454,6 +1458,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "enumerate" => {
+                        if !args.is_empty() { return Err(InterpError::ArityMismatch { name: "enumerate".to_string(), expected: "0".to_string(), actual: args.len(), span }); }
                         let mut result = Vec::with_capacity(arr.len());
                         for (i, item) in arr.iter().enumerate() {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1484,7 +1489,21 @@ impl<'a> Interpreter<'a> {
                     "chunk" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "chunk".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let size_val = self.eval_expr(&args[0])?;
-                        let size = size_val.to_i64().unwrap_or(1).max(1) as usize;
+                        let size_i64 = size_val.to_i64().ok_or_else(|| InterpError::TypeError {
+                            expected: "integer".to_string(),
+                            actual: datatype_type_name(&size_val).to_string(),
+                            context: "chunk size".to_string(),
+                            span,
+                        })?;
+                        if size_i64 <= 0 {
+                            return Err(InterpError::TypeError {
+                                expected: "positive integer".to_string(),
+                                actual: format!("{}", size_i64),
+                                context: "chunk size".to_string(),
+                                span,
+                            });
+                        }
+                        let size = size_i64 as usize;
                         let mut result = Vec::new();
                         for chunk in arr.chunks(size) {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1559,9 +1578,9 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     if exp < 0 {
-                        // Negative exponents on integers would produce fractions; return 0
-                        // (integer division: 1 / n^|exp| rounds to 0 for |n| > 1)
-                        if *n == 1 { Ok(Some(DataType::Int64(1))) }
+                        // Negative exponents on integers: 0^-n is undefined, |n|>1 → 0
+                        if *n == 0 { Ok(Some(DataType::Null)) }
+                        else if *n == 1 { Ok(Some(DataType::Int64(1))) }
                         else if *n == -1 { Ok(Some(DataType::Int64(if exp % 2 == 0 { 1 } else { -1 }))) }
                         else { Ok(Some(DataType::Int64(0))) }
                     } else if exp > u32::MAX as i64 {
@@ -1736,7 +1755,8 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     if exp < 0 {
-                        if *n == 1 { Ok(Some(DataType::Int32(1))) }
+                        if *n == 0 { Ok(Some(DataType::Null)) }
+                        else if *n == 1 { Ok(Some(DataType::Int32(1))) }
                         else if *n == -1 { Ok(Some(DataType::Int32(if exp % 2 == 0 { 1 } else { -1 }))) }
                         else { Ok(Some(DataType::Int32(0))) }
                     } else if exp > u32::MAX as i64 {
@@ -1753,14 +1773,16 @@ impl<'a> Interpreter<'a> {
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().or_else(|| arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
-                    Ok(Some(DataType::Int32((*n as i64).min(other) as i32)))
+                    let result = (*n as i64).min(other).max(i32::MIN as i64).min(i32::MAX as i64);
+                    Ok(Some(DataType::Int32(result as i32)))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().or_else(|| arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
-                    Ok(Some(DataType::Int32((*n as i64).max(other) as i32)))
+                    let result = (*n as i64).max(other).max(i32::MIN as i64).min(i32::MAX as i64);
+                    Ok(Some(DataType::Int32(result as i32)))
                 }
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
@@ -1771,7 +1793,8 @@ impl<'a> Interpreter<'a> {
                     let max_val = hi_arg.to_i64().or_else(|| hi_arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
-                    Ok(Some(DataType::Int32((*n as i64).max(lo).min(hi) as i32)))
+                    let result = (*n as i64).max(lo).min(hi).max(i32::MIN as i64).min(i32::MAX as i64);
+                    Ok(Some(DataType::Int32(result as i32)))
                 }
                 _ => Ok(None),
             },
@@ -1785,7 +1808,11 @@ impl<'a> Interpreter<'a> {
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
-                    if exp < 0 { Ok(Some(DataType::Uint32(0))) }
+                    if exp < 0 {
+                        if *n == 0 { Ok(Some(DataType::Null)) }
+                        else if *n == 1 { Ok(Some(DataType::Uint32(1))) }
+                        else { Ok(Some(DataType::Uint32(0))) }
+                    }
                     else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
                     else {
                         match n.checked_pow(exp as u32) {
@@ -1798,13 +1825,15 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
-                    Ok(Some(DataType::Uint32((*n as i64).min(other).max(0) as u32)))
+                    let result = (*n as i64).min(other).max(0).min(u32::MAX as i64);
+                    Ok(Some(DataType::Uint32(result as u32)))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
-                    Ok(Some(DataType::Uint32((*n as i64).max(other).max(0) as u32)))
+                    let result = (*n as i64).max(other).max(0).min(u32::MAX as i64);
+                    Ok(Some(DataType::Uint32(result as u32)))
                 }
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
@@ -1813,7 +1842,8 @@ impl<'a> Interpreter<'a> {
                     let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
                     let max_val = hi_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
-                    Ok(Some(DataType::Uint32((*n as i64).max(lo).min(hi).max(0) as u32)))
+                    let result = (*n as i64).max(lo).min(hi).max(0).min(u32::MAX as i64);
+                    Ok(Some(DataType::Uint32(result as u32)))
                 }
                 _ => Ok(None),
             },
@@ -1833,7 +1863,11 @@ impl<'a> Interpreter<'a> {
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
-                    if exp < 0 { Ok(Some(DataType::Uint64(0))) }
+                    if exp < 0 {
+                        if *n == 0 { Ok(Some(DataType::Null)) }
+                        else if *n == 1 { Ok(Some(DataType::Uint64(1))) }
+                        else { Ok(Some(DataType::Uint64(0))) }
+                    }
                     else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
                     else {
                         match n.checked_pow(exp as u32) {
@@ -2581,33 +2615,33 @@ impl<'a> Interpreter<'a> {
                         return Err(InterpError::ArityMismatch { name: "len".to_string(), expected: "1".to_string(), actual: 0, span: expr.span });
                     }
                     "assert" => {
-                        if let Some(arg) = args.first() {
-                            let val = self.eval_expr(arg)?;
-                            match &val {
-                                DataType::Bool(true) => return Ok(DataType::Null),
-                                DataType::Bool(false) => {
-                                    let msg = if args.len() > 1 {
-                                        let msg_val = self.eval_expr(&args[1])?;
-                                        datatype_to_display(&msg_val)
-                                    } else {
-                                        "Assertion failed".to_string()
-                                    };
-                                    return Err(InterpError::AssertionFailed {
-                                        message: msg,
-                                        span: expr.span,
-                                    });
-                                }
-                                other => {
-                                    return Err(InterpError::TypeError {
-                                        expected: "Bool".to_string(),
-                                        actual: datatype_type_name(other).to_string(),
-                                        context: "assert()".to_string(),
-                                        span: expr.span,
-                                    })
-                                }
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch { name: "assert".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span });
+                        }
+                        let val = self.eval_expr(&args[0])?;
+                        match &val {
+                            DataType::Bool(true) => return Ok(DataType::Null),
+                            DataType::Bool(false) => {
+                                let msg = if args.len() > 1 {
+                                    let msg_val = self.eval_expr(&args[1])?;
+                                    datatype_to_display(&msg_val)
+                                } else {
+                                    "Assertion failed".to_string()
+                                };
+                                return Err(InterpError::AssertionFailed {
+                                    message: msg,
+                                    span: expr.span,
+                                });
+                            }
+                            other => {
+                                return Err(InterpError::TypeError {
+                                    expected: "Bool".to_string(),
+                                    actual: datatype_type_name(other).to_string(),
+                                    context: "assert()".to_string(),
+                                    span: expr.span,
+                                })
                             }
                         }
-                        return Ok(DataType::Null);
                     }
                     "assert_eq" => {
                         if args.len() < 2 {
@@ -3937,6 +3971,14 @@ impl<'a> Interpreter<'a> {
             }
         }
 
+        // Register package enum/struct definitions
+        for (name, variants) in &pkg.enum_defs {
+            self.enum_defs.insert(name.clone(), variants.clone());
+        }
+        for (name, fields) in &pkg.struct_defs {
+            self.struct_defs.insert(name.clone(), fields.clone());
+        }
+
         if glob || path.len() == 2 {
             // `use pkg::collections::*` or `use pkg::collections` — import all exports
             for (name, func) in &pkg.functions {
@@ -5200,6 +5242,8 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
 
     let mut functions = HashMap::new();
     let mut use_statements = Vec::new();
+    let mut enum_defs = Vec::new();
+    let mut struct_defs = Vec::new();
 
     for stmt in &program.statements {
         match &stmt.kind {
@@ -5209,6 +5253,13 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
             StatementKind::Use { .. } => {
                 use_statements.push(stmt.clone());
             }
+            StatementKind::EnumDef { .. } | StatementKind::StructDef { .. } => {
+                if let StatementKind::EnumDef { name, variants } = &stmt.kind {
+                    enum_defs.push((name.clone(), variants.clone()));
+                } else if let StatementKind::StructDef { name, fields } = &stmt.kind {
+                    struct_defs.push((name.clone(), fields.clone()));
+                }
+            }
             _ => {}
         }
     }
@@ -5217,6 +5268,8 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
         id: id.to_string(),
         functions,
         use_statements,
+        enum_defs,
+        struct_defs,
     })
 }
 

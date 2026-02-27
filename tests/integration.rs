@@ -8155,3 +8155,93 @@ fn test_group_by_basic() {
         output typeof(result);
     "#), DataType::String("map".to_string()));
 }
+
+// Round 80: pow(0, -n) returns Null
+#[test]
+fn test_pow_zero_negative_exp() {
+    assert_eq!(run("output (0).pow(-1);"), DataType::Null);
+}
+
+#[test]
+fn test_pow_zero_negative_exp_large() {
+    assert_eq!(run("output (0).pow(-100);"), DataType::Null);
+}
+
+#[test]
+fn test_pow_one_negative_exp() {
+    assert_eq!(run("output (1).pow(-5);"), DataType::Int64(1));
+}
+
+#[test]
+fn test_pow_neg_one_negative_exp() {
+    assert_eq!(run("output (-1).pow(-3);"), DataType::Int64(-1));
+    assert_eq!(run("output (-1).pow(-4);"), DataType::Int64(1));
+}
+
+// Round 80: enumerate arity check
+#[test]
+fn test_enumerate_arity_error() {
+    let err = run_err("output [1,2].enumerate(|x| x);");
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "enumerate");
+            assert_eq!(expected, "0");
+            assert_eq!(actual, 1);
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+// Round 80: chunk(0) errors instead of silent coercion
+#[test]
+fn test_chunk_zero_error() {
+    let err = run_err("output [1,2,3].chunk(0);");
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert!(context.contains("chunk size"), "expected chunk size context, got {}", context);
+        }
+        _ => panic!("expected TypeError, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_chunk_negative_error() {
+    let err = run_err("output [1,2,3].chunk(-1);");
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert!(context.contains("chunk size"));
+        }
+        _ => panic!("expected TypeError, got {:?}", err),
+    }
+}
+
+// Round 80: assert() no args
+#[test]
+fn test_assert_no_args_error() {
+    let err = run_err("assert();");
+    match err {
+        InterpError::ArityMismatch { name, expected, .. } => {
+            assert_eq!(name, "assert");
+            assert_eq!(expected, "1-2");
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+// Round 80: Int64 min/max/clamp basic correctness
+#[test]
+fn test_int64_min_method() {
+    assert_eq!(run("output (10).min(3);"), DataType::Int64(3));
+}
+
+#[test]
+fn test_int64_max_method() {
+    assert_eq!(run("output (3).max(10);"), DataType::Int64(10));
+}
+
+#[test]
+fn test_int64_clamp_method() {
+    assert_eq!(run("output (15).clamp(0, 10);"), DataType::Int64(10));
+    assert_eq!(run("output (-5).clamp(0, 10);"), DataType::Int64(0));
+    assert_eq!(run("output (5).clamp(0, 10);"), DataType::Int64(5));
+}

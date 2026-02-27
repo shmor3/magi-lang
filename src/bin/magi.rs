@@ -908,8 +908,8 @@ impl OperationEvaluator for FullEvaluator {
 
             // Range
             OperationType::Range => {
-                let start = a.to_i64().unwrap_or(0);
-                let end = b.to_i64().unwrap_or(0);
+                let start = inputs.get("start").or(inputs.get("a")).and_then(|v| v.to_i64()).unwrap_or(0);
+                let end = inputs.get("end").or(inputs.get("b")).and_then(|v| v.to_i64()).unwrap_or(0);
                 let step = inputs.get("step").and_then(|v| v.to_i64()).unwrap_or(if start <= end { 1 } else { -1 });
                 if step == 0 { return Ok(DataType::Array(vec![])); }
                 let mut result = Vec::new();
@@ -1013,6 +1013,71 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             },
 
+            // Bytes operations
+            OperationType::BytesLength => {
+                match &input {
+                    DataType::Bytes(b) => Ok(DataType::Int64(b.len() as i64)),
+                    _ => Err(EvalError::InvalidInput(format!("BytesLength expects Bytes, got {:?}", input))),
+                }
+            },
+            OperationType::BytesSlice => {
+                match &input {
+                    DataType::Bytes(b) => {
+                        let start = inputs.get("start").and_then(|v| v.to_i64()).unwrap_or(0) as usize;
+                        let end = inputs.get("end").and_then(|v| v.to_i64()).unwrap_or(b.len() as i64) as usize;
+                        let start = start.min(b.len());
+                        let end = end.min(b.len());
+                        if start > end {
+                            Ok(DataType::Bytes(vec![]))
+                        } else {
+                            Ok(DataType::Bytes(b[start..end].to_vec()))
+                        }
+                    }
+                    _ => Err(EvalError::InvalidInput(format!("BytesSlice expects Bytes, got {:?}", input))),
+                }
+            },
+            OperationType::BytesConcat => {
+                let a_val = inputs.get("a").cloned().unwrap_or(DataType::Null);
+                let b_val = inputs.get("b").cloned().unwrap_or(DataType::Null);
+                match (&a_val, &b_val) {
+                    (DataType::Bytes(a), DataType::Bytes(b)) => {
+                        let mut result = a.clone();
+                        result.extend_from_slice(b);
+                        Ok(DataType::Bytes(result))
+                    }
+                    _ => Err(EvalError::InvalidInput("BytesConcat expects two Bytes arguments".to_string())),
+                }
+            },
+            OperationType::BytesContains => {
+                let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::Bytes(haystack), DataType::Bytes(needle)) => {
+                        let found = haystack.windows(needle.len()).any(|w| w == needle.as_slice());
+                        Ok(DataType::Bool(found))
+                    }
+                    _ => Err(EvalError::InvalidInput("BytesContains expects Bytes input and search".to_string())),
+                }
+            },
+            OperationType::Base64Encode => {
+                match &input {
+                    DataType::Bytes(b) => {
+                        Ok(DataType::String(base64_encode(b)))
+                    }
+                    _ => Err(EvalError::InvalidInput(format!("Base64Encode expects Bytes, got {:?}", input))),
+                }
+            },
+            OperationType::Base64Decode => {
+                match &input {
+                    DataType::String(s) => {
+                        match base64_decode(s) {
+                            Ok(bytes) => Ok(DataType::Bytes(bytes)),
+                            Err(e) => Err(EvalError::InvalidInput(format!("Base64Decode failed: {}", e))),
+                        }
+                    }
+                    _ => Err(EvalError::InvalidInput(format!("Base64Decode expects String, got {:?}", input))),
+                }
+            },
+
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
                 other,
@@ -1037,6 +1102,55 @@ fn is_truthy(val: &DataType) -> bool {
         DataType::Map(m) => !m.is_empty(),
         _ => true,
     }
+}
+
+const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8]) -> String {
+    let mut result = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(BASE64_CHARS[((n >> 18) & 0x3F) as usize] as char);
+        result.push(BASE64_CHARS[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(BASE64_CHARS[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(BASE64_CHARS[(n & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim_end_matches('=');
+    let mut result = Vec::new();
+    let chars: Vec<u8> = s.bytes().collect();
+    for chunk in chars.chunks(4) {
+        let mut n: u32 = 0;
+        for (i, &c) in chunk.iter().enumerate() {
+            let val = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return Err(format!("invalid base64 character: {}", c as char)),
+            };
+            n |= (val as u32) << (18 - i * 6);
+        }
+        result.push((n >> 16) as u8);
+        if chunk.len() > 2 { result.push((n >> 8) as u8); }
+        if chunk.len() > 3 { result.push(n as u8); }
+    }
+    Ok(result)
 }
 
 fn promote_numeric(val: &DataType) -> Option<Result<i64, f64>> {
