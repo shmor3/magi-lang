@@ -28,6 +28,8 @@ md-5 = "0.10"
 hmac = "0.12"
 crc32fast = "1"
 base64 = "0.22"
+url = "2"
+csv = "1"
 
 [dev-dependencies]
 wasmparser = "0.245"

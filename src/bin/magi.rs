@@ -4216,54 +4216,61 @@ impl OperationEvaluator for FullEvaluator {
             // ================================================================
             OperationType::UrlParse => {
                 match &input {
-                    DataType::String(url) => {
-                        let mut m = std::collections::BTreeMap::new();
-                        m.insert("raw".to_string(), DataType::String(url.clone()));
-                        // Simple URL parsing
-                        if let Some(proto_end) = url.find("://") {
-                            m.insert("protocol".to_string(), DataType::String(url[..proto_end].to_string()));
-                            let rest = &url[proto_end + 3..];
-                            let (host_port, path_rest) = rest.split_once('/').unwrap_or((rest, ""));
-                            let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
-                                (h.to_string(), p.parse::<i64>().ok())
-                            } else {
-                                (host_port.to_string(), None)
-                            };
-                            m.insert("host".to_string(), DataType::String(host));
-                            if let Some(p) = port {
-                                m.insert("port".to_string(), DataType::Int64(p));
-                            }
-                            let (path, query) = if let Some((p, q)) = path_rest.split_once('?') {
-                                (format!("/{}", p), Some(q))
-                            } else {
-                                (format!("/{}", path_rest), None)
-                            };
-                            m.insert("path".to_string(), DataType::String(path));
-                            if let Some(q) = query {
-                                let (query_str, fragment) = if let Some((qs, f)) = q.split_once('#') {
-                                    (qs, Some(f))
-                                } else {
-                                    (q, None)
-                                };
-                                m.insert("query".to_string(), DataType::String(query_str.to_string()));
-                                if let Some(f) = fragment {
-                                    m.insert("fragment".to_string(), DataType::String(f.to_string()));
+                    DataType::String(url_str) => {
+                        match url::Url::parse(url_str) {
+                            Ok(parsed) => {
+                                let mut m = std::collections::BTreeMap::new();
+                                m.insert("raw".into(), DataType::String(url_str.clone()));
+                                m.insert("protocol".into(), DataType::String(parsed.scheme().to_string()));
+                                m.insert("host".into(), DataType::String(parsed.host_str().unwrap_or("").to_string()));
+                                if let Some(port) = parsed.port() {
+                                    m.insert("port".into(), DataType::Int64(port as i64));
                                 }
+                                m.insert("path".into(), DataType::String(parsed.path().to_string()));
+                                if let Some(q) = parsed.query() {
+                                    m.insert("query".into(), DataType::String(q.to_string()));
+                                }
+                                if let Some(f) = parsed.fragment() {
+                                    m.insert("fragment".into(), DataType::String(f.to_string()));
+                                }
+                                if !parsed.username().is_empty() {
+                                    m.insert("username".into(), DataType::String(parsed.username().to_string()));
+                                }
+                                if let Some(pw) = parsed.password() {
+                                    m.insert("password".into(), DataType::String(pw.to_string()));
+                                }
+                                Ok(DataType::Map(m))
+                            }
+                            Err(_) => {
+                                let mut m = std::collections::BTreeMap::new();
+                                m.insert("raw".into(), DataType::String(url_str.clone()));
+                                Ok(DataType::Map(m))
                             }
                         }
-                        Ok(DataType::Map(m))
                     }
                     _ => Ok(DataType::Null),
                 }
             }
             OperationType::UrlJoin => {
-                let base = inputs.get("base").cloned().unwrap_or(DataType::Null);
-                let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
-                match (&base, &path) {
+                let base_val = inputs.get("base").cloned().unwrap_or(DataType::Null);
+                let path_val = inputs.get("path").cloned().unwrap_or(DataType::Null);
+                match (&base_val, &path_val) {
                     (DataType::String(b), DataType::String(p)) => {
-                        let base_trimmed = b.trim_end_matches('/');
-                        let path_trimmed = p.trim_start_matches('/');
-                        Ok(DataType::String(format!("{}/{}", base_trimmed, path_trimmed)))
+                        match url::Url::parse(b) {
+                            Ok(base_url) => match base_url.join(p) {
+                                Ok(joined) => Ok(DataType::String(joined.to_string())),
+                                Err(_) => {
+                                    let bt = b.trim_end_matches('/');
+                                    let pt = p.trim_start_matches('/');
+                                    Ok(DataType::String(format!("{}/{}", bt, pt)))
+                                }
+                            },
+                            Err(_) => {
+                                let bt = b.trim_end_matches('/');
+                                let pt = p.trim_start_matches('/');
+                                Ok(DataType::String(format!("{}/{}", bt, pt)))
+                            }
+                        }
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -4460,70 +4467,91 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::CsvParse => {
                 match &input {
                     DataType::String(s) => {
-                        let lines: Vec<&str> = s.lines().collect();
-                        if lines.is_empty() { return Ok(DataType::Array(vec![])); }
-                        let headers: Vec<&str> = lines[0].split(',').map(|h| h.trim()).collect();
-                        let rows: Vec<DataType> = lines[1..].iter().filter(|l| !l.trim().is_empty()).map(|line| {
-                            let values: Vec<&str> = line.split(',').collect();
-                            let mut m = std::collections::BTreeMap::new();
-                            for (i, header) in headers.iter().enumerate() {
-                                let val = values.get(i).map(|v| v.trim()).unwrap_or("");
-                                m.insert(header.to_string(), DataType::String(val.to_string()));
+                        let mut reader = csv::ReaderBuilder::new()
+                            .has_headers(true)
+                            .from_reader(s.as_bytes());
+                        let headers: Vec<String> = reader.headers()
+                            .map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?
+                            .iter()
+                            .map(|h| h.to_string())
+                            .collect();
+                        let mut rows = Vec::new();
+                        for result in reader.records() {
+                            let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?;
+                            let mut row = std::collections::BTreeMap::new();
+                            for (i, field) in record.iter().enumerate() {
+                                let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{}", i));
+                                row.insert(key, DataType::String(field.to_string()));
                             }
-                            DataType::Map(m)
-                        }).collect();
+                            rows.push(DataType::Map(row));
+                        }
                         Ok(DataType::Array(rows))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_parse: input must be a string".to_string())),
+                    _ => Err(EvalError::InvalidInput("csv_parse: expected string input".into())),
                 }
             }
             OperationType::CsvStringify => {
                 match &input {
-                    DataType::Array(rows) => {
-                        if rows.is_empty() { return Ok(DataType::String(String::new())); }
-                        let headers: Vec<String> = if let DataType::Map(m) = &rows[0] {
-                            m.keys().filter(|k| !k.starts_with("__")).cloned().collect()
-                        } else {
-                            return Err(EvalError::InvalidInput("csv_stringify: array elements must be maps".to_string()));
-                        };
-                        let mut csv_lines = vec![headers.join(",")];
-                        for row in rows {
-                            if let DataType::Map(m) = row {
-                                let values: Vec<String> = headers.iter()
-                                    .map(|h| m.get(h).map(|v| v.to_string_lossy()).unwrap_or_default())
-                                    .collect();
-                                csv_lines.push(values.join(","));
+                    DataType::Array(rows) if !rows.is_empty() => {
+                        let mut wtr = csv::Writer::from_writer(vec![]);
+                        if let DataType::Map(first) = &rows[0] {
+                            let headers: Vec<&str> = first.keys().map(|k| k.as_str()).collect();
+                            wtr.write_record(&headers)
+                                .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                            let vals: Vec<String> = first.values().map(|v| v.to_string()).collect();
+                            wtr.write_record(&vals)
+                                .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                            for row in &rows[1..] {
+                                if let DataType::Map(m) = row {
+                                    let vals: Vec<String> = headers.iter()
+                                        .map(|&h| m.get(h).map(|v| v.to_string()).unwrap_or_default())
+                                        .collect();
+                                    wtr.write_record(&vals)
+                                        .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                                }
                             }
                         }
-                        Ok(DataType::String(csv_lines.join("\n")))
+                        let bytes = wtr.into_inner()
+                            .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                        Ok(DataType::String(String::from_utf8_lossy(&bytes).to_string()))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_stringify: input must be an array".to_string())),
+                    DataType::Array(_) => Ok(DataType::String(String::new())),
+                    _ => Err(EvalError::InvalidInput("csv_stringify: expected array input".into())),
                 }
             }
             OperationType::CsvHeaders => {
                 match &input {
                     DataType::String(s) => {
-                        let first_line = s.lines().next().unwrap_or("");
-                        let headers: Vec<DataType> = first_line.split(',')
-                            .map(|h| DataType::String(h.trim().to_string()))
+                        let mut reader = csv::ReaderBuilder::new()
+                            .has_headers(true)
+                            .from_reader(s.as_bytes());
+                        let headers = reader.headers()
+                            .map_err(|e| EvalError::InvalidInput(format!("csv_headers: {}", e)))?;
+                        let arr: Vec<DataType> = headers.iter()
+                            .map(|h| DataType::String(h.to_string()))
                             .collect();
-                        Ok(DataType::Array(headers))
+                        Ok(DataType::Array(arr))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_headers: input must be a string".to_string())),
+                    _ => Err(EvalError::InvalidInput("csv_headers: expected string input".into())),
                 }
             }
             OperationType::CsvParseRows => {
                 match &input {
                     DataType::String(s) => {
-                        let rows: Vec<DataType> = s.lines().filter(|l| !l.trim().is_empty()).map(|line| {
-                            let values: Vec<DataType> = line.split(',')
-                                .map(|v| DataType::String(v.trim().to_string()))
+                        let mut reader = csv::ReaderBuilder::new()
+                            .has_headers(false)
+                            .from_reader(s.as_bytes());
+                        let mut rows = Vec::new();
+                        for result in reader.records() {
+                            let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse_rows: {}", e)))?;
+                            let row: Vec<DataType> = record.iter()
+                                .map(|f| DataType::String(f.to_string()))
                                 .collect();
-                            DataType::Array(values)
-                        }).collect();
+                            rows.push(DataType::Array(row));
+                        }
                         Ok(DataType::Array(rows))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_parse_rows: input must be a string".to_string())),
+                    _ => Err(EvalError::InvalidInput("csv_parse_rows: expected string input".into())),
                 }
             }
 
