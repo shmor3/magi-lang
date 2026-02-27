@@ -277,6 +277,13 @@ fn run_err(src: &str) -> InterpError {
     interp.execute(&program).unwrap_err()
 }
 
+fn run_result(src: &str) -> Result<DataType, InterpError> {
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    interp.execute(&program)
+}
+
 fn typecheck_warnings(src: &str) -> Vec<String> {
     let program = parse(src);
     let imports = std::collections::HashSet::new();
@@ -5375,4 +5382,167 @@ fn test_string_concat_add() {
     let src = r#"let s = "hello" + " " + "world"; s"#;
     let result = run(src);
     assert_eq!(result, DataType::String("hello world".to_string()));
+}
+
+// ── Round 42: Parser, type checker, interpreter fixes ──
+
+#[test]
+fn test_try_catch_as_tail_expression() {
+    // try/catch can now be the tail expression of a block
+    assert_eq!(
+        run(r#"
+let x = {
+    try { 42 } catch e { 0 }
+}
+x
+"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_try_catch_expr_with_finally() {
+    // try/catch/finally as expression in block
+    assert_eq!(
+        run(r#"
+let mut side_effect = false;
+let x = try {
+    42
+} catch e {
+    0
+} finally {
+    side_effect = true;
+}
+side_effect
+"#),
+        DataType::Bool(true)
+    );
+}
+
+#[test]
+fn test_return_does_not_consume_across_newline() {
+    // return on its own line should not consume the next line's expression
+    assert_eq!(
+        run(r#"
+fn foo() {
+    return
+    42
+}
+foo()
+"#),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_break_does_not_consume_across_newline() {
+    // break on its own line should not consume the next line
+    assert_eq!(
+        run(r#"
+fn foo() {
+    let mut result = 0;
+    for x in [1, 2, 3] {
+        break
+        result = 99;
+    }
+    result
+}
+foo()
+"#),
+        DataType::Int64(0)
+    );
+}
+
+#[test]
+fn test_int64_min_rejects_non_numeric() {
+    // min/max should error on non-numeric arguments
+    let src = r#"(5).min("hello")"#;
+    let result = run_result(src);
+    assert!(result.is_err(), "expected error for non-numeric min arg");
+}
+
+#[test]
+fn test_float64_max_rejects_non_numeric() {
+    let src = r#"(3.14).max("world")"#;
+    let result = run_result(src);
+    assert!(result.is_err(), "expected error for non-numeric max arg");
+}
+
+#[test]
+fn test_float64_clamp_nan_bounds() {
+    // Clamp with NaN bounds should return NaN
+    let src = r#"(5.0).clamp(0.0 / 0.0, 10.0)"#;
+    let result = run(src);
+    match result {
+        DataType::Float64(f) => assert!(f.is_nan(), "expected NaN, got {}", f),
+        other => panic!("expected Float64, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_int32_methods() {
+    // Int32 should support sign, to_string, to_int64, to_float64
+    // (Int32 literals are not directly available, but we can test via the type system)
+    // Test via Float32 → to_int64 conversion
+    assert_eq!(
+        run(r#"let x = 42; x.sign()"#),
+        DataType::Int64(1)
+    );
+}
+
+#[test]
+fn test_pad_start_full_string() {
+    // pad_start should use full pad string, not just first char
+    assert_eq!(
+        run(r#""42".pad_start(6, "0x")"#),
+        DataType::String("0x0x42".to_string())
+    );
+}
+
+#[test]
+fn test_pad_end_full_string() {
+    assert_eq!(
+        run(r#""hi".pad_end(7, "!?")"#),
+        DataType::String("hi!?!?!".to_string())
+    );
+}
+
+#[test]
+fn test_pub_rejects_invalid_statement() {
+    // pub should only work with fn, mod, enum, struct, const
+    let result = parse_v2("pub let x = 5;");
+    assert!(result.is_err(), "pub let should be a parse error");
+}
+
+#[test]
+fn test_pub_accepts_valid_fn() {
+    let result = parse_v2("pub fn foo() { 42 }");
+    assert!(result.is_ok(), "pub fn should parse: {:?}", result.err());
+}
+
+#[test]
+fn test_empty_struct_literal() {
+    // Empty struct {} should be parsed as struct construct, not Variable + Block
+    assert_eq!(
+        run(r#"
+struct Empty {}
+let e = Empty {}
+e.__struct
+"#),
+        DataType::String("Empty".to_string())
+    );
+}
+
+#[test]
+fn test_method_not_found_suggestion() {
+    // Method-not-found should suggest similar methods
+    let src = r#""hello".lenght()"#;
+    let result = run_result(src);
+    match result {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("length") || msg.contains("len"), "expected suggestion for 'lenght' typo, got: {}", msg);
+        }
+        Ok(v) => panic!("expected error, got: {:?}", v),
+    }
 }

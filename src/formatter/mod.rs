@@ -701,6 +701,7 @@ impl<'a> Formatter<'a> {
                 try_block,
                 catch_var,
                 catch_block,
+                finally_block,
             } => {
                 self.write("try ");
                 self.fmt_block(try_block);
@@ -710,6 +711,10 @@ impl<'a> Formatter<'a> {
                     self.write(" ");
                 }
                 self.fmt_block(catch_block);
+                if let Some(finally) = finally_block {
+                    self.write(" finally ");
+                    self.fmt_block(finally);
+                }
             }
             ExpressionKind::ListComprehension {
                 expr: inner,

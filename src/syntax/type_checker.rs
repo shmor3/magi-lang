@@ -570,6 +570,8 @@ impl TypeChecker {
             StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) => {
                 self.push_scope();
                 self.function_depth += 1;
+                let saved_loop_depth = self.loop_depth;
+                self.loop_depth = 0;
                 let prev_return_type = std::mem::replace(
                     &mut self.current_return_type,
                     def.return_type.as_deref()
@@ -583,6 +585,28 @@ impl TypeChecker {
                         .as_deref()
                         .and_then(ChannelType::parse)
                         .unwrap_or(ChannelType::Null);
+                    // Type-check default param expression if present
+                    if let Some(default_expr) = &param.default {
+                        let default_type = self.infer_expr(default_expr);
+                        if ct != ChannelType::Null
+                            && default_type != ChannelType::Null
+                            && !default_type.is_compatible_with(&ct)
+                        {
+                            let code = super::errors::ErrorCode::W106;
+                            self.diagnostics.push(AstDiagnostic {
+                                line: default_expr.span.start_line,
+                                column: default_expr.span.start_col,
+                                message: format!(
+                                    "default value type '{}' doesn't match parameter type '{}'",
+                                    default_type, ct
+                                ),
+                                severity: DiagnosticSeverity::Warning,
+                                code: Some(code.to_string()),
+                                help: Some(code.help().to_string()),
+                                suggestion: None,
+                            });
+                        }
+                    }
                     self.define_var(
                         &param.name,
                         ct,
@@ -633,6 +657,7 @@ impl TypeChecker {
                     }
                 }
                 self.function_depth -= 1;
+                self.loop_depth = saved_loop_depth;
                 self.current_return_type = prev_return_type;
                 self.pop_scope();
             }
@@ -833,10 +858,10 @@ impl TypeChecker {
 
                 self.push_scope();
                 if let Some(var_name) = catch_var {
-                    // Error variable is always a string
+                    // Error variable can be any thrown type
                     self.define_var(
                         var_name,
-                        ChannelType::String,
+                        ChannelType::Null,
                         false,
                         stmt.span.start_line,
                         stmt.span.start_col,
@@ -1799,14 +1824,16 @@ impl TypeChecker {
                 try_block,
                 catch_var,
                 catch_block,
+                finally_block,
             } => {
                 let try_ty = self.infer_block(try_block);
 
                 self.push_scope();
                 if let Some(var_name) = catch_var {
+                    // Error variable can be any thrown type
                     self.define_var(
                         var_name,
-                        ChannelType::String,
+                        ChannelType::Null,
                         false,
                         expr.span.start_line,
                         expr.span.start_col,
@@ -1814,6 +1841,10 @@ impl TypeChecker {
                 }
                 let catch_ty = self.infer_block_no_scope(catch_block);
                 self.pop_scope();
+
+                if let Some(finally) = finally_block {
+                    self.infer_block(finally);
+                }
 
                 // Unify try/catch types
                 if try_ty == catch_ty {
@@ -1890,15 +1921,49 @@ impl TypeChecker {
                 ChannelType::Map
             }
 
-            ExpressionKind::EnumConstruct { args, .. } => {
+            ExpressionKind::EnumConstruct { enum_name, variant, args } => {
+                // Validate enum variant exists
+                if let Some(variants) = self.enum_variants.get(enum_name.as_str()) {
+                    if !variants.iter().any(|v| v == variant) {
+                        let code = super::errors::ErrorCode::E202;
+                        self.diagnostics.push(AstDiagnostic {
+                            line: expr.span.start_line,
+                            column: expr.span.start_col,
+                            message: format!(
+                                "enum '{}' has no variant '{}' (available: {})",
+                                enum_name,
+                                variant,
+                                variants.join(", ")
+                            ),
+                            severity: DiagnosticSeverity::Error,
+                            code: Some(code.to_string()),
+                            help: Some(code.help().to_string()),
+                            suggestion: super::errors::suggest_name(variant, &variants.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+                        });
+                    }
+                }
                 for arg in args {
                     self.infer_expr(arg);
                 }
                 ChannelType::Map
             }
 
-            ExpressionKind::StructConstruct { fields, .. } => {
-                for (_, field_expr) in fields {
+            ExpressionKind::StructConstruct { name, fields } => {
+                // Check for duplicate field names
+                let mut seen = HashSet::new();
+                for (field_name, field_expr) in fields {
+                    if !seen.insert(field_name.as_str()) {
+                        let code = super::errors::ErrorCode::E107;
+                        self.diagnostics.push(AstDiagnostic {
+                            line: expr.span.start_line,
+                            column: expr.span.start_col,
+                            message: format!("duplicate field '{}' in struct '{}' constructor", field_name, name),
+                            severity: DiagnosticSeverity::Warning,
+                            code: Some(code.to_string()),
+                            help: Some(code.help().to_string()),
+                            suggestion: None,
+                        });
+                    }
                     self.infer_expr(field_expr);
                 }
                 ChannelType::Map
@@ -2613,8 +2678,8 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "contains" => Some("bytes_contains".into()),
             _ => None,
         },
-        ChannelType::Int64 | ChannelType::Int32 => match method {
-            "abs" | "sign" | "to_string" | "to_float64" | "pow" | "min"
+        ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => match method {
+            "abs" | "sign" | "to_string" | "to_float64" | "to_int64" | "pow" | "min"
             | "max" | "clamp" => Some("numeric_method".into()),
             _ => None,
         },

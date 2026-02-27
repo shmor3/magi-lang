@@ -922,7 +922,7 @@ impl Compiler {
                 self.emit(Instruction::PushNull);
             }
 
-            ExpressionKind::TryCatchExpr { try_block, catch_var, catch_block } => {
+            ExpressionKind::TryCatchExpr { try_block, catch_var, catch_block, .. } => {
                 // Compile try block; catch block is compiled as fallback.
                 // In WASM MVP, traps can't be caught. This handles Result-based errors.
                 self.compile_block(try_block)?;

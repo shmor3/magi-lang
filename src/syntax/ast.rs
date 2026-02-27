@@ -340,6 +340,7 @@ pub enum ExpressionKind {
         try_block: Block,
         catch_var: Option<String>,
         catch_block: Block,
+        finally_block: Option<Block>,
     },
     /// List comprehension: `[expr for pattern in iterable if condition]`
     ListComprehension {

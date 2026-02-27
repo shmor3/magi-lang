@@ -372,10 +372,14 @@ impl<'a> LintContext<'a> {
             ExpressionKind::TryCatchExpr {
                 try_block,
                 catch_block,
+                finally_block,
                 ..
             } => {
                 self.check_block(try_block);
                 self.check_block(catch_block);
+                if let Some(finally) = finally_block {
+                    self.check_block(finally);
+                }
             }
             ExpressionKind::ListComprehension {
                 expr: inner,

@@ -217,9 +217,19 @@ impl Parser {
             TokenKind::Enum => self.parse_enum_def(start),
             TokenKind::Struct => self.parse_struct_def(start),
             TokenKind::Pub => {
-                // pub fn / pub mod — consume pub, then parse inner
+                // pub fn / pub mod / pub enum / pub struct / pub const
                 self.advance(); // consume 'pub'
-                self.parse_statement()
+                match self.peek_kind() {
+                    TokenKind::Fn | TokenKind::Async | TokenKind::Mod
+                    | TokenKind::Enum | TokenKind::Struct | TokenKind::Const => {
+                        self.parse_statement()
+                    }
+                    _ => Err(SyntaxError {
+                        line: start.start_line as usize,
+                        column: start.start_col as usize,
+                        message: "'pub' can only be applied to fn, async fn, mod, enum, struct, or const definitions".to_string(),
+                    }),
+                }
             }
             TokenKind::Ident => {
                 // Could be assignment (x = ...), compound assign (x += ...), or expression
@@ -452,9 +462,11 @@ impl Parser {
     }
 
     fn parse_break_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
-        self.advance(); // consume 'break'
-                        // Optional value expression (e.g. `break 42;`)
-        let value = if !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
+        let keyword_tok = self.advance().clone(); // consume 'break'
+        // Optional value expression (e.g. `break 42;`)
+        // Only parse value if next token is on the same line as `break`
+        let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
+        let value = if next_on_same_line && !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
             Some(self.parse_expression()?)
         } else {
             None
@@ -478,9 +490,11 @@ impl Parser {
     }
 
     fn parse_return_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
-        self.advance(); // consume 'return'
-                        // Optional return value
-        let value = if !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
+        let keyword_tok = self.advance().clone(); // consume 'return'
+        // Optional return value
+        // Only parse value if next token is on the same line as `return`
+        let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
+        let value = if next_on_same_line && !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
             Some(self.parse_expression()?)
         } else {
             None
@@ -641,11 +655,11 @@ impl Parser {
 
         // Parse the test body block
         let body = self.parse_block()?;
-        let end = self.peek().span;
+        let body_span = body.span;
 
         Ok(Statement {
             kind: StatementKind::TestDef { name, body },
-            span: start.merge(end),
+            span: start.merge(body_span),
         })
     }
 
@@ -846,7 +860,6 @@ impl Parser {
                 | TokenKind::Break
                 | TokenKind::Continue
                 | TokenKind::Return
-                | TokenKind::Try
                 | TokenKind::Throw
                 | TokenKind::Const
                 | TokenKind::Mod
@@ -1187,9 +1200,24 @@ impl Parser {
                         span,
                     };
                 }
-                // Phase 14: propagate optional chaining through subsequent .field and .method()
-                while self.at(&TokenKind::Dot) {
-                    self.advance();
+                // Phase 14: propagate optional chaining through subsequent .field, .method(), and [index]
+                while self.at(&TokenKind::Dot) || self.at(&TokenKind::LBracket) {
+                    if self.at(&TokenKind::LBracket) {
+                        // Index access in optional chain: a?.b[0] → if a?.b is null, return null
+                        self.advance(); // consume '['
+                        let index = self.parse_expression()?;
+                        let end = self.expect(&TokenKind::RBracket)?;
+                        let span = expr.span.merge(end.span);
+                        expr = Expression {
+                            kind: ExpressionKind::Index {
+                                object: Box::new(expr),
+                                index: Box::new(index),
+                            },
+                            span,
+                        };
+                        continue;
+                    }
+                    self.advance(); // consume '.'
                     let next_field = self.expect(&TokenKind::Ident)?;
                     if self.at(&TokenKind::LParen) {
                         // Optional method call: a?.b.method() → optional wrap
@@ -2067,13 +2095,22 @@ impl Parser {
         };
 
         let catch_block = self.parse_block()?;
-        let span = start.merge(catch_block.span);
+
+        let finally_block = if self.eat(&TokenKind::Finally) {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+
+        let end_span = finally_block.as_ref().map(|b| b.span).unwrap_or(catch_block.span);
+        let span = start.merge(end_span);
 
         Ok(Expression {
             kind: ExpressionKind::TryCatchExpr {
                 try_block,
                 catch_var,
                 catch_block,
+                finally_block,
             },
             span,
         })
@@ -2251,12 +2288,21 @@ impl Parser {
     // =========================================================================
 
     /// Check if current position looks like a struct literal: `Name { ident :`
-    /// (not `Name { stmt...`)
-    fn is_struct_literal(&self, _name: &str) -> bool {
-        // We're at LBrace. Check if: LBrace Ident Colon
+    /// or `Name {}` (empty struct, uppercase name)
+    fn is_struct_literal(&self, name: &str) -> bool {
+        if self.pos >= self.tokens.len() || self.tokens[self.pos].kind != TokenKind::LBrace {
+            return false;
+        }
+        // Empty struct: Name {} — name must start with uppercase (struct convention)
+        if self.pos + 1 < self.tokens.len()
+            && self.tokens[self.pos + 1].kind == TokenKind::RBrace
+            && name.starts_with(|c: char| c.is_uppercase())
+        {
+            return true;
+        }
+        // Non-empty struct: Name { field: value }
         if self.pos + 2 < self.tokens.len() {
-            self.tokens[self.pos].kind == TokenKind::LBrace
-                && self.tokens[self.pos + 1].kind == TokenKind::Ident
+            self.tokens[self.pos + 1].kind == TokenKind::Ident
                 && self.tokens[self.pos + 2].kind == TokenKind::Colon
         } else {
             false

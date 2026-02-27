@@ -1512,13 +1512,15 @@ impl<'a> Interpreter<'a> {
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
-                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64)).unwrap_or(*n);
+                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Int64((*n).min(other))))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
-                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64)).unwrap_or(*n);
+                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
                     Ok(Some(DataType::Int64((*n).max(other))))
                 }
                 "sign" => Ok(Some(DataType::Int64(n.signum()))),
@@ -1526,8 +1528,10 @@ impl<'a> Interpreter<'a> {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
-                    let min_val = lo_arg.to_i64().or_else(|| lo_arg.to_f64().map(|f| f as i64)).unwrap_or(i64::MIN);
-                    let max_val = hi_arg.to_i64().or_else(|| hi_arg.to_f64().map(|f| f as i64)).unwrap_or(i64::MAX);
+                    let min_val = lo_arg.to_i64().or_else(|| lo_arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = hi_arg.to_i64().or_else(|| hi_arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                     Ok(Some(DataType::Int64((*n).max(lo).min(hi))))
                 }
@@ -1559,13 +1563,15 @@ impl<'a> Interpreter<'a> {
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
-                    let other = arg.to_f64().unwrap_or(*n);
+                    let other = arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Float64(n.min(other))))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
-                    let other = arg.to_f64().unwrap_or(*n);
+                    let other = arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
                     Ok(Some(DataType::Float64(n.max(other))))
                 }
                 "sign" => Ok(Some(DataType::Float64(n.signum()))),
@@ -1579,8 +1585,13 @@ impl<'a> Interpreter<'a> {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
-                    let min_val = lo_arg.to_f64().unwrap_or(f64::NEG_INFINITY);
-                    let max_val = hi_arg.to_f64().unwrap_or(f64::INFINITY);
+                    let min_val = lo_arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = hi_arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    if min_val.is_nan() || max_val.is_nan() {
+                        return Ok(Some(DataType::Float64(f64::NAN)));
+                    }
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                     Ok(Some(DataType::Float64(n.max(lo).min(hi))))
                 }
@@ -1594,6 +1605,51 @@ impl<'a> Interpreter<'a> {
                 "sqrt" => Ok(Some(DataType::Float32(n.sqrt()))),
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
+                "sign" => Ok(Some(DataType::Float32(n.signum()))),
+                "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
+                "to_int64" => {
+                    if !n.is_finite() { Ok(Some(DataType::Null)) }
+                    else { Ok(Some(DataType::Int64(*n as i64))) }
+                }
+                "pow" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                    Ok(Some(DataType::Float64((*n as f64).powf(exp))))
+                }
+                "min" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
+                    Ok(Some(DataType::Float64((*n as f64).min(other))))
+                }
+                "max" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
+                    Ok(Some(DataType::Float64((*n as f64).max(other))))
+                }
+                "clamp" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    let lo_arg = self.eval_expr(&args[0])?;
+                    let hi_arg = self.eval_expr(&args[1])?;
+                    let min_val = lo_arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = hi_arg.to_f64()
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    if min_val.is_nan() || max_val.is_nan() { return Ok(Some(DataType::Float64(f64::NAN))); }
+                    let v = *n as f64;
+                    let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
+                    Ok(Some(DataType::Float64(v.max(lo).min(hi))))
+                }
+                "ln" => Ok(Some(DataType::Float64((*n as f64).ln()))),
+                "log2" => Ok(Some(DataType::Float64((*n as f64).log2()))),
+                "log10" => Ok(Some(DataType::Float64((*n as f64).log10()))),
+                "sin" => Ok(Some(DataType::Float64((*n as f64).sin()))),
+                "cos" => Ok(Some(DataType::Float64((*n as f64).cos()))),
+                "tan" => Ok(Some(DataType::Float64((*n as f64).tan()))),
                 _ => Ok(None),
             },
             DataType::Int32(n) => match method {
@@ -1601,6 +1657,51 @@ impl<'a> Interpreter<'a> {
                     Some(v) => DataType::Int32(v),
                     None => DataType::Null, // i32::MIN overflow
                 })),
+                "sign" => Ok(Some(DataType::Int32(n.signum()))),
+                "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
+                "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "pow" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    if exp < 0 {
+                        if *n == 1 { Ok(Some(DataType::Int32(1))) }
+                        else if *n == -1 { Ok(Some(DataType::Int32(if exp % 2 == 0 { 1 } else { -1 }))) }
+                        else { Ok(Some(DataType::Int32(0))) }
+                    } else if exp > u32::MAX as i64 {
+                        Ok(Some(DataType::Null))
+                    } else {
+                        match n.checked_pow(exp as u32) {
+                            Some(result) => Ok(Some(DataType::Int32(result))),
+                            None => Ok(Some(DataType::Null)),
+                        }
+                    }
+                }
+                "min" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
+                    Ok(Some(DataType::Int64((*n as i64).min(other))))
+                }
+                "max" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().or_else(|| arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
+                    Ok(Some(DataType::Int64((*n as i64).max(other))))
+                }
+                "clamp" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    let lo_arg = self.eval_expr(&args[0])?;
+                    let hi_arg = self.eval_expr(&args[1])?;
+                    let min_val = lo_arg.to_i64().or_else(|| lo_arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = hi_arg.to_i64().or_else(|| hi_arg.to_f64().map(|f| f as i64))
+                        .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
+                    Ok(Some(DataType::Int64((*n as i64).max(lo).min(hi))))
+                }
                 _ => Ok(None),
             },
             // String methods (Phase 16+)
@@ -1650,7 +1751,13 @@ impl<'a> Interpreter<'a> {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "replace".to_string(), expected: 2, actual: args.len(), span }); }
                     let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace pattern".to_string(), span }) };
                     let to = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace replacement".to_string(), span }) };
-                    if !from.is_empty() && to.len() > from.len() {
+                    if from.is_empty() {
+                        // Rust's replace("", x) inserts x between every char and at both ends
+                        let result_len = s.len().saturating_add((s.chars().count() + 1).saturating_mul(to.len()));
+                        if result_len > MAX_STRING_OUTPUT {
+                            return Err(InterpError::TypeError { expected: format!("replace result at most {} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result_len), context: "string replace".to_string(), span });
+                        }
+                    } else if to.len() > from.len() {
                         let match_count = s.matches(&from).count();
                         let growth = match_count.saturating_mul(to.len().saturating_sub(from.len()));
                         if s.len().saturating_add(growth) > MAX_STRING_OUTPUT {
@@ -1717,9 +1824,10 @@ impl<'a> Interpreter<'a> {
                             span,
                         });
                     }
-                    let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
+                    let pad_str = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) if !c.is_empty() => c, _ => " ".to_string() } } else { " ".to_string() };
                     let pad_len = width.saturating_sub(s.chars().count());
-                    Ok(Some(DataType::String(format!("{}{}", std::iter::repeat(pad_char).take(pad_len).collect::<String>(), s))))
+                    let padding: String = pad_str.chars().cycle().take(pad_len).collect();
+                    Ok(Some(DataType::String(format!("{}{}", padding, s))))
                 }
                 "pad_end" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: 1, actual: 0, span }); }
@@ -1733,17 +1841,19 @@ impl<'a> Interpreter<'a> {
                             span,
                         });
                     }
-                    let pad_char = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) => c.chars().next().unwrap_or(' '), _ => ' ' } } else { ' ' };
+                    let pad_str = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) if !c.is_empty() => c, _ => " ".to_string() } } else { " ".to_string() };
                     let pad_len = width.saturating_sub(s.chars().count());
-                    Ok(Some(DataType::String(format!("{}{}", s, std::iter::repeat(pad_char).take(pad_len).collect::<String>()))))
+                    let padding: String = pad_str.chars().cycle().take(pad_len).collect();
+                    Ok(Some(DataType::String(format!("{}{}", s, padding))))
                 }
                 "substring" | "slice" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: 1, actual: 0, span }); }
-                    let char_len = s.chars().count();
-                    let start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
-                    let end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(char_len as i64).max(0) as usize } else { char_len };
-                    let start = start.min(char_len);
-                    let end = end.min(char_len);
+                    let char_len = s.chars().count() as i64;
+                    let raw_start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    let raw_end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(char_len) } else { char_len };
+                    // Support negative indices (count from end)
+                    let start = if raw_start < 0 { (char_len + raw_start).max(0) as usize } else { (raw_start as usize).min(char_len as usize) };
+                    let end = if raw_end < 0 { (char_len + raw_end).max(0) as usize } else { (raw_end as usize).min(char_len as usize) };
                     if start >= end {
                         Ok(Some(DataType::String(String::new())))
                     } else {
@@ -1830,11 +1940,16 @@ impl<'a> Interpreter<'a> {
                     for item in &arr[1..] {
                         let cmp = match (&min, item) {
                             (DataType::Int64(a), DataType::Int64(b)) => *a > *b,
-                            (DataType::Float64(a), DataType::Float64(b)) => *a > *b,
-                            (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) > *b,
-                            (DataType::Float64(a), DataType::Int64(b)) => *a > (*b as f64),
+                            // NaN handling: if current min is NaN, replace it; if item is NaN, skip it
+                            (DataType::Float64(a), DataType::Float64(b)) => a.is_nan() || (!b.is_nan() && *a > *b),
+                            (DataType::Int64(a), DataType::Float64(b)) => !b.is_nan() && (*a as f64) > *b,
+                            (DataType::Float64(a), DataType::Int64(b)) => a.is_nan() || *a > (*b as f64),
                             (DataType::String(a), DataType::String(b)) => a > b,
-                            _ => return Err(InterpError::TypeError { expected: "comparable types (all numbers or all strings)".to_string(), actual: format!("{} and {}", min.type_name(), item.type_name()), context: "array min".to_string(), span }),
+                            // Numeric fallback for Float32/Int32/Uint32/Uint64
+                            (a, b) => match (a.to_f64(), b.to_f64()) {
+                                (Some(fa), Some(fb)) => fa.is_nan() || (!fb.is_nan() && fa > fb),
+                                _ => return Err(InterpError::TypeError { expected: "comparable types (all numbers or all strings)".to_string(), actual: format!("{} and {}", min.type_name(), item.type_name()), context: "array min".to_string(), span }),
+                            },
                         };
                         if cmp { min = item.clone(); }
                     }
@@ -1846,11 +1961,16 @@ impl<'a> Interpreter<'a> {
                     for item in &arr[1..] {
                         let cmp = match (&max, item) {
                             (DataType::Int64(a), DataType::Int64(b)) => *a < *b,
-                            (DataType::Float64(a), DataType::Float64(b)) => *a < *b,
-                            (DataType::Int64(a), DataType::Float64(b)) => (*a as f64) < *b,
-                            (DataType::Float64(a), DataType::Int64(b)) => *a < (*b as f64),
+                            // NaN handling: if current max is NaN, replace it; if item is NaN, skip it
+                            (DataType::Float64(a), DataType::Float64(b)) => a.is_nan() || (!b.is_nan() && *a < *b),
+                            (DataType::Int64(a), DataType::Float64(b)) => !b.is_nan() && (*a as f64) < *b,
+                            (DataType::Float64(a), DataType::Int64(b)) => a.is_nan() || *a < (*b as f64),
                             (DataType::String(a), DataType::String(b)) => a < b,
-                            _ => return Err(InterpError::TypeError { expected: "comparable types (all numbers or all strings)".to_string(), actual: format!("{} and {}", max.type_name(), item.type_name()), context: "array max".to_string(), span }),
+                            // Numeric fallback for Float32/Int32/Uint32/Uint64
+                            (a, b) => match (a.to_f64(), b.to_f64()) {
+                                (Some(fa), Some(fb)) => fa.is_nan() || (!fb.is_nan() && fa < fb),
+                                _ => return Err(InterpError::TypeError { expected: "comparable types (all numbers or all strings)".to_string(), actual: format!("{} and {}", max.type_name(), item.type_name()), context: "array max".to_string(), span }),
+                            },
                         };
                         if cmp { max = item.clone(); }
                     }
@@ -2457,11 +2577,19 @@ impl<'a> Interpreter<'a> {
                 // Slice syntax: arr[1..3] or str[0..5]
                 if let ExpressionKind::Range { start: rs, end: re, inclusive } = &index.kind {
                     let obj = self.eval_expr(object)?;
+                    // Propagate null from optional chaining through index
+                    if matches!(obj, DataType::Null) && Self::has_optional_chain(&object.kind) {
+                        return Ok(DataType::Null);
+                    }
                     let s = self.eval_expr(rs)?;
                     let e = self.eval_expr(re)?;
                     return self.eval_slice(&obj, &s, &e, *inclusive, expr.span);
                 }
                 let obj = self.eval_expr(object)?;
+                // Propagate null from optional chaining through index
+                if matches!(obj, DataType::Null) && Self::has_optional_chain(&object.kind) {
+                    return Ok(DataType::Null);
+                }
                 let idx = self.eval_expr(index)?;
 
                 let inputs = HashMap::from([
@@ -2609,10 +2737,14 @@ impl<'a> Interpreter<'a> {
                 }
 
                 let op_type =
-                    resolve_method(&obj, method).ok_or_else(|| InterpError::UnknownOperation {
-                        name: format!("{}.{}", datatype_type_name(&obj), method),
-                        span: expr.span,
-                        suggestion: None,
+                    resolve_method(&obj, method).ok_or_else(|| {
+                        let available = available_methods_for_type(&obj);
+                        let suggestion = super::errors::suggest_name(method, &available);
+                        InterpError::UnknownOperation {
+                            name: format!("{}.{}", datatype_type_name(&obj), method),
+                            span: expr.span,
+                            suggestion,
+                        }
                     })?;
                 let input_ports = op_input_ports(op_type);
                 let inputs: HashMap<String, DataType> = input_ports.first()
@@ -3101,9 +3233,10 @@ impl<'a> Interpreter<'a> {
                 try_block,
                 catch_var,
                 catch_block,
+                finally_block,
             } => {
                 let try_result = self.exec_block(try_block);
-                match try_result {
+                let result = match try_result {
                     Ok(val) => Ok(val),
                     Err(ref e) if is_control_flow(e) => try_result,
                     Err(e) => {
@@ -3122,7 +3255,15 @@ impl<'a> Interpreter<'a> {
                         self.symbols.pop();
                         catch_result
                     }
+                };
+                // Execute finally block if present (always runs, can override result)
+                if let Some(finally) = finally_block {
+                    let finally_result = self.exec_block(finally);
+                    if finally_result.is_err() {
+                        return finally_result;
+                    }
                 }
+                result
             }
         }
     }
@@ -3281,6 +3422,17 @@ impl<'a> Interpreter<'a> {
                 self.eval_pipe_stage(&mid, right)
             }
             _ => Err(InterpError::InvalidPipeStage { span: stage.span }),
+        }
+    }
+
+    /// Check if an expression kind contains an OptionalChain node (for null propagation).
+    fn has_optional_chain(kind: &ExpressionKind) -> bool {
+        match kind {
+            ExpressionKind::OptionalChain { .. } => true,
+            ExpressionKind::FieldAccess { object, .. }
+            | ExpressionKind::Index { object, .. }
+            | ExpressionKind::MethodCall { object, .. } => Self::has_optional_chain(&object.kind),
+            _ => false,
         }
     }
 }
@@ -4315,6 +4467,59 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
             _ => None,
         },
     }
+}
+
+/// Get available method names for a DataType (for error suggestions).
+fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
+    let mut methods: Vec<&'static str> = Vec::new();
+    // Generic methods available on any type
+    methods.extend_from_slice(&["to_string", "to_int64", "to_float64", "to_bool", "to_json"]);
+    match obj {
+        DataType::Array(_) => {
+            // Direct methods
+            methods.extend_from_slice(&["first", "last", "is_empty", "sum", "product", "min", "max", "join"]);
+            // HOF methods
+            methods.extend_from_slice(&["map", "filter", "reduce", "find", "find_index", "any", "all",
+                "flat_map", "each", "sort_by", "group_by", "min_by", "max_by",
+                "take_while", "skip_while", "partition", "scan", "enumerate", "zip", "chunk"]);
+            // Evaluator methods
+            methods.extend_from_slice(&["push", "pop", "shift", "len", "length", "get", "set",
+                "slice", "contains", "sort", "reverse", "flatten", "concat",
+                "unique", "insert", "remove", "filter_nulls"]);
+        }
+        DataType::String(_) => {
+            // Direct methods
+            methods.extend_from_slice(&["is_empty", "is_numeric", "is_alphabetic", "to_int", "to_float",
+                "len", "length", "trim", "trim_start", "trim_end", "to_upper", "to_uppercase",
+                "to_lower", "to_lowercase", "reverse", "chars", "lines", "pad_start", "pad_end",
+                "char_at", "repeat", "substring", "slice", "index_of"]);
+            // Evaluator methods
+            methods.extend_from_slice(&["split", "contains", "replace", "starts_with", "ends_with",
+                "words", "count"]);
+            // HOF methods
+            methods.extend_from_slice(&["map", "filter", "reduce"]);
+        }
+        DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => {
+            methods.extend_from_slice(&["abs", "sign", "to_float64", "pow", "min", "max", "clamp"]);
+        }
+        DataType::Float64(_) | DataType::Float32(_) => {
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
+                "sign", "to_int64", "pow", "min", "max", "clamp",
+                "ln", "log2", "log10", "sin", "cos", "tan"]);
+        }
+        DataType::Map(_) => {
+            methods.extend_from_slice(&["get", "set", "delete", "has", "keys", "values", "entries",
+                "merge", "len", "length", "size"]);
+            // HOF methods
+            methods.extend_from_slice(&["filter_entries", "map_values", "map_keys"]);
+        }
+        DataType::Bytes(_) => {
+            methods.extend_from_slice(&["len", "length", "slice", "concat", "contains",
+                "base64_encode", "base64_decode"]);
+        }
+        _ => {}
+    }
+    methods
 }
 
 /// Match a value against a pattern, returning variable bindings on success.
