@@ -670,6 +670,305 @@ impl OperationEvaluator for FullEvaluator {
                 None => Ok(DataType::Null),
             },
 
+            // Array mutation operations
+            OperationType::ArrayShift => match &array {
+                DataType::Array(arr) => Ok(arr.first().cloned().unwrap_or(DataType::Null)),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ArrayInsert => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(0);
+                        let idx = if i < 0 { 0 } else { (i as usize).min(arr.len()) };
+                        let mut new_arr = arr.clone();
+                        new_arr.insert(idx, value.clone());
+                        Ok(DataType::Array(new_arr))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::ArrayRemove => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 || i as usize >= arr.len() { return Ok(DataType::Null); }
+                        let mut new_arr = arr.clone();
+                        Ok(new_arr.remove(i as usize))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+
+            // String methods
+            OperationType::StringChars => match &input {
+                DataType::String(s) => {
+                    if s.chars().count() > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!("chars() would produce {} elements (max {})", s.chars().count(), MAX_ARRAY_ELEMENTS)));
+                    }
+                    Ok(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect()))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringRepeat => {
+                let count = inputs.get("count").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
+                match &input {
+                    DataType::String(s) => {
+                        let n = count.to_i64().unwrap_or(0).max(0) as usize;
+                        let result_len = s.len().saturating_mul(n);
+                        if result_len > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("repeat result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(s.repeat(n)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::StringLines => match &input {
+                DataType::String(s) => {
+                    let lines: Vec<DataType> = s.lines().map(|l| DataType::String(l.to_string())).collect();
+                    if lines.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!("lines() would produce {} elements (max {})", lines.len(), MAX_ARRAY_ELEMENTS)));
+                    }
+                    Ok(DataType::Array(lines))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringWords => match &input {
+                DataType::String(s) => {
+                    Ok(DataType::Array(s.split_whitespace().map(|w| DataType::String(w.to_string())).collect()))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringReverse => match &input {
+                DataType::String(s) => Ok(DataType::String(s.chars().rev().collect())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringCount => {
+                let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::String(s), DataType::String(sub)) => {
+                        Ok(DataType::Int64(s.matches(sub.as_str()).count() as i64))
+                    }
+                    _ => Ok(DataType::Int64(0)),
+                }
+            },
+            OperationType::CharAt => {
+                let index = inputs.get("index").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
+                match &input {
+                    DataType::String(s) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 { return Ok(DataType::Null); }
+                        Ok(s.chars().nth(i as usize).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::PadStart => {
+                let width = inputs.get("width").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
+                let fill = inputs.get("fill").or(inputs.get("input_2")).cloned();
+                match &input {
+                    DataType::String(s) => {
+                        let w = width.to_i64().unwrap_or(0).max(0) as usize;
+                        if w > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("pad_start width exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        let fill_char = match &fill {
+                            Some(DataType::String(f)) => f.chars().next().unwrap_or(' '),
+                            _ => ' ',
+                        };
+                        let char_count = s.chars().count();
+                        if char_count >= w {
+                            Ok(DataType::String(s.clone()))
+                        } else {
+                            let padding: String = std::iter::repeat(fill_char).take(w - char_count).collect();
+                            Ok(DataType::String(format!("{}{}", padding, s)))
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::PadEnd => {
+                let width = inputs.get("width").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
+                let fill = inputs.get("fill").or(inputs.get("input_2")).cloned();
+                match &input {
+                    DataType::String(s) => {
+                        let w = width.to_i64().unwrap_or(0).max(0) as usize;
+                        if w > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("pad_end width exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        let fill_char = match &fill {
+                            Some(DataType::String(f)) => f.chars().next().unwrap_or(' '),
+                            _ => ' ',
+                        };
+                        let char_count = s.chars().count();
+                        if char_count >= w {
+                            Ok(DataType::String(s.clone()))
+                        } else {
+                            let padding: String = std::iter::repeat(fill_char).take(w - char_count).collect();
+                            Ok(DataType::String(format!("{}{}", s, padding)))
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+
+            // Type inspection
+            OperationType::Typeof => {
+                let type_name = match &input {
+                    DataType::Null => "null",
+                    DataType::Bool(_) => "bool",
+                    DataType::Int32(_) => "int32",
+                    DataType::Int64(_) => "int64",
+                    DataType::Uint32(_) => "uint32",
+                    DataType::Uint64(_) => "uint64",
+                    DataType::Float32(_) => "float32",
+                    DataType::Float64(_) => "float64",
+                    DataType::String(_) => "string",
+                    DataType::Array(_) => "array",
+                    DataType::Map(m) => {
+                        if m.contains_key("__enum") { "enum" }
+                        else if m.contains_key("__struct") { "struct" }
+                        else { "map" }
+                    }
+                    DataType::Bytes(_) => "bytes",
+                    DataType::Future(_) => "future",
+                };
+                Ok(DataType::String(type_name.to_string()))
+            },
+
+            // Min/Max
+            OperationType::Min => {
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.min(y))),
+                    (Some(pa), Some(pb)) => {
+                        let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                        let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Float64(fa.min(fb)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::Max => {
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.max(y))),
+                    (Some(pa), Some(pb)) => {
+                        let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                        let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Float64(fa.max(fb)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+
+            // Range
+            OperationType::Range => {
+                let start = a.to_i64().unwrap_or(0);
+                let end = b.to_i64().unwrap_or(0);
+                let step = inputs.get("step").and_then(|v| v.to_i64()).unwrap_or(if start <= end { 1 } else { -1 });
+                if step == 0 { return Ok(DataType::Array(vec![])); }
+                let mut result = Vec::new();
+                let mut i = start;
+                loop {
+                    if step > 0 && i >= end { break; }
+                    if step < 0 && i <= end { break; }
+                    if result.len() >= MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!("range would produce more than {} elements", MAX_ARRAY_ELEMENTS)));
+                    }
+                    result.push(DataType::Int64(i));
+                    i += step;
+                }
+                Ok(DataType::Array(result))
+            },
+
+            // ToJson
+            OperationType::ToJson => {
+                fn to_json(val: &DataType) -> String {
+                    match val {
+                        DataType::Null => "null".to_string(),
+                        DataType::Bool(b) => format!("{}", b),
+                        DataType::Int64(n) => format!("{}", n),
+                        DataType::Int32(n) => format!("{}", n),
+                        DataType::Uint32(n) => format!("{}", n),
+                        DataType::Uint64(n) => format!("{}", n),
+                        DataType::Float64(f) => {
+                            if f.is_nan() { "null".to_string() }
+                            else if f.is_infinite() { "null".to_string() }
+                            else if *f == (*f as i64 as f64) && f.abs() < 1e15 { format!("{}.0", *f as i64) }
+                            else { format!("{}", f) }
+                        }
+                        DataType::Float32(f) => to_json(&DataType::Float64(*f as f64)),
+                        DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")),
+                        DataType::Array(arr) => {
+                            let parts: Vec<String> = arr.iter().map(|v| to_json(v)).collect();
+                            format!("[{}]", parts.join(","))
+                        }
+                        DataType::Map(m) => {
+                            let parts: Vec<String> = m.iter()
+                                .filter(|(k, _)| !k.starts_with("__"))
+                                .map(|(k, v)| format!("\"{}\":{}", k.replace('\\', "\\\\").replace('"', "\\\""), to_json(v)))
+                                .collect();
+                            format!("{{{}}}", parts.join(","))
+                        }
+                        DataType::Bytes(b) => {
+                            let parts: Vec<String> = b.iter().map(|byte| format!("{}", byte)).collect();
+                            format!("[{}]", parts.join(","))
+                        }
+                        DataType::Future(_) => "null".to_string(),
+                    }
+                }
+                Ok(DataType::String(to_json(&input)))
+            },
+
+            // Bitwise operations
+            OperationType::BitAnd => match (a.to_i64(), b.to_i64()) {
+                (Some(x), Some(y)) => Ok(DataType::Int64(x & y)),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::BitOr => match (a.to_i64(), b.to_i64()) {
+                (Some(x), Some(y)) => Ok(DataType::Int64(x | y)),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::BitXor => match (a.to_i64(), b.to_i64()) {
+                (Some(x), Some(y)) => Ok(DataType::Int64(x ^ y)),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::BitNot => match input.to_i64() {
+                Some(x) => Ok(DataType::Int64(!x)),
+                None => Ok(DataType::Null),
+            },
+            OperationType::BitShiftLeft => match (a.to_i64(), b.to_i64()) {
+                (Some(x), Some(y)) if y >= 0 && y < 64 => Ok(DataType::Int64(x << y)),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::BitShiftRight => match (a.to_i64(), b.to_i64()) {
+                (Some(x), Some(y)) if y >= 0 && y < 64 => Ok(DataType::Int64(x >> y)),
+                _ => Ok(DataType::Null),
+            },
+
+            // Type checking predicates
+            OperationType::IsNull => Ok(DataType::Bool(matches!(&input, DataType::Null))),
+            OperationType::IsString => Ok(DataType::Bool(matches!(&input, DataType::String(_)))),
+            OperationType::IsNumber => Ok(DataType::Bool(promote_numeric(&input).is_some())),
+            OperationType::IsArray => Ok(DataType::Bool(matches!(&input, DataType::Array(_)))),
+            OperationType::IsMap => Ok(DataType::Bool(matches!(&input, DataType::Map(_)))),
+            OperationType::IsBool => Ok(DataType::Bool(matches!(&input, DataType::Bool(_)))),
+            OperationType::IsBytes => Ok(DataType::Bool(matches!(&input, DataType::Bytes(_)))),
+
+            // Assert / DebugLog
+            OperationType::Assert => {
+                match &input {
+                    DataType::Bool(true) => Ok(DataType::Null),
+                    DataType::Bool(false) => Err(EvalError::InvalidInput("Assertion failed".to_string())),
+                    _ => Err(EvalError::InvalidInput(format!("Assert expects bool, got {:?}", input))),
+                }
+            },
+            OperationType::DebugLog => {
+                eprintln!("[debug] {}", input.to_string_lossy());
+                Ok(DataType::Null)
+            },
+
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
                 other,

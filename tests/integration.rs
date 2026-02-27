@@ -253,6 +253,64 @@ impl OperationEvaluator for StubEvaluator {
                 other => Ok(other.clone()),
             },
 
+            // Array mutation
+            OperationType::ArrayShift => {
+                let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
+                match &arr_val {
+                    DataType::Array(arr) => Ok(arr.first().cloned().unwrap_or(DataType::Null)),
+                    _ => Ok(DataType::Null),
+                }
+            },
+
+            // String methods dispatched to evaluator
+            OperationType::StringWords => match &input {
+                DataType::String(s) => Ok(DataType::Array(s.split_whitespace().map(|w| DataType::String(w.to_string())).collect())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringCount => {
+                let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::String(s), DataType::String(sub)) => Ok(DataType::Int64(s.matches(sub.as_str()).count() as i64)),
+                    _ => Ok(DataType::Int64(0)),
+                }
+            },
+
+            // Typeof
+            OperationType::Typeof => {
+                let type_name = match &input {
+                    DataType::Null => "null",
+                    DataType::Bool(_) => "bool",
+                    DataType::Int64(_) => "int64",
+                    DataType::Float64(_) => "float64",
+                    DataType::String(_) => "string",
+                    DataType::Array(_) => "array",
+                    DataType::Map(m) => {
+                        if m.contains_key("__enum") { "enum" }
+                        else if m.contains_key("__struct") { "struct" }
+                        else { "map" }
+                    }
+                    _ => "unknown",
+                };
+                Ok(DataType::String(type_name.to_string()))
+            },
+
+            // ToJson
+            OperationType::ToJson => {
+                fn to_json_stub(val: &DataType) -> String {
+                    match val {
+                        DataType::Null => "null".to_string(),
+                        DataType::Bool(b) => format!("{}", b),
+                        DataType::Int64(n) => format!("{}", n),
+                        DataType::Float64(f) => format!("{}", f),
+                        DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+                        DataType::Array(arr) => format!("[{}]", arr.iter().map(|v| to_json_stub(v)).collect::<Vec<_>>().join(",")),
+                        DataType::Map(m) => format!("{{{}}}", m.iter().filter(|(k,_)| !k.starts_with("__")).map(|(k,v)| format!("\"{}\":{}", k, to_json_stub(v))).collect::<Vec<_>>().join(",")),
+                        _ => "null".to_string(),
+                    }
+                }
+                Ok(DataType::String(to_json_stub(&input)))
+            },
+
             // Catch-all
             _ => Ok(DataType::Null),
         }
@@ -6122,4 +6180,132 @@ fn test_import_span_parse() {
     let src = r#"import "test-plugin""#;
     let parsed = parse_v2(src);
     assert!(parsed.is_ok(), "import should parse cleanly");
+}
+
+// ── Round 50: FullEvaluator new operations ──────────────────────────────────
+
+#[test]
+fn test_string_reverse() {
+    let src = r#""hello".reverse()"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("olleh".to_string()));
+}
+
+#[test]
+fn test_string_chars() {
+    let src = r#""abc".chars()"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("b".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_string_lines() {
+    let src = "\"hello\\nworld\".lines()";
+    let result = run(src);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::String("hello".to_string()),
+        DataType::String("world".to_string()),
+    ]));
+}
+
+#[test]
+fn test_string_repeat() {
+    let src = r#""ab".repeat(3)"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("ababab".to_string()));
+}
+
+#[test]
+fn test_string_count() {
+    let src = r#""banana".count("an")"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(2));
+}
+
+#[test]
+fn test_string_words() {
+    let src = r#""hello  world  foo".words()"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::String("hello".to_string()),
+        DataType::String("world".to_string()),
+        DataType::String("foo".to_string()),
+    ]));
+}
+
+#[test]
+fn test_char_at() {
+    let src = r#""hello".char_at(1)"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("e".to_string()));
+}
+
+#[test]
+fn test_pad_start() {
+    let src = r#""42".pad_start(5, "0")"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("00042".to_string()));
+}
+
+#[test]
+fn test_pad_end() {
+    let src = r#""hi".pad_end(5)"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("hi   ".to_string()));
+}
+
+#[test]
+fn test_array_shift() {
+    let src = r#"[10, 20, 30].shift()"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_to_json_map() {
+    let src = r#"
+let m = {"name": "alice", "age": 30}
+m.to_json()
+"#;
+    let result = run(src);
+    // JSON output — keys are alphabetical in BTreeMap
+    match result {
+        DataType::String(s) => {
+            assert!(s.contains("\"name\":\"alice\""), "should contain name: {}", s);
+            assert!(s.contains("\"age\":30"), "should contain age: {}", s);
+        }
+        other => panic!("expected String, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_typeof_values() {
+    let src = r#"typeof(42)"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("int64".to_string()));
+}
+
+#[test]
+fn test_typeof_string() {
+    let src = r#"typeof("hello")"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("string".to_string()));
+}
+
+#[test]
+fn test_typeof_array() {
+    let src = r#"typeof([1, 2, 3])"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("array".to_string()));
+}
+
+#[test]
+fn test_typeof_null() {
+    let src = r#"typeof(null)"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("null".to_string()));
 }

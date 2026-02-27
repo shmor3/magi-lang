@@ -4550,7 +4550,7 @@ fn datatype_type_name(val: &DataType) -> &'static str {
 
 /// Resolve a method call to an OperationType based on receiver type and method name.
 fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
-    match obj {
+    let result = match obj {
         DataType::Array(_) => match method {
             "push" => Some(OperationType::ArrayPush),
             "pop" => Some(OperationType::ArrayPop),
@@ -4617,16 +4617,18 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
             "base64_decode" => Some(OperationType::Base64Decode),
             _ => None,
         },
-        // Generic methods that work on any type
-        _ => match method {
-            "to_string" => Some(OperationType::ToString),
-            "to_int64" => Some(OperationType::ToInt64),
-            "to_float64" => Some(OperationType::ToFloat64),
-            "to_bool" => Some(OperationType::ToBool),
-            "to_json" => Some(OperationType::ToJson),
-            _ => None,
-        },
-    }
+        _ => None,
+    };
+    // Fall back to generic methods that work on any type
+    result.or_else(|| match method {
+        "to_string" => Some(OperationType::ToString),
+        "to_int64" => Some(OperationType::ToInt64),
+        "to_float64" => Some(OperationType::ToFloat64),
+        "to_bool" => Some(OperationType::ToBool),
+        "to_json" => Some(OperationType::ToJson),
+        "typeof" => Some(OperationType::Typeof),
+        _ => None,
+    })
 }
 
 /// Get available method names for a DataType (for error suggestions).
