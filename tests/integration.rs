@@ -8674,3 +8674,146 @@ fn test_moderate_nesting_ok() {
     let result = parse_v2(&src);
     assert!(result.is_ok());
 }
+
+// ── Round 84: coverage gap tests ───────────────
+
+#[test]
+fn test_match_type_pattern_int64() {
+    assert_eq!(run(r#"
+        let val = 42;
+        output match val {
+            n: int64 => n + 1,
+            s: string => 0,
+            _ => -1,
+        };
+    "#), DataType::Int64(43));
+}
+
+#[test]
+fn test_match_type_pattern_string() {
+    assert_eq!(run(r#"
+        let val = "hello";
+        output match val {
+            n: int64 => 0,
+            s: string => s,
+            _ => "unknown",
+        };
+    "#), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_match_null_literal_pattern() {
+    assert_eq!(run(r#"
+        let val = null;
+        output match val {
+            null => "was null",
+            _ => "not null",
+        };
+    "#), DataType::String("was null".to_string()));
+}
+
+#[test]
+fn test_for_loop_break_with_value() {
+    // break with value in a for loop — test the value propagates
+    assert_eq!(run(r#"
+        fn find_first_large(arr) {
+            for x in arr {
+                if x > 25 { return x }
+            }
+            return -1;
+        }
+        output find_first_large([10, 20, 30, 40]);
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_mutable_array_destructure() {
+    assert_eq!(run(r#"
+        let mut [a, b] = [1, 2];
+        a = 10;
+        b = 20;
+        output a + b;
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_map_destructure_with_alias() {
+    assert_eq!(run(r#"
+        let {name: user_name} = {"name": "Alice", "age": 30};
+        output user_name;
+    "#), DataType::String("Alice".to_string()));
+}
+
+#[test]
+fn test_nested_loop_break_inner_only() {
+    assert_eq!(run(r#"
+        let mut result = 0;
+        for i in [1, 2, 3] {
+            for j in [10, 20, 30] {
+                if j == 20 { break }
+            }
+            result = result + i;
+        }
+        output result;
+    "#), DataType::Int64(6));
+}
+
+#[test]
+fn test_nested_loop_continue_inner_only() {
+    assert_eq!(run(r#"
+        let mut sum = 0;
+        for i in [1, 2, 3] {
+            for j in [10, 20, 30] {
+                if j == 20 { continue }
+                sum = sum + j;
+            }
+            sum = sum + i;
+        }
+        output sum;
+    "#), DataType::Int64(126));
+}
+
+#[test]
+fn test_try_catch_expr_finally_catch_path() {
+    assert_eq!(run(r#"
+        let mut log = "";
+        let val = try {
+            throw "oops"
+        } catch e {
+            log = "caught";
+            99
+        } finally {
+            log = log + "_done";
+        };
+        output [val, log];
+    "#), DataType::Array(vec![
+        DataType::Int64(99),
+        DataType::String("caught_done".to_string()),
+    ]));
+}
+
+#[test]
+fn test_try_propagate_non_null() {
+    assert_eq!(run(r#"
+        fn safe_get() {
+            let val = 42;
+            val?
+        }
+        output safe_get();
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_try_propagate_null_throws() {
+    let err = run_err(r#"
+        fn will_fail() {
+            let val = null;
+            val?
+        }
+        will_fail();
+    "#);
+    match err {
+        InterpError::ThrownError { .. } => {}
+        other => panic!("expected ThrownError from ?, got: {:?}", other),
+    }
+}

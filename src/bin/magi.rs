@@ -1110,6 +1110,159 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
+            // Logical Xor
+            OperationType::Xor => {
+                let a_bool = is_truthy(&a);
+                let b_bool = is_truthy(&b);
+                Ok(DataType::Bool(a_bool ^ b_bool))
+            }
+
+            // Clamp: clamp(value, min, max)
+            OperationType::Clamp => {
+                let min_val = inputs.get("min").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                let max_val = inputs.get("max").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
+                match (promote_numeric(&input), promote_numeric(&min_val), promote_numeric(&max_val)) {
+                    (Some(v), Some(lo), Some(hi)) => {
+                        let fv = match v { Ok(i) => i as f64, Err(f) => f };
+                        let flo = match lo { Ok(i) => i as f64, Err(f) => f };
+                        let fhi = match hi { Ok(i) => i as f64, Err(f) => f };
+                        let clamped = fv.max(flo).min(fhi);
+                        if matches!(v, Ok(_)) && matches!(lo, Ok(_)) && matches!(hi, Ok(_)) {
+                            Ok(DataType::Int64(clamped as i64))
+                        } else {
+                            Ok(DataType::Float64(clamped))
+                        }
+                    }
+                    _ => Err(EvalError::InvalidInput("Clamp requires numeric arguments".to_string())),
+                }
+            }
+
+            // Float checks
+            OperationType::IsNan => {
+                match &input {
+                    DataType::Float64(f) => Ok(DataType::Bool(f.is_nan())),
+                    DataType::Float32(f) => Ok(DataType::Bool(f.is_nan())),
+                    _ => Ok(DataType::Bool(false)),
+                }
+            }
+            OperationType::IsInfinite => {
+                match &input {
+                    DataType::Float64(f) => Ok(DataType::Bool(f.is_infinite())),
+                    DataType::Float32(f) => Ok(DataType::Bool(f.is_infinite())),
+                    _ => Ok(DataType::Bool(false)),
+                }
+            }
+            OperationType::IsFinite => {
+                match &input {
+                    DataType::Float64(f) => Ok(DataType::Bool(f.is_finite())),
+                    DataType::Float32(f) => Ok(DataType::Bool(f.is_finite())),
+                    DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => Ok(DataType::Bool(true)),
+                    _ => Ok(DataType::Bool(false)),
+                }
+            }
+
+            // Parse functions
+            OperationType::ParseJson => {
+                match &input {
+                    DataType::String(s) => {
+                        fn parse_json_value(s: &str) -> std::result::Result<DataType, String> {
+                            let s = s.trim();
+                            if s == "null" { return Ok(DataType::Null); }
+                            if s == "true" { return Ok(DataType::Bool(true)); }
+                            if s == "false" { return Ok(DataType::Bool(false)); }
+                            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                                let inner = &s[1..s.len()-1];
+                                return Ok(DataType::String(inner.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")));
+                            }
+                            if s.starts_with('[') && s.ends_with(']') {
+                                let inner = &s[1..s.len()-1];
+                                if inner.trim().is_empty() { return Ok(DataType::Array(vec![])); }
+                                let mut items = Vec::new();
+                                let mut depth = 0i32;
+                                let mut start = 0;
+                                for (i, ch) in inner.char_indices() {
+                                    match ch {
+                                        '[' | '{' => depth += 1,
+                                        ']' | '}' => depth -= 1,
+                                        '"' => {} // simplified — doesn't handle escaped quotes in deeply nested JSON
+                                        ',' if depth == 0 => {
+                                            items.push(parse_json_value(&inner[start..i])?);
+                                            start = i + 1;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                items.push(parse_json_value(&inner[start..])?);
+                                return Ok(DataType::Array(items));
+                            }
+                            if s.starts_with('{') && s.ends_with('}') {
+                                let inner = &s[1..s.len()-1];
+                                if inner.trim().is_empty() { return Ok(DataType::Map(std::collections::BTreeMap::new())); }
+                                let mut map = std::collections::BTreeMap::new();
+                                let mut depth = 0i32;
+                                let mut start = 0;
+                                let mut entries = Vec::new();
+                                for (i, ch) in inner.char_indices() {
+                                    match ch {
+                                        '[' | '{' => depth += 1,
+                                        ']' | '}' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            entries.push(&inner[start..i]);
+                                            start = i + 1;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                entries.push(&inner[start..]);
+                                for entry in entries {
+                                    if let Some(colon_pos) = entry.find(':') {
+                                        let key = entry[..colon_pos].trim();
+                                        let val = entry[colon_pos+1..].trim();
+                                        let key_str = if key.starts_with('"') && key.ends_with('"') && key.len() >= 2 {
+                                            key[1..key.len()-1].to_string()
+                                        } else {
+                                            key.to_string()
+                                        };
+                                        map.insert(key_str, parse_json_value(val)?);
+                                    }
+                                }
+                                return Ok(DataType::Map(map));
+                            }
+                            // Try number
+                            if let Ok(i) = s.parse::<i64>() { return Ok(DataType::Int64(i)); }
+                            if let Ok(f) = s.parse::<f64>() { return Ok(DataType::Float64(f)); }
+                            Err(format!("Invalid JSON: {}", s))
+                        }
+                        parse_json_value(s).map_err(|e| EvalError::InvalidInput(e))
+                    }
+                    _ => Err(EvalError::InvalidInput(format!("ParseJson expects String, got {:?}", input))),
+                }
+            }
+            OperationType::ParseInt => {
+                match &input {
+                    DataType::String(s) => {
+                        let trimmed = s.trim();
+                        match trimmed.parse::<i64>() {
+                            Ok(n) => Ok(DataType::Int64(n)),
+                            Err(_) => Ok(DataType::Null),
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+            OperationType::ParseFloat => {
+                match &input {
+                    DataType::String(s) => {
+                        let trimmed = s.trim();
+                        match trimmed.parse::<f64>() {
+                            Ok(f) => Ok(DataType::Float64(f)),
+                            Err(_) => Ok(DataType::Null),
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
                 other,
