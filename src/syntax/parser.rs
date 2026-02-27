@@ -2142,7 +2142,59 @@ impl Parser {
                         .text
                         .parse()
                         .map_err(|_| self.error("Invalid float"))?;
-                    Ok(Pattern::Literal(Literal::Float64(-val)))
+                    let neg_val = -val;
+                    let start_expr = Expression {
+                        kind: ExpressionKind::Literal(Literal::Float64(neg_val)),
+                        span: num_tok.span,
+                    };
+                    // Float range pattern: -1.0..1.0 or -1.0..=1.0
+                    if self.at(&TokenKind::DotDot) || self.at(&TokenKind::DotDotEq) {
+                        let inclusive = self.at(&TokenKind::DotDotEq);
+                        let end_pos = self.pos + 1;
+                        let end_tok_kind = if end_pos < self.tokens.len() {
+                            self.tokens[end_pos].kind.clone()
+                        } else {
+                            TokenKind::Eof
+                        };
+                        if end_tok_kind == TokenKind::FloatLiteral || end_tok_kind == TokenKind::IntLiteral {
+                            self.advance(); // consume `..` or `..=`
+                            let end_tok = self.peek().clone();
+                            self.advance();
+                            let end_val: f64 = end_tok.text.parse().map_err(|_| self.error("Invalid float"))?;
+                            return Ok(Pattern::RangePattern {
+                                start: Box::new(start_expr),
+                                end: Box::new(Expression {
+                                    kind: ExpressionKind::Literal(Literal::Float64(end_val)),
+                                    span: end_tok.span,
+                                }),
+                                inclusive,
+                            });
+                        } else if end_tok_kind == TokenKind::Minus {
+                            // Negative end: -1.0..-0.5
+                            let neg_pos = end_pos + 1;
+                            let neg_tok_kind = if neg_pos < self.tokens.len() {
+                                self.tokens[neg_pos].kind.clone()
+                            } else {
+                                TokenKind::Eof
+                            };
+                            if neg_tok_kind == TokenKind::FloatLiteral || neg_tok_kind == TokenKind::IntLiteral {
+                                self.advance(); // consume `..` or `..=`
+                                self.advance(); // consume `-`
+                                let end_tok = self.peek().clone();
+                                self.advance();
+                                let end_val: f64 = end_tok.text.parse::<f64>().map_err(|_| self.error("Invalid float"))?;
+                                return Ok(Pattern::RangePattern {
+                                    start: Box::new(start_expr),
+                                    end: Box::new(Expression {
+                                        kind: ExpressionKind::Literal(Literal::Float64(-end_val)),
+                                        span: end_tok.span,
+                                    }),
+                                    inclusive,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Pattern::Literal(Literal::Float64(neg_val)))
                 } else {
                     Err(self.error("Expected number after '-' in pattern"))
                 }

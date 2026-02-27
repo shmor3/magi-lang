@@ -8294,3 +8294,38 @@ fn test_fstring_valid_expression_ok() {
     let result = magi_lang::syntax::parser::parse_v2(r#"output f"value is {x + 1}";"#);
     assert!(result.is_ok(), "f-string with valid expression should parse: {:?}", result.err());
 }
+
+// Round 81: negative float range patterns
+#[test]
+fn test_negative_float_range_pattern() {
+    assert_eq!(run(r#"
+        let x = -0.5;
+        output match x {
+            -1.0..0.0 => "negative",
+            0.0..1.0 => "positive",
+            _ => "other"
+        };
+    "#), DataType::String("negative".to_string()));
+}
+
+#[test]
+fn test_negative_float_range_inclusive() {
+    assert_eq!(run(r#"
+        let x = -1.0;
+        output match x {
+            -1.0..=0.0 => "in range",
+            _ => "out"
+        };
+    "#), DataType::String("in range".to_string()));
+}
+
+#[test]
+fn test_negative_to_negative_float_range() {
+    assert_eq!(run(r#"
+        let x = -0.5;
+        output match x {
+            -1.0..-0.1 => "in range",
+            _ => "out"
+        };
+    "#), DataType::String("in range".to_string()));
+}
