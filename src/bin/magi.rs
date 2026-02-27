@@ -1,9 +1,12 @@
 //! MAGI language CLI — interpret and compile .magi files.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::net::IpAddr;
 use std::process;
+use std::sync::{LazyLock, Mutex};
 
 use magi_lang::compiler;
 use magi_lang::eval::{DiagnosticSeverity, EvalError, OperationEvaluator};
@@ -19,6 +22,258 @@ const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 
 /// UTF-8 BOM (byte order mark).
 const UTF8_BOM: &str = "\u{FEFF}";
+
+// ---------------------------------------------------------------------------
+// Connection registry — global storage for open connections (HTTP clients,
+// WebSocket handles, TLS sessions, etc.) keyed by UUID-based connection IDs.
+// ---------------------------------------------------------------------------
+
+/// Global connection registry.
+static CONNECTIONS: LazyLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Store a connection in the global registry.
+#[allow(dead_code)]
+fn conn_store<T: Send + 'static>(id: &str, conn: T) {
+    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    map.insert(id.to_string(), Box::new(conn));
+}
+
+/// Execute a closure with mutable access to a typed connection.
+#[allow(dead_code)]
+fn conn_with<T: Send + 'static, R>(
+    id: &str,
+    f: impl FnOnce(&mut T) -> Result<R, EvalError>,
+) -> Result<R, EvalError> {
+    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = map
+        .get_mut(id)
+        .ok_or_else(|| EvalError::InvalidInput(format!("Connection not found: {}", id)))?;
+    let typed = entry
+        .downcast_mut::<T>()
+        .ok_or_else(|| EvalError::InvalidInput(format!("Connection type mismatch: {}", id)))?;
+    f(typed)
+}
+
+/// Remove a connection from the global registry.
+#[allow(dead_code)]
+fn conn_remove(id: &str) -> Result<(), EvalError> {
+    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(id)
+        .ok_or_else(|| EvalError::InvalidInput(format!("Connection not found: {}", id)))?;
+    Ok(())
+}
+
+/// Generate a UUID-based connection ID with the given prefix.
+#[allow(dead_code)]
+fn conn_id(prefix: &str) -> String {
+    format!("{}:{}", prefix, uuid::Uuid::new_v4())
+}
+
+// ---------------------------------------------------------------------------
+// SSRF protection helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether an IP address is in a private / loopback / link-local /
+/// CGNAT range that should be blocked for outbound requests.
+#[allow(dead_code)]
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()                           // 127.0.0.0/8
+                || v4.is_private()                     // 10/8, 172.16/12, 192.168/16
+                || v4.is_link_local()                  // 169.254/16
+                || v4.octets()[0] == 0                 // 0.0.0.0/8
+                || v4.is_broadcast()                   // 255.255.255.255
+                || v4.is_multicast()                   // 224/4
+                || (v4.octets()[0] == 100              // CGNAT 100.64/10
+                    && (v4.octets()[1] & 0xC0) == 64)
+                || (v4.octets()[0] == 198              // benchmarking 198.18/15
+                    && (v4.octets()[1] & 0xFE) == 18)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_multicast() || {
+                let seg = v6.segments();
+                // link-local fe80::/10
+                (seg[0] & 0xFFC0) == 0xFE80
+                    // unique local fc00::/7
+                    || (seg[0] & 0xFE00) == 0xFC00
+                    // ::ffff:0:0/96 mapped IPv4 — check inner
+                    || (seg[0] == 0
+                        && seg[1] == 0
+                        && seg[2] == 0
+                        && seg[3] == 0
+                        && seg[4] == 0
+                        && seg[5] == 0xFFFF
+                        && is_blocked_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                            (seg[6] >> 8) as u8,
+                            seg[6] as u8,
+                            (seg[7] >> 8) as u8,
+                            seg[7] as u8,
+                        ))))
+            }
+        }
+    }
+}
+
+/// Validate that a URL uses an allowed scheme (http/https/ws/wss) and does
+/// not target a blocked host.
+#[allow(dead_code)]
+fn validate_url(url: &str) -> Result<(), EvalError> {
+    // Extract scheme.
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("ws://"))
+        .or_else(|| url.strip_prefix("wss://"))
+    else {
+        return Err(EvalError::InvalidInput(
+            "URL scheme must be http, https, ws, or wss".to_string(),
+        ));
+    };
+
+    // Extract host (before first '/' or '?' or '#' or ':' for port).
+    let host = rest
+        .split(&['/', '?', '#'][..])
+        .next()
+        .unwrap_or(rest);
+    // Strip port if present.
+    let host = if let Some(bracket_end) = host.find(']') {
+        // IPv6 literal [::1]:port
+        &host[..=bracket_end]
+    } else if let Some(colon) = host.rfind(':') {
+        &host[..colon]
+    } else {
+        host
+    };
+
+    if host.is_empty() {
+        return Err(EvalError::InvalidInput("URL has empty host".to_string()));
+    }
+
+    validate_host(host)
+}
+
+/// Validate that a hostname is not a blocked internal name.
+#[allow(dead_code)]
+fn validate_host(host: &str) -> Result<(), EvalError> {
+    let lower = host.to_ascii_lowercase();
+
+    // Block well-known internal hostnames.
+    if lower == "localhost"
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+        || lower == "metadata.google.internal"
+        || lower == "[::1]"
+    {
+        return Err(EvalError::InvalidInput(format!(
+            "Blocked host: {}",
+            host
+        )));
+    }
+
+    // If the host parses as an IP, apply IP-level checks.
+    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+        if is_blocked_ip(ip) {
+            return Err(EvalError::InvalidInput(format!(
+                "Blocked IP address: {}",
+                ip
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Utility helpers for FullEvaluator operation implementations
+// ---------------------------------------------------------------------------
+
+/// Extract a port number from an input map.
+#[allow(dead_code)]
+fn get_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalError> {
+    match inputs.get(key) {
+        Some(DataType::Int64(n)) => {
+            let n = *n;
+            if (1..=65535).contains(&n) {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (1-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(DataType::Int32(n)) => {
+            let n = *n as i64;
+            if (1..=65535).contains(&n) {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (1-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(DataType::Uint32(n)) => {
+            let n = *n as u64;
+            if (1..=65535).contains(&n) {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (1-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(DataType::Uint64(n)) => {
+            let n = *n;
+            if (1..=65535).contains(&n) {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (1-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(other) => Err(EvalError::InvalidInput(format!(
+            "Expected numeric port for '{}', got: {:?}",
+            key, other
+        ))),
+        None => Err(EvalError::InvalidInput(format!(
+            "Missing required input: {}",
+            key
+        ))),
+    }
+}
+
+/// Extract a string reference from an input map.
+#[allow(dead_code)]
+fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'a str, EvalError> {
+    match inputs.get(key) {
+        Some(DataType::String(s)) => Ok(s.as_str()),
+        Some(other) => Err(EvalError::InvalidInput(format!(
+            "Expected string for '{}', got: {:?}",
+            key, other
+        ))),
+        None => Err(EvalError::InvalidInput(format!(
+            "Missing required input: {}",
+            key
+        ))),
+    }
+}
+
+/// Convert a `DataType` value to a byte vector.
+#[allow(dead_code)]
+fn data_to_bytes(data: &DataType) -> Vec<u8> {
+    match data {
+        DataType::Bytes(b) => b.clone(),
+        DataType::String(s) => s.as_bytes().to_vec(),
+        other => other.to_string().into_bytes(),
+    }
+}
 
 /// Read a .magi source file, stripping BOM and validating the contents.
 /// Prints an error message and exits with code 1 on failure.
