@@ -1,8 +1,0 @@
-Test 1: Empty braces {}
-Test 2: Single expression without semicolon: 5  
-Test 3: Consecutive plus operators: 1 + + 2
-Test 4: Trailing commas: foo(1,2,3,)
-Test 5: Map with one entry: {"key": value}
-Test 6: Nested lambdas: |x| |y| x + y
-Test 7: Unclosed parenthesis: foo(1
-Test 8: EOF after expression: if true { 
