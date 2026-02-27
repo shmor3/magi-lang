@@ -23,6 +23,11 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 tungstenite = "0.26"
 regex = "1"
+sha2 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+crc32fast = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 wasmparser = "0.245"
