@@ -6764,3 +6764,261 @@ show(Color::Red)
     assert!(!codes.contains(&"W203".to_string()),
         "Or-pattern with all enum variants covered should not warn W203, got {:?}", codes);
 }
+
+// Round 54 — untested method coverage
+
+#[test]
+fn test_string_to_float() {
+    assert_eq!(run(r#""3.14".to_float()"#), DataType::Float64(3.14));
+    assert_eq!(run(r#""not_a_number".to_float()"#), DataType::Null);
+    assert_eq!(run(r#""".to_float()"#), DataType::Null);
+}
+
+#[test]
+fn test_string_to_uppercase() {
+    assert_eq!(
+        run(r#""hello".to_uppercase()"#),
+        DataType::String("HELLO".to_string())
+    );
+}
+
+#[test]
+fn test_string_trim_start() {
+    assert_eq!(
+        run(r#""  hello  ".trim_start()"#),
+        DataType::String("hello  ".to_string())
+    );
+}
+
+#[test]
+fn test_string_trim_end() {
+    assert_eq!(
+        run(r#""  hello  ".trim_end()"#),
+        DataType::String("  hello".to_string())
+    );
+}
+
+#[test]
+fn test_string_slice_method() {
+    assert_eq!(
+        run(r#""hello world".slice(6, 11)"#),
+        DataType::String("world".to_string())
+    );
+}
+
+#[test]
+fn test_string_slice_method_negative() {
+    assert_eq!(
+        run(r#""hello".slice(-3, -1)"#),
+        DataType::String("ll".to_string())
+    );
+}
+
+#[test]
+fn test_float64_tan() {
+    match run(r#"1.0.tan()"#) {
+        DataType::Float64(v) => assert!((v - 1.5574077246549023).abs() < 1e-10),
+        other => panic!("expected Float64, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_array_each() {
+    // each() returns null but executes side effects
+    assert_eq!(run(r#"[1, 2, 3].each(|x| x * 2)"#), DataType::Null);
+}
+
+#[test]
+fn test_array_group_by() {
+    let result = run(r#"
+let items = [1, 2, 3, 4, 5, 6]
+items.group_by(|x| if x % 2 == 0 { "even" } else { "odd" })
+"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 2);
+            assert_eq!(
+                m.get("even"),
+                Some(&DataType::Array(vec![DataType::Int64(2), DataType::Int64(4), DataType::Int64(6)]))
+            );
+            assert_eq!(
+                m.get("odd"),
+                Some(&DataType::Array(vec![DataType::Int64(1), DataType::Int64(3), DataType::Int64(5)]))
+            );
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_map_filter_entries() {
+    let result = run(r#"
+let m = {"a": 1, "b": 2, "c": 3}
+m.filter_entries(|k, v| v > 1)
+"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 2);
+            assert_eq!(m.get("b"), Some(&DataType::Int64(2)));
+            assert_eq!(m.get("c"), Some(&DataType::Int64(3)));
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_map_map_values() {
+    let result = run(r#"
+let m = {"a": 1, "b": 2}
+m.map_values(|v| v * 10)
+"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a"), Some(&DataType::Int64(10)));
+            assert_eq!(m.get("b"), Some(&DataType::Int64(20)));
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_map_map_keys() {
+    let result = run(r#"
+let m = {"a": 1, "b": 2}
+m.map_keys(|k| k + "!")
+"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a!"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("b!"), Some(&DataType::Int64(2)));
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_string_is_numeric() {
+    assert_eq!(run(r#""123".is_numeric()"#), DataType::Bool(true));
+    assert_eq!(run(r#""12.5".is_numeric()"#), DataType::Bool(true));
+    assert_eq!(run(r#""abc".is_numeric()"#), DataType::Bool(false));
+    assert_eq!(run(r#""".is_numeric()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_string_is_alphabetic() {
+    assert_eq!(run(r#""hello".is_alphabetic()"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello123".is_alphabetic()"#), DataType::Bool(false));
+    assert_eq!(run(r#""".is_alphabetic()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_array_min_by_max_by() {
+    assert_eq!(
+        run(r#"
+let items = ["cat", "elephant", "dog"]
+items.min_by(|a, b| a.len() - b.len())
+"#),
+        DataType::String("cat".to_string())
+    );
+    assert_eq!(
+        run(r#"
+let items = ["cat", "elephant", "dog"]
+items.max_by(|a, b| a.len() - b.len())
+"#),
+        DataType::String("elephant".to_string())
+    );
+}
+
+#[test]
+fn test_array_flat_map() {
+    assert_eq!(
+        run(r#"[1, 2, 3].flat_map(|x| [x, x * 10])"#),
+        DataType::Array(vec![
+            DataType::Int64(1), DataType::Int64(10),
+            DataType::Int64(2), DataType::Int64(20),
+            DataType::Int64(3), DataType::Int64(30),
+        ])
+    );
+}
+
+#[test]
+fn test_array_sort_by() {
+    assert_eq!(
+        run(r#"[3, 1, 2].sort_by(|a, b| a - b)"#),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)])
+    );
+}
+
+#[test]
+fn test_array_enumerate() {
+    let result = run(r#"["a", "b", "c"].enumerate()"#);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 3);
+            // Each element should be [index, value]
+            match &arr[0] {
+                DataType::Array(inner) => {
+                    assert_eq!(inner[0], DataType::Int64(0));
+                    assert_eq!(inner[1], DataType::String("a".to_string()));
+                }
+                _ => panic!("expected inner array"),
+            }
+        }
+        _ => panic!("expected Array, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_array_sum_product() {
+    assert_eq!(run(r#"[1, 2, 3, 4].sum()"#), DataType::Int64(10));
+    assert_eq!(run(r#"[1, 2, 3, 4].product()"#), DataType::Int64(24));
+    assert_eq!(run(r#"[].sum()"#), DataType::Int64(0));
+    assert_eq!(run(r#"[].product()"#), DataType::Int64(1));
+}
+
+#[test]
+fn test_array_min_max() {
+    assert_eq!(run(r#"[3, 1, 4, 1, 5].min()"#), DataType::Int64(1));
+    assert_eq!(run(r#"[3, 1, 4, 1, 5].max()"#), DataType::Int64(5));
+    assert_eq!(run(r#"[].min()"#), DataType::Null);
+    assert_eq!(run(r#"[].max()"#), DataType::Null);
+}
+
+#[test]
+fn test_string_is_empty() {
+    assert_eq!(run(r#""".is_empty()"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello".is_empty()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_array_is_empty() {
+    assert_eq!(run(r#"[].is_empty()"#), DataType::Bool(true));
+    assert_eq!(run(r#"[1].is_empty()"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_number_clamp() {
+    assert_eq!(run(r#"15.clamp(0, 10)"#), DataType::Int64(10));
+    assert_eq!(run(r#"(-5).clamp(0, 10)"#), DataType::Int64(0));
+    assert_eq!(run(r#"5.clamp(0, 10)"#), DataType::Int64(5));
+}
+
+#[test]
+fn test_number_pow() {
+    assert_eq!(run(r#"2.pow(10)"#), DataType::Int64(1024));
+    assert_eq!(run(r#"2.pow(0)"#), DataType::Int64(1));
+}
+
+#[test]
+fn test_string_count_method() {
+    assert_eq!(run(r#""hello world".count("l")"#), DataType::Int64(3));
+    assert_eq!(run(r#""hello".count("z")"#), DataType::Int64(0));
+}
+
+#[test]
+fn test_string_starts_ends_with() {
+    assert_eq!(run(r#""hello".starts_with("hel")"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello".starts_with("world")"#), DataType::Bool(false));
+    assert_eq!(run(r#""hello".ends_with("llo")"#), DataType::Bool(true));
+    assert_eq!(run(r#""hello".ends_with("world")"#), DataType::Bool(false));
+}
