@@ -2961,12 +2961,12 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
         },
         ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => match method {
             "abs" | "sign" | "to_string" | "to_float64" | "to_int64" | "pow" | "min"
-            | "max" | "clamp" => Some("numeric_method".into()),
+            | "max" | "clamp" | "to_int32" | "to_uint32" | "to_uint64" => Some("numeric_method".into()),
             _ => None,
         },
         ChannelType::Float64 | ChannelType::Float32 => match method {
             "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
-            | "to_int64" | "to_float64" | "pow" | "min" | "max" | "clamp" | "is_nan"
+            | "to_int64" | "to_float64" | "to_float32" | "pow" | "min" | "max" | "clamp" | "is_nan"
             | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
             | "tan" => Some("numeric_method".into()),
             _ => None,

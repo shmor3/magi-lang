@@ -10,7 +10,7 @@ fn span_to_lsp_range(source: &str, line: u32, col: u32, name_char_len: usize) ->
     let char_col = col.saturating_sub(1);
     let line_text = source.lines().nth(lsp_line as usize).unwrap_or("");
     let start_utf16 = char_col_to_utf16(line_text, char_col);
-    let end_utf16 = char_col_to_utf16(line_text, char_col + name_char_len as u32);
+    let end_utf16 = char_col_to_utf16(line_text, char_col.saturating_add(name_char_len as u32));
     Range {
         start: Position { line: lsp_line, character: start_utf16 },
         end: Position { line: lsp_line, character: end_utf16 },

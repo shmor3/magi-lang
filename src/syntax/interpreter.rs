@@ -1666,6 +1666,7 @@ impl<'a> Interpreter<'a> {
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
                 "sign" => Ok(Some(DataType::Float32(n.signum()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_float32" => Ok(Some(DataType::Float32(*n))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => {
                     let v = *n as f64;
@@ -1722,6 +1723,7 @@ impl<'a> Interpreter<'a> {
                 })),
                 "sign" => Ok(Some(DataType::Int32(n.signum()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_int32" => Ok(Some(DataType::Int32(*n))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
                 "pow" => {
@@ -1769,6 +1771,7 @@ impl<'a> Interpreter<'a> {
             },
             DataType::Uint32(n) => match method {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_uint32" => Ok(Some(DataType::Uint32(*n))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
                 "abs" => Ok(Some(DataType::Uint32(*n))),
@@ -1810,6 +1813,7 @@ impl<'a> Interpreter<'a> {
             },
             DataType::Uint64(n) => match method {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_uint64" => Ok(Some(DataType::Uint64(*n))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => {
                     if *n > i64::MAX as u64 {
@@ -4738,11 +4742,11 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
                 "words", "count"]);
         }
         DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => {
-            methods.extend_from_slice(&["abs", "sign", "to_float64", "pow", "min", "max", "clamp"]);
+            methods.extend_from_slice(&["abs", "sign", "to_float64", "to_int32", "to_uint32", "to_uint64", "pow", "min", "max", "clamp"]);
         }
         DataType::Float64(_) | DataType::Float32(_) => {
             methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
-                "sign", "to_int64", "pow", "min", "max", "clamp",
+                "sign", "to_int64", "to_float32", "pow", "min", "max", "clamp",
                 "ln", "log2", "log10", "sin", "cos", "tan"]);
         }
         DataType::Map(_) => {
@@ -5266,5 +5270,45 @@ mod tests {
         let span = Span::new(1, 1, 1, 1);
         let result = interp.try_eval_direct_method(&obj, "sign", &args, span).unwrap();
         assert_eq!(result, Some(DataType::Uint64(0)));
+    }
+
+    #[test]
+    fn test_float32_to_float32_identity() {
+        let mut interp = make_interp();
+        let obj = DataType::Float32(3.14);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "to_float32", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Float32(3.14)));
+    }
+
+    #[test]
+    fn test_int32_to_int32_identity() {
+        let mut interp = make_interp();
+        let obj = DataType::Int32(42);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "to_int32", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Int32(42)));
+    }
+
+    #[test]
+    fn test_uint32_to_uint32_identity() {
+        let mut interp = make_interp();
+        let obj = DataType::Uint32(99);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "to_uint32", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Uint32(99)));
+    }
+
+    #[test]
+    fn test_uint64_to_uint64_identity() {
+        let mut interp = make_interp();
+        let obj = DataType::Uint64(12345);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "to_uint64", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Uint64(12345)));
     }
 }

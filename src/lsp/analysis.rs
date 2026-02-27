@@ -131,7 +131,12 @@ fn find_name_col(source: &str, line: u32, name: &str) -> Option<u32> {
             let char_col = line_text[..abs_offset].chars().count() as u32;
             return Some(char_col + 1);
         }
-        start = abs_offset + 1;
+        // Advance past current match start, ensuring we land on a UTF-8 char boundary
+        start = abs_offset + name_bytes.len().max(1);
+        // Ensure we're on a char boundary
+        while start < line_text.len() && !line_text.is_char_boundary(start) {
+            start += 1;
+        }
     }
     // Fallback to substring match if no word-boundary match found
     let byte_offset = line_text.find(name)?;
@@ -562,5 +567,23 @@ mod tests {
     #[test]
     fn test_utf16_to_char_col_ascii() {
         assert_eq!(utf16_to_char_col("hello", 3), 3);
+    }
+
+    #[test]
+    fn test_find_name_col_utf8_no_panic() {
+        // Source with multi-byte characters before an identifier
+        let source = "let αβγ = 1;\nlet foo = αβγ;";
+        // "foo" is on line 2
+        let result = find_name_col(source, 2, "foo");
+        assert!(result.is_some(), "Should find 'foo' on line 2");
+        assert_eq!(result.unwrap(), 5); // "let " = 4 chars + 1
+    }
+
+    #[test]
+    fn test_find_name_col_repeated_substring_utf8() {
+        // Ensure we don't panic when skipping past multi-byte chars
+        let source = "let café_x = 1; let café_y = 2;";
+        let result = find_name_col(source, 1, "café_y");
+        assert!(result.is_some(), "Should find 'café_y'");
     }
 }
