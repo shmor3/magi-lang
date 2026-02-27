@@ -8245,3 +8245,52 @@ fn test_int64_clamp_method() {
     assert_eq!(run("output (-5).clamp(0, 10);"), DataType::Int64(0));
     assert_eq!(run("output (5).clamp(0, 10);"), DataType::Int64(5));
 }
+
+// Round 81: type checker sort/reverse return Array (not Null)
+#[test]
+fn test_type_checker_sort_no_false_positive() {
+    // sort() returns Array — should not warn about method on Null
+    let src = r#"
+        let arr = [3, 1, 2];
+        let sorted = arr.sort();
+        output sorted.len();
+    "#;
+    let program = magi_lang::syntax::parser::parse_v2(src).unwrap();
+    let analysis = magi_lang::syntax::type_checker::check_types(&program, &std::collections::HashSet::new());
+    let w110_warnings: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("E201"))
+        .collect();
+    assert!(w110_warnings.is_empty(), "sort() should return Array, not Null: {:?}", w110_warnings);
+}
+
+#[test]
+fn test_type_checker_is_empty_no_false_positive() {
+    // array.is_empty() returns Bool, not Null
+    let src = r#"
+        let arr = [1, 2, 3];
+        if arr.is_empty() {
+            output 0;
+        }
+        output 1;
+    "#;
+    let program = magi_lang::syntax::parser::parse_v2(src).unwrap();
+    let analysis = magi_lang::syntax::type_checker::check_types(&program, &std::collections::HashSet::new());
+    // Should not have E101 about condition being non-bool
+    let e101_warnings: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("E101"))
+        .collect();
+    assert!(e101_warnings.is_empty(), "is_empty() should return Bool: {:?}", e101_warnings);
+}
+
+// Round 81: f-string leftover token detection
+#[test]
+fn test_fstring_leftover_tokens_error() {
+    let result = magi_lang::syntax::parser::parse_v2(r#"output f"value is {x y z}";"#);
+    assert!(result.is_err(), "f-string with leftover tokens should fail to parse");
+}
+
+#[test]
+fn test_fstring_valid_expression_ok() {
+    let result = magi_lang::syntax::parser::parse_v2(r#"output f"value is {x + 1}";"#);
+    assert!(result.is_ok(), "f-string with valid expression should parse: {:?}", result.err());
+}

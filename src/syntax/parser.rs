@@ -2258,6 +2258,13 @@ impl Parser {
                     column: tok.span.start_col as usize,
                     message: format!("Error in f-string expression: {}", e.message),
                 })?;
+                if !inner_parser.at(&TokenKind::Eof) {
+                    return Err(SyntaxError {
+                        line: tok.span.start_line as usize,
+                        column: tok.span.start_col as usize,
+                        message: format!("Unexpected token in f-string interpolation: '{}'", inner_parser.peek().text),
+                    });
+                }
                 parts.push(StringPart::Expr(expr));
             } else {
                 current_lit.push(ch);

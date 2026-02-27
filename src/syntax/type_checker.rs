@@ -1754,6 +1754,17 @@ impl TypeChecker {
                         "map_hof" => ChannelType::Map,
                         "base64_encode" => ChannelType::String,
                         "base64_decode" => ChannelType::Bytes,
+                        "array_direct" => match method.as_str() {
+                            "is_empty" => ChannelType::Bool,
+                            "join" => ChannelType::String,
+                            _ => ChannelType::Null, // first, last, min, max, sum, product — element type unknown
+                        },
+                        "string_char_at" => ChannelType::String,
+                        "string_convert" => match method.as_str() {
+                            "to_int" => ChannelType::Int64,
+                            "to_float" => ChannelType::Float64,
+                            _ => ChannelType::Null,
+                        },
                         _ => ChannelType::Null,
                     };
                 }
@@ -2918,8 +2929,8 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "map" => Some("array_map".into()),
             "filter" => Some("array_filter".into()),
             "reduce" => Some("reduce".into()),
-            "sort" => Some("sort".into()),
-            "reverse" => Some("reverse".into()),
+            "sort" => Some("array_sort".into()),
+            "reverse" => Some("array_reverse".into()),
             "contains" => Some("array_contains".into()),
             "find" => Some("array_find".into()),
             "find_index" => Some("array_find_index".into()),
@@ -2991,9 +3002,24 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "base64_decode" => Some("base64_decode".into()),
             _ => None,
         },
-        ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => match method {
+        ChannelType::Int64 => match method {
             "abs" | "sign" | "to_string" | "to_float64" | "to_int64" | "pow" | "min"
-            | "max" | "clamp" | "to_int32" | "to_uint32" | "to_uint64" => Some("numeric_method".into()),
+            | "max" | "clamp" => Some("numeric_method".into()),
+            _ => None,
+        },
+        ChannelType::Int32 => match method {
+            "abs" | "sign" | "to_string" | "to_float64" | "to_int64" | "to_int32" | "pow" | "min"
+            | "max" | "clamp" => Some("numeric_method".into()),
+            _ => None,
+        },
+        ChannelType::Uint32 => match method {
+            "abs" | "sign" | "to_string" | "to_float64" | "to_int64" | "to_uint32" | "pow" | "min"
+            | "max" | "clamp" => Some("numeric_method".into()),
+            _ => None,
+        },
+        ChannelType::Uint64 => match method {
+            "abs" | "sign" | "to_string" | "to_float64" | "to_int64" | "to_uint64" | "pow" | "min"
+            | "max" | "clamp" => Some("numeric_method".into()),
             _ => None,
         },
         ChannelType::Float64 => match method {
