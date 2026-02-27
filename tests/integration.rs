@@ -3928,7 +3928,7 @@ fn test_pad_start_excessive_width_errors() {
     let err = run_err(r#"
 "x".pad_start(99999999999)
 "#);
-    assert!(matches!(err, InterpError::TypeError { .. }));
+    assert!(matches!(err, InterpError::ResourceLimit { .. }));
 }
 
 // ── Round 25: catch values, error display, type checker fixes ──
@@ -6308,4 +6308,130 @@ fn test_typeof_null() {
     let src = r#"typeof(null)"#;
     let result = run(src);
     assert_eq!(result, DataType::String("null".to_string()));
+}
+
+// ── Round 51: type checker, interpreter, error code fixes ──
+
+#[test]
+fn test_resource_limit_error_type_pad_end() {
+    // Resource limits should produce ResourceLimit, not TypeError
+    let err = run_err(r#""x".pad_end(99999999999)"#);
+    assert!(matches!(err, InterpError::ResourceLimit { .. }));
+}
+
+#[test]
+fn test_resource_limit_error_type_repeat() {
+    let err = run_err(r#""abc".repeat(99999999)"#);
+    assert!(matches!(err, InterpError::ResourceLimit { .. }));
+}
+
+#[test]
+fn test_w112_default_param_type_mismatch() {
+    let codes = typecheck_warnings(r#"fn foo(x: int64 = "hello") { output x; }"#);
+    assert!(codes.contains(&"W112".to_string()), "expected W112, got {:?}", codes);
+}
+
+#[test]
+fn test_w106_stays_for_redundant_ops() {
+    // W106 should still be used for self-comparison and double negation
+    let codes = typecheck_warnings(r#"
+let x = 5
+let _y = x == x
+"#);
+    assert!(codes.contains(&"W106".to_string()), "expected W106, got {:?}", codes);
+}
+
+#[test]
+fn test_w106_stays_for_double_negation() {
+    let codes = typecheck_warnings(r#"
+let x = 5
+let _y = --x
+"#);
+    assert!(codes.contains(&"W106".to_string()), "expected W106, got {:?}", codes);
+}
+
+#[test]
+fn test_bool_match_exhaustive_no_warning() {
+    // Matching both true and false should not warn about non-exhaustiveness
+    let codes = typecheck_warnings(r#"
+let x = true
+let _y = match x {
+    true => 1,
+    false => 0,
+}
+"#);
+    assert!(!codes.contains(&"W203".to_string()), "should not warn W203, got {:?}", codes);
+}
+
+#[test]
+fn test_bool_match_non_exhaustive_warns() {
+    // Matching only true should warn
+    let codes = typecheck_warnings(r#"
+let x = true
+let _y = match x {
+    true => 1,
+}
+"#);
+    assert!(codes.contains(&"W203".to_string()), "expected W203, got {:?}", codes);
+}
+
+#[test]
+fn test_while_true_with_break_no_w105() {
+    // while true { break; } should NOT warn W105
+    let codes = typecheck_warnings(r#"
+while true {
+    break;
+}
+"#);
+    assert!(!codes.contains(&"W105".to_string()), "should not warn W105, got {:?}", codes);
+}
+
+#[test]
+fn test_while_true_with_break_in_if_no_w105() {
+    // while true { if cond { break; } } should NOT warn W105
+    let codes = typecheck_warnings(r#"
+let mut i = 0
+while true {
+    i = i + 1
+    if i > 5 { break; }
+}
+"#);
+    assert!(!codes.contains(&"W105".to_string()), "should not warn W105, got {:?}", codes);
+}
+
+#[test]
+fn test_while_true_without_break_warns_w105() {
+    let codes = typecheck_warnings(r#"
+while true {
+    output 1;
+}
+"#);
+    assert!(codes.contains(&"W105".to_string()), "expected W105, got {:?}", codes);
+}
+
+#[test]
+fn test_method_call_on_array_first() {
+    let result = run(r#"[1, 2, 3].first()"#);
+    assert_eq!(result, DataType::Int64(1));
+}
+
+#[test]
+fn test_to_json_method_on_map() {
+    // to_json should work on maps (previously broken by resolve_method shadowing)
+    let result = run(r#"{"a": 1}.to_json()"#);
+    assert!(matches!(result, DataType::String(_)));
+}
+
+#[test]
+fn test_typeof_method_on_value() {
+    let result = run(r#"42.typeof()"#);
+    assert_eq!(result, DataType::String("int64".to_string()));
+}
+
+#[test]
+fn test_int_abs_and_sign() {
+    assert_eq!(run(r#"(-5).abs()"#), DataType::Int64(5));
+    assert_eq!(run(r#"(-5).sign()"#), DataType::Int64(-1));
+    assert_eq!(run(r#"(0).sign()"#), DataType::Int64(0));
+    assert_eq!(run(r#"(5).sign()"#), DataType::Int64(1));
 }

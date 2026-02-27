@@ -102,6 +102,10 @@ pub enum ErrorCode {
     W109,
     /// Unnecessary `let mut` — variable is never reassigned
     W110,
+    /// Reserved keyword used as identifier
+    W111,
+    /// Default parameter type mismatch
+    W112,
 
     // Lint warnings (W2xx)
     /// Naming convention: functions/variables should be snake_case
@@ -165,6 +169,8 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W108 => "W108",
             ErrorCode::W109 => "W109",
             ErrorCode::W110 => "W110",
+            ErrorCode::W111 => "W111",
+            ErrorCode::W112 => "W112",
             ErrorCode::W200 => "W200",
             ErrorCode::W201 => "W201",
             ErrorCode::W202 => "W202",
@@ -230,6 +236,8 @@ impl ErrorCode {
             ErrorCode::W108 => "The `return` keyword is unnecessary in tail position. The last expression in a block is already the return value.",
             ErrorCode::W109 => "This function parameter is never used. Prefix it with `_` to suppress this warning, or remove it.",
             ErrorCode::W110 => "This variable is declared as `let mut` but is never reassigned. Use `let` instead.",
+            ErrorCode::W111 => "This name is a reserved keyword in MAGI. Using it as an identifier may cause issues in future versions.",
+            ErrorCode::W112 => "The default value type does not match the parameter's type annotation. This may cause unexpected behavior.",
 
             // Lint warnings
             ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",

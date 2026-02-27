@@ -683,9 +683,9 @@ impl<'a> Formatter<'a> {
                     match part {
                         StringPart::Literal(s) => {
                             // Escape special characters in the literal.
-                            // Braces must be doubled so they round-trip through the parser.
+                            // Braces must use \{ and \} to round-trip through the parser.
                             let escaped = escape_string_contents(s);
-                            let escaped = escaped.replace('{', "{{").replace('}', "}}");
+                            let escaped = escaped.replace('{', "\\{").replace('}', "\\}");
                             self.write(&escaped);
                         }
                         StringPart::Expr(e) => {

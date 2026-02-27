@@ -235,7 +235,7 @@ impl TypeChecker {
                 col,
                 format!("'{}' is a reserved keyword", name),
                 DiagnosticSeverity::Warning,
-                super::errors::ErrorCode::E200,
+                super::errors::ErrorCode::W111,
                 None,
             );
         }
@@ -524,11 +524,11 @@ impl TypeChecker {
                     );
                 }
 
-                // W105: Infinite while loop (literal true condition).
+                // W105: Infinite while loop (literal true condition, no break in body).
                 if matches!(
                     &condition.kind,
                     ExpressionKind::Literal(Literal::Bool(true))
-                ) {
+                ) && !block_contains_break(body) {
                     self.emit_coded(
                         condition.span.start_line,
                         condition.span.start_col,
@@ -600,7 +600,7 @@ impl TypeChecker {
                             && default_type != ChannelType::Null
                             && !default_type.is_compatible_with(&ct)
                         {
-                            let code = super::errors::ErrorCode::W106;
+                            let code = super::errors::ErrorCode::W112;
                             self.diagnostics.push(AstDiagnostic {
                                 line: default_expr.span.start_line,
                                 column: default_expr.span.start_col,
@@ -1027,6 +1027,32 @@ impl TypeChecker {
         false
     }
 
+    /// Check if match arms exhaustively cover boolean values (true and false).
+    fn check_bool_exhaustive(&self, arms: &[crate::syntax::ast::MatchArm]) -> bool {
+        let mut has_true = false;
+        let mut has_false = false;
+        for arm in arms {
+            if arm.guard.is_some() {
+                continue;
+            }
+            match &arm.pattern {
+                Pattern::Literal(Literal::Bool(true)) => has_true = true,
+                Pattern::Literal(Literal::Bool(false)) => has_false = true,
+                Pattern::Or(alternatives) => {
+                    for alt in alternatives {
+                        match alt {
+                            Pattern::Literal(Literal::Bool(true)) => has_true = true,
+                            Pattern::Literal(Literal::Bool(false)) => has_false = true,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        has_true && has_false
+    }
+
     // Block
     // =========================================================================
 
@@ -1425,11 +1451,12 @@ impl TypeChecker {
                 if obj_ty != ChannelType::Array
                     && obj_ty != ChannelType::Null
                     && obj_ty != ChannelType::Map
+                    && obj_ty != ChannelType::String
                 {
                     self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
-                        format!("Indexing requires array or map, got {}", obj_ty.as_str()),
+                        format!("Indexing requires array, map, or string, got {}", obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E100,
                         None,
@@ -1491,6 +1518,7 @@ impl TypeChecker {
                 let obj_ty = self.infer_expr(object);
                 if obj_ty != ChannelType::Map
                     && obj_ty != ChannelType::String
+                    && obj_ty != ChannelType::Array
                     && obj_ty != ChannelType::Null
                 {
                     self.emit_coded(
@@ -1658,7 +1686,7 @@ impl TypeChecker {
                             && default_type != ChannelType::Null
                             && !default_type.is_compatible_with(&ct)
                         {
-                            let code = super::errors::ErrorCode::W106;
+                            let code = super::errors::ErrorCode::W112;
                             self.diagnostics.push(AstDiagnostic {
                                 line: default_expr.span.start_line,
                                 column: default_expr.span.start_col,
@@ -1727,7 +1755,9 @@ impl TypeChecker {
                 if !has_catchall {
                     // Check if all enum variants are covered
                     let enum_exhaustive = self.check_enum_exhaustive(arms);
-                    if !enum_exhaustive {
+                    // Check if boolean true/false are both covered
+                    let bool_exhaustive = self.check_bool_exhaustive(arms);
+                    if !enum_exhaustive && !bool_exhaustive {
                         self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
@@ -2639,6 +2669,47 @@ fn as_variable(expr: &Expression) -> Option<&str> {
 /// Check if a block is empty (no statements and no tail expression).
 fn is_empty_block(block: &Block) -> bool {
     block.statements.is_empty() && block.tail_expr.is_none()
+}
+
+/// Check if a block contains a break statement (shallow — does not recurse into nested loops).
+fn block_contains_break(block: &Block) -> bool {
+    for stmt in &block.statements {
+        match &stmt.kind {
+            StatementKind::Break(_) => return true,
+            StatementKind::TryCatch { try_block, catch_block, .. } => {
+                if block_contains_break(try_block) { return true; }
+                if block_contains_break(catch_block) { return true; }
+            }
+            // Don't recurse into nested loops — their breaks are for the inner loop.
+            StatementKind::ForLoop { .. } | StatementKind::WhileLoop { .. } => {}
+            StatementKind::ExprStatement(expr) => {
+                if expr_contains_break(expr) { return true; }
+            }
+            _ => {}
+        }
+    }
+    // Also check tail expression
+    if let Some(tail) = &block.tail_expr {
+        if expr_contains_break(tail) { return true; }
+    }
+    false
+}
+
+/// Check if an expression contains a break statement (for if-else blocks, etc.).
+fn expr_contains_break(expr: &Expression) -> bool {
+    match &expr.kind {
+        ExpressionKind::IfElse { then_block, else_block, .. } => {
+            if block_contains_break(then_block) { return true; }
+            if let Some(eb) = else_block {
+                if block_contains_break(eb) { return true; }
+            }
+            false
+        }
+        ExpressionKind::Block(block) => block_contains_break(block),
+        // Don't recurse into loop expressions — their breaks are for the inner loop.
+        ExpressionKind::Loop(_) => false,
+        _ => false,
+    }
 }
 
 /// Resolve a method name on a given type to an OperationType name.

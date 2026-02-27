@@ -1759,6 +1759,8 @@ impl<'a> Interpreter<'a> {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "abs" => Ok(Some(DataType::Uint32(*n))),
+                "sign" => Ok(Some(DataType::Int64(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
@@ -1797,7 +1799,15 @@ impl<'a> Interpreter<'a> {
             DataType::Uint64(n) => match method {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
-                "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "to_int64" => {
+                    if *n > i64::MAX as u64 {
+                        Ok(Some(DataType::Null))
+                    } else {
+                        Ok(Some(DataType::Int64(*n as i64)))
+                    }
+                }
+                "abs" => Ok(Some(DataType::Uint64(*n))),
+                "sign" => Ok(Some(DataType::Int64(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
@@ -1849,14 +1859,14 @@ impl<'a> Interpreter<'a> {
                 "reverse" => Ok(Some(DataType::String(s.chars().rev().collect()))),
                 "chars" => {
                     if s.chars().count() > MAX_ARRAY_ELEMENTS {
-                        return Err(InterpError::TypeError { expected: format!("string at most {} chars for chars()", MAX_ARRAY_ELEMENTS), actual: format!("{}", s.chars().count()), context: "string chars".to_string(), span });
+                        return Err(InterpError::ResourceLimit { limit: format!("{} chars", MAX_ARRAY_ELEMENTS), actual: format!("{}", s.chars().count()), context: "string chars".to_string(), span });
                     }
                     Ok(Some(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect())))
                 }
                 "lines" => {
-                    let lines: Vec<DataType> = s.lines().map(|l| DataType::String(l.to_string())).collect();
+                    let lines: Vec<DataType> = s.lines().take(MAX_ARRAY_ELEMENTS + 1).map(|l| DataType::String(l.to_string())).collect();
                     if lines.len() > MAX_ARRAY_ELEMENTS {
-                        return Err(InterpError::TypeError { expected: format!("string at most {} lines for lines()", MAX_ARRAY_ELEMENTS), actual: format!("{}", lines.len()), context: "string lines".to_string(), span });
+                        return Err(InterpError::ResourceLimit { limit: format!("{} lines", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "string lines".to_string(), span });
                     }
                     Ok(Some(DataType::Array(lines)))
                 }
@@ -1873,7 +1883,7 @@ impl<'a> Interpreter<'a> {
                     }
                     let parts: Vec<DataType> = s.split(&sep).take(MAX_ARRAY_ELEMENTS + 1).map(|p| DataType::String(p.to_string())).collect();
                     if parts.len() > MAX_ARRAY_ELEMENTS {
-                        return Err(InterpError::TypeError { expected: format!("split result at most {} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "string split".to_string(), span });
+                        return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "string split".to_string(), span });
                     }
                     Ok(Some(DataType::Array(parts)))
                 }
@@ -1885,13 +1895,13 @@ impl<'a> Interpreter<'a> {
                         // Rust's replace("", x) inserts x between every char and at both ends
                         let result_len = s.len().saturating_add((s.chars().count() + 1).saturating_mul(to.len()));
                         if result_len > MAX_STRING_OUTPUT {
-                            return Err(InterpError::TypeError { expected: format!("replace result at most {} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result_len), context: "string replace".to_string(), span });
+                            return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result_len), context: "string replace".to_string(), span });
                         }
                     } else if to.len() > from.len() {
                         let match_count = s.matches(&from).count();
                         let growth = match_count.saturating_mul(to.len().saturating_sub(from.len()));
                         if s.len().saturating_add(growth) > MAX_STRING_OUTPUT {
-                            return Err(InterpError::TypeError { expected: format!("replace result at most {} bytes", MAX_STRING_OUTPUT), actual: format!("{}", s.len().saturating_add(growth)), context: "string replace".to_string(), span });
+                            return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", s.len().saturating_add(growth)), context: "string replace".to_string(), span });
                         }
                     }
                     Ok(Some(DataType::String(s.replace(&from, &to))))
@@ -1924,8 +1934,8 @@ impl<'a> Interpreter<'a> {
                     let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_REPEAT_LEN: usize = 10_000_000;
                     if n > 0 && s.len().saturating_mul(n) > MAX_REPEAT_LEN {
-                        return Err(InterpError::TypeError {
-                            expected: format!("repeat count producing at most {} chars", MAX_REPEAT_LEN),
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{} chars", MAX_REPEAT_LEN),
                             actual: format!("{} * {} = {}", s.len(), n, s.len().saturating_mul(n)),
                             context: "string repeat".to_string(),
                             span,
@@ -1947,10 +1957,10 @@ impl<'a> Interpreter<'a> {
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
-                        return Err(InterpError::TypeError {
-                            expected: format!("pad width at most {}", MAX_PAD_WIDTH),
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{}", MAX_PAD_WIDTH),
                             actual: format!("{}", width),
-                            context: "pad_start".to_string(),
+                            context: "pad_start width".to_string(),
                             span,
                         });
                     }
@@ -1964,10 +1974,10 @@ impl<'a> Interpreter<'a> {
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
-                        return Err(InterpError::TypeError {
-                            expected: format!("pad width at most {}", MAX_PAD_WIDTH),
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{}", MAX_PAD_WIDTH),
                             actual: format!("{}", width),
-                            context: "pad_end".to_string(),
+                            context: "pad_end width".to_string(),
                             span,
                         });
                     }
@@ -2118,7 +2128,7 @@ impl<'a> Interpreter<'a> {
                     let parts: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
                     let estimated_len: usize = parts.iter().map(|p| p.len()).sum::<usize>() + separator.len().saturating_mul(parts.len().saturating_sub(1));
                     if estimated_len > MAX_STRING_OUTPUT {
-                        return Err(InterpError::TypeError { expected: format!("join result at most {} bytes", MAX_STRING_OUTPUT), actual: format!("{}", estimated_len), context: "array join".to_string(), span });
+                        return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", estimated_len), context: "array join".to_string(), span });
                     }
                     Ok(Some(DataType::String(parts.join(&separator))))
                 }
@@ -3883,6 +3893,7 @@ impl<'a> Interpreter<'a> {
                     | InterpError::ContinueOutsideLoop { span }
                     | InterpError::ReturnOutsideFunction { span }
                     | InterpError::NotImplemented { span, .. }
+                    | InterpError::ResourceLimit { span, .. }
                     | InterpError::ThrownError { span, .. }
                     | InterpError::InvalidPlaceholder { span }
                     | InterpError::InvalidPipeStage { span } => (span.start_line, span.start_col),
@@ -4658,8 +4669,6 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
             // Evaluator methods
             methods.extend_from_slice(&["split", "contains", "replace", "starts_with", "ends_with",
                 "words", "count"]);
-            // HOF methods
-            methods.extend_from_slice(&["map", "filter", "reduce"]);
         }
         DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => {
             methods.extend_from_slice(&["abs", "sign", "to_float64", "pow", "min", "max", "clamp"]);
@@ -4681,6 +4690,8 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
         }
         _ => {}
     }
+    // Generic methods available on all types
+    methods.extend_from_slice(&["to_string", "to_int64", "to_float64", "to_bool", "to_json", "typeof"]);
     methods
 }
 
@@ -4928,6 +4939,13 @@ pub enum InterpError {
     ReturnOutsideFunction {
         span: Span,
     },
+    /// Resource limit exceeded (string too large, too many elements, etc.)
+    ResourceLimit {
+        limit: String,
+        actual: String,
+        context: String,
+        span: Span,
+    },
     /// Feature not yet implemented
     NotImplemented {
         message: String,
@@ -5046,6 +5064,9 @@ impl std::fmt::Display for InterpError {
             }
             InterpError::ReturnOutsideFunction { span } => {
                 write!(f, "{} [E302]: 'return' used outside of a function", span)
+            }
+            InterpError::ResourceLimit { limit, actual, context, span } => {
+                write!(f, "{} [E400]: Resource limit in {}: max {}, got {}", span, context, limit, actual)
             }
             InterpError::NotImplemented { message, span } => {
                 write!(f, "{} [E408]: {}", span, message)
