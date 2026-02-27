@@ -170,12 +170,14 @@ fn find_variant_range(source: &str, def_line: u32, name: &str) -> Range {
             break;
         }
         if let Some(byte_offset) = lines[line_idx].find(name) {
-            // Verify word boundary
+            // Verify word boundary (check for alphanumeric or underscore)
             let before_ok = byte_offset == 0
-                || !lines[line_idx].as_bytes()[byte_offset - 1].is_ascii_alphanumeric();
+                || !lines[line_idx].as_bytes().get(byte_offset - 1)
+                    .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
             let after_pos = byte_offset + name.len();
             let after_ok = after_pos >= lines[line_idx].len()
-                || !lines[line_idx].as_bytes()[after_pos].is_ascii_alphanumeric();
+                || !lines[line_idx].as_bytes().get(after_pos)
+                    .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
             if before_ok && after_ok {
                 let char_col = lines[line_idx][..byte_offset].chars().count() as u32;
                 let start_utf16 = char_col_to_utf16(lines[line_idx], char_col);
@@ -199,5 +201,191 @@ fn find_variant_range(source: &str, def_line: u32, name: &str) -> Range {
     Range {
         start: Position { line: lsp_line, character: 0 },
         end: Position { line: lsp_line, character: 0 },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lsp::analysis::analyze_document;
+
+    fn test_uri() -> Url {
+        Url::parse("file:///test.magi").unwrap()
+    }
+
+    #[test]
+    fn test_document_symbols_functions() {
+        let source = "fn foo() { null }\nfn bar(x: int64) -> int64 { x }";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            let fn_symbols: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::FUNCTION)
+                .collect();
+            assert_eq!(fn_symbols.len(), 2);
+            let names: Vec<&str> = fn_symbols.iter().map(|s| s.name.as_str()).collect();
+            assert!(names.contains(&"foo"));
+            assert!(names.contains(&"bar"));
+        } else {
+            panic!("expected flat symbols");
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_enum_with_variants() {
+        let source = "enum Color { Red, Green, Blue }";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            let enum_sym: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::ENUM)
+                .collect();
+            assert_eq!(enum_sym.len(), 1);
+            assert_eq!(enum_sym[0].name, "Color");
+
+            let variant_syms: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::ENUM_MEMBER)
+                .collect();
+            assert_eq!(variant_syms.len(), 3);
+            // Variants should have container_name set
+            for v in &variant_syms {
+                assert_eq!(v.container_name, Some("Color".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_struct_with_fields() {
+        let source = "struct Point { x: float64, y: float64 }";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            let struct_sym: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::STRUCT)
+                .collect();
+            assert_eq!(struct_sym.len(), 1);
+            assert_eq!(struct_sym[0].name, "Point");
+
+            let field_syms: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::FIELD)
+                .collect();
+            assert_eq!(field_syms.len(), 2);
+            for f in &field_syms {
+                assert_eq!(f.container_name, Some("Point".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_variables_and_constants() {
+        let source = "let x = 5;\nconst PI = 3.14;\nlet mut counter = 0;";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            let const_sym: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::CONSTANT)
+                .collect();
+            assert_eq!(const_sym.len(), 1);
+            assert_eq!(const_sym[0].name, "PI");
+
+            let var_syms: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::VARIABLE)
+                .collect();
+            assert!(var_syms.len() >= 2); // x and counter
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_type_alias() {
+        let source = "type MyInt = int64;";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            let type_sym: Vec<_> = symbols.iter()
+                .filter(|s| s.kind == SymbolKind::TYPE_PARAMETER)
+                .collect();
+            assert_eq!(type_sym.len(), 1);
+            assert_eq!(type_sym[0].name, "MyInt");
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_empty_document() {
+        let source = "";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            assert!(symbols.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_sorted_by_position() {
+        let source = "let z = 1;\nfn a() { null }\nlet m = 2;";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            // Verify sorted by (line, character)
+            for i in 1..symbols.len() {
+                let prev = &symbols[i - 1].location.range.start;
+                let curr = &symbols[i].location.range.start;
+                assert!(
+                    (prev.line, prev.character) <= (curr.line, curr.character),
+                    "symbols not sorted: {:?} > {:?}", prev, curr
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_parse_error_document() {
+        // Document with parse error -- no AST, no symbols
+        let source = "fn {";
+        let (state, _) = analyze_document(source);
+        let uri = test_uri();
+        let result = handle_document_symbols(&state, &uri);
+        assert!(result.is_some());
+        if let Some(DocumentSymbolResponse::Flat(symbols)) = result {
+            assert!(symbols.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_make_range_line_0() {
+        let source = "hello";
+        // line=0, col=0 tests saturating_sub behavior
+        let range = make_range(source, 0, 0, 5);
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 0);
+    }
+
+    #[test]
+    fn test_find_variant_range_not_found() {
+        let source = "enum Color { Red }";
+        // Search for a variant that doesn't exist
+        let range = find_variant_range(source, 1, "NotExist");
+        // Should fallback to definition line
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 0);
+    }
+
+    #[test]
+    fn test_find_variant_range_multiline_enum() {
+        let source = "enum Direction {\n    North,\n    South,\n    East,\n    West,\n}";
+        let range = find_variant_range(source, 1, "South");
+        assert_eq!(range.start.line, 2); // "South" is on line 2 (0-based)
     }
 }

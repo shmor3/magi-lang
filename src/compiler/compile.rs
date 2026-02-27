@@ -21,6 +21,8 @@ pub struct Compiler {
     lambda_counter: u32,
     /// Loop context stack for break/continue.
     loop_stack: Vec<LoopContext>,
+    /// Current WASM structured block nesting depth (incremented by Block/Loop/If/IfVoid, decremented by End).
+    block_depth: u32,
 }
 
 /// Builder for a function being compiled.
@@ -87,10 +89,10 @@ impl FnBuilder {
 
 /// Context for compiling loop bodies (break/continue targets).
 struct LoopContext {
-    /// Block label for break (forward branch out of loop).
-    break_label: u32,
-    /// Loop label for continue (backward branch to loop start).
-    continue_label: u32,
+    /// Absolute WASM block depth for break (forward branch out of loop).
+    break_depth: u32,
+    /// Absolute WASM block depth for continue (backward branch to loop start).
+    continue_depth: u32,
 }
 
 impl Compiler {
@@ -101,6 +103,7 @@ impl Compiler {
             fn_index: HashMap::new(),
             lambda_counter: 0,
             loop_stack: Vec::new(),
+            block_depth: 0,
         }
     }
 
@@ -341,6 +344,7 @@ impl Compiler {
 
     fn begin_function(&mut self, name: &str, exported: bool) {
         self.current_fn = Some(FnBuilder::new(name.to_string(), exported));
+        self.block_depth = 0;
     }
 
     fn end_function(&mut self) {
@@ -366,6 +370,16 @@ impl Compiler {
     }
 
     fn emit(&mut self, inst: Instruction) {
+        // Track WASM structured block nesting depth for correct break/continue labels.
+        match &inst {
+            Instruction::Block | Instruction::Loop | Instruction::If | Instruction::IfVoid => {
+                self.block_depth += 1;
+            }
+            Instruction::End => {
+                self.block_depth = self.block_depth.saturating_sub(1);
+            }
+            _ => {}
+        }
         if let Some(fb) = &mut self.current_fn {
             fb.emit(inst);
         }
@@ -462,9 +476,11 @@ impl Compiler {
             StatementKind::Break(expr) => {
                 if let Some(e) = expr {
                     self.compile_expr(e)?;
+                    // break with value: discard the value since the outer Block is Empty typed.
+                    self.emit(Instruction::Drop);
                 }
                 if let Some(ctx) = self.loop_stack.last() {
-                    let label = ctx.break_label;
+                    let label = self.block_depth - ctx.break_depth;
                     self.emit(Instruction::Br(label));
                 } else {
                     return Err(CompileError::at(
@@ -477,7 +493,7 @@ impl Compiler {
 
             StatementKind::Continue => {
                 if let Some(ctx) = self.loop_stack.last() {
-                    let label = ctx.continue_label;
+                    let label = self.block_depth - ctx.continue_depth;
                     self.emit(Instruction::Br(label));
                 } else {
                     return Err(CompileError::at(
@@ -1186,20 +1202,22 @@ impl Compiler {
 
         // Loop structure.
         self.emit(Instruction::Block); // break target
+        let break_depth = self.block_depth; // absolute depth of the Block
         self.emit(Instruction::Loop);  // continue target
+        let continue_depth = self.block_depth; // absolute depth of the Loop
 
-        let break_label = 1; // block (1 level up from loop)
-        let continue_label = 0; // loop (current level)
         self.loop_stack.push(LoopContext {
-            break_label,
-            continue_label,
+            break_depth,
+            continue_depth,
         });
 
         // Check: counter >= len (both raw untagged).
         self.emit(Instruction::LocalGet(counter_local));
         self.emit(Instruction::LocalGet(len_local));
         self.emit(Instruction::I64Ge);
-        self.emit(Instruction::BrIf(1)); // break out of block
+        // break out of the outer Block when iteration is complete.
+        let cond_break_offset = self.block_depth - break_depth;
+        self.emit(Instruction::BrIf(cond_break_offset));
 
         // Load current element. ArrayGet expects tagged index.
         self.emit(Instruction::LocalGet(iter_local));
@@ -1275,7 +1293,8 @@ impl Compiler {
         self.emit(Instruction::LocalSet(counter_local));
 
         // Loop back.
-        self.emit(Instruction::Br(0)); // back to Loop
+        let loop_back_offset = self.block_depth - continue_depth;
+        self.emit(Instruction::Br(loop_back_offset)); // back to Loop
 
         self.emit(Instruction::End); // Loop end
         self.emit(Instruction::End); // Block end
@@ -1290,17 +1309,21 @@ impl Compiler {
         body: &Block,
     ) -> Result<(), CompileError> {
         self.emit(Instruction::Block); // break target
+        let break_depth = self.block_depth;
         self.emit(Instruction::Loop);  // continue target
+        let continue_depth = self.block_depth;
 
         self.loop_stack.push(LoopContext {
-            break_label: 1,
-            continue_label: 0,
+            break_depth,
+            continue_depth,
         });
 
         // Check condition.
         self.compile_expr(condition)?;
         self.emit(Instruction::BoolNot);
-        self.emit(Instruction::BrIf(1)); // break if false
+        // break if false: branch to the outer Block.
+        let cond_break_offset = self.block_depth - break_depth;
+        self.emit(Instruction::BrIf(cond_break_offset));
 
         // Body.
         self.fb()?.push_scope();
@@ -1311,7 +1334,9 @@ impl Compiler {
         }
         self.fb()?.pop_scope();
 
-        self.emit(Instruction::Br(0)); // continue
+        // continue: branch back to Loop.
+        let continue_offset = self.block_depth - continue_depth;
+        self.emit(Instruction::Br(continue_offset));
         self.emit(Instruction::End); // Loop
         self.emit(Instruction::End); // Block
 
@@ -1321,21 +1346,29 @@ impl Compiler {
 
     fn compile_infinite_loop(&mut self, block: &Block) -> Result<(), CompileError> {
         self.emit(Instruction::Block);
+        let break_depth = self.block_depth;
         self.emit(Instruction::Loop);
+        let continue_depth = self.block_depth;
 
         self.loop_stack.push(LoopContext {
-            break_label: 1,
-            continue_label: 0,
+            break_depth,
+            continue_depth,
         });
 
         self.compile_block(block)?;
         self.emit(Instruction::Drop);
 
-        self.emit(Instruction::Br(0));
+        let continue_offset = self.block_depth - continue_depth;
+        self.emit(Instruction::Br(continue_offset));
         self.emit(Instruction::End);
         self.emit(Instruction::End);
 
         self.loop_stack.pop();
+
+        // The infinite loop is used as an expression. After the outer Block(Empty)
+        // ends, nothing is on the stack. Push null as the expression value.
+        // (break with a value cannot pass values through Empty blocks.)
+        self.emit(Instruction::PushNull);
         Ok(())
     }
 
@@ -2518,5 +2551,56 @@ mod tests {
         let err = result.unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("match guard") || msg.contains("not yet supported"), "error should mention match guards: {}", msg);
+    }
+
+    // ── Break/Continue depth tests ──────────────────────────────────
+
+    #[test]
+    fn test_compile_for_loop_continue_in_if() {
+        // Ensure continue inside if within for-loop compiles without error.
+        let module = compile(r#"
+            for x in [1, 2, 3, 4, 5] {
+                if x == 3 { continue; }
+                output x;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Print)));
+    }
+
+    #[test]
+    fn test_compile_for_loop_break_in_if() {
+        let module = compile(r#"
+            for x in [1, 2, 3, 4, 5] {
+                if x == 3 { break; }
+                output x;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)));
+    }
+
+    #[test]
+    fn test_compile_infinite_loop_break_value() {
+        let module = compile(r#"
+            let x = loop {
+                break 42;
+            };
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)));
+        // break with value should have a Drop (value discarded since Block is Empty).
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Drop)));
+    }
+
+    #[test]
+    fn test_compile_negation_has_tag_f64() {
+        let module = compile("let x = -5;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // The float path should have TagF64 in the if branch.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::TagF64)));
+        // Also has the integer path with I64Neg.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Neg)));
     }
 }

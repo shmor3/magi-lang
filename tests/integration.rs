@@ -10139,3 +10139,1111 @@ fn test_for_loop_break_exits_early() {
         output last_seen;
     "#), DataType::Int64(30));
 }
+
+// ═══════════════════════════════════════════════════════════
+// End-to-end integration tests: realistic multi-feature programs
+//
+// NOTE: The StubEvaluator has port-name mismatches for some array
+// operations (.push(), .contains(), arr[idx], map["key"]).
+// These tests use spread syntax [...arr, elem] instead of .push(),
+// .find() instead of .contains(), destructuring or .first()/.last()
+// instead of indexing, and field access map.key instead of map["key"].
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_e2e_simple_calculator() {
+    // A calculator that evaluates simple expressions using match and recursion.
+    // Combines: enums, match with destructuring, recursion, arithmetic.
+    assert_eq!(run(r#"
+        enum Expr {
+            Num(val),
+            Add(left, right),
+            Mul(left, right),
+            Neg(inner)
+        }
+
+        fn eval(expr) {
+            match expr {
+                Expr::Num(v) => v,
+                Expr::Add(l, r) => eval(l) + eval(r),
+                Expr::Mul(l, r) => eval(l) * eval(r),
+                Expr::Neg(e) => 0 - eval(e),
+            }
+        }
+
+        // (3 + 4) * -(2 + 1) = 7 * -3 = -21
+        let expr = Expr::Mul(
+            Expr::Add(Expr::Num(3), Expr::Num(4)),
+            Expr::Neg(Expr::Add(Expr::Num(2), Expr::Num(1)))
+        );
+        output eval(expr);
+    "#), DataType::Int64(-21));
+}
+
+#[test]
+fn test_e2e_calculator_with_variables() {
+    // Extended calculator with variable environment using enums for lookup.
+    // Combines: enums, match, recursion, null coalescing, field access.
+    assert_eq!(run(r#"
+        enum Expr {
+            Lit(val),
+            VarX,
+            VarY,
+            BinAdd(left, right),
+            BinMul(left, right)
+        }
+
+        fn eval(expr, x_val, y_val) {
+            match expr {
+                Expr::Lit(v) => v,
+                Expr::VarX => x_val,
+                Expr::VarY => y_val,
+                Expr::BinAdd(l, r) => eval(l, x_val, y_val) + eval(r, x_val, y_val),
+                Expr::BinMul(l, r) => eval(l, x_val, y_val) * eval(r, x_val, y_val),
+            }
+        }
+
+        // (x + y) * 3 = (10 + 5) * 3 = 45
+        let expr = Expr::BinMul(
+            Expr::BinAdd(Expr::VarX, Expr::VarY),
+            Expr::Lit(3)
+        );
+        output eval(expr, 10, 5);
+    "#), DataType::Int64(45));
+}
+
+#[test]
+fn test_e2e_stack_implementation() {
+    // Stack data structure using arrays and spread syntax.
+    // Combines: arrays, spread, closures, while loop, mutable state, .last(), slicing.
+    assert_eq!(run(r#"
+        fn stack_push(stack, val) {
+            [...stack, val]
+        }
+
+        fn stack_pop(stack) {
+            if len(stack) == 0 {
+                [stack, null]
+            } else {
+                let top = stack.last();
+                let new_stack = stack[0..len(stack) - 1];
+                [new_stack, top]
+            }
+        }
+
+        // Use the stack to reverse a sequence
+        let mut s = [];
+        s = stack_push(s, 10);
+        s = stack_push(s, 20);
+        s = stack_push(s, 30);
+
+        let mut reversed = [];
+        while len(s) > 0 {
+            let pair = stack_pop(s);
+            // destructure the pair: [new_stack, top_value]
+            let [new_s, top] = pair;
+            s = new_s;
+            reversed = [...reversed, top];
+        }
+        output reversed;
+    "#), DataType::Array(vec![
+        DataType::Int64(30),
+        DataType::Int64(20),
+        DataType::Int64(10),
+    ]));
+}
+
+#[test]
+fn test_e2e_stack_balanced_parens() {
+    // Use a stack (array) to check balanced parentheses.
+    // Combines: arrays, spread, for loop, match, mutable state, break, .last(), slicing.
+    assert_eq!(run(r#"
+        fn is_balanced(chars) {
+            let mut stack = [];
+            let mut valid = true;
+            for ch in chars {
+                match ch {
+                    "(" | "[" | "{" => {
+                        stack = [...stack, ch];
+                    },
+                    ")" => {
+                        if len(stack) == 0 { valid = false; break }
+                        let top = stack.last();
+                        stack = stack[0..len(stack) - 1];
+                        if top != "(" { valid = false; break }
+                    },
+                    "]" => {
+                        if len(stack) == 0 { valid = false; break }
+                        let top = stack.last();
+                        stack = stack[0..len(stack) - 1];
+                        if top != "[" { valid = false; break }
+                    },
+                    "}" => {
+                        if len(stack) == 0 { valid = false; break }
+                        let top = stack.last();
+                        stack = stack[0..len(stack) - 1];
+                        if top != "{" { valid = false; break }
+                    },
+                    _ => {},
+                }
+            }
+            valid && len(stack) == 0
+        }
+
+        let test1 = is_balanced(["(", "[", "]", ")"]);
+        let test2 = is_balanced(["(", "[", ")", "]"]);
+        let test3 = is_balanced(["(", "(", ")", ")"]);
+        let test4 = is_balanced(["(", ")"]);
+        output [test1, test2, test3, test4];
+    "#), DataType::Array(vec![
+        DataType::Bool(true),
+        DataType::Bool(false),
+        DataType::Bool(true),
+        DataType::Bool(true),
+    ]));
+}
+
+#[test]
+fn test_e2e_string_processing_csv_parse() {
+    // Parse CSV-like data lines and transform them.
+    // Combines: string split (direct method), HOFs, closures, destructuring, f-strings.
+    assert_eq!(run(r#"
+        fn parse_record(line) {
+            let fields = line.split(",");
+            let [name, age, city] = fields;
+            {"name": name, "age": age, "city": city}
+        }
+
+        fn format_record(record) {
+            f"{record.name} (age {record.age}) from {record.city}"
+        }
+
+        let lines = [
+            "Alice,30,NYC",
+            "Bob,25,LA",
+            "Charlie,35,Chicago"
+        ];
+
+        let records = lines.map(|line| parse_record(line));
+        let formatted = records.map(|r| format_record(r));
+        output formatted;
+    "#), DataType::Array(vec![
+        DataType::String("Alice (age 30) from NYC".to_string()),
+        DataType::String("Bob (age 25) from LA".to_string()),
+        DataType::String("Charlie (age 35) from Chicago".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_csv_filter_and_aggregate() {
+    // Parse CSV, filter rows, and compute aggregates.
+    // Combines: string split, destructuring, map, filter, reduce, type conversion.
+    // Note: uses .to_int() (direct string method) instead of .to_int64() (evaluator op).
+    assert_eq!(run(r#"
+        fn parse_row(line) {
+            let [name, score_str] = line.split(":");
+            {"name": name, "score": score_str.to_int()}
+        }
+
+        let data = [
+            "Alice:85",
+            "Bob:92",
+            "Charlie:78",
+            "Diana:95",
+            "Eve:60"
+        ];
+
+        let rows = data.map(|line| parse_row(line));
+        let high_scorers = rows.filter(|r| r.score > 80);
+        let total = high_scorers.reduce(0, |acc, r| acc + r.score);
+        let count = len(high_scorers);
+        output {"total": total, "count": count};
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("total".to_string(), DataType::Int64(272));
+        m.insert("count".to_string(), DataType::Int64(3));
+        m
+    }));
+}
+
+#[test]
+fn test_e2e_state_machine_traffic_light() {
+    // Enum-based state machine simulating a traffic light.
+    // Combines: enums, match, while loop, mutable state, spread, counter.
+    assert_eq!(run(r#"
+        enum Light { Red, Yellow, Green }
+
+        fn next_state(light) {
+            match light {
+                Light::Red => Light::Green,
+                Light::Green => Light::Yellow,
+                Light::Yellow => Light::Red,
+            }
+        }
+
+        fn light_name(light) {
+            match light {
+                Light::Red => "red",
+                Light::Green => "green",
+                Light::Yellow => "yellow",
+            }
+        }
+
+        let mut current = Light::Red;
+        let mut history = [];
+        let mut steps = 0;
+
+        while steps < 7 {
+            history = [...history, light_name(current)];
+            current = next_state(current);
+            steps = steps + 1;
+        }
+        output history;
+    "#), DataType::Array(vec![
+        DataType::String("red".to_string()),
+        DataType::String("green".to_string()),
+        DataType::String("yellow".to_string()),
+        DataType::String("red".to_string()),
+        DataType::String("green".to_string()),
+        DataType::String("yellow".to_string()),
+        DataType::String("red".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_state_machine_with_data() {
+    // State machine with data-carrying enum variants and event dispatch.
+    // Combines: enums with fields, match destructuring, for loop, spread, f-strings.
+    assert_eq!(run(r#"
+        enum State {
+            Idle,
+            Loading(url),
+            Success(data),
+            Error(msg)
+        }
+
+        fn transition(state, event) {
+            match state {
+                State::Idle => {
+                    if event == "fetch" { State::Loading("https://api.example.com") }
+                    else { state }
+                },
+                State::Loading(_) => {
+                    if event == "ok" { State::Success("response data") }
+                    else if event == "fail" { State::Error("network error") }
+                    else { state }
+                },
+                State::Error(_) => {
+                    if event == "retry" { State::Idle }
+                    else { state }
+                },
+                State::Success(_) => {
+                    if event == "reset" { State::Idle }
+                    else { state }
+                },
+            }
+        }
+
+        fn describe(state) {
+            match state {
+                State::Idle => "idle",
+                State::Loading(url) => f"loading:{url}",
+                State::Success(data) => f"success:{data}",
+                State::Error(msg) => f"error:{msg}",
+            }
+        }
+
+        let events = ["fetch", "ok", "reset", "fetch", "fail", "retry"];
+        let mut st = State::Idle;
+        let mut log = [describe(st)];
+        for ev in events {
+            st = transition(st, ev);
+            log = [...log, describe(st)];
+        }
+        output log;
+    "#), DataType::Array(vec![
+        DataType::String("idle".to_string()),
+        DataType::String("loading:https://api.example.com".to_string()),
+        DataType::String("success:response data".to_string()),
+        DataType::String("idle".to_string()),
+        DataType::String("loading:https://api.example.com".to_string()),
+        DataType::String("error:network error".to_string()),
+        DataType::String("idle".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_tree_traversal_sum() {
+    // Recursive tree operations using enum-based binary tree.
+    // Combines: enums with fields, recursion, match destructuring, spread.
+    assert_eq!(run(r#"
+        enum Tree {
+            Leaf(val),
+            Node(left, right)
+        }
+
+        fn tree_sum(tree) {
+            match tree {
+                Tree::Leaf(v) => v,
+                Tree::Node(l, r) => tree_sum(l) + tree_sum(r),
+            }
+        }
+
+        fn tree_depth(tree) {
+            match tree {
+                Tree::Leaf(_) => 1,
+                Tree::Node(l, r) => {
+                    let ld = tree_depth(l);
+                    let rd = tree_depth(r);
+                    1 + if ld > rd { ld } else { rd }
+                },
+            }
+        }
+
+        fn tree_leaves(tree) {
+            match tree {
+                Tree::Leaf(v) => [v],
+                Tree::Node(l, r) => {
+                    let left_leaves = tree_leaves(l);
+                    let right_leaves = tree_leaves(r);
+                    [...left_leaves, ...right_leaves]
+                },
+            }
+        }
+
+        //       Node
+        //      /    \
+        //    Node    Leaf(5)
+        //   /    \
+        // Leaf(1) Node
+        //        /    \
+        //     Leaf(2)  Leaf(3)
+        let tree = Tree::Node(
+            Tree::Node(
+                Tree::Leaf(1),
+                Tree::Node(Tree::Leaf(2), Tree::Leaf(3))
+            ),
+            Tree::Leaf(5)
+        );
+
+        output [tree_sum(tree), tree_depth(tree), tree_leaves(tree)];
+    "#), DataType::Array(vec![
+        DataType::Int64(11),
+        DataType::Int64(4),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Int64(3),
+            DataType::Int64(5),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_tree_search() {
+    // Binary search tree: insert and search with inorder traversal.
+    // Combines: enums with 3 fields, deep recursion, match, comparison, spread.
+    assert_eq!(run(r#"
+        enum BST {
+            Empty,
+            Node(val, left, right)
+        }
+
+        fn insert(tree, x) {
+            match tree {
+                BST::Empty => BST::Node(x, BST::Empty, BST::Empty),
+                BST::Node(v, l, r) => {
+                    if x < v {
+                        BST::Node(v, insert(l, x), r)
+                    } else if x > v {
+                        BST::Node(v, l, insert(r, x))
+                    } else {
+                        tree
+                    }
+                },
+            }
+        }
+
+        fn bst_contains(tree, x) {
+            match tree {
+                BST::Empty => false,
+                BST::Node(v, l, r) => {
+                    if x == v { true }
+                    else if x < v { bst_contains(l, x) }
+                    else { bst_contains(r, x) }
+                },
+            }
+        }
+
+        fn inorder(tree) {
+            match tree {
+                BST::Empty => [],
+                BST::Node(v, l, r) => {
+                    let left = inorder(l);
+                    let right = inorder(r);
+                    [...left, v, ...right]
+                },
+            }
+        }
+
+        let mut bst = BST::Empty;
+        for val in [5, 3, 7, 1, 4, 6, 8] {
+            bst = insert(bst, val);
+        }
+
+        let sorted = inorder(bst);
+        let has3 = bst_contains(bst, 3);
+        let has9 = bst_contains(bst, 9);
+        output [sorted, has3, has9];
+    "#), DataType::Array(vec![
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(3),
+            DataType::Int64(4),
+            DataType::Int64(5),
+            DataType::Int64(6),
+            DataType::Int64(7),
+            DataType::Int64(8),
+        ]),
+        DataType::Bool(true),
+        DataType::Bool(false),
+    ]));
+}
+
+#[test]
+fn test_e2e_pipeline_data_transformations() {
+    // Data flowing through multiple transformation functions.
+    // Combines: HOF chaining, closures, map/filter/reduce, f-strings, string methods.
+    assert_eq!(run(r#"
+        fn normalize(items) {
+            items.map(|x| x.trim())
+        }
+
+        fn remove_empty(items) {
+            items.filter(|x| len(x) > 0)
+        }
+
+        fn deduplicate(items) {
+            let mut seen = [];
+            let mut result = [];
+            for item in items {
+                let already = seen.find(|s| s == item);
+                if already == null {
+                    seen = [...seen, item];
+                    result = [...result, item];
+                }
+            }
+            result
+        }
+
+        fn to_upper_first(s) {
+            if len(s) == 0 { return s }
+            let first = s[0..1];
+            let rest = s[1..len(s)];
+            // Simple uppercase for ASCII a-z
+            let upper = match first {
+                "a" => "A", "b" => "B", "c" => "C", "d" => "D",
+                "e" => "E", "f" => "F", "g" => "G", "h" => "H",
+                _ => first,
+            };
+            f"{upper}{rest}"
+        }
+
+        let raw = ["  alice ", "bob", " alice", "", "  charlie  ", "bob", " dave "];
+
+        let result = deduplicate(remove_empty(normalize(raw)))
+            .map(|name| to_upper_first(name));
+
+        output result;
+    "#), DataType::Array(vec![
+        DataType::String("Alice".to_string()),
+        DataType::String("Bob".to_string()),
+        DataType::String("Charlie".to_string()),
+        DataType::String("Dave".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_pipeline_number_processing() {
+    // Multi-step numeric pipeline using HOF chaining.
+    // Combines: filter, map, reduce, scan, partition, destructuring.
+    assert_eq!(run(r#"
+        let data = [12, 5, 8, 3, 15, 7, 20, 1, 9, 14];
+
+        // Split into small (<=10) and large (>10)
+        let [small, large] = data.partition(|x| x <= 10);
+
+        // Process small: square each, sum
+        let small_sum = small.map(|x| x * x).reduce(0, |acc, x| acc + x);
+
+        // Process large: subtract 10 from each, product
+        let large_product = large.map(|x| x - 10).reduce(1, |acc, x| acc * x);
+
+        // running totals of original data
+        let running = data.scan(0, |acc, x| acc + x);
+        let final_total = running.last();
+
+        output [small_sum, large_product, final_total];
+    "#), DataType::Array(vec![
+        // small = [5, 8, 3, 7, 1, 9], squares = [25, 64, 9, 49, 1, 81], sum = 229
+        DataType::Int64(229),
+        // large = [12, 15, 20, 14], minus 10 = [2, 5, 10, 4], product = 400
+        DataType::Int64(400),
+        // sum of all = 12+5+8+3+15+7+20+1+9+14 = 94
+        DataType::Int64(94),
+    ]));
+}
+
+#[test]
+fn test_e2e_builder_pattern() {
+    // Struct construction through chained function calls.
+    // Combines: structs, field access, functions returning modified structs, spread, f-strings.
+    assert_eq!(run(r#"
+        struct Config {
+            host: string,
+            port: int64,
+            debug: bool,
+            tags: array
+        }
+
+        fn default_config() {
+            Config {
+                host: "localhost",
+                port: 8080,
+                debug: false,
+                tags: []
+            }
+        }
+
+        fn with_host(config, host) {
+            Config {
+                host: host,
+                port: config.port,
+                debug: config.debug,
+                tags: config.tags
+            }
+        }
+
+        fn with_port(config, port) {
+            Config {
+                host: config.host,
+                port: port,
+                debug: config.debug,
+                tags: config.tags
+            }
+        }
+
+        fn with_debug(config) {
+            Config {
+                host: config.host,
+                port: config.port,
+                debug: true,
+                tags: config.tags
+            }
+        }
+
+        fn add_tag(config, tag) {
+            Config {
+                host: config.host,
+                port: config.port,
+                debug: config.debug,
+                tags: [...config.tags, tag]
+            }
+        }
+
+        fn describe(config) {
+            f"{config.host}:{config.port} debug={config.debug} tags={len(config.tags)}"
+        }
+
+        let cfg = default_config();
+        let cfg = with_host(cfg, "api.example.com");
+        let cfg = with_port(cfg, 443);
+        let cfg = with_debug(cfg);
+        let cfg = add_tag(cfg, "production");
+        let cfg = add_tag(cfg, "v2");
+
+        output [describe(cfg), cfg.host, cfg.port, cfg.debug, cfg.tags];
+    "#), DataType::Array(vec![
+        DataType::String("api.example.com:443 debug=true tags=2".to_string()),
+        DataType::String("api.example.com".to_string()),
+        DataType::Int64(443),
+        DataType::Bool(true),
+        DataType::Array(vec![
+            DataType::String("production".to_string()),
+            DataType::String("v2".to_string()),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_error_handling_validation() {
+    // Complex try-catch with validation and recovery.
+    // Combines: try-catch, throw, functions, spread, mutable state.
+    assert_eq!(run(r#"
+        fn validate_age(age) {
+            if age < 0 { throw "age cannot be negative" }
+            if age > 150 { throw "age unreasonably large" }
+            age
+        }
+
+        fn validate_name(name) {
+            if len(name) == 0 { throw "name cannot be empty" }
+            if len(name) > 50 { throw "name too long" }
+            name
+        }
+
+        fn create_person(name, age) {
+            let validated_name = validate_name(name);
+            let validated_age = validate_age(age);
+            {"name": validated_name, "age": validated_age}
+        }
+
+        // Test 1: valid input
+        let r1 = try { create_person("Alice", 30) } catch e { f"error: {e}" };
+
+        // Test 2: invalid age
+        let r2 = try { create_person("Bob", -5) } catch e { f"error: {e}" };
+
+        // Test 3: empty name
+        let r3 = try { create_person("", 25) } catch e { f"error: {e}" };
+
+        // Test 4: recovery with default
+        let r4 = try {
+            create_person("Eve", 200)
+        } catch e {
+            // Recover with a safe default
+            create_person("Eve", 99)
+        };
+
+        output [r1, r2, r3, r4];
+    "#), DataType::Array(vec![
+        DataType::Map({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("name".to_string(), DataType::String("Alice".to_string()));
+            m.insert("age".to_string(), DataType::Int64(30));
+            m
+        }),
+        DataType::String("error: age cannot be negative".to_string()),
+        DataType::String("error: name cannot be empty".to_string()),
+        DataType::Map({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("name".to_string(), DataType::String("Eve".to_string()));
+            m.insert("age".to_string(), DataType::Int64(99));
+            m
+        }),
+    ]));
+}
+
+#[test]
+fn test_e2e_error_handling_nested_with_finally() {
+    // Nested try-catch with finally blocks tracking cleanup via spread.
+    // Combines: try-catch-finally, throw, mutable state, nested blocks, spread.
+    assert_eq!(run(r#"
+        let mut log = [];
+
+        let result = try {
+            log = [...log, "outer-start"];
+            let inner = try {
+                log = [...log, "inner-start"];
+                throw "inner failure"
+            } catch e {
+                log = [...log, f"inner-caught: {e}"];
+                "recovered"
+            } finally {
+                log = [...log, "inner-finally"];
+            };
+            log = [...log, f"after-inner: {inner}"];
+            inner
+        } catch e {
+            log = [...log, f"outer-caught: {e}"];
+            "outer-recovery"
+        } finally {
+            log = [...log, "outer-finally"];
+        };
+
+        output [result, log];
+    "#), DataType::Array(vec![
+        DataType::String("recovered".to_string()),
+        DataType::Array(vec![
+            DataType::String("outer-start".to_string()),
+            DataType::String("inner-start".to_string()),
+            DataType::String("inner-caught: inner failure".to_string()),
+            DataType::String("inner-finally".to_string()),
+            DataType::String("after-inner: recovered".to_string()),
+            DataType::String("outer-finally".to_string()),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_higher_order_function_composition() {
+    // Functions that return functions, compose them, and apply chains.
+    // Combines: closures, HOFs, function-returning-functions, reduce.
+    assert_eq!(run(r#"
+        fn make_adder(n) {
+            |x| x + n
+        }
+
+        fn make_multiplier(n) {
+            |x| x * n
+        }
+
+        fn compose(f, g) {
+            |x| f(g(x))
+        }
+
+        fn apply_all(fns, value) {
+            let mut result = value;
+            for f in fns {
+                result = f(result);
+            }
+            result
+        }
+
+        let add5 = make_adder(5);
+        let mul3 = make_multiplier(3);
+        let add5_then_mul3 = compose(mul3, add5);
+        let mul3_then_add5 = compose(add5, mul3);
+
+        // Build a pipeline: +2, *4, +10
+        let pipeline = [make_adder(2), make_multiplier(4), make_adder(10)];
+        // apply_all(pipeline, 3) = ((3+2)*4)+10 = 30
+        let piped = apply_all(pipeline, 3);
+
+        output [
+            add5(10),
+            mul3(10),
+            add5_then_mul3(10),
+            mul3_then_add5(10),
+            piped
+        ];
+    "#), DataType::Array(vec![
+        DataType::Int64(15),    // 10 + 5
+        DataType::Int64(30),    // 10 * 3
+        DataType::Int64(45),    // (10 + 5) * 3
+        DataType::Int64(35),    // (10 * 3) + 5
+        DataType::Int64(30),    // ((3+2)*4)+10
+    ]));
+}
+
+#[test]
+fn test_e2e_function_composition_with_predicates() {
+    // Higher-order predicate combinators: and_pred, or_pred, not_pred.
+    // Combines: closures, HOFs, boolean logic, filter.
+    assert_eq!(run(r#"
+        fn and_pred(f, g) {
+            |x| f(x) && g(x)
+        }
+
+        fn or_pred(f, g) {
+            |x| f(x) || g(x)
+        }
+
+        fn not_pred(f) {
+            |x| !f(x)
+        }
+
+        let is_positive = |x| x > 0;
+        let is_even = |x| x % 2 == 0;
+        let is_small = |x| x < 10;
+
+        let positive_and_even = and_pred(is_positive, is_even);
+        let small_or_even = or_pred(is_small, is_even);
+        let not_small = not_pred(is_small);
+
+        let data = [-4, -1, 0, 1, 2, 5, 8, 12, 15, 20];
+
+        let r1 = data.filter(positive_and_even);
+        let r2 = data.filter(small_or_even);
+        let r3 = data.filter(not_small);
+        output [r1, r2, r3];
+    "#), DataType::Array(vec![
+        // positive_and_even: > 0 && even => 2, 8, 12, 20
+        DataType::Array(vec![
+            DataType::Int64(2),
+            DataType::Int64(8),
+            DataType::Int64(12),
+            DataType::Int64(20),
+        ]),
+        // small_or_even: < 10 || even => -4, -1, 0, 1, 2, 5, 8, 12, 20
+        DataType::Array(vec![
+            DataType::Int64(-4),
+            DataType::Int64(-1),
+            DataType::Int64(0),
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Int64(5),
+            DataType::Int64(8),
+            DataType::Int64(12),
+            DataType::Int64(20),
+        ]),
+        // not_small: >= 10 => 12, 15, 20
+        DataType::Array(vec![
+            DataType::Int64(12),
+            DataType::Int64(15),
+            DataType::Int64(20),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_pattern_matching_exhaustive() {
+    // Complex match with guards, or-patterns, destructuring, nested patterns.
+    // Combines: enums, match, guards, or-patterns, wildcard, nested destructuring.
+    assert_eq!(run(r#"
+        enum Shape {
+            Circle(radius),
+            Rectangle(width, height),
+            Triangle(base, height)
+        }
+
+        fn classify(shape) {
+            match shape {
+                Shape::Circle(r) if r <= 0 => "invalid",
+                Shape::Circle(r) if r < 5 => "small-circle",
+                Shape::Circle(r) if r < 20 => "medium-circle",
+                Shape::Circle(_) => "large-circle",
+                Shape::Rectangle(w, h) if w == h => f"square-{w}x{h}",
+                Shape::Rectangle(w, h) if w > 100 || h > 100 => "oversized-rect",
+                Shape::Rectangle(w, h) => f"rect-{w}x{h}",
+                Shape::Triangle(b, h) if b == h => "equilateral-ish",
+                Shape::Triangle(b, h) => f"triangle-{b}x{h}",
+            }
+        }
+
+        let shapes = [
+            Shape::Circle(0),
+            Shape::Circle(3),
+            Shape::Circle(15),
+            Shape::Circle(50),
+            Shape::Rectangle(5, 5),
+            Shape::Rectangle(200, 10),
+            Shape::Rectangle(8, 12),
+            Shape::Triangle(7, 7),
+            Shape::Triangle(3, 9),
+        ];
+
+        let results = shapes.map(|s| classify(s));
+        output results;
+    "#), DataType::Array(vec![
+        DataType::String("invalid".to_string()),
+        DataType::String("small-circle".to_string()),
+        DataType::String("medium-circle".to_string()),
+        DataType::String("large-circle".to_string()),
+        DataType::String("square-5x5".to_string()),
+        DataType::String("oversized-rect".to_string()),
+        DataType::String("rect-8x12".to_string()),
+        DataType::String("equilateral-ish".to_string()),
+        DataType::String("triangle-3x9".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_pattern_matching_or_and_destructure() {
+    // Match with or-patterns combining enum variants and destructuring.
+    // Combines: enums, or-patterns, match, wildcard, bindings.
+    assert_eq!(run(r#"
+        enum Result { Ok(v), Err(e) }
+        enum Option { Some(v), None }
+
+        fn unwrap_or(val, default) {
+            match val {
+                Result::Ok(v) | Option::Some(v) => v,
+                Result::Err(_) | Option::None => default,
+            }
+        }
+
+        fn classify_number(n) {
+            match n {
+                0 => "zero",
+                1 | 2 | 3 => "tiny",
+                n if n < 0 => "negative",
+                n if n <= 10 => "small",
+                n if n <= 100 => "medium",
+                _ => "large",
+            }
+        }
+
+        let r1 = unwrap_or(Result::Ok(42), 0);
+        let r2 = unwrap_or(Result::Err("fail"), 0);
+        let r3 = unwrap_or(Option::Some(99), 0);
+        let r4 = unwrap_or(Option::None, 0);
+
+        let classifications = [-5, 0, 1, 2, 7, 50, 200].map(|n| classify_number(n));
+
+        output [r1, r2, r3, r4, classifications];
+    "#), DataType::Array(vec![
+        DataType::Int64(42),
+        DataType::Int64(0),
+        DataType::Int64(99),
+        DataType::Int64(0),
+        DataType::Array(vec![
+            DataType::String("negative".to_string()),
+            DataType::String("zero".to_string()),
+            DataType::String("tiny".to_string()),
+            DataType::String("tiny".to_string()),
+            DataType::String("small".to_string()),
+            DataType::String("medium".to_string()),
+            DataType::String("large".to_string()),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_fibonacci_iterative() {
+    // Iterative Fibonacci computing all values up to n=10.
+    // Combines: while loop, mutable state, closures, HOF map.
+    assert_eq!(run(r#"
+        fn fib_iter(n) {
+            if n <= 0 { return 0 }
+            if n == 1 { return 1 }
+            let mut a = 0;
+            let mut b = 1;
+            let mut i = 2;
+            while i <= n {
+                let temp = a + b;
+                a = b;
+                b = temp;
+                i = i + 1;
+            }
+            b
+        }
+
+        let fibs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(|n| fib_iter(n));
+        output fibs;
+    "#), DataType::Array(vec![
+        DataType::Int64(0),
+        DataType::Int64(1),
+        DataType::Int64(1),
+        DataType::Int64(2),
+        DataType::Int64(3),
+        DataType::Int64(5),
+        DataType::Int64(8),
+        DataType::Int64(13),
+        DataType::Int64(21),
+        DataType::Int64(34),
+        DataType::Int64(55),
+    ]));
+}
+
+#[test]
+fn test_e2e_event_dispatcher() {
+    // Simple event system using parallel arrays for events/handlers.
+    // Combines: arrays, closures, for loops, spread, enumerate, if/else.
+    assert_eq!(run(r#"
+        fn register(events, fns, event_name, handler) {
+            [[...events, event_name], [...fns, handler]]
+        }
+
+        fn emit(events, fns, event_name, data) {
+            let mut results = [];
+            let pairs = events.zip(fns);
+            for pair in pairs {
+                let [ev, handler] = pair;
+                if ev == event_name {
+                    results = [...results, handler(data)];
+                }
+            }
+            results
+        }
+
+        let mut events = [];
+        let mut fns = [];
+        let [events, fns] = register(events, fns, "greet", |name| f"Hello, {name}!");
+        let [events, fns] = register(events, fns, "greet", |name| f"Welcome {name}");
+        let [events, fns] = register(events, fns, "farewell", |name| f"Goodbye, {name}!");
+
+        let greet_results = emit(events, fns, "greet", "Alice");
+        let farewell_results = emit(events, fns, "farewell", "Bob");
+        let unknown_results = emit(events, fns, "unknown", "Nobody");
+
+        output [...greet_results, ...farewell_results, ...unknown_results];
+    "#), DataType::Array(vec![
+        DataType::String("Hello, Alice!".to_string()),
+        DataType::String("Welcome Alice".to_string()),
+        DataType::String("Goodbye, Bob!".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_linked_list_operations() {
+    // Linked list using enums: cons, head, tail, length, to_array.
+    // Combines: enums, recursion, match, spread for array building.
+    assert_eq!(run(r#"
+        enum List {
+            Nil,
+            Cons(head, tail)
+        }
+
+        fn from_array(arr) {
+            arr.reduce(List::Nil, |acc, x| List::Cons(x, acc))
+        }
+
+        fn list_reverse(list) {
+            fn go(lst, acc) {
+                match lst {
+                    List::Nil => acc,
+                    List::Cons(h, t) => go(t, List::Cons(h, acc)),
+                }
+            }
+            go(list, List::Nil)
+        }
+
+        fn to_array(list) {
+            match list {
+                List::Nil => [],
+                List::Cons(h, t) => [h, ...to_array(t)],
+            }
+        }
+
+        fn list_length(list) {
+            match list {
+                List::Nil => 0,
+                List::Cons(_, t) => 1 + list_length(t),
+            }
+        }
+
+        fn list_map(list, f) {
+            match list {
+                List::Nil => List::Nil,
+                List::Cons(h, t) => List::Cons(f(h), list_map(t, f)),
+            }
+        }
+
+        fn list_filter(list, pred) {
+            match list {
+                List::Nil => List::Nil,
+                List::Cons(h, t) => {
+                    let rest = list_filter(t, pred);
+                    if pred(h) { List::Cons(h, rest) } else { rest }
+                },
+            }
+        }
+
+        // from_array with reduce builds reversed, so reverse it back
+        let list = list_reverse(from_array([1, 2, 3, 4, 5]));
+        let doubled = list_map(list, |x| x * 2);
+        let evens = list_filter(list, |x| x % 2 == 0);
+
+        output [
+            to_array(doubled),
+            to_array(evens),
+            list_length(list),
+            list_length(evens)
+        ];
+    "#), DataType::Array(vec![
+        DataType::Array(vec![
+            DataType::Int64(2),
+            DataType::Int64(4),
+            DataType::Int64(6),
+            DataType::Int64(8),
+            DataType::Int64(10),
+        ]),
+        DataType::Array(vec![
+            DataType::Int64(2),
+            DataType::Int64(4),
+        ]),
+        DataType::Int64(5),
+        DataType::Int64(2),
+    ]));
+}

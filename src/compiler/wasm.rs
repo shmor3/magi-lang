@@ -470,6 +470,8 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Or);
             }
             Instruction::TagF64 => {
+                // The value on stack is f64 — reinterpret to i64 before tagging.
+                f.instruction(&WasmInst::I64ReinterpretF64);
                 f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const((tag::F64 as i64) << 56));
@@ -2802,9 +2804,19 @@ mod tests {
     // ── Unary operations ─────────────────────────────────────────────
 
     #[test]
+    fn test_validate_unary_negation() {
+        // Fixed: TagF64 now includes I64ReinterpretF64 so F64Neg result
+        // is correctly converted before tagging.
+        compile_and_validate("let x = -5;");
+    }
+
+    #[test]
+    fn test_validate_unary_negation_float() {
+        compile_and_validate("let x = -3.14;");
+    }
+
+    #[test]
     fn test_validate_subtraction_as_negation() {
-        // Note: UnaryOp Neg has a known WASM type mismatch bug (TagF64
-        // expects i64 but F64Neg produces f64). Use subtraction instead.
         compile_and_validate("let x = 0 - 5;");
     }
 
@@ -2882,7 +2894,6 @@ mod tests {
 
     #[test]
     fn test_validate_function_early_return() {
-        // Note: avoids unary negation (-x) due to known WASM TagF64 bug.
         compile_and_validate(r#"
             fn clamp_positive(x) {
                 if x < 0 { return 0; }
@@ -3023,8 +3034,6 @@ mod tests {
 
     #[test]
     fn test_validate_while_loop_with_break() {
-        // Note: `loop { break }` has known WASM stack validation bugs.
-        // Test while-loop with break instead, which uses a different code path.
         compile_and_validate(r#"
             let mut x = 0;
             while x < 100 {
@@ -3047,12 +3056,88 @@ mod tests {
 
     #[test]
     fn test_validate_for_with_conditional_output() {
-        // Note: `continue` in for-loop has a known WASM stack validation bug.
-        // Test conditional output without continue.
         compile_and_validate(r#"
             for x in [1, 2, 3, 4, 5] {
                 if x != 3 {
                     output x;
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_validate_infinite_loop_break() {
+        // Fixed: loop { break } now produces valid WASM.
+        // The outer Block is Empty-typed and break exits it correctly.
+        compile_and_validate(r#"
+            let x = loop {
+                break 42;
+            };
+        "#);
+    }
+
+    #[test]
+    fn test_validate_infinite_loop_break_no_value() {
+        compile_and_validate(r#"
+            loop {
+                break;
+            };
+        "#);
+    }
+
+    #[test]
+    fn test_validate_infinite_loop_conditional_break() {
+        compile_and_validate(r#"
+            let mut i = 0;
+            loop {
+                i = i + 1;
+                if i >= 10 { break; }
+            };
+        "#);
+    }
+
+    #[test]
+    fn test_validate_for_with_continue() {
+        // Fixed: continue in for-loop now computes correct branch depth
+        // even when nested inside if-else blocks.
+        compile_and_validate(r#"
+            for x in [1, 2, 3, 4, 5] {
+                if x == 3 { continue; }
+                output x;
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_validate_while_with_continue() {
+        compile_and_validate(r#"
+            let mut x = 0;
+            while x < 10 {
+                x = x + 1;
+                if x == 5 { continue; }
+                output x;
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_validate_for_with_break() {
+        compile_and_validate(r#"
+            for x in [1, 2, 3, 4, 5] {
+                if x == 3 { break; }
+                output x;
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_validate_nested_loop_break_continue() {
+        compile_and_validate(r#"
+            for i in [1, 2, 3] {
+                for j in [10, 20, 30] {
+                    if j == 20 { continue; }
+                    if i == 2 { break; }
+                    output i + j;
                 }
             }
         "#);

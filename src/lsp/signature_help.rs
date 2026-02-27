@@ -47,7 +47,7 @@ pub fn handle_signature_help(
     }
 
     // Look up builtin functions with known signatures
-    if let Some(sig) = builtin_signature(&fn_name) {
+    if let Some(sig) = builtin_signature(&fn_name, active_param) {
         return Some(sig);
     }
 
@@ -55,7 +55,7 @@ pub fn handle_signature_help(
 }
 
 /// Return signature help for well-known builtin functions.
-fn builtin_signature(name: &str) -> Option<SignatureHelp> {
+fn builtin_signature(name: &str, active_param: u32) -> Option<SignatureHelp> {
     let (label, params): (&str, Vec<&str>) = match name {
         "len" => ("fn len(value) -> int64", vec!["value"]),
         "range" => ("fn range(start: int64, end: int64) -> [int64]", vec!["start", "end"]),
@@ -106,9 +106,118 @@ fn builtin_signature(name: &str) -> Option<SignatureHelp> {
             label: label.to_string(),
             documentation: None,
             parameters: Some(parameters),
-            active_parameter: Some(0),
+            active_parameter: Some(active_param),
         }],
         active_signature: Some(0),
-        active_parameter: Some(0),
+        active_parameter: Some(active_param),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lsp::analysis::analyze_document;
+
+    fn make_sig_params(line: u32, character: u32) -> SignatureHelpParams {
+        SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: Url::parse("file:///test.magi").unwrap(),
+                },
+                position: Position { line, character },
+            },
+            context: None,
+            work_done_progress_params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_signature_help_user_function() {
+        let source = "fn add(a: int64, b: int64) -> int64 { a }\nadd(1, 2)";
+        let (state, _) = analyze_document(source);
+        // Cursor on first arg (col 4 on line 1)
+        let params = make_sig_params(1, 4);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_some());
+        let sig = result.unwrap();
+        assert_eq!(sig.signatures.len(), 1);
+        assert_eq!(sig.active_parameter, Some(0));
+        assert!(sig.signatures[0].label.contains("add"));
+    }
+
+    #[test]
+    fn test_signature_help_user_function_second_param() {
+        let source = "fn add(a: int64, b: int64) -> int64 { a }\nadd(1, 2)";
+        let (state, _) = analyze_document(source);
+        // Cursor on second arg (col 7 on line 1)
+        let params = make_sig_params(1, 7);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_some());
+        let sig = result.unwrap();
+        assert_eq!(sig.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn test_signature_help_builtin_function() {
+        let source = "range(0, 10)";
+        let (state, _) = analyze_document(source);
+        let params = make_sig_params(0, 6);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_some());
+        let sig = result.unwrap();
+        assert!(sig.signatures[0].label.contains("range"));
+        assert_eq!(sig.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn test_signature_help_builtin_second_param() {
+        let source = "range(0, 10)";
+        let (state, _) = analyze_document(source);
+        // Cursor after comma (col 9 on "10")
+        let params = make_sig_params(0, 9);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_some());
+        let sig = result.unwrap();
+        assert_eq!(sig.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn test_signature_help_no_call() {
+        let source = "let x = 5;";
+        let (state, _) = analyze_document(source);
+        let params = make_sig_params(0, 5);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_signature_help_empty_document() {
+        let source = "";
+        let (state, _) = analyze_document(source);
+        let params = make_sig_params(0, 0);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_signature_help_unknown_function() {
+        let source = "unknown_fn(x)";
+        let (state, _) = analyze_document(source);
+        let params = make_sig_params(0, 12);
+        let result = handle_signature_help(&state, &params);
+        // "unknown_fn" is not defined and not a builtin
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_signature_help_clamp_third_param() {
+        let source = "clamp(x, 0, 100)";
+        let (state, _) = analyze_document(source);
+        // Cursor on third arg
+        let params = make_sig_params(0, 13);
+        let result = handle_signature_help(&state, &params);
+        assert!(result.is_some());
+        let sig = result.unwrap();
+        assert_eq!(sig.active_parameter, Some(2));
+    }
 }

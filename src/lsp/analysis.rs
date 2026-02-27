@@ -626,11 +626,42 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
     let mut pos = col;
     let mut commas = 0u32;
 
-    // Walk backwards from cursor
+    // Walk backwards from cursor, skipping string literals
     while pos > 0 {
         pos -= 1;
+        // Skip string literals when scanning backwards: if we land on a closing quote,
+        // walk back to the opening quote (handling escapes).
+        if chars[pos] == '"' || chars[pos] == '\'' {
+            let quote = chars[pos];
+            if pos > 0 {
+                pos -= 1;
+                // Walk backwards to find the matching opening quote
+                while pos > 0 {
+                    if chars[pos] == quote {
+                        // Check if this quote is escaped
+                        let mut backslash_count = 0;
+                        let mut bp = pos;
+                        while bp > 0 && chars[bp - 1] == '\\' {
+                            backslash_count += 1;
+                            bp -= 1;
+                        }
+                        if backslash_count % 2 == 0 {
+                            // Unescaped quote — this is the opening quote
+                            break;
+                        }
+                    }
+                    pos -= 1;
+                }
+            }
+            continue;
+        }
         match chars[pos] {
-            ')' => depth += 1,
+            ')' | ']' => depth += 1,
+            '[' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
             '(' => {
                 if depth == 0 {
                     // Found our opening paren. The function name is before it.
@@ -885,5 +916,425 @@ mod tests {
         let (state, _) = analyze_document(source);
         let result = find_variable_struct_type(&state, "p");
         assert_eq!(result, Some("Point".to_string()));
+    }
+
+    // =========================================================================
+    // Empty/whitespace document edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_analyze_empty_document() {
+        let source = "";
+        let (state, diagnostics) = analyze_document(source);
+        // Empty source should parse to an empty program (no parse error)
+        assert!(state.program.is_some());
+        assert!(state.functions.is_empty());
+        assert!(state.variables.is_empty());
+        assert!(state.enums.is_empty());
+        assert!(state.structs.is_empty());
+        // No parse errors for empty file
+        let errors: Vec<_> = diagnostics.iter()
+            .filter(|d| d.code.is_none())
+            .collect();
+        assert!(errors.is_empty(), "empty doc should not produce parse errors: {:?}", errors);
+    }
+
+    #[test]
+    fn test_analyze_whitespace_only_document() {
+        let source = "   \n  \n\n  \t  ";
+        let (state, _) = analyze_document(source);
+        assert!(state.program.is_some());
+        assert!(state.functions.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_document_with_comments_only() {
+        let source = "// just a comment\n// another line";
+        let (state, _) = analyze_document(source);
+        assert!(state.program.is_some());
+        assert!(state.functions.is_empty());
+    }
+
+    // =========================================================================
+    // find_word_at_position edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_find_word_empty_source() {
+        assert_eq!(find_word_at_position("", 0, 0), None);
+    }
+
+    #[test]
+    fn test_find_word_nonexistent_line() {
+        let source = "let x = 5;";
+        // Line 1 doesn't exist (source has only line 0)
+        assert_eq!(find_word_at_position(source, 1, 0), None);
+        // Very large line number
+        assert_eq!(find_word_at_position(source, 999, 0), None);
+    }
+
+    #[test]
+    fn test_find_word_col_past_end_of_line() {
+        let source = "hi";
+        // col 2 is at len, should return "hi" (backward scan works)
+        assert_eq!(find_word_at_position(source, 0, 2), Some("hi".to_string()));
+        // col 100 is past end — utf16_to_char_col clamps to char count,
+        // backward scan still finds the word at end of line
+        assert_eq!(find_word_at_position(source, 0, 100), Some("hi".to_string()));
+    }
+
+    #[test]
+    fn test_find_word_at_position_end_of_identifier() {
+        let source = "foo bar";
+        // col 3 is the space between foo and bar
+        assert_eq!(find_word_at_position(source, 0, 3), Some("foo".to_string()));
+    }
+
+    #[test]
+    fn test_find_word_at_position_unicode() {
+        let source = "let αβγ = 42;";
+        // cursor on 'α' (col 4)
+        // αβγ are not ASCII alphanumeric, so is_ident_char_unicode returns false for them
+        // This means the word detection won't pick up Greek letters as identifiers
+        // (by design - is_ident_char_unicode only does ASCII)
+        let word = find_word_at_position(source, 0, 4);
+        assert_eq!(word, None); // Greek letters not treated as identifiers
+    }
+
+    #[test]
+    fn test_find_word_on_special_chars() {
+        let source = "a + b";
+        // col 2 is on '+'
+        assert_eq!(find_word_at_position(source, 0, 2), None);
+    }
+
+    #[test]
+    fn test_find_word_at_position_multiline() {
+        let source = "let x = 5;\nlet y = 10;";
+        assert_eq!(find_word_at_position(source, 1, 4), Some("y".to_string()));
+    }
+
+    // =========================================================================
+    // find_call_context edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_find_call_context_nested_calls() {
+        let source = "foo(bar(x), y)";
+        // Cursor after "y" (col 13) -- inside outer foo(), after comma
+        let result = find_call_context_at_position(source, 0, 13);
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_nested_inner() {
+        let source = "foo(bar(x), y)";
+        // Cursor on "x" (col 8) -- inside inner bar()
+        let result = find_call_context_at_position(source, 0, 8);
+        assert_eq!(result, Some(("bar".to_string(), 0)));
+    }
+
+    #[test]
+    fn test_find_call_context_unclosed_paren() {
+        let source = "foo(x, y";
+        // No closing paren -- cursor at col 7 (on "y")
+        let result = find_call_context_at_position(source, 0, 7);
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_empty_parens() {
+        let source = "foo()";
+        // Cursor inside empty parens (col 4)
+        let result = find_call_context_at_position(source, 0, 4);
+        assert_eq!(result, Some(("foo".to_string(), 0)));
+    }
+
+    #[test]
+    fn test_find_call_context_string_with_comma() {
+        let source = r#"foo("a,b", y)"#;
+        // Cursor on "y" (after real comma) -- the comma inside the string should be skipped
+        let result = find_call_context_at_position(source, 0, 12);
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_string_with_paren() {
+        let source = r#"foo("(x)", y)"#;
+        // Cursor on "y" -- parens inside string should be skipped
+        let result = find_call_context_at_position(source, 0, 12);
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_array_arg() {
+        let source = "foo([1, 2], y)";
+        // Cursor on "y" -- comma inside array should be skipped via bracket tracking
+        let result = find_call_context_at_position(source, 0, 13);
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_no_function_name() {
+        let source = "(x, y)";
+        // Opening paren has no identifier before it
+        let result = find_call_context_at_position(source, 0, 4);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_call_context_empty_source() {
+        assert_eq!(find_call_context_at_position("", 0, 0), None);
+    }
+
+    // =========================================================================
+    // find_dot_receiver edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_find_dot_receiver_partial_method() {
+        // User is typing "point.le" (partial method name)
+        let source = "point.le";
+        let result = find_dot_receiver_at_position(source, 0, 8);
+        assert_eq!(result, Some("point".to_string()));
+    }
+
+    #[test]
+    fn test_find_dot_receiver_at_dot() {
+        // Cursor right after dot (col 6 in "point." where dot is at col 5)
+        let source = "point.";
+        let result = find_dot_receiver_at_position(source, 0, 6);
+        assert_eq!(result, Some("point".to_string()));
+    }
+
+    #[test]
+    fn test_find_dot_receiver_col_0() {
+        let source = ".method";
+        let result = find_dot_receiver_at_position(source, 0, 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_dot_receiver_empty() {
+        assert_eq!(find_dot_receiver_at_position("", 0, 0), None);
+    }
+
+    // =========================================================================
+    // find_enum_variant edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_find_enum_variant_empty() {
+        assert_eq!(find_enum_variant_at_position("", 0, 0), None);
+    }
+
+    #[test]
+    fn test_find_enum_variant_col_past_end() {
+        let source = "Color::Red";
+        // col 100 is past end — utf16_to_char_col clamps to char count,
+        // backward scan still finds the variant at end of line
+        assert_eq!(find_enum_variant_at_position(source, 0, 100), Some(("Color".to_string(), "Red".to_string())));
+    }
+
+    // =========================================================================
+    // UTF-16 encoding edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_char_col_to_utf16_with_bmp_chars() {
+        // BMP characters take 1 UTF-16 code unit each
+        let line = "hello\u{00E9}world"; // "helloéworld" -- é is U+00E9 (BMP)
+        assert_eq!(char_col_to_utf16(line, 0), 0);
+        assert_eq!(char_col_to_utf16(line, 5), 5); // before é
+        assert_eq!(char_col_to_utf16(line, 6), 6); // after é
+    }
+
+    #[test]
+    fn test_char_col_to_utf16_with_supplementary_chars() {
+        // U+1F600 (grinning face) takes 2 UTF-16 code units
+        let line = "ab\u{1F600}cd";
+        assert_eq!(char_col_to_utf16(line, 0), 0);
+        assert_eq!(char_col_to_utf16(line, 2), 2); // before emoji
+        assert_eq!(char_col_to_utf16(line, 3), 4); // after emoji (2 UTF-16 units)
+        assert_eq!(char_col_to_utf16(line, 4), 5); // 'c'
+    }
+
+    #[test]
+    fn test_utf16_to_char_col_with_supplementary_chars() {
+        let line = "ab\u{1F600}cd";
+        assert_eq!(utf16_to_char_col(line, 0), 0);
+        assert_eq!(utf16_to_char_col(line, 2), 2); // before emoji
+        assert_eq!(utf16_to_char_col(line, 4), 3); // after emoji
+        assert_eq!(utf16_to_char_col(line, 5), 4); // 'c' (corrected — 'd' is at char 4)
+    }
+
+    #[test]
+    fn test_utf16_to_char_col_past_end() {
+        let line = "abc";
+        assert_eq!(utf16_to_char_col(line, 100), 3); // clamps to char count
+    }
+
+    #[test]
+    fn test_char_col_to_utf16_empty() {
+        assert_eq!(char_col_to_utf16("", 0), 0);
+        assert_eq!(char_col_to_utf16("", 5), 0); // past end returns 0
+    }
+
+    // =========================================================================
+    // to_lsp_diagnostic edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_to_lsp_diagnostic_line_0_col_0() {
+        // line 0 / col 0 saturating_sub should not underflow
+        let d = AstDiagnostic {
+            line: 0,
+            column: 0,
+            message: "err".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Error,
+            code: None,
+            help: None,
+            suggestion: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.range.start.line, 0);
+        assert_eq!(lsp_d.range.start.character, 0);
+    }
+
+    #[test]
+    fn test_to_lsp_diagnostic_with_help_and_suggestion() {
+        let d = AstDiagnostic {
+            line: 1,
+            column: 1,
+            message: "error".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W100".to_string()),
+            help: Some("try this".to_string()),
+            suggestion: Some("fix it".to_string()),
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert!(lsp_d.message.contains("error"));
+        assert!(lsp_d.message.contains("try this"));
+        assert!(lsp_d.message.contains("fix it"));
+        assert_eq!(lsp_d.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn test_to_lsp_diagnostic_col_past_end_of_line() {
+        let d = AstDiagnostic {
+            line: 1,
+            column: 100, // way past end
+            message: "err".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Error,
+            code: None,
+            help: None,
+            suggestion: None,
+        };
+        let source = "short";
+        let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
+        // Should not panic, range should be clamped
+        assert_eq!(lsp_d.range.start.line, 0);
+    }
+
+    #[test]
+    fn test_to_lsp_diagnostic_line_past_end_of_source() {
+        let d = AstDiagnostic {
+            line: 100,
+            column: 1,
+            message: "err".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Error,
+            code: None,
+            help: None,
+            suggestion: None,
+        };
+        let source = "let x = 5;";
+        let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
+        // Line not found — falls back to col-based range
+        assert_eq!(lsp_d.range.start.line, 99);
+    }
+
+    // =========================================================================
+    // find_name_col edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_find_name_col_nonexistent_line() {
+        let source = "let x = 5;";
+        assert_eq!(find_name_col(source, 5, "x"), None);
+    }
+
+    #[test]
+    fn test_find_name_col_name_not_found() {
+        let source = "let x = 5;";
+        assert_eq!(find_name_col(source, 1, "zzz"), None);
+    }
+
+    #[test]
+    fn test_find_name_col_word_boundary() {
+        // "ax" should not match as word "x"
+        let source = "let ax = 5; let x = 10;";
+        let result = find_name_col(source, 1, "x");
+        // Should find standalone "x", not the "x" in "ax"
+        assert!(result.is_some());
+        let col = result.unwrap();
+        assert_eq!(col, 17); // "let ax = 5; let " = 16 chars, then "x" at 17
+    }
+
+    // =========================================================================
+    // analyze_document with various structures
+    // =========================================================================
+
+    #[test]
+    fn test_analyze_document_with_type_alias() {
+        let source = "type MyInt = int64;";
+        let (state, _) = analyze_document(source);
+        let var = state.variables.get("MyInt");
+        assert!(var.is_some());
+        assert!(var.unwrap().is_type_alias);
+        assert_eq!(var.unwrap().type_annotation, Some("int64".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_document_with_const() {
+        let source = "const PI = 3.14;";
+        let (state, _) = analyze_document(source);
+        let var = state.variables.get("PI");
+        assert!(var.is_some());
+        assert!(var.unwrap().constant);
+    }
+
+    #[test]
+    fn test_analyze_document_with_let_mut() {
+        let source = "let mut counter = 0;";
+        let (state, _) = analyze_document(source);
+        let var = state.variables.get("counter");
+        assert!(var.is_some());
+        assert!(var.unwrap().mutable);
+    }
+
+    #[test]
+    fn test_analyze_document_with_async_fn() {
+        let source = "async fn fetch() { null }";
+        let (state, _) = analyze_document(source);
+        let func = state.functions.get("fetch");
+        assert!(func.is_some());
+        assert!(func.unwrap().is_async);
+    }
+
+    #[test]
+    fn test_analyze_document_with_use_statement() {
+        let source = "use std::io;";
+        let (state, _) = analyze_document(source);
+        let var = state.variables.get("io");
+        assert!(var.is_some());
+        assert_eq!(var.unwrap().type_annotation, Some("import(std::io)".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_document_with_destructure() {
+        let source = "let [a, b] = [1, 2];";
+        let (state, _) = analyze_document(source);
+        assert!(state.variables.contains_key("a"));
+        assert!(state.variables.contains_key("b"));
     }
 }

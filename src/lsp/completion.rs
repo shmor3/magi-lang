@@ -401,8 +401,8 @@ pub fn handle_completion(
         } else if var.type_annotation.as_deref() == Some("module") {
             format!("mod {}", name)
         } else if let Some(ref ta) = var.type_annotation {
-            if ta.starts_with("import(") {
-                format!("use {}", &ta[7..ta.len().saturating_sub(1)])
+            if ta.starts_with("import(") && ta.ends_with(')') && ta.len() > 8 {
+                format!("use {}", &ta[7..ta.len() - 1])
             } else if var.constant {
                 format!("const {}: {}", name, ta)
             } else if var.mutable {
@@ -477,4 +477,172 @@ pub fn handle_completion(
     }
 
     CompletionResponse::Array(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lsp::analysis::analyze_document;
+
+    fn make_completion_params(line: u32, character: u32) -> CompletionParams {
+        CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: Url::parse("file:///test.magi").unwrap(),
+                },
+                position: Position { line, character },
+            },
+            context: None,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    fn get_items(response: CompletionResponse) -> Vec<CompletionItem> {
+        match response {
+            CompletionResponse::Array(items) => items,
+            _ => panic!("expected array response"),
+        }
+    }
+
+    #[test]
+    fn test_completion_includes_keywords() {
+        let source = "le";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(0, 2);
+        let items = get_items(handle_completion(&state, &params));
+        let has_let = items.iter().any(|i| i.label == "let");
+        assert!(has_let, "should include 'let' keyword");
+    }
+
+    #[test]
+    fn test_completion_includes_builtins() {
+        let source = "pri";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(0, 3);
+        let items = get_items(handle_completion(&state, &params));
+        let has_print = items.iter().any(|i| i.label == "print");
+        let has_println = items.iter().any(|i| i.label == "println");
+        assert!(has_print, "should include 'print'");
+        assert!(has_println, "should include 'println'");
+    }
+
+    #[test]
+    fn test_completion_includes_user_functions() {
+        let source = "fn greet() { null }\ngre";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(1, 3);
+        let items = get_items(handle_completion(&state, &params));
+        let has_greet = items.iter().any(|i| i.label == "greet");
+        assert!(has_greet, "should include user function 'greet'");
+    }
+
+    #[test]
+    fn test_completion_includes_user_variables() {
+        let source = "let my_value = 42;\nmy";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(1, 2);
+        let items = get_items(handle_completion(&state, &params));
+        let has_var = items.iter().any(|i| i.label == "my_value");
+        assert!(has_var, "should include variable 'my_value'");
+    }
+
+    #[test]
+    fn test_completion_enum_variants_via_double_colon() {
+        // Use valid syntax so the enum is parsed and available in state
+        let source = "enum Color { Red, Green, Blue }\nlet c = Color::Red;";
+        let (state, _) = analyze_document(source);
+        assert!(state.enums.contains_key("Color"), "Color enum should be in state");
+        // Simulate cursor right after "::" (col 15) -- the double colon context
+        // detection finds "Color" as the enum name before "::"
+        // To trigger double-colon completion, we need cursor after "::" with partial or no text
+        // In the actual source "Color::Red", col 15 is on "R" -- find_double_colon_context
+        // walks back from "Red" -> skips ident -> finds "::" -> finds "Color"
+        let params = make_completion_params(1, 15);
+        let items = get_items(handle_completion(&state, &params));
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"Red"), "should suggest Red variant");
+        assert!(names.contains(&"Green"), "should suggest Green variant");
+        assert!(names.contains(&"Blue"), "should suggest Blue variant");
+    }
+
+    #[test]
+    fn test_completion_dot_access_generic_methods() {
+        let source = "let x = 5;\nx.";
+        let (state, _) = analyze_document(source);
+        // Cursor after dot
+        let params = make_completion_params(1, 2);
+        let items = get_items(handle_completion(&state, &params));
+        let has_to_string = items.iter().any(|i| i.label == "to_string");
+        assert!(has_to_string, "should include generic method 'to_string'");
+    }
+
+    #[test]
+    fn test_completion_empty_document() {
+        let source = "";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(0, 0);
+        let items = get_items(handle_completion(&state, &params));
+        // Should include keywords and builtins even for empty doc
+        assert!(!items.is_empty());
+        let has_fn = items.iter().any(|i| i.label == "fn");
+        assert!(has_fn, "should include 'fn' keyword");
+    }
+
+    #[test]
+    fn test_completion_parse_error_still_works() {
+        // Document with parse error -- completions should still work
+        let source = "let x = 5;\nfn foo() {\n  x.";
+        let (state, _) = analyze_document(source);
+        // The parse may fail, but completions should still work from partial state
+        let params = make_completion_params(2, 4);
+        let items = get_items(handle_completion(&state, &params));
+        // Even if parse fails, dot-access should return generic methods
+        // (if state has no variables due to parse error, we get generic methods)
+        // Just verify no panic
+        let _ = items;
+    }
+
+    #[test]
+    fn test_completion_filters_by_prefix() {
+        let source = "fn foo() { null }\nfn bar() { null }\nfo";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(2, 2);
+        let items = get_items(handle_completion(&state, &params));
+        // "fo" should match "foo", "for" keyword, "floor" builtin, etc.
+        // but NOT "bar"
+        let has_bar = items.iter().any(|i| i.label == "bar");
+        assert!(!has_bar, "'bar' should be filtered out by prefix 'fo'");
+    }
+
+    #[test]
+    fn test_find_prefix_at_position_empty() {
+        assert_eq!(find_prefix_at_position("", 0, 0), None);
+    }
+
+    #[test]
+    fn test_find_prefix_at_position_no_prefix() {
+        // Col 0 at start of line, no chars before
+        assert_eq!(find_prefix_at_position("hello", 0, 0), None);
+    }
+
+    #[test]
+    fn test_find_prefix_at_position_full_word() {
+        assert_eq!(find_prefix_at_position("hello world", 0, 5), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_find_double_colon_context_no_colons() {
+        assert_eq!(find_double_colon_context("hello", 0, 5), None);
+    }
+
+    #[test]
+    fn test_find_double_colon_context_valid() {
+        assert_eq!(find_double_colon_context("Color::", 0, 7), Some("Color".to_string()));
+    }
+
+    #[test]
+    fn test_find_double_colon_context_with_partial_variant() {
+        assert_eq!(find_double_colon_context("Color::Re", 0, 9), Some("Color".to_string()));
+    }
 }

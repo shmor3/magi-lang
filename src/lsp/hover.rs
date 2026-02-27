@@ -61,9 +61,12 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
             info.push_str("mod ");
             info.push_str(&var.name);
         } else if let Some(ref ta) = var.type_annotation {
-            if ta.starts_with("import(") {
+            if ta.starts_with("import(") && ta.ends_with(')') && ta.len() > 8 {
                 info.push_str("use ");
-                info.push_str(&ta[7..ta.len().saturating_sub(1)]);
+                info.push_str(&ta[7..ta.len() - 1]);
+            } else if ta.starts_with("import(") {
+                info.push_str("use ");
+                info.push_str(ta);
             } else {
                 if var.constant {
                     info.push_str("const ");
@@ -315,4 +318,215 @@ fn is_keyword(word: &str) -> bool {
             | "enum" | "struct" | "test" | "true" | "false" | "null" | "in" | "as"
             | "spawn" | "await" | "pub"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lsp::analysis::analyze_document;
+
+    fn make_hover_params(line: u32, character: u32) -> HoverParams {
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: Url::parse("file:///test.magi").unwrap(),
+                },
+                position: Position { line, character },
+            },
+            work_done_progress_params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_hover_function() {
+        let source = "fn greet(name: string) -> string { name }";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 3);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("fn greet"));
+            assert!(content.value.contains("name: string"));
+            assert!(content.value.contains("-> string"));
+        } else {
+            panic!("expected markup content");
+        }
+    }
+
+    #[test]
+    fn test_hover_variable() {
+        let source = "let x: int64 = 42;";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 4);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("let x"));
+            assert!(content.value.contains("int64"));
+        }
+    }
+
+    #[test]
+    fn test_hover_constant() {
+        let source = "const PI = 3.14;";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 6);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("const PI"));
+        }
+    }
+
+    #[test]
+    fn test_hover_enum() {
+        let source = "enum Color { Red, Green, Blue }";
+        let (state, _) = analyze_document(source);
+        // Hover on "Color"
+        let params = make_hover_params(0, 5);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("enum Color"));
+            assert!(content.value.contains("Red"));
+        }
+    }
+
+    #[test]
+    fn test_hover_struct() {
+        let source = "struct Point { x: float64, y: float64 }";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 7);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("struct Point"));
+            assert!(content.value.contains("x: float64"));
+        }
+    }
+
+    #[test]
+    fn test_hover_builtin() {
+        let source = "len([1, 2, 3])";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 1);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("len"));
+            assert!(content.value.contains("length"));
+        }
+    }
+
+    #[test]
+    fn test_hover_keyword() {
+        let source = "let x = 5;";
+        let (state, _) = analyze_document(source);
+        // Hover on "let" keyword
+        let params = make_hover_params(0, 0);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("keyword"));
+        }
+    }
+
+    #[test]
+    fn test_hover_on_space_returns_none() {
+        let source = "let x = 5;";
+        let (state, _) = analyze_document(source);
+        // Col 3 is the space after "let" -- backward scan finds "let" keyword
+        let params = make_hover_params(0, 3);
+        let _result = handle_hover(&state, &params);
+        // Col 6 is space between = and 5 (no adjacent identifier chars)
+        let params2 = make_hover_params(0, 6);
+        let result2 = handle_hover(&state, &params2);
+        assert!(result2.is_none());
+    }
+
+    #[test]
+    fn test_hover_empty_document() {
+        let source = "";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 0);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_hover_method_name() {
+        let source = "let arr = [1, 2, 3];\narr.map(|x| x + 1)";
+        let (state, _) = analyze_document(source);
+        // Hover on "map" (line 1, col 4)
+        let params = make_hover_params(1, 4);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("map"));
+        }
+    }
+
+    #[test]
+    fn test_hover_enum_variant() {
+        let source = "enum Color { Red, Green, Blue }\nlet c = Color::Red;";
+        let (state, _) = analyze_document(source);
+        // Hover on "Red" in "Color::Red" (line 1, col 15)
+        let params = make_hover_params(1, 15);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("Color::Red"));
+            assert!(content.value.contains("Variant"));
+        }
+    }
+
+    #[test]
+    fn test_hover_type_alias() {
+        let source = "type MyInt = int64;";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 5);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("type MyInt"));
+            assert!(content.value.contains("int64"));
+        }
+    }
+
+    #[test]
+    fn test_hover_use_import() {
+        let source = "use std::io;";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 9);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("use"));
+            assert!(content.value.contains("std::io"));
+        }
+    }
+
+    #[test]
+    fn test_hover_async_function() {
+        let source = "async fn fetch() { null }";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 9);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("async fn fetch"));
+        }
+    }
 }
