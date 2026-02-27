@@ -506,8 +506,18 @@ impl<'a> Formatter<'a> {
                 args,
                 kwargs,
             } => {
-                self.fmt_expression_prec(object, 9);
-                self.write(".");
+                // Check if object is an OptionalChain marker (empty field = ?.method() syntax)
+                let is_optional_method = matches!(
+                    &object.kind,
+                    ExpressionKind::OptionalChain { field, .. } if field.is_empty()
+                );
+                if is_optional_method {
+                    // Format as obj?.method() — the OptionalChain already outputs "?."
+                    self.fmt_expression_prec(object, 9);
+                } else {
+                    self.fmt_expression_prec(object, 9);
+                    self.write(".");
+                }
                 self.write(method);
                 self.write("(");
                 self.fmt_args(args, kwargs);
@@ -1329,6 +1339,15 @@ for n in 1..=10 {
     output n;
 }
 "#;
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_optional_chain_method_call() {
+        let source = "let x = null;\nlet y = x?.foo();\nlet z = x?.bar.baz();";
+        let formatted = format_source(source);
+        assert!(formatted.contains("x?.foo()"), "expected x?.foo(), got: {}", formatted);
+        assert!(formatted.contains("x?.bar.baz()"), "expected x?.bar.baz(), got: {}", formatted);
         assert_idempotent(source);
     }
 }

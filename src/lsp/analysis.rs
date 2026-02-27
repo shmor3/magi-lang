@@ -232,7 +232,74 @@ pub fn extract_symbols(
                     col: name_col,
                 });
             }
+            StatementKind::TypeAlias { name, target } => {
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
+                variables.insert(name.clone(), VariableSymbol {
+                    name: name.clone(),
+                    mutable: false,
+                    constant: false,
+                    type_annotation: Some(target.clone()),
+                    line: stmt.span.start_line,
+                    col: name_col,
+                });
+            }
+            StatementKind::ModuleDef { name, body } => {
+                let name_col = find_name_col(source, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
+                variables.insert(name.clone(), VariableSymbol {
+                    name: name.clone(),
+                    mutable: false,
+                    constant: false,
+                    type_annotation: Some("module".to_string()),
+                    line: stmt.span.start_line,
+                    col: name_col,
+                });
+                // Also extract symbols from module body
+                let module_program = crate::syntax::ast::Program {
+                    statements: body.statements.clone(),
+                    span: body.span,
+                };
+                extract_symbols(&module_program, source, functions, variables, enums, structs);
+            }
+            StatementKind::LetDestructure { pattern, .. } => {
+                // Extract variable names from destructure patterns
+                let names = destructure_names(pattern);
+                for name in names {
+                    let name_col = find_name_col(source, stmt.span.start_line, &name)
+                        .unwrap_or(stmt.span.start_col);
+                    variables.insert(name.clone(), VariableSymbol {
+                        name,
+                        mutable: false,
+                        constant: false,
+                        type_annotation: None,
+                        line: stmt.span.start_line,
+                        col: name_col,
+                    });
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+/// Extract variable names from a destructure pattern.
+fn destructure_names(pattern: &DestructurePattern) -> Vec<String> {
+    match pattern {
+        DestructurePattern::Array(elems) => {
+            let mut names = Vec::new();
+            for elem in elems {
+                match elem {
+                    DestructureElement::Name(n) => names.push(n.clone()),
+                    DestructureElement::Rest(n) => names.push(n.clone()),
+                }
+            }
+            names
+        }
+        DestructurePattern::Map(entries) => {
+            entries.iter().map(|(key, alias)| {
+                alias.as_ref().unwrap_or(key).clone()
+            }).collect()
         }
     }
 }
