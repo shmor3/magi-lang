@@ -2472,26 +2472,28 @@ fn test_range_non_inclusive_max_ok() {
 }
 
 #[test]
-fn test_slice_negative_start_clamps_to_zero() {
-    // Negative slice start should clamp to 0, not wrap to huge usize
+fn test_slice_negative_start_wraps_from_end() {
+    // Negative slice start wraps from end (Python-style)
     let src = r#"
         let arr = [10, 20, 30, 40, 50];
-        arr[(-1)..3]
+        arr[(-2)..5]
     "#;
     assert_eq!(run(src), DataType::Array(vec![
-        DataType::Int64(10),
-        DataType::Int64(20),
-        DataType::Int64(30),
+        DataType::Int64(40),
+        DataType::Int64(50),
     ]));
 }
 
 #[test]
-fn test_slice_negative_end_produces_empty() {
+fn test_slice_negative_end_wraps_from_end() {
     let src = r#"
         let arr = [10, 20, 30];
         arr[0..(-1)]
     "#;
-    assert_eq!(run(src), DataType::Array(vec![]));
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(10),
+        DataType::Int64(20),
+    ]));
 }
 
 #[test]
@@ -5640,4 +5642,56 @@ fn test_linter_mixed_match_no_false_positive() {
     let result = magi_lang::linter::lint(&program, &config);
     let w203: Vec<_> = result.diagnostics.iter().filter(|d| d.code.as_deref() == Some("W203")).collect();
     assert!(w203.is_empty(), "should not produce W203 for mixed match, got: {:?}", w203);
+}
+
+// ── Round 45: Uint methods, struct reserved fields, slice wrapping, main scope ──
+
+#[test]
+fn test_has_main_sees_top_level_const() {
+    let src = r#"
+    const MAX = 100
+    fn main() {
+        MAX + 1
+    }
+    "#;
+    assert_eq!(run(src), DataType::Int64(101));
+}
+
+#[test]
+fn test_has_main_sees_top_level_let() {
+    let src = r#"
+    let greeting = "hello"
+    fn main() {
+        greeting
+    }
+    "#;
+    assert_eq!(run(src), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_struct_reserved_field_rejected() {
+    let src = "struct Bad { __struct: string }";
+    let result = parse_v2(src);
+    assert!(result.is_err(), "should reject __struct as field name");
+}
+
+#[test]
+fn test_string_slice_negative_wraps() {
+    let src = r#"
+    let s = "hello"
+    s[(-3)..5]
+    "#;
+    assert_eq!(run(src), DataType::String("llo".to_string()));
+}
+
+#[test]
+fn test_slice_both_negative() {
+    let src = r#"
+    let arr = [1, 2, 3, 4, 5]
+    arr[(-3)..(-1)]
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![
+        DataType::Int64(3),
+        DataType::Int64(4),
+    ]));
 }

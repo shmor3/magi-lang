@@ -801,16 +801,28 @@ impl Compiler {
             }
 
             ExpressionKind::Pipe { left, right } => {
-                // Compile left, then substitute into right's placeholder.
-                // For now, compile as: left becomes first arg of right's call.
+                // Compile left value and save to a local so it can be placed
+                // at the correct argument position (not just first).
                 self.compile_expr(left)?;
+                let pipe_local = self.ensure_temp_local()?;
+                self.emit(Instruction::LocalSet(pipe_local));
+
                 match &right.kind {
                     ExpressionKind::Call { name, args, .. } => {
-                        // Insert left value as replacement for placeholder.
-                        for arg in args {
-                            if matches!(&arg.kind, ExpressionKind::Placeholder) {
-                                // Already on stack from left.
-                            } else {
+                        // Compile args in order; use LocalGet for placeholder position.
+                        let has_placeholder = args.iter().any(|a| matches!(&a.kind, ExpressionKind::Placeholder));
+                        if has_placeholder {
+                            for arg in args {
+                                if matches!(&arg.kind, ExpressionKind::Placeholder) {
+                                    self.emit(Instruction::LocalGet(pipe_local));
+                                } else {
+                                    self.compile_expr(arg)?;
+                                }
+                            }
+                        } else {
+                            // No explicit placeholder: pipe value is first argument.
+                            self.emit(Instruction::LocalGet(pipe_local));
+                            for arg in args {
                                 self.compile_expr(arg)?;
                             }
                         }
@@ -818,14 +830,16 @@ impl Compiler {
                             self.emit(Instruction::Call(fn_idx));
                         } else {
                             let name_idx = self.module.intern_string(name);
+                            let arg_count = if has_placeholder { args.len() } else { args.len() + 1 };
                             self.emit(Instruction::RuntimeCall {
                                 name: name_idx,
-                                arg_count: args.len() as u32,
+                                arg_count: arg_count as u32,
                             });
                         }
                     }
                     _ => {
                         // General case: compile right as function, call with left as arg.
+                        self.emit(Instruction::LocalGet(pipe_local));
                         self.compile_expr(right)?;
                         self.emit(Instruction::CallIndirect(1));
                     }
@@ -922,18 +936,11 @@ impl Compiler {
                 self.emit(Instruction::PushNull);
             }
 
-            ExpressionKind::TryCatchExpr { try_block, catch_var, catch_block, .. } => {
-                // Compile try block; catch block is compiled as fallback.
-                // In WASM MVP, traps can't be caught. This handles Result-based errors.
+            ExpressionKind::TryCatchExpr { try_block, .. } => {
+                // In WASM MVP, traps can't be caught. Only compile the try block;
+                // the catch block is unreachable in WASM and would create stack issues
+                // if compiled unconditionally.
                 self.compile_block(try_block)?;
-                // Compile catch block (for completeness, though WASM traps bypass it).
-                if let Some(var_name) = catch_var {
-                    self.fb()?.push_scope();
-                    let _idx = self.define_local(var_name, ValType::Tagged, false)?;
-                    self.compile_block(catch_block)?;
-                    self.emit(Instruction::Drop);
-                    self.fb()?.pop_scope();
-                }
             }
 
             ExpressionKind::ListComprehension { expr, pattern, iterable, condition } => {
@@ -1357,8 +1364,11 @@ impl Compiler {
                     self.emit(Instruction::I64Eq);
                     self.emit(Instruction::If);
                     self.compile_block(&arm.body)?;
-                    if !is_last {
-                        self.emit(Instruction::Else);
+                    // Always emit Else: either chain to next arm, or provide
+                    // default PushNull so the If block has a valid Else branch.
+                    self.emit(Instruction::Else);
+                    if is_last {
+                        self.emit(Instruction::PushNull);
                     }
                 }
                 _ => {
@@ -1371,8 +1381,9 @@ impl Compiler {
                     });
                     self.emit(Instruction::If);
                     self.compile_block(&arm.body)?;
-                    if !is_last {
-                        self.emit(Instruction::Else);
+                    self.emit(Instruction::Else);
+                    if is_last {
+                        self.emit(Instruction::PushNull);
                     }
                 }
             }

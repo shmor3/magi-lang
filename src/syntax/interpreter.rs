@@ -605,17 +605,29 @@ impl<'a> Interpreter<'a> {
         let has_main = self.functions.contains_key("main");
 
         if has_main {
-            // Process imports and use statements, then call main()
+            // Process imports, use statements, and top-level declarations, then call main()
             for stmt in &program.statements {
                 match &stmt.kind {
                     StatementKind::Import(plugin_id) => {
                         self.imports.insert(plugin_id.clone());
                     }
-                    StatementKind::Use { .. } => {
+                    StatementKind::Use { .. }
+                    | StatementKind::ConstDef { .. }
+                    | StatementKind::Let { .. }
+                    | StatementKind::LetMut { .. } => {
                         self.exec_statement(stmt)?;
                     }
                     _ => {}
                 }
+            }
+            // Snapshot top-level globals so they survive call_function's scope reset.
+            // Inject them via closure_captures so they're available inside main().
+            let globals: Vec<(String, DataType, bool)> = self.symbols.iter()
+                .flat_map(|scope| scope.iter())
+                .map(|(name, entry)| (name.clone(), self.heap.read(entry.addr).cloned().unwrap_or(DataType::Null), entry.mutable))
+                .collect();
+            if !globals.is_empty() {
+                self.closure_captures.insert("main".to_string(), globals);
             }
             let main_span = self
                 .functions
@@ -1100,10 +1112,16 @@ impl<'a> Interpreter<'a> {
     // =========================================================================
 
     fn eval_slice(&self, obj: &DataType, start: &DataType, end: &DataType, inclusive: bool, span: Span) -> Result<DataType, InterpError> {
+        let len = match obj {
+            DataType::Array(arr) => arr.len() as i64,
+            DataType::String(s) => s.chars().count() as i64,
+            _ => 0,
+        };
         let s_raw = start.to_i64().unwrap_or(0);
-        let e_raw_i = end.to_i64().unwrap_or(0);
-        let s = if s_raw < 0 { 0usize } else { s_raw as usize };
-        let e_raw = if e_raw_i < 0 { 0usize } else { e_raw_i as usize };
+        let e_raw_i = end.to_i64().unwrap_or(len);
+        // Wrap negative indices from end (Python-style)
+        let s = if s_raw < 0 { (len + s_raw).max(0) as usize } else { s_raw as usize };
+        let e_raw = if e_raw_i < 0 { (len + e_raw_i).max(0) as usize } else { e_raw_i as usize };
         let e = if inclusive { e_raw.saturating_add(1) } else { e_raw };
 
         match obj {
@@ -1699,6 +1717,84 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
                     let max_val = hi_arg.to_i64().or_else(|| hi_arg.to_f64().map(|f| f as i64))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
+                    Ok(Some(DataType::Int64((*n as i64).max(lo).min(hi))))
+                }
+                _ => Ok(None),
+            },
+            DataType::Uint32(n) => match method {
+                "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
+                "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "pow" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    if exp < 0 { Ok(Some(DataType::Uint32(0))) }
+                    else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
+                    else {
+                        match n.checked_pow(exp as u32) {
+                            Some(result) => Ok(Some(DataType::Uint32(result))),
+                            None => Ok(Some(DataType::Null)),
+                        }
+                    }
+                }
+                "min" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
+                    Ok(Some(DataType::Int64((*n as i64).min(other))))
+                }
+                "max" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
+                    Ok(Some(DataType::Int64((*n as i64).max(other))))
+                }
+                "clamp" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    let lo_arg = self.eval_expr(&args[0])?;
+                    let hi_arg = self.eval_expr(&args[1])?;
+                    let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = hi_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
+                    Ok(Some(DataType::Int64((*n as i64).max(lo).min(hi))))
+                }
+                _ => Ok(None),
+            },
+            DataType::Uint64(n) => match method {
+                "to_string" => Ok(Some(DataType::String(n.to_string()))),
+                "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
+                "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
+                "pow" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    if exp < 0 { Ok(Some(DataType::Uint64(0))) }
+                    else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
+                    else {
+                        match n.checked_pow(exp as u32) {
+                            Some(result) => Ok(Some(DataType::Uint64(result))),
+                            None => Ok(Some(DataType::Null)),
+                        }
+                    }
+                }
+                "min" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
+                    Ok(Some(DataType::Int64((*n as i64).min(other))))
+                }
+                "max" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
+                    Ok(Some(DataType::Int64((*n as i64).max(other))))
+                }
+                "clamp" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    let lo_arg = self.eval_expr(&args[0])?;
+                    let hi_arg = self.eval_expr(&args[1])?;
+                    let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = hi_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                     Ok(Some(DataType::Int64((*n as i64).max(lo).min(hi))))
                 }

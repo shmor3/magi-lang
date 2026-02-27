@@ -2276,6 +2276,13 @@ impl Parser {
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let field_start = self.peek().span;
             let field_tok = self.expect_identifier()?;
+            if field_tok.text.starts_with("__") {
+                return Err(SyntaxError {
+                    line: field_start.start_line as usize,
+                    column: field_start.start_col as usize,
+                    message: format!("field name '{}' is reserved (double-underscore prefix)", field_tok.text),
+                });
+            }
             let type_annotation = if self.eat(&TokenKind::Colon) {
                 let type_tok = self.expect(&TokenKind::Ident)?;
                 Some(type_tok.text)
