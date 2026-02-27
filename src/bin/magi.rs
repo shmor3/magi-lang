@@ -2111,11 +2111,7 @@ impl OperationEvaluator for FullEvaluator {
             // NowTimestamp: current time in milliseconds
             // ================================================================
             OperationType::NowTimestamp => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                Ok(DataType::Int64(now))
+                Ok(DataType::Int64(chrono::Utc::now().timestamp_millis()))
             }
 
             // ================================================================
@@ -2125,20 +2121,10 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(v) => {
                         let ms = match v { Ok(i) => i, Err(f) => f as i64 };
-                        let secs = ms / 1000;
-                        let remaining_ms = (ms % 1000).unsigned_abs();
-                        // Simple UTC formatting
-                        let days_since_epoch = secs / 86400;
-                        let time_of_day = ((secs % 86400) + 86400) % 86400;
-                        let hours = time_of_day / 3600;
-                        let minutes = (time_of_day % 3600) / 60;
-                        let seconds = time_of_day % 60;
-                        // Civil date from days since 1970-01-01 (simplified)
-                        let (y, m, d) = days_to_ymd(days_since_epoch);
-                        Ok(DataType::String(format!(
-                            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-                            y, m, d, hours, minutes, seconds, remaining_ms
-                        )))
+                        match chrono::DateTime::from_timestamp_millis(ms) {
+                            Some(dt) => Ok(DataType::String(dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())),
+                            None => Err(EvalError::InvalidInput(format!("format_timestamp: invalid timestamp {}", ms))),
+                        }
                     }
                     None => Ok(DataType::Null),
                 }
@@ -2192,28 +2178,29 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ParseTimestamp => {
                 match &input {
                     DataType::String(s) => {
-                        // Simple ISO 8601 parser: YYYY-MM-DDThh:mm:ss[.sss]Z
                         let s = s.trim();
-                        if s.len() < 19 {
-                            return Ok(DataType::Null);
+                        // Try RFC 3339 (with timezone)
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                            return Ok(DataType::Int64(dt.timestamp_millis()));
                         }
-                        let year: i64 = s[0..4].parse().unwrap_or(0);
-                        let month: i64 = s[5..7].parse().unwrap_or(0);
-                        let day: i64 = s[8..10].parse().unwrap_or(0);
-                        let hour: i64 = s[11..13].parse().unwrap_or(0);
-                        let min: i64 = s[14..16].parse().unwrap_or(0);
-                        let sec: i64 = s[17..19].parse().unwrap_or(0);
-                        let ms: i64 = if s.len() > 20 && s.as_bytes()[19] == b'.' {
-                            let end = s[20..].find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len() - 20);
-                            let frac = &s[20..20+end];
-                            let padded = format!("{:0<3}", &frac[..frac.len().min(3)]);
-                            padded.parse().unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let days = ymd_to_days(year, month, day);
-                        let total_secs = days * 86400 + hour * 3600 + min * 60 + sec;
-                        Ok(DataType::Int64(total_secs * 1000 + ms))
+                        // Try ISO 8601 without timezone (assume UTC)
+                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+                            return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
+                        }
+                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                            return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
+                        }
+                        // Try space-separated datetime
+                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                            return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
+                        }
+                        // Try date-only
+                        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                            if let Some(dt) = d.and_hms_opt(0, 0, 0) {
+                                return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
+                            }
+                        }
+                        Ok(DataType::Null)
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -4556,30 +4543,40 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
-            // YAML operations (basic inline parser, no external dependency)
+            // YAML operations (serde_yaml)
             // ================================================================
             OperationType::YamlParse => {
                 match &input {
-                    DataType::String(s) => yaml_parse(s),
+                    DataType::String(s) => {
+                        let yaml_val: serde_yaml::Value = serde_yaml::from_str(s)
+                            .map_err(|e| EvalError::InvalidInput(format!("yaml_parse: {}", e)))?;
+                        Ok(yaml_value_to_datatype(&yaml_val))
+                    }
                     _ => Err(EvalError::InvalidInput("yaml_parse: input must be a string".to_string())),
                 }
             }
             OperationType::YamlStringify => {
-                Ok(DataType::String(yaml_stringify(&input, 0)))
+                let yaml_val = datatype_to_yaml_value(&input);
+                let s = serde_yaml::to_string(&yaml_val)
+                    .map_err(|e| EvalError::InvalidInput(format!("yaml_stringify: {}", e)))?;
+                Ok(DataType::String(s))
             }
             OperationType::YamlValidate => {
                 match &input {
-                    DataType::String(s) => Ok(DataType::Bool(yaml_parse(s).is_ok())),
+                    DataType::String(s) => {
+                        let valid = serde_yaml::from_str::<serde_yaml::Value>(s).is_ok();
+                        Ok(DataType::Bool(valid))
+                    }
                     _ => Ok(DataType::Bool(false)),
                 }
             }
             OperationType::YamlToJson => {
                 match &input {
                     DataType::String(s) => {
-                        match yaml_parse(s) {
-                            Ok(data) => Ok(DataType::String(datatype_to_json_string(&data))),
-                            Err(e) => Err(e),
-                        }
+                        let yaml_val: serde_yaml::Value = serde_yaml::from_str(s)
+                            .map_err(|e| EvalError::InvalidInput(format!("yaml_to_json: {}", e)))?;
+                        let data = yaml_value_to_datatype(&yaml_val);
+                        Ok(DataType::String(datatype_to_json_string(&data)))
                     }
                     _ => Err(EvalError::InvalidInput("yaml_to_json: input must be a YAML string".to_string())),
                 }
@@ -4590,7 +4587,10 @@ impl OperationEvaluator for FullEvaluator {
                         match serde_json::from_str::<serde_json::Value>(s) {
                             Ok(json_val) => {
                                 let data = json_value_to_datatype(&json_val);
-                                Ok(DataType::String(yaml_stringify(&data, 0)))
+                                let yaml_val = datatype_to_yaml_value(&data);
+                                let yaml_str = serde_yaml::to_string(&yaml_val)
+                                    .map_err(|e| EvalError::InvalidInput(format!("yaml_from_json: {}", e)))?;
+                                Ok(DataType::String(yaml_str))
                             }
                             Err(e) => Err(EvalError::InvalidInput(format!("yaml_from_json: invalid JSON: {}", e))),
                         }
@@ -4606,9 +4606,13 @@ impl OperationEvaluator for FullEvaluator {
                         Ok(DataType::Map(merged))
                     }
                     (DataType::String(s1), DataType::String(s2)) => {
-                        let v1 = yaml_parse(s1)?;
-                        let v2 = yaml_parse(s2)?;
-                        match (v1, v2) {
+                        let v1: serde_yaml::Value = serde_yaml::from_str(s1)
+                            .map_err(|e| EvalError::InvalidInput(format!("yaml_merge: {}", e)))?;
+                        let v2: serde_yaml::Value = serde_yaml::from_str(s2)
+                            .map_err(|e| EvalError::InvalidInput(format!("yaml_merge: {}", e)))?;
+                        let d1 = yaml_value_to_datatype(&v1);
+                        let d2 = yaml_value_to_datatype(&v2);
+                        match (d1, d2) {
                             (DataType::Map(m1), DataType::Map(m2)) => {
                                 let mut merged = m1;
                                 for (k, v) in m2 { merged.insert(k, v); }
@@ -5441,557 +5445,81 @@ fn xorshift64(mut seed: u64) -> u64 {
     seed
 }
 
-/// Convert days since Unix epoch to (year, month, day)
-fn days_to_ymd(days: i64) -> (i64, i64, i64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m as i64, d as i64)
-}
-
-/// Convert (year, month, day) to days since Unix epoch
-fn ymd_to_days(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64;
-    let m_adj = if m > 2 { m - 3 } else { m + 9 } as u64;
-    let doy = (153 * m_adj + 2) / 5 + d as u64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe as i64 - 719468
-}
-
 // =============================================================================
-// YAML helpers (basic inline parser/serializer, no external dependency)
+// YAML helpers (serde_yaml conversion)
 // =============================================================================
 
-/// Parse a YAML string into a DataType value.
-fn yaml_parse(s: &str) -> Result<DataType, EvalError> {
-    let lines: Vec<&str> = s.lines().collect();
-    if lines.is_empty() {
-        return Ok(DataType::Null);
-    }
-    let mut start = 0;
-    while start < lines.len() {
-        let trimmed = lines[start].trim();
-        if trimmed.is_empty() || trimmed == "---" {
-            start += 1;
-        } else {
-            break;
-        }
-    }
-    if start >= lines.len() {
-        return Ok(DataType::Null);
-    }
-    let (val, _) = yaml_parse_value(&lines, start, 0)?;
-    Ok(val)
-}
-
-fn yaml_parse_value(lines: &[&str], line_idx: usize, _min_indent: usize) -> Result<(DataType, usize), EvalError> {
-    if line_idx >= lines.len() {
-        return Ok((DataType::Null, line_idx));
-    }
-    let line = lines[line_idx];
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return yaml_parse_value(lines, line_idx + 1, _min_indent);
-    }
-    let indent = yaml_indent(line);
-    if trimmed.starts_with('[') {
-        let full = yaml_collect_flow(lines, line_idx, '[', ']')?;
-        return Ok((yaml_parse_flow_sequence(&full)?, line_idx + yaml_flow_line_count(lines, line_idx, '[', ']')));
-    }
-    if trimmed.starts_with('{') {
-        let full = yaml_collect_flow(lines, line_idx, '{', '}')?;
-        return Ok((yaml_parse_flow_mapping(&full)?, line_idx + yaml_flow_line_count(lines, line_idx, '{', '}')));
-    }
-    if trimmed.starts_with("- ") || trimmed == "-" {
-        return yaml_parse_block_sequence(lines, line_idx, indent);
-    }
-    if yaml_is_mapping_line(trimmed) {
-        return yaml_parse_block_mapping(lines, line_idx, indent);
-    }
-    let val = yaml_parse_scalar(trimmed);
-    Ok((val, line_idx + 1))
-}
-
-fn yaml_parse_block_mapping(lines: &[&str], mut line_idx: usize, base_indent: usize) -> Result<(DataType, usize), EvalError> {
-    let mut map = std::collections::BTreeMap::new();
-    while line_idx < lines.len() {
-        let line = lines[line_idx];
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { line_idx += 1; continue; }
-        let indent = yaml_indent(line);
-        if indent != base_indent { break; }
-        if !yaml_is_mapping_line(trimmed) { break; }
-        let (key, value_part) = yaml_split_mapping_line(trimmed);
-        let key_str = yaml_unquote(&key);
-        if value_part.is_empty() {
-            line_idx += 1;
-            if line_idx < lines.len() {
-                let next_trimmed = lines[line_idx].trim();
-                let next_indent = yaml_indent(lines[line_idx]);
-                if next_indent > base_indent && !next_trimmed.is_empty() {
-                    let (val, next) = yaml_parse_value(lines, line_idx, next_indent)?;
-                    map.insert(key_str, val);
-                    line_idx = next;
-                } else { map.insert(key_str, DataType::Null); }
-            } else { map.insert(key_str, DataType::Null); }
-        } else if value_part == "|" || value_part == ">" || value_part == "|+" || value_part == ">+"
-            || value_part == "|-" || value_part == ">-" {
-            let fold = value_part.starts_with('>');
-            let strip = value_part.ends_with('-');
-            let keep = value_part.ends_with('+');
-            line_idx += 1;
-            let (text, next) = yaml_parse_block_scalar(lines, line_idx, base_indent, fold, strip, keep);
-            map.insert(key_str, DataType::String(text));
-            line_idx = next;
-        } else if value_part.starts_with('[') {
-            map.insert(key_str, yaml_parse_flow_sequence(&value_part)?);
-            line_idx += 1;
-        } else if value_part.starts_with('{') {
-            map.insert(key_str, yaml_parse_flow_mapping(&value_part)?);
-            line_idx += 1;
-        } else {
-            map.insert(key_str, yaml_parse_scalar(&value_part));
-            line_idx += 1;
-        }
-    }
-    Ok((DataType::Map(map), line_idx))
-}
-
-fn yaml_parse_block_sequence(lines: &[&str], mut line_idx: usize, base_indent: usize) -> Result<(DataType, usize), EvalError> {
-    let mut items = Vec::new();
-    while line_idx < lines.len() {
-        let line = lines[line_idx];
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { line_idx += 1; continue; }
-        let indent = yaml_indent(line);
-        if indent < base_indent { break; }
-        if indent > base_indent && !trimmed.starts_with("- ") && trimmed != "-" { break; }
-        if !(trimmed.starts_with("- ") || trimmed == "-") { break; }
-        if trimmed == "-" {
-            line_idx += 1;
-            if line_idx < lines.len() {
-                let next_indent = yaml_indent(lines[line_idx]);
-                let next_trimmed = lines[line_idx].trim();
-                if next_indent > base_indent && !next_trimmed.is_empty() {
-                    let (val, next) = yaml_parse_value(lines, line_idx, next_indent)?;
-                    items.push(val);
-                    line_idx = next;
-                } else { items.push(DataType::Null); }
-            } else { items.push(DataType::Null); }
-        } else {
-            let after_dash = &trimmed[2..];
-            if yaml_is_mapping_line(after_dash) {
-                let item_indent = indent + 2;
-                let (key, value_part) = yaml_split_mapping_line(after_dash);
-                let key_str = yaml_unquote(&key);
-                let mut sub_map = std::collections::BTreeMap::new();
-                if value_part.is_empty() {
-                    line_idx += 1;
-                    if line_idx < lines.len() {
-                        let next_indent = yaml_indent(lines[line_idx]);
-                        let next_trimmed = lines[line_idx].trim();
-                        if next_indent > indent && !next_trimmed.is_empty() {
-                            let (val, next) = yaml_parse_value(lines, line_idx, next_indent)?;
-                            sub_map.insert(key_str, val);
-                            line_idx = next;
-                        } else { sub_map.insert(key_str, DataType::Null); }
-                    } else { sub_map.insert(key_str, DataType::Null); }
-                } else {
-                    sub_map.insert(key_str, yaml_parse_scalar(&value_part));
-                    line_idx += 1;
-                }
-                while line_idx < lines.len() {
-                    let next_line = lines[line_idx];
-                    let next_trimmed = next_line.trim();
-                    if next_trimmed.is_empty() || next_trimmed.starts_with('#') { line_idx += 1; continue; }
-                    let next_indent = yaml_indent(next_line);
-                    if next_indent < item_indent { break; }
-                    if !yaml_is_mapping_line(next_trimmed) { break; }
-                    let (k2, v2) = yaml_split_mapping_line(next_trimmed);
-                    let k2_str = yaml_unquote(&k2);
-                    if v2.is_empty() {
-                        line_idx += 1;
-                        if line_idx < lines.len() {
-                            let ni = yaml_indent(lines[line_idx]);
-                            let nt = lines[line_idx].trim();
-                            if ni > next_indent && !nt.is_empty() {
-                                let (val, next) = yaml_parse_value(lines, line_idx, ni)?;
-                                sub_map.insert(k2_str, val);
-                                line_idx = next;
-                            } else { sub_map.insert(k2_str, DataType::Null); }
-                        } else { sub_map.insert(k2_str, DataType::Null); }
-                    } else {
-                        sub_map.insert(k2_str, yaml_parse_scalar(&v2));
-                        line_idx += 1;
-                    }
-                }
-                items.push(DataType::Map(sub_map));
-            } else {
-                items.push(yaml_parse_scalar(after_dash));
-                line_idx += 1;
-            }
-        }
-    }
-    Ok((DataType::Array(items), line_idx))
-}
-
-fn yaml_parse_block_scalar(lines: &[&str], mut line_idx: usize, parent_indent: usize, fold: bool, strip: bool, keep: bool) -> (String, usize) {
-    let mut content_lines: Vec<&str> = Vec::new();
-    let mut first_indent = None;
-    let save = line_idx;
-    while line_idx < lines.len() {
-        let line = lines[line_idx];
-        if line.trim().is_empty() { line_idx += 1; continue; }
-        let ind = yaml_indent(line);
-        if ind <= parent_indent { break; }
-        first_indent = Some(ind);
-        break;
-    }
-    line_idx = save;
-    let content_indent = first_indent.unwrap_or(parent_indent + 2);
-    while line_idx < lines.len() {
-        let line = lines[line_idx];
-        if line.trim().is_empty() { content_lines.push(""); line_idx += 1; continue; }
-        let ind = yaml_indent(line);
-        if ind < content_indent { break; }
-        content_lines.push(&line[content_indent.min(line.len())..]);
-        line_idx += 1;
-    }
-    if !keep { while content_lines.last() == Some(&"") { content_lines.pop(); } }
-    let text = if fold {
-        let mut result = String::new();
-        let mut prev_blank = false;
-        for line in &content_lines {
-            if line.is_empty() { result.push('\n'); prev_blank = true; }
-            else if prev_blank { result.push_str(line); prev_blank = false; }
-            else {
-                if !result.is_empty() && !result.ends_with('\n') { result.push(' '); }
-                result.push_str(line);
-            }
-        }
-        result
-    } else { content_lines.join("\n") };
-    let text = if strip { text.trim_end_matches('\n').to_string() }
-    else if keep { if text.ends_with('\n') { text } else { text + "\n" } }
-    else { text.trim_end_matches('\n').to_string() + "\n" };
-    (text, line_idx)
-}
-
-fn yaml_parse_flow_sequence(s: &str) -> Result<DataType, EvalError> {
-    let s = s.trim();
-    if !s.starts_with('[') || !s.ends_with(']') {
-        return Err(EvalError::InvalidInput("yaml: invalid flow sequence".to_string()));
-    }
-    let inner = s[1..s.len()-1].trim();
-    if inner.is_empty() { return Ok(DataType::Array(vec![])); }
-    let parts = yaml_split_flow_items(inner);
-    let mut items = Vec::new();
-    for part in &parts {
-        let part = part.trim();
-        if part.starts_with('{') { items.push(yaml_parse_flow_mapping(part)?); }
-        else if part.starts_with('[') { items.push(yaml_parse_flow_sequence(part)?); }
-        else { items.push(yaml_parse_scalar(part)); }
-    }
-    Ok(DataType::Array(items))
-}
-
-fn yaml_parse_flow_mapping(s: &str) -> Result<DataType, EvalError> {
-    let s = s.trim();
-    if !s.starts_with('{') || !s.ends_with('}') {
-        return Err(EvalError::InvalidInput("yaml: invalid flow mapping".to_string()));
-    }
-    let inner = s[1..s.len()-1].trim();
-    if inner.is_empty() { return Ok(DataType::Map(std::collections::BTreeMap::new())); }
-    let parts = yaml_split_flow_items(inner);
-    let mut map = std::collections::BTreeMap::new();
-    for part in &parts {
-        let part = part.trim();
-        if let Some(colon_pos) = yaml_find_flow_colon(part) {
-            let key = part[..colon_pos].trim();
-            let val = part[colon_pos+1..].trim();
-            let key_str = yaml_unquote(key);
-            if val.starts_with('{') { map.insert(key_str, yaml_parse_flow_mapping(val)?); }
-            else if val.starts_with('[') { map.insert(key_str, yaml_parse_flow_sequence(val)?); }
-            else { map.insert(key_str, yaml_parse_scalar(val)); }
-        }
-    }
-    Ok(DataType::Map(map))
-}
-
-fn yaml_split_flow_items(s: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut depth_brace = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if in_single_quote { current.push(c); if c == '\'' { in_single_quote = false; } }
-        else if in_double_quote {
-            current.push(c);
-            if c == '\\' && i + 1 < chars.len() { i += 1; current.push(chars[i]); }
-            else if c == '"' { in_double_quote = false; }
-        } else if c == '\'' { in_single_quote = true; current.push(c); }
-        else if c == '"' { in_double_quote = true; current.push(c); }
-        else if c == '{' { depth_brace += 1; current.push(c); }
-        else if c == '}' { depth_brace -= 1; current.push(c); }
-        else if c == '[' { depth_bracket += 1; current.push(c); }
-        else if c == ']' { depth_bracket -= 1; current.push(c); }
-        else if c == ',' && depth_brace == 0 && depth_bracket == 0 { items.push(current.clone()); current.clear(); }
-        else { current.push(c); }
-        i += 1;
-    }
-    if !current.trim().is_empty() { items.push(current); }
-    items
-}
-
-fn yaml_find_flow_colon(s: &str) -> Option<usize> {
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let chars: Vec<char> = s.chars().collect();
-    let mut byte_pos = 0;
-    for (i, &c) in chars.iter().enumerate() {
-        if in_single_quote { if c == '\'' { in_single_quote = false; } }
-        else if in_double_quote {
-            if c == '\\' && i + 1 < chars.len() { byte_pos += c.len_utf8() + chars[i + 1].len_utf8(); continue; }
-            if c == '"' { in_double_quote = false; }
-        } else if c == '\'' { in_single_quote = true; }
-        else if c == '"' { in_double_quote = true; }
-        else if c == ':' { return Some(byte_pos); }
-        byte_pos += c.len_utf8();
-    }
-    None
-}
-
-fn yaml_parse_scalar(s: &str) -> DataType {
-    let s = s.trim();
-    if s.is_empty() || s == "null" || s == "~" || s == "Null" || s == "NULL" { return DataType::Null; }
-    if s == "true" || s == "True" || s == "TRUE" { return DataType::Bool(true); }
-    if s == "false" || s == "False" || s == "FALSE" { return DataType::Bool(false); }
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        return DataType::String(yaml_unquote(s));
-    }
-    if let Ok(n) = s.parse::<i64>() { return DataType::Int64(n); }
-    if (s.starts_with("0x") || s.starts_with("0X")) && s.len() > 2 {
-        if let Ok(n) = i64::from_str_radix(&s[2..], 16) { return DataType::Int64(n); }
-    }
-    if (s.starts_with("0o") || s.starts_with("0O")) && s.len() > 2 {
-        if let Ok(n) = i64::from_str_radix(&s[2..], 8) { return DataType::Int64(n); }
-    }
-    if let Ok(f) = s.parse::<f64>() { return DataType::Float64(f); }
-    if s == ".inf" || s == ".Inf" || s == ".INF" { return DataType::Float64(f64::INFINITY); }
-    if s == "-.inf" || s == "-.Inf" || s == "-.INF" { return DataType::Float64(f64::NEG_INFINITY); }
-    if s == ".nan" || s == ".NaN" || s == ".NAN" { return DataType::Float64(f64::NAN); }
-    if let Some(comment_pos) = s.find(" #") {
-        let before = s[..comment_pos].trim();
-        if !before.is_empty() { return yaml_parse_scalar(before); }
-    }
-    DataType::String(s.to_string())
-}
-
-fn yaml_indent(line: &str) -> usize { line.len() - line.trim_start().len() }
-
-fn yaml_is_mapping_line(trimmed: &str) -> bool {
-    if trimmed.starts_with("- ") || trimmed == "-" || trimmed.starts_with('#') { return false; }
-    if trimmed.starts_with('[') || trimmed.starts_with('{') { return false; }
-    let mut in_single = false;
-    let mut in_double = false;
-    let chars: Vec<char> = trimmed.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if in_single { if c == '\'' { in_single = false; } continue; }
-        if in_double { if c == '\\' { continue; } else if c == '"' { in_double = false; } continue; }
-        if c == '\'' { in_single = true; continue; }
-        if c == '"' { in_double = true; continue; }
-        if c == ':' && (i + 1 >= chars.len() || chars[i + 1] == ' ') { return true; }
-    }
-    false
-}
-
-fn yaml_split_mapping_line(trimmed: &str) -> (String, String) {
-    let mut in_single = false;
-    let mut in_double = false;
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut byte_pos = 0;
-    for (i, &c) in chars.iter().enumerate() {
-        if in_single { if c == '\'' { in_single = false; } }
-        else if in_double {
-            if c == '\\' && i + 1 < chars.len() { byte_pos += c.len_utf8() + chars[i + 1].len_utf8(); continue; }
-            if c == '"' { in_double = false; }
-        } else if c == '\'' { in_single = true; }
-        else if c == '"' { in_double = true; }
-        else if c == ':' {
-            if i + 1 >= chars.len() { return (trimmed[..byte_pos].to_string(), String::new()); }
-            if chars[i + 1] == ' ' {
-                let key = trimmed[..byte_pos].to_string();
-                let val_start = byte_pos + c.len_utf8() + 1;
-                return (key, trimmed[val_start..].trim().to_string());
-            }
-        }
-        byte_pos += c.len_utf8();
-    }
-    (trimmed.to_string(), String::new())
-}
-
-fn yaml_unquote(s: &str) -> String {
-    let s = s.trim();
-    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        let inner = &s[1..s.len()-1];
-        let mut result = String::new();
-        let mut chars = inner.chars();
-        while let Some(c) = chars.next() {
-            if c == '\\' {
-                match chars.next() {
-                    Some('n') => result.push('\n'),
-                    Some('t') => result.push('\t'),
-                    Some('r') => result.push('\r'),
-                    Some('\\') => result.push('\\'),
-                    Some('"') => result.push('"'),
-                    Some('/') => result.push('/'),
-                    Some('0') => result.push('\0'),
-                    Some(other) => { result.push('\\'); result.push(other); }
-                    None => result.push('\\'),
-                }
-            } else { result.push(c); }
-        }
-        result
-    } else if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
-        s[1..s.len()-1].replace("''", "'")
-    } else { s.to_string() }
-}
-
-fn yaml_collect_flow(lines: &[&str], start: usize, open: char, close: char) -> Result<String, EvalError> {
-    let mut result = String::new();
-    let mut depth = 0i32;
-    for line_str in &lines[start..] {
-        let line = line_str.trim();
-        for c in line.chars() {
-            if c == open { depth += 1; }
-            if c == close { depth -= 1; }
-        }
-        if !result.is_empty() { result.push(' '); }
-        result.push_str(line);
-        if depth <= 0 { break; }
-    }
-    if depth != 0 { return Err(EvalError::InvalidInput(format!("yaml: unclosed '{}' in flow construct", open))); }
-    Ok(result)
-}
-
-fn yaml_flow_line_count(lines: &[&str], start: usize, open: char, close: char) -> usize {
-    let mut depth = 0i32;
-    for (offset, line_str) in lines[start..].iter().enumerate() {
-        let line = line_str.trim();
-        for c in line.chars() {
-            if c == open { depth += 1; }
-            if c == close { depth -= 1; }
-        }
-        if depth <= 0 { return offset + 1; }
-    }
-    lines.len() - start
-}
-
-fn yaml_stringify(val: &DataType, indent: usize) -> String {
-    let pad = "  ".repeat(indent);
+fn yaml_value_to_datatype(val: &serde_yaml::Value) -> DataType {
     match val {
-        DataType::Null => "null".to_string(),
-        DataType::Bool(b) => b.to_string(),
-        DataType::Int32(n) => n.to_string(),
-        DataType::Int64(n) => n.to_string(),
-        DataType::Uint32(n) => n.to_string(),
-        DataType::Uint64(n) => n.to_string(),
-        DataType::Float32(f) => {
-            if f.is_nan() { ".nan".to_string() }
-            else if f.is_infinite() { if *f > 0.0 { ".inf".to_string() } else { "-.inf".to_string() } }
-            else { format!("{}", f) }
-        }
-        DataType::Float64(f) => {
-            if f.is_nan() { ".nan".to_string() }
-            else if f.is_infinite() { if *f > 0.0 { ".inf".to_string() } else { "-.inf".to_string() } }
-            else { format!("{}", f) }
-        }
-        DataType::String(s) => {
-            if s.is_empty() || s == "null" || s == "true" || s == "false" || s == "~"
-                || s.contains('\n') || s.contains(':') || s.contains('#')
-                || s.contains('"') || s.contains('\'')
-                || s.starts_with(' ') || s.ends_with(' ')
-                || s.starts_with('{') || s.starts_with('[')
-                || s.starts_with('*') || s.starts_with('&')
-                || s.starts_with('!') || s.starts_with('%')
-                || s.starts_with('@') || s.starts_with('`')
-                || s.starts_with('-') || s.starts_with('?')
-                || s.starts_with(',')
-                || s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok()
-            {
-                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t");
-                format!("\"{}\"", escaped)
-            } else { s.clone() }
-        }
-        DataType::Array(arr) => {
-            if arr.is_empty() { "[]".to_string() }
-            else {
-                let mut lines = Vec::new();
-                for item in arr {
-                    match item {
-                        DataType::Map(_) => {
-                            let child = yaml_stringify(item, indent + 1);
-                            let child_lines: Vec<&str> = child.lines().collect();
-                            if let Some(first) = child_lines.first() {
-                                lines.push(format!("{}- {}", pad, first));
-                                for cl in &child_lines[1..] { lines.push(format!("{}  {}", pad, cl)); }
-                            }
-                        }
-                        DataType::Array(_) => {
-                            let child = yaml_stringify(item, indent + 1);
-                            lines.push(format!("{}-", pad));
-                            for cl in child.lines() { lines.push(format!("{}  {}", pad, cl)); }
-                        }
-                        _ => { lines.push(format!("{}- {}", pad, yaml_stringify(item, 0))); }
-                    }
-                }
-                lines.join("\n")
+        serde_yaml::Value::Null => DataType::Null,
+        serde_yaml::Value::Bool(b) => DataType::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                DataType::Int64(i)
+            } else if let Some(f) = n.as_f64() {
+                DataType::Float64(f)
+            } else {
+                DataType::Null
             }
+        }
+        serde_yaml::Value::String(s) => DataType::String(s.clone()),
+        serde_yaml::Value::Sequence(arr) => {
+            DataType::Array(arr.iter().map(yaml_value_to_datatype).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let m: std::collections::BTreeMap<String, DataType> = map.iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        serde_yaml::Value::String(s) => s.clone(),
+                        serde_yaml::Value::Number(n) => format!("{}", n),
+                        serde_yaml::Value::Bool(b) => format!("{}", b),
+                        serde_yaml::Value::Null => "null".to_string(),
+                        other => format!("{:?}", other),
+                    };
+                    (key, yaml_value_to_datatype(v))
+                })
+                .collect();
+            DataType::Map(m)
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_value_to_datatype(&tagged.value),
+    }
+}
+
+fn datatype_to_yaml_value(data: &DataType) -> serde_yaml::Value {
+    match data {
+        DataType::Null => serde_yaml::Value::Null,
+        DataType::Bool(b) => serde_yaml::Value::Bool(*b),
+        DataType::Int64(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n)),
+        DataType::Int32(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
+        DataType::Uint32(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
+        DataType::Uint64(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
+        DataType::Float64(f) => {
+            if f.is_nan() || f.is_infinite() {
+                serde_yaml::Value::String(format!("{}", f))
+            } else {
+                serde_yaml::Value::Number(serde_yaml::Number::from(*f))
+            }
+        }
+        DataType::Float32(f) => {
+            if f.is_nan() || f.is_infinite() {
+                serde_yaml::Value::String(format!("{}", f))
+            } else {
+                serde_yaml::Value::Number(serde_yaml::Number::from(*f as f64))
+            }
+        }
+        DataType::String(s) => serde_yaml::Value::String(s.clone()),
+        DataType::Array(arr) => {
+            serde_yaml::Value::Sequence(arr.iter().map(datatype_to_yaml_value).collect())
         }
         DataType::Map(m) => {
-            if m.is_empty() { "{}".to_string() }
-            else {
-                let entries: Vec<String> = m.iter()
-                    .filter(|(k, _)| !k.starts_with("__"))
-                    .map(|(k, v)| {
-                        let key_str = if k.contains(':') || k.contains('#') || k.contains(' ')
-                            || k.starts_with('{') || k.starts_with('[')
-                            || k.starts_with('\'') || k.starts_with('"')
-                            || k == "null" || k == "true" || k == "false"
-                        { format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\"")) }
-                        else { k.clone() };
-                        match v {
-                            DataType::Map(_) | DataType::Array(_) => {
-                                let child = yaml_stringify(v, indent + 1);
-                                format!("{}{}:\n{}", pad, key_str, child)
-                            }
-                            _ => format!("{}{}: {}", pad, key_str, yaml_stringify(v, 0)),
-                        }
-                    })
-                    .collect();
-                entries.join("\n")
-            }
+            let mapping: serde_yaml::Mapping = m.iter()
+                .filter(|(k, _)| !k.starts_with("__"))
+                .map(|(k, v)| (serde_yaml::Value::String(k.clone()), datatype_to_yaml_value(v)))
+                .collect();
+            serde_yaml::Value::Mapping(mapping)
         }
-        DataType::Bytes(b) => {
-            use base64::Engine;
-            format!("\"{}\"", base64::engine::general_purpose::STANDARD.encode(b))
-        },
-        DataType::Future(_) => "null".to_string(),
+        DataType::Bytes(b) => serde_yaml::Value::String(format!("<bytes:{}>", b.len())),
+        DataType::Future(_) => serde_yaml::Value::Null,
     }
 }
 

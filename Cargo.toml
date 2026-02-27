@@ -30,6 +30,7 @@ crc32fast = "1"
 base64 = "0.22"
 url = "2"
 csv = "1"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 wasmparser = "0.245"
