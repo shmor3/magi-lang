@@ -365,7 +365,9 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
     let (start_utf16, end_utf16) = if let Some(src) = source {
         if let Some(src_line) = src.lines().nth(line as usize) {
             let chars: Vec<char> = src_line.chars().collect();
-            let start = col as usize;
+            let char_len = chars.len() as u32;
+            // Clamp start to within the line
+            let start = (col as usize).min(chars.len());
             let end_char = if start < chars.len() && is_ident_start(chars[start]) {
                 // Identifier: scan alphanumeric + underscore
                 let mut end = start;
@@ -382,10 +384,29 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
                     end += 1;
                 }
                 end as u32
+            } else if start < chars.len() && (chars[start] == '"' || chars[start] == '\'') {
+                // String literal: scan to matching close quote
+                let quote = chars[start];
+                let mut end = start + 1;
+                while end < chars.len() && chars[end] != quote {
+                    if chars[end] == '\\' {
+                        end += 1; // skip escaped char
+                    }
+                    end += 1;
+                }
+                if end < chars.len() {
+                    end += 1; // include closing quote
+                }
+                end as u32
+            } else if start < chars.len() {
+                // Operator or other single char — highlight at least one char
+                (start as u32 + 1).min(char_len)
             } else {
-                (col + 1).min(chars.len() as u32)
+                // Column past end of line — clamp to line end, produce zero-width
+                char_len
             };
-            (char_col_to_utf16(src_line, col), char_col_to_utf16(src_line, end_char))
+            let clamped_start = (col).min(char_len);
+            (char_col_to_utf16(src_line, clamped_start), char_col_to_utf16(src_line, end_char))
         } else {
             // Line not found in source — col is char-based, use as-is (no conversion possible)
             (col, col.saturating_add(1))
@@ -486,6 +507,186 @@ pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<
 
 fn is_ident_char_unicode(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Detect if cursor is on an `EnumName::Variant` pattern.
+/// Returns `(enum_name, variant_name)` if found, or `None` if cursor is on a plain identifier.
+/// `character` is a 0-based UTF-16 code unit offset (per LSP spec).
+pub fn find_enum_variant_at_position(source: &str, line: u32, character: u32) -> Option<(String, String)> {
+    let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
+    let col = utf16_to_char_col(target_line, character) as usize;
+
+    if col > chars.len() {
+        return None;
+    }
+
+    // Scan backwards for start of identifier
+    let mut start = col;
+    while start > 0 && is_ident_char_unicode(chars[start - 1]) {
+        start -= 1;
+    }
+
+    // Scan forwards for end of identifier
+    let mut end = col;
+    while end < chars.len() && is_ident_char_unicode(chars[end]) {
+        end += 1;
+    }
+
+    if start == end {
+        return None;
+    }
+
+    let word: String = chars[start..end].iter().collect();
+
+    // Check if there's `::` before this identifier (cursor is on variant)
+    if start >= 2 && chars[start - 1] == ':' && chars[start - 2] == ':' {
+        // Scan backwards from `::` to find the enum name
+        let enum_end = start - 2;
+        let mut enum_start = enum_end;
+        while enum_start > 0 && is_ident_char_unicode(chars[enum_start - 1]) {
+            enum_start -= 1;
+        }
+        if enum_start < enum_end {
+            let enum_name: String = chars[enum_start..enum_end].iter().collect();
+            return Some((enum_name, word));
+        }
+    }
+
+    // Check if there's `::` after this identifier (cursor is on enum name)
+    if end + 1 < chars.len() && chars[end] == ':' && chars[end + 1] == ':' {
+        // Scan forwards from `::` to find the variant name
+        let variant_start = end + 2;
+        let mut variant_end = variant_start;
+        while variant_end < chars.len() && is_ident_char_unicode(chars[variant_end]) {
+            variant_end += 1;
+        }
+        if variant_start < variant_end {
+            let variant: String = chars[variant_start..variant_end].iter().collect();
+            return Some((word, variant));
+        }
+    }
+
+    None
+}
+
+/// Detect if the cursor is in a dot-access context (e.g., `point.`).
+/// Returns the identifier before the dot if found.
+/// `character` is a 0-based UTF-16 code unit offset (per LSP spec).
+pub fn find_dot_receiver_at_position(source: &str, line: u32, character: u32) -> Option<String> {
+    let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
+    let col = utf16_to_char_col(target_line, character) as usize;
+
+    if col == 0 || col > chars.len() {
+        return None;
+    }
+
+    // Walk backwards from cursor to find the dot
+    let mut pos = col;
+    // Skip any partial identifier the user is typing after the dot
+    while pos > 0 && is_ident_char_unicode(chars[pos - 1]) {
+        pos -= 1;
+    }
+
+    // Check for dot
+    if pos == 0 || chars[pos - 1] != '.' {
+        return None;
+    }
+    pos -= 1; // skip the dot
+
+    // Now scan backwards for the receiver identifier
+    let recv_end = pos;
+    let mut recv_start = recv_end;
+    while recv_start > 0 && is_ident_char_unicode(chars[recv_start - 1]) {
+        recv_start -= 1;
+    }
+
+    if recv_start == recv_end {
+        return None;
+    }
+
+    Some(chars[recv_start..recv_end].iter().collect())
+}
+
+/// Find the function name and argument index at a call site.
+/// Used for signature help. Returns `(function_name, active_param_index)`.
+/// `character` is a 0-based UTF-16 code unit offset (per LSP spec).
+pub fn find_call_context_at_position(source: &str, line: u32, character: u32) -> Option<(String, u32)> {
+    let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
+    let col = utf16_to_char_col(target_line, character) as usize;
+
+    if col > chars.len() {
+        return None;
+    }
+
+    // Scan backwards to find the matching `(`
+    let mut depth = 0i32;
+    let mut pos = col;
+    let mut commas = 0u32;
+
+    // Walk backwards from cursor
+    while pos > 0 {
+        pos -= 1;
+        match chars[pos] {
+            ')' => depth += 1,
+            '(' => {
+                if depth == 0 {
+                    // Found our opening paren. The function name is before it.
+                    let mut name_end = pos;
+                    // Skip whitespace
+                    while name_end > 0 && chars[name_end - 1] == ' ' {
+                        name_end -= 1;
+                    }
+                    let mut name_start = name_end;
+                    while name_start > 0 && is_ident_char_unicode(chars[name_start - 1]) {
+                        name_start -= 1;
+                    }
+                    if name_start < name_end {
+                        let name: String = chars[name_start..name_end].iter().collect();
+                        return Some((name, commas));
+                    }
+                    return None;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                commas += 1;
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// Try to determine the struct type of a variable by looking at its initializer in the AST.
+/// Returns the struct name if the variable is initialized with a struct constructor.
+pub fn find_variable_struct_type(state: &DocumentState, var_name: &str) -> Option<String> {
+    let program = state.program.as_ref()?;
+    for stmt in &program.statements {
+        match &stmt.kind {
+            StatementKind::Let { name, value, type_annotation, .. }
+            | StatementKind::LetMut { name, value, type_annotation, .. }
+            | StatementKind::ConstDef { name, value, type_annotation, .. } => {
+                if name == var_name {
+                    // Check type annotation first
+                    if let Some(ta) = type_annotation {
+                        if state.structs.contains_key(ta) {
+                            return Some(ta.clone());
+                        }
+                    }
+                    // Check if RHS is a struct constructor
+                    if let ExpressionKind::StructConstruct { name: sname, .. } = &value.kind {
+                        return Some(sname.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 // =============================================================================
@@ -615,5 +816,74 @@ mod tests {
         let source = "let café_x = 1; let café_y = 2;";
         let result = find_name_col(source, 1, "café_y");
         assert!(result.is_some(), "Should find 'café_y'");
+    }
+
+    #[test]
+    fn test_find_enum_variant_cursor_on_variant() {
+        let source = "let c = Color::Red;";
+        // Cursor on "Red" (col 15)
+        let result = find_enum_variant_at_position(source, 0, 15);
+        assert_eq!(result, Some(("Color".to_string(), "Red".to_string())));
+    }
+
+    #[test]
+    fn test_find_enum_variant_cursor_on_enum_name() {
+        let source = "let c = Color::Red;";
+        // Cursor on "Color" (col 8)
+        let result = find_enum_variant_at_position(source, 0, 8);
+        assert_eq!(result, Some(("Color".to_string(), "Red".to_string())));
+    }
+
+    #[test]
+    fn test_find_enum_variant_no_double_colon() {
+        let source = "let c = foo;";
+        let result = find_enum_variant_at_position(source, 0, 8);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_dot_receiver() {
+        let source = "point.x";
+        // Cursor after the dot at col 6 (on "x")
+        let result = find_dot_receiver_at_position(source, 0, 6);
+        assert_eq!(result, Some("point".to_string()));
+    }
+
+    #[test]
+    fn test_find_dot_receiver_no_dot() {
+        let source = "point";
+        let result = find_dot_receiver_at_position(source, 0, 3);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_call_context_first_param() {
+        let source = "foo(x, y)";
+        // Cursor inside parens, after "x"
+        let result = find_call_context_at_position(source, 0, 4);
+        assert_eq!(result, Some(("foo".to_string(), 0)));
+    }
+
+    #[test]
+    fn test_find_call_context_second_param() {
+        let source = "foo(x, y)";
+        // Cursor after comma
+        let result = find_call_context_at_position(source, 0, 7);
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_no_call() {
+        let source = "let x = 5;";
+        let result = find_call_context_at_position(source, 0, 5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_variable_struct_type() {
+        let source = "struct Point { x: float64, y: float64 }\nlet p = Point { x: 1.0, y: 2.0 };";
+        let (state, _) = analyze_document(source);
+        let result = find_variable_struct_type(&state, "p");
+        assert_eq!(result, Some("Point".to_string()));
     }
 }

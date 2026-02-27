@@ -1,11 +1,14 @@
 //! Language Server Protocol implementation for the MAGI language.
 //!
-//! Provides diagnostics, hover, go-to-definition, completion, and formatting.
+//! Provides diagnostics, hover, go-to-definition, completion, signature help,
+//! document symbols, and formatting.
 
 pub mod analysis;
 pub mod completion;
 pub mod definition;
+pub mod document_symbols;
 pub mod hover;
+pub mod signature_help;
 
 use analysis::{analyze_document, to_lsp_diagnostic_with_source, DocumentState};
 use std::collections::HashMap;
@@ -76,7 +79,13 @@ impl LanguageServer for MagiLanguageServer {
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
                     ..Default::default()
                 }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
+                    ..Default::default()
+                }),
                 definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
@@ -162,6 +171,29 @@ impl LanguageServer for MagiLanguageServer {
             None => return Ok(None),
         };
         Ok(Some(completion::handle_completion(state, &params)))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        Ok(signature_help::handle_signature_help(state, &params))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        Ok(document_symbols::handle_document_symbols(state, uri))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {

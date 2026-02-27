@@ -3,9 +3,10 @@
 //! Uses the `wasm-encoder` crate to produce valid `.wasm` modules.
 
 use wasm_encoder::{
-    CodeSection, DataSection, ExportKind, ExportSection, FunctionSection,
-    GlobalSection, GlobalType, ImportSection, Instruction as WasmInst, MemorySection,
-    MemoryType, Module, TableSection, TableType, TypeSection, ValType as WasmValType,
+    CodeSection, DataSection, ElementSection, Elements, ExportKind, ExportSection,
+    FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction as WasmInst,
+    MemorySection, MemoryType, Module, TableSection, TableType, TypeSection,
+    ValType as WasmValType,
 };
 
 use super::ir::*;
@@ -125,6 +126,18 @@ impl WasmCodegen {
         exports.export("__heap_ptr", ExportKind::Global, 0);
         module.section(&exports);
 
+        // ── Element section (populate function table for indirect calls) ──
+        let mut elements = ElementSection::new();
+        let func_indices: Vec<u32> = (0..ir.functions.len() as u32)
+            .map(|i| i + num_imports)
+            .collect();
+        elements.active(
+            Some(0),
+            &wasm_encoder::ConstExpr::i32_const(0),
+            Elements::Functions(func_indices.into()),
+        );
+        module.section(&elements);
+
         // ── Code section ─────────────────────────────────────
         let mut code = CodeSection::new();
         for func in &ir.functions {
@@ -166,6 +179,7 @@ impl WasmCodegen {
         let mut max_temps: u32 = 0;
         for inst in &func.instructions {
             let needed = match inst {
+                Instruction::MemStoreI64 => 1, // temp for value during addr conversion
                 Instruction::ArrayNew(count) => if *count > 0 { 2 } else { 1 }, // base_ptr + element temp
                 Instruction::ArrayGet => 2,  // index + array_ptr
                 Instruction::ArraySet => 3,  // value + index + array_ptr
@@ -619,8 +633,14 @@ impl WasmCodegen {
             }
             Instruction::MemStoreI64 => {
                 // stack: [addr(i64), value(i64)]
-                // We need addr as i32 for store.
-                // Use a local swap approach: store value, convert addr, store.
+                // WASM i64.store expects [i32_addr, i64_value].
+                // The addr is i64 but the value is also i64, so we need to
+                // save the value to a temp, wrap the addr, then restore.
+                // Since this instruction is currently unused in compiled output,
+                // use a simpler approach: swap via temp local.
+                f.instruction(&WasmInst::LocalSet(temp_base)); // save value
+                f.instruction(&WasmInst::I32WrapI64);          // convert addr to i32
+                f.instruction(&WasmInst::LocalGet(temp_base)); // restore value
                 f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg {
                     offset: 0,
                     align: 3,
@@ -2625,6 +2645,81 @@ mod tests {
     fn test_compile_to_wasm_api() {
         let program = parse_v2("let x = 1 + 2;").unwrap();
         let wasm = super::super::compile_to_wasm(&program).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_test_def() {
+        let wasm = compile_to_wasm(r#"
+            test "basic addition" {
+                assert_eq(1 + 1, 2);
+            }
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_pipe_named_fn() {
+        let wasm = compile_to_wasm(r#"
+            fn double(x) { x * 2 }
+            let r = 21 |> double();
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_list_comprehension() {
+        let wasm = compile_to_wasm(r#"
+            let xs = [x * 2 for x in [1, 2, 3]];
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_try_catch() {
+        let wasm = compile_to_wasm(r#"
+            try {
+                let x = 42;
+            } catch e {
+                output e;
+            }
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_short_circuit() {
+        let wasm = compile_to_wasm(r#"
+            let a = true && false;
+            let b = true || false;
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_null_coalesce() {
+        let wasm = compile_to_wasm(r#"
+            let x = null ?? 42;
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_match_wildcard() {
+        let wasm = compile_to_wasm(r#"
+            let x = match 42 {
+                1 => "one",
+                _ => "other",
+            };
+        "#).unwrap();
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_wasm_infinite_loop() {
+        let wasm = compile_to_wasm(r#"
+            let x = loop { break 42; };
+        "#).unwrap();
         assert_eq!(&wasm[0..4], b"\0asm");
     }
 }

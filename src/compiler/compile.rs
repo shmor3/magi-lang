@@ -545,10 +545,21 @@ impl Compiler {
                 let test_name = format!("__test_{}", name.replace(' ', "_"));
                 let idx = self.module.functions.len() as u32;
                 self.fn_index.insert(test_name.clone(), idx);
+                // Push placeholder so end_function can replace it.
+                self.module.functions.push(IrFunction {
+                    name: test_name.clone(),
+                    param_count: 0,
+                    has_rest: false,
+                    locals: Vec::new(),
+                    instructions: Vec::new(),
+                    exported: false,
+                    return_type: ValType::Tagged,
+                });
 
                 let prev = self.current_fn.take();
                 self.begin_function(&test_name, false);
                 self.compile_block(body)?;
+                self.emit(Instruction::Drop); // discard block result
                 self.emit(Instruction::PushNull);
                 self.emit(Instruction::Return);
                 self.end_function();
@@ -1111,8 +1122,7 @@ impl Compiler {
                 self.emit(Instruction::I64Le);
                 self.emit(Instruction::TagBool);
             }
-            BinOp::And => {} // Handled as short-circuit above.
-            BinOp::Or => {}  // Handled as short-circuit above.
+            BinOp::And | BinOp::Or => unreachable!("And/Or handled as short-circuit in compile_expr"),
         }
         Ok(())
     }
@@ -2005,5 +2015,68 @@ mod tests {
             .instructions
             .iter()
             .any(|i| matches!(i, Instruction::BoolNot)));
+    }
+
+    #[test]
+    fn test_compile_test_def() {
+        let module = compile(r#"
+            test "basic math" {
+                assert_eq(1 + 1, 2);
+            }
+        "#).unwrap();
+        assert!(module.functions.iter().any(|f| f.name == "__test_basic_math"));
+    }
+
+    #[test]
+    fn test_compile_short_circuit_and_or() {
+        let module = compile("let x = true && false; let y = true || false;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Short-circuit uses BoolNot (for &&) and BrIf (for both).
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::BoolNot)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::BrIf(_))));
+    }
+
+    #[test]
+    fn test_compile_infinite_loop() {
+        let module = compile(r#"
+            let x = loop {
+                break 42;
+            };
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Br(_))));
+    }
+
+    #[test]
+    fn test_compile_pipe_named_fn() {
+        let module = compile(r#"
+            fn double(x) { x * 2 }
+            let r = 21 |> double();
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Call(_))));
+    }
+
+    #[test]
+    fn test_compile_try_catch_stmt() {
+        let module = compile(r#"
+            try {
+                let x = 42;
+            } catch e {
+                output e;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Try-catch uses LocalSet for the try result.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::LocalSet(_))));
+    }
+
+    #[test]
+    fn test_compile_map_comprehension() {
+        let module = compile(r#"let m = {"k": x * 2 for x in [1, 2, 3]};"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapNew(0))));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapSet)));
     }
 }

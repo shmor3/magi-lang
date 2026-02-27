@@ -1,6 +1,6 @@
 //! Go-to-definition provider for the MAGI LSP.
 
-use super::analysis::{char_col_to_utf16, find_word_at_position, DocumentState};
+use super::analysis::{char_col_to_utf16, find_enum_variant_at_position, find_word_at_position, DocumentState};
 use tower_lsp::lsp_types::*;
 
 /// Convert a 1-based (line, col) span position to a 0-based UTF-16 LSP range.
@@ -24,6 +24,17 @@ pub fn handle_goto_definition(
     uri: &Url,
 ) -> Option<GotoDefinitionResponse> {
     let pos = params.text_document_position_params.position;
+
+    // Check for enum variant pattern (EnumName::Variant) first
+    if let Some((enum_name, _variant_name)) = find_enum_variant_at_position(&state.source, pos.line, pos.character) {
+        if let Some(en) = state.enums.get(&enum_name) {
+            return Some(GotoDefinitionResponse::Scalar(Location {
+                uri: uri.clone(),
+                range: span_to_lsp_range(&state.source, en.line, en.col, enum_name.chars().count()),
+            }));
+        }
+    }
+
     let word = find_word_at_position(&state.source, pos.line, pos.character)?;
 
     // Search in functions

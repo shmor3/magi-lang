@@ -20,6 +20,9 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
+    /// When true, suppress struct literal parsing (e.g., in if/while/for conditions
+    /// and match guards where `{` starts a block, not a struct).
+    no_struct_literal: bool,
 }
 
 impl Parser {
@@ -28,6 +31,7 @@ impl Parser {
             tokens,
             pos: 0,
             depth: 0,
+            no_struct_literal: false,
         }
     }
 
@@ -459,7 +463,7 @@ impl Parser {
         };
 
         self.expect(&TokenKind::In)?;
-        let iterable = self.parse_expression()?;
+        let iterable = self.parse_expression_no_struct()?;
         let body = self.parse_block()?;
 
         Ok(Statement {
@@ -474,7 +478,7 @@ impl Parser {
 
     fn parse_while_loop(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'while'
-        let condition = self.parse_expression()?;
+        let condition = self.parse_expression_no_struct()?;
         let body = self.parse_block()?;
 
         Ok(Statement {
@@ -959,6 +963,17 @@ impl Parser {
 
     fn parse_expression(&mut self) -> Result<Expression, SyntaxError> {
         self.parse_pipe_expr()
+    }
+
+    /// Parse an expression with struct literal parsing suppressed.
+    /// Used in contexts where `{` after an identifier starts a block, not a struct
+    /// (if/while/for conditions, match guards).
+    fn parse_expression_no_struct(&mut self) -> Result<Expression, SyntaxError> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let result = self.parse_expression();
+        self.no_struct_literal = saved;
+        result
     }
 
     /// Pipe expression: `expr |> expr |> expr`
@@ -1530,7 +1545,8 @@ impl Parser {
 
                 // Struct construction: Name { field: value, ... }
                 // Disambiguate from block: check Ident { Ident :
-                if self.at(&TokenKind::LBrace) && self.is_struct_literal(&tok.text) {
+                // Suppressed in if/while/for conditions and match guards where { starts a block.
+                if !self.no_struct_literal && self.at(&TokenKind::LBrace) && self.is_struct_literal(&tok.text) {
                     let name = tok.text.clone();
                     self.advance(); // consume {
                     let mut fields = Vec::new();
@@ -1780,7 +1796,7 @@ impl Parser {
 
     fn parse_if_expr(&mut self) -> Result<Expression, SyntaxError> {
         let start = self.advance().span; // consume 'if'
-        let condition = self.parse_expression()?;
+        let condition = self.parse_expression_no_struct()?;
         let then_block = self.parse_block()?;
 
         let else_block = if self.eat(&TokenKind::Else) {
@@ -1819,7 +1835,7 @@ impl Parser {
 
     fn parse_match_expr(&mut self) -> Result<Expression, SyntaxError> {
         let start = self.advance().span; // consume 'match'
-        let value = self.parse_expression()?;
+        let value = self.parse_expression_no_struct()?;
         self.expect(&TokenKind::LBrace)?;
 
         let mut arms = Vec::new();
@@ -1828,8 +1844,9 @@ impl Parser {
             let pattern = self.parse_pattern()?;
 
             // Optional guard: `if condition`
+            // Suppress struct literals in guard to avoid ambiguity with match arm body `{`
             let guard = if self.eat(&TokenKind::If) {
-                Some(self.parse_expression()?)
+                Some(self.parse_expression_no_struct()?)
             } else {
                 None
             };
@@ -3617,6 +3634,149 @@ output result;
                 assert!(def.body.tail_expr.is_some());
             }
             other => panic!("Expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    // --- Struct literal ambiguity (round 82) ---
+
+    #[test]
+    fn test_if_uppercase_condition_not_struct() {
+        // `if Foo { x }` -- Foo is the condition, { x } is the block body
+        // Must NOT be parsed as StructConstruct(Foo, {x: ...})
+        let prog = parse("if Foo { x }");
+        match &prog.statements[0].kind {
+            StatementKind::ExprStatement(expr) => match &expr.kind {
+                ExpressionKind::IfElse { condition, then_block, .. } => {
+                    assert!(matches!(&condition.kind, ExpressionKind::Variable(n) if n == "Foo"));
+                    assert!(then_block.tail_expr.is_some());
+                }
+                other => panic!("Expected IfElse, got {:?}", other),
+            },
+            other => panic!("Expected ExprStatement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_if_uppercase_condition_with_field_colon_in_body() {
+        // `if State { name: val }` -- State is condition, block has type-pattern or label
+        // The key test: { ident: ident } would trigger is_struct_literal in old code
+        let prog = parse("if State { x }");
+        match &prog.statements[0].kind {
+            StatementKind::ExprStatement(expr) => {
+                assert!(matches!(&expr.kind, ExpressionKind::IfElse { .. }));
+            }
+            other => panic!("Expected ExprStatement(IfElse), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_while_uppercase_condition_not_struct() {
+        let prog = parse("while Running { break }");
+        match &prog.statements[0].kind {
+            StatementKind::WhileLoop { condition, .. } => {
+                assert!(matches!(&condition.kind, ExpressionKind::Variable(n) if n == "Running"));
+            }
+            other => panic!("Expected WhileLoop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_for_uppercase_iterable_not_struct() {
+        let prog = parse("for x in Items { break }");
+        match &prog.statements[0].kind {
+            StatementKind::ForLoop { iterable, .. } => {
+                assert!(matches!(&iterable.kind, ExpressionKind::Variable(n) if n == "Items"));
+            }
+            other => panic!("Expected ForLoop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_match_value_not_struct() {
+        let prog = parse(r#"match Status { "ok" => 1, _ => 0 }"#);
+        match &prog.statements[0].kind {
+            StatementKind::ExprStatement(expr) => match &expr.kind {
+                ExpressionKind::Match { value, .. } => {
+                    assert!(matches!(&value.kind, ExpressionKind::Variable(n) if n == "Status"));
+                }
+                other => panic!("Expected Match, got {:?}", other),
+            },
+            other => panic!("Expected ExprStatement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_match_guard_not_struct() {
+        let prog = parse(r#"match x { v if Flag => v, _ => 0 }"#);
+        match &prog.statements[0].kind {
+            StatementKind::ExprStatement(expr) => match &expr.kind {
+                ExpressionKind::Match { arms, .. } => {
+                    assert!(arms[0].guard.is_some());
+                    let guard = arms[0].guard.as_ref().unwrap();
+                    assert!(matches!(&guard.kind, ExpressionKind::Variable(n) if n == "Flag"));
+                }
+                other => panic!("Expected Match, got {:?}", other),
+            },
+            other => panic!("Expected ExprStatement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_struct_literal_in_let_still_works() {
+        // Struct literals should work in non-condition contexts
+        let prog = parse("let p = Point { x: 1, y: 2 }");
+        match &prog.statements[0].kind {
+            StatementKind::Let { value, .. } => {
+                assert!(matches!(&value.kind, ExpressionKind::StructConstruct { .. }));
+            }
+            other => panic!("Expected Let with struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_struct_literal_in_fn_body() {
+        // Struct literal inside a function body should work
+        let prog = parse("fn make() { Point { x: 1, y: 2 } }");
+        match &prog.statements[0].kind {
+            StatementKind::FunctionDef(def) => {
+                let tail = def.body.tail_expr.as_ref().expect("expected tail expr");
+                assert!(matches!(&tail.kind, ExpressionKind::StructConstruct { .. }));
+            }
+            other => panic!("Expected FunctionDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_struct_literal_in_match_arm_body() {
+        // Struct literal in match arm body (after =>) should work
+        let prog = parse(r#"match x { 1 => Point { x: 1, y: 2 }, _ => Point { x: 0, y: 0 } }"#);
+        match &prog.statements[0].kind {
+            StatementKind::ExprStatement(expr) => match &expr.kind {
+                ExpressionKind::Match { arms, .. } => {
+                    let body = &arms[0].body;
+                    let tail = body.tail_expr.as_ref().expect("expected tail");
+                    assert!(matches!(&tail.kind, ExpressionKind::StructConstruct { .. }));
+                }
+                _ => panic!("expected Match"),
+            },
+            _ => panic!("expected ExprStatement"),
+        }
+    }
+
+    #[test]
+    fn test_struct_literal_in_if_then_body() {
+        // Struct literal inside if-then block should work
+        let prog = parse("if cond { Point { x: 1, y: 2 } }");
+        match &prog.statements[0].kind {
+            StatementKind::ExprStatement(expr) => match &expr.kind {
+                ExpressionKind::IfElse { condition, then_block, .. } => {
+                    assert!(matches!(&condition.kind, ExpressionKind::Variable(n) if n == "cond"));
+                    let tail = then_block.tail_expr.as_ref().expect("expected tail");
+                    assert!(matches!(&tail.kind, ExpressionKind::StructConstruct { .. }));
+                }
+                _ => panic!("expected IfElse"),
+            },
+            _ => panic!("expected ExprStatement"),
         }
     }
 }

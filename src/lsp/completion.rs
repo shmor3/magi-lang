@@ -1,6 +1,6 @@
 //! Completion provider for the MAGI LSP.
 
-use super::analysis::{utf16_to_char_col, DocumentState};
+use super::analysis::{find_dot_receiver_at_position, find_variable_struct_type, utf16_to_char_col, DocumentState};
 use tower_lsp::lsp_types::*;
 
 /// MAGI language keywords.
@@ -46,18 +46,227 @@ fn find_prefix_at_position(source: &str, line: u32, character: u32) -> Option<St
     Some(chars[start..col].iter().collect())
 }
 
+/// Check if cursor is right after `EnumName::` and return enum variants for completion.
+fn find_double_colon_context(source: &str, line: u32, character: u32) -> Option<String> {
+    let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
+    let col = utf16_to_char_col(target_line, character) as usize;
+
+    if col > chars.len() {
+        return None;
+    }
+
+    // Walk backwards: skip any partial identifier the user is typing
+    let mut pos = col;
+    while pos > 0 && (chars[pos - 1].is_ascii_alphanumeric() || chars[pos - 1] == '_') {
+        pos -= 1;
+    }
+
+    // Check for `::`
+    if pos < 2 || chars[pos - 1] != ':' || chars[pos - 2] != ':' {
+        return None;
+    }
+    pos -= 2;
+
+    // Scan backwards for the enum name
+    let name_end = pos;
+    let mut name_start = name_end;
+    while name_start > 0 && (chars[name_start - 1].is_ascii_alphanumeric() || chars[name_start - 1] == '_') {
+        name_start -= 1;
+    }
+
+    if name_start == name_end {
+        return None;
+    }
+
+    Some(chars[name_start..name_end].iter().collect())
+}
+
+/// Common method names for array types.
+const ARRAY_METHODS: &[(&str, &str)] = &[
+    ("len", "Returns the length of the array"),
+    ("push", "Appends an element to the array"),
+    ("pop", "Removes and returns the last element"),
+    ("shift", "Removes and returns the first element"),
+    ("insert", "Inserts an element at an index"),
+    ("remove", "Removes an element at an index"),
+    ("map", "Transforms each element"),
+    ("filter", "Filters elements by predicate"),
+    ("reduce", "Reduces the array to a single value"),
+    ("find", "Finds the first matching element"),
+    ("any", "Returns true if any element matches"),
+    ("all", "Returns true if all elements match"),
+    ("each", "Iterates over each element"),
+    ("sort", "Returns a sorted copy"),
+    ("reverse", "Returns a reversed copy"),
+    ("contains", "Checks if array contains a value"),
+    ("join", "Joins elements into a string"),
+    ("slice", "Returns a sub-array"),
+    ("is_empty", "Returns true if the array is empty"),
+    ("flat_map", "Maps and flattens results"),
+    ("enumerate", "Returns [index, value] pairs"),
+    ("chunk", "Splits into chunks of n elements"),
+    ("zip", "Zips two arrays together"),
+    ("group_by", "Groups elements by key function"),
+    ("sort_by", "Sorts by a key function"),
+    ("min_by", "Finds minimum by key function"),
+    ("max_by", "Finds maximum by key function"),
+    ("filter_nulls", "Removes null elements"),
+    ("to_string", "Converts to string representation"),
+    ("to_json", "Converts to JSON string"),
+    ("typeof", "Returns the type name"),
+];
+
+/// Common method names for string types.
+const STRING_METHODS: &[(&str, &str)] = &[
+    ("len", "Returns the length of the string"),
+    ("contains", "Checks if string contains a substring"),
+    ("starts_with", "Checks if string starts with a prefix"),
+    ("ends_with", "Checks if string ends with a suffix"),
+    ("trim", "Removes leading and trailing whitespace"),
+    ("to_uppercase", "Converts to uppercase"),
+    ("to_lowercase", "Converts to lowercase"),
+    ("split", "Splits the string by delimiter"),
+    ("replace", "Replaces occurrences of a substring"),
+    ("slice", "Returns a substring by index range"),
+    ("index_of", "Finds the first index of a substring"),
+    ("chars", "Returns array of characters"),
+    ("lines", "Splits into lines"),
+    ("words", "Splits into words"),
+    ("reverse", "Returns a reversed string"),
+    ("repeat", "Repeats the string n times"),
+    ("count", "Counts occurrences of a substring"),
+    ("pad_start", "Pads the start to a given length"),
+    ("pad_end", "Pads the end to a given length"),
+    ("char_at", "Returns the character at an index"),
+    ("to_string", "Returns the string itself"),
+    ("to_int64", "Parses as integer"),
+    ("to_float64", "Parses as float"),
+    ("to_json", "Converts to JSON string"),
+    ("typeof", "Returns the type name"),
+];
+
+/// Common method names for map types.
+const MAP_METHODS: &[(&str, &str)] = &[
+    ("len", "Returns the number of entries"),
+    ("keys", "Returns array of keys"),
+    ("values", "Returns array of values"),
+    ("entries", "Returns array of [key, value] pairs"),
+    ("contains_key", "Checks if a key exists"),
+    ("to_string", "Converts to string representation"),
+    ("to_json", "Converts to JSON string"),
+    ("typeof", "Returns the type name"),
+];
+
+/// Generic methods available on all types.
+const GENERIC_METHODS: &[(&str, &str)] = &[
+    ("to_string", "Converts to string representation"),
+    ("to_json", "Converts to JSON string"),
+    ("to_int64", "Converts to 64-bit integer"),
+    ("to_float64", "Converts to 64-bit float"),
+    ("to_bool", "Converts to boolean"),
+    ("typeof", "Returns the type name"),
+];
+
 /// Handle a completion request.
 pub fn handle_completion(
     state: &DocumentState,
     params: &CompletionParams,
 ) -> CompletionResponse {
+    let pos = params.text_document_position.position;
+
+    // Check for double-colon context: `EnumName::` -> suggest variants
+    if let Some(enum_name) = find_double_colon_context(&state.source, pos.line, pos.character) {
+        if let Some(en) = state.enums.get(&enum_name) {
+            let items: Vec<CompletionItem> = en.variants.iter().map(|variant| {
+                CompletionItem {
+                    label: variant.clone(),
+                    kind: Some(CompletionItemKind::ENUM_MEMBER),
+                    detail: Some(format!("{}::{}", enum_name, variant)),
+                    ..Default::default()
+                }
+            }).collect();
+            return CompletionResponse::Array(items);
+        }
+    }
+
+    // Check for dot-access context: `expr.` -> suggest fields/methods
+    if let Some(receiver) = find_dot_receiver_at_position(&state.source, pos.line, pos.character) {
+        let mut items = Vec::new();
+
+        // Check if receiver is a variable with a known struct type
+        if let Some(struct_name) = find_variable_struct_type(state, &receiver) {
+            if let Some(st) = state.structs.get(&struct_name) {
+                for (field_name, field_type) in &st.fields {
+                    let detail = if let Some(ty) = field_type {
+                        format!("{}: {}", field_name, ty)
+                    } else {
+                        field_name.clone()
+                    };
+                    items.push(CompletionItem {
+                        label: field_name.clone(),
+                        kind: Some(CompletionItemKind::FIELD),
+                        detail: Some(detail),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        // Also add generic methods for all types
+        for &(method, desc) in GENERIC_METHODS {
+            items.push(CompletionItem {
+                label: method.to_string(),
+                kind: Some(CompletionItemKind::METHOD),
+                detail: Some(desc.to_string()),
+                ..Default::default()
+            });
+        }
+
+        // Add type-specific methods based on variable type annotation
+        let type_methods = if let Some(var) = state.variables.get(&receiver) {
+            match var.type_annotation.as_deref() {
+                Some(t) if t.starts_with("[") || t == "Array" => Some(ARRAY_METHODS),
+                Some("string" | "String") => Some(STRING_METHODS),
+                Some("Map") => Some(MAP_METHODS),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(methods) = type_methods {
+            for &(method, desc) in methods {
+                // Avoid duplicates with generic methods
+                if !items.iter().any(|i| i.label == method) {
+                    items.push(CompletionItem {
+                        label: method.to_string(),
+                        kind: Some(CompletionItemKind::METHOD),
+                        detail: Some(desc.to_string()),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        // Filter by any partial text after the dot
+        let prefix = find_prefix_at_position(&state.source, pos.line, pos.character)
+            .unwrap_or_default();
+        if !prefix.is_empty() {
+            let prefix_lower = prefix.to_lowercase();
+            items.retain(|item| item.label.to_lowercase().contains(&prefix_lower));
+        }
+
+        return CompletionResponse::Array(items);
+    }
+
     let mut items = Vec::new();
 
     // Extract the prefix at cursor position for filtering (only text before cursor)
     let prefix = find_prefix_at_position(
         &state.source,
-        params.text_document_position.position.line,
-        params.text_document_position.position.character,
+        pos.line,
+        pos.character,
     )
     .unwrap_or_default();
 

@@ -1,11 +1,32 @@
 //! Hover provider for the MAGI LSP.
 
-use super::analysis::{find_word_at_position, DocumentState};
+use super::analysis::{find_enum_variant_at_position, find_word_at_position, DocumentState};
 use tower_lsp::lsp_types::*;
 
 /// Handle a hover request. Looks up the word under the cursor in symbol maps.
 pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover> {
     let pos = params.text_document_position_params.position;
+
+    // Check for enum variant pattern (EnumName::Variant) first
+    if let Some((enum_name, variant_name)) = find_enum_variant_at_position(&state.source, pos.line, pos.character) {
+        if let Some(en) = state.enums.get(&enum_name) {
+            if en.variants.contains(&variant_name) {
+                let all_variants = en.variants.join(", ");
+                let info = format!(
+                    "```magi\n{}::{}\n```\nVariant of `enum {} {{ {} }}`",
+                    enum_name, variant_name, enum_name, all_variants
+                );
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: info,
+                    }),
+                    range: None,
+                });
+            }
+        }
+    }
+
     let word = find_word_at_position(&state.source, pos.line, pos.character)?;
 
     // Look up in functions
