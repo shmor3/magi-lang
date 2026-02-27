@@ -784,15 +784,15 @@ impl OperationEvaluator for FullEvaluator {
                         if w > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("pad_start width exceeds {} byte limit", MAX_STRING_OUTPUT)));
                         }
-                        let fill_char = match &fill {
-                            Some(DataType::String(f)) => f.chars().next().unwrap_or(' '),
-                            _ => ' ',
+                        let pad_str = match &fill {
+                            Some(DataType::String(f)) if !f.is_empty() => f.clone(),
+                            _ => " ".to_string(),
                         };
                         let char_count = s.chars().count();
                         if char_count >= w {
                             Ok(DataType::String(s.clone()))
                         } else {
-                            let padding: String = std::iter::repeat(fill_char).take(w - char_count).collect();
+                            let padding: String = pad_str.chars().cycle().take(w - char_count).collect();
                             Ok(DataType::String(format!("{}{}", padding, s)))
                         }
                     }
@@ -808,15 +808,15 @@ impl OperationEvaluator for FullEvaluator {
                         if w > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("pad_end width exceeds {} byte limit", MAX_STRING_OUTPUT)));
                         }
-                        let fill_char = match &fill {
-                            Some(DataType::String(f)) => f.chars().next().unwrap_or(' '),
-                            _ => ' ',
+                        let pad_str = match &fill {
+                            Some(DataType::String(f)) if !f.is_empty() => f.clone(),
+                            _ => " ".to_string(),
                         };
                         let char_count = s.chars().count();
                         if char_count >= w {
                             Ok(DataType::String(s.clone()))
                         } else {
-                            let padding: String = std::iter::repeat(fill_char).take(w - char_count).collect();
+                            let padding: String = pad_str.chars().cycle().take(w - char_count).collect();
                             Ok(DataType::String(format!("{}{}", s, padding)))
                         }
                     }
@@ -1366,7 +1366,6 @@ fn cmd_lint(path: &str) {
             }
         }
         eprintln!("{} warning(s) emitted.", result.diagnostics.len());
-        process::exit(1);
     }
 }
 
@@ -1490,6 +1489,24 @@ fn cmd_compile(path: &str) {
             process::exit(1);
         }
     };
+
+    // Type check before compiling
+    let imports = std::collections::HashSet::new();
+    let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
+    let mut has_errors = false;
+    for d in &analysis.diagnostics {
+        let severity = match d.severity {
+            DiagnosticSeverity::Error => { has_errors = true; "error" }
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Info => "info",
+        };
+        let code = d.code.as_deref().unwrap_or("");
+        eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
+    }
+    if has_errors {
+        eprintln!("Type errors found; aborting compilation.");
+        process::exit(1);
+    }
 
     let wasm_bytes = match compiler::compile_to_wasm(&program) {
         Ok(bytes) => bytes,
