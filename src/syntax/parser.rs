@@ -2129,19 +2129,36 @@ impl Parser {
                 if !current_lit.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current_lit)));
                 }
-                // Collect until matching '}'
+                // Collect until matching '}', respecting string literals
                 let mut expr_str = String::new();
                 let mut depth = 1;
-                for inner in chars.by_ref() {
+                while let Some(inner) = chars.next() {
                     if inner == '{' {
                         depth += 1;
+                        expr_str.push(inner);
                     } else if inner == '}' {
                         depth -= 1;
                         if depth == 0 {
                             break;
                         }
+                        expr_str.push(inner);
+                    } else if inner == '"' || inner == '\'' {
+                        // Skip over string literals so braces inside don't affect depth
+                        let quote = inner;
+                        expr_str.push(quote);
+                        while let Some(sch) = chars.next() {
+                            expr_str.push(sch);
+                            if sch == '\\' {
+                                if let Some(esc) = chars.next() {
+                                    expr_str.push(esc);
+                                }
+                            } else if sch == quote {
+                                break;
+                            }
+                        }
+                    } else {
+                        expr_str.push(inner);
                     }
-                    expr_str.push(inner);
                 }
                 if depth > 0 {
                     return Err(SyntaxError {

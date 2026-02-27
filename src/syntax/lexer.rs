@@ -976,6 +976,35 @@ impl<'a> Lexer<'a> {
                     let ch = self.parse_escape_sequence()?;
                     value.push(ch);
                 }
+                Some(q @ b'"') | Some(q @ b'\'') if brace_depth > 0 => {
+                    // Inside interpolation: skip over string literals so braces within
+                    // them don't affect our depth tracking.
+                    let quote = q;
+                    self.advance();
+                    value.push(quote as char);
+                    loop {
+                        match self.peek() {
+                            None => break,
+                            Some(b'\\') => {
+                                self.advance();
+                                value.push('\\');
+                                if let Some(ch) = self.advance_char() {
+                                    value.push(ch);
+                                }
+                            }
+                            Some(c) if c == quote => {
+                                self.advance();
+                                value.push(quote as char);
+                                break;
+                            }
+                            _ => {
+                                if let Some(ch) = self.advance_char() {
+                                    value.push(ch);
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {
                     if let Some(ch) = self.advance_char() {
                         value.push(ch);
@@ -992,10 +1021,26 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
         let start = self.pos;
+
+        // Check for base prefixes: 0x, 0o, 0b
+        if self.peek() == Some(b'0') {
+            if let Some(prefix) = self.peek_at(1) {
+                match prefix {
+                    b'x' | b'X' => return self.lex_int_with_base(start, start_line, start_col, 16, |c| c.is_ascii_hexdigit()),
+                    b'o' | b'O' => return self.lex_int_with_base(start, start_line, start_col, 8, |c| matches!(c, b'0'..=b'7')),
+                    b'b' | b'B' => return self.lex_int_with_base(start, start_line, start_col, 2, |c| c == b'0' || c == b'1'),
+                    _ => {}
+                }
+            }
+        }
+
         let mut is_float = false;
 
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
+                self.advance();
+            } else if ch == b'_' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
+                // Underscore separator: only valid between digits
                 self.advance();
             } else if ch == b'.' && !is_float {
                 // Check if next char after dot is a digit (to avoid 1.method())
@@ -1025,7 +1070,9 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let text = String::from_utf8_lossy(&self.source[start..self.pos]).to_string();
+        // Strip underscores from the token text for downstream parsing
+        let raw = String::from_utf8_lossy(&self.source[start..self.pos]).to_string();
+        let text = raw.replace('_', "");
         let kind = if is_float {
             TokenKind::FloatLiteral
         } else {
@@ -1036,6 +1083,46 @@ impl<'a> Lexer<'a> {
             kind,
             span: Span::new(start_line, start_col, self.line, self.col - 1),
             text,
+        })
+    }
+
+    fn lex_int_with_base(&mut self, _start: usize, start_line: u32, start_col: u32, base: u32, is_valid_digit: fn(u8) -> bool) -> Result<Token, SyntaxError> {
+        self.advance(); // consume '0'
+        self.advance(); // consume prefix letter (x/o/b)
+
+        let digit_start = self.pos;
+        while let Some(ch) = self.peek() {
+            if is_valid_digit(ch) {
+                self.advance();
+            } else if ch == b'_' && self.peek_at(1).is_some_and(|c| is_valid_digit(c)) {
+                self.advance(); // underscore between digits
+            } else {
+                break;
+            }
+        }
+
+        if self.pos == digit_start {
+            return Err(SyntaxError {
+                line: start_line as usize,
+                column: start_col as usize,
+                message: format!("Expected digits after base prefix"),
+            });
+        }
+
+        let digits: String = String::from_utf8_lossy(&self.source[digit_start..self.pos])
+            .chars()
+            .filter(|c| *c != '_')
+            .collect();
+        let value = i64::from_str_radix(&digits, base).map_err(|_| SyntaxError {
+            line: start_line as usize,
+            column: start_col as usize,
+            message: format!("Invalid numeric literal"),
+        })?;
+
+        Ok(Token {
+            kind: TokenKind::IntLiteral,
+            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            text: value.to_string(), // store decimal value for downstream parsers
         })
     }
 

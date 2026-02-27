@@ -610,6 +610,10 @@ impl<'a> Formatter<'a> {
                         self.write(": ");
                         self.write(ty);
                     }
+                    if let Some(default) = &param.default {
+                        self.write(" = ");
+                        self.fmt_expression(default);
+                    }
                     if i < params.len() - 1 {
                         self.write(", ");
                     }
@@ -858,14 +862,24 @@ impl<'a> Formatter<'a> {
         match lit {
             Literal::Int64(n) => self.write(&n.to_string()),
             Literal::Float64(f) => {
-                let s = f.to_string();
-                if s.contains('e') || s.contains('E') {
-                    // Scientific notation: format with explicit decimal to ensure parsability
-                    self.write(&format!("{:.1e}", f));
-                } else if !s.contains('.') {
-                    self.write(&format!("{}.0", s));
+                if f.is_nan() {
+                    self.write("(0.0 / 0.0)");
+                } else if f.is_infinite() {
+                    if *f > 0.0 {
+                        self.write("(1.0 / 0.0)");
+                    } else {
+                        self.write("(-1.0 / 0.0)");
+                    }
                 } else {
-                    self.write(&s);
+                    let s = f.to_string();
+                    if s.contains('e') || s.contains('E') {
+                        // Scientific notation: format with explicit decimal to ensure parsability
+                        self.write(&format!("{:.1e}", f));
+                    } else if !s.contains('.') {
+                        self.write(&format!("{}.0", s));
+                    } else {
+                        self.write(&s);
+                    }
                 }
             }
             Literal::String(s) => {

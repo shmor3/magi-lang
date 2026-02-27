@@ -246,11 +246,24 @@ pub fn check_match_exhaustiveness(
     let mut enum_variants_used: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
 
+    let mut has_non_enum_arm = false;
     for arm in arms {
         // Only count unguarded arms as covering a variant — guarded arms may not match
         if arm.guard.is_none() {
+            let before = enum_variants_used.values().map(|v| v.len()).sum::<usize>();
             collect_enum_variants(&arm.pattern, &mut enum_variants_used);
+            let after = enum_variants_used.values().map(|v| v.len()).sum::<usize>();
+            if before == after && !is_catch_all_pattern(&arm.pattern) {
+                // This arm is not an enum pattern and not a catch-all — mixed match
+                has_non_enum_arm = true;
+            }
         }
+    }
+
+    // If arms mix enum patterns with non-enum patterns (literals, structs, etc.),
+    // we can't reliably check exhaustiveness — skip to avoid false positives.
+    if has_non_enum_arm {
+        return diagnostics;
     }
 
     // For each enum referenced, check if all its variants are covered

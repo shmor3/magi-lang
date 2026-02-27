@@ -5546,3 +5546,98 @@ fn test_method_not_found_suggestion() {
         Ok(v) => panic!("expected error, got: {:?}", v),
     }
 }
+
+// ── Round 44: Numeric literals, f-string braces, formatter ──
+
+#[test]
+fn test_hex_literal() {
+    assert_eq!(run("0xFF"), DataType::Int64(255));
+    assert_eq!(run("0x10"), DataType::Int64(16));
+    assert_eq!(run("0xDEAD"), DataType::Int64(0xDEAD));
+}
+
+#[test]
+fn test_octal_literal() {
+    assert_eq!(run("0o77"), DataType::Int64(63));
+    assert_eq!(run("0o10"), DataType::Int64(8));
+}
+
+#[test]
+fn test_binary_literal() {
+    assert_eq!(run("0b1010"), DataType::Int64(10));
+    assert_eq!(run("0b11111111"), DataType::Int64(255));
+}
+
+#[test]
+fn test_underscore_separators_in_numbers() {
+    assert_eq!(run("1_000_000"), DataType::Int64(1_000_000));
+    assert_eq!(run("0xFF_FF"), DataType::Int64(0xFFFF));
+    assert_eq!(run("0b1010_0101"), DataType::Int64(0b1010_0101));
+    assert_eq!(run("1_000.5"), DataType::Float64(1000.5));
+}
+
+#[test]
+fn test_hex_arithmetic() {
+    assert_eq!(run("0xFF + 1"), DataType::Int64(256));
+    assert_eq!(run("0x10 * 2"), DataType::Int64(32));
+}
+
+#[test]
+fn test_fstring_with_string_containing_braces() {
+    // String inside f-string interpolation that contains brace characters
+    let src = r#"
+    let x = "hello"
+    f"result: {x}"
+    "#;
+    assert_eq!(run(src), DataType::String("result: hello".to_string()));
+}
+
+#[test]
+fn test_fstring_with_nested_braces() {
+    // Map literal inside f-string interpolation
+    let src = r#"
+    let m = { "a": 1 }
+    f"val: {m.a}"
+    "#;
+    assert_eq!(run(src), DataType::String("val: 1".to_string()));
+}
+
+#[test]
+fn test_formatter_lambda_default_params() {
+    let src = r#"let f = |x, y = 10| x + y"#;
+    let program = parse(src);
+    let config = magi_lang::formatter::FormatConfig::default();
+    let formatted = magi_lang::formatter::format_program(&program, &config);
+    assert!(formatted.contains("y = 10"), "formatter should preserve lambda default param, got: {}", formatted);
+}
+
+#[test]
+fn test_formatter_nan_inf() {
+    // NaN and Infinity should produce parseable output
+    let src = "let x = 0.0 / 0.0\nlet y = 1.0 / 0.0";
+    let program = parse(src);
+    let config = magi_lang::formatter::FormatConfig::default();
+    let formatted = magi_lang::formatter::format_program(&program, &config);
+    // Should not contain "NaN" or "inf" as raw text — should use expressions
+    assert!(!formatted.contains("NaN"), "NaN should be formatted as expression, got: {}", formatted);
+    assert!(!formatted.contains("inf"), "Infinity should be formatted as expression, got: {}", formatted);
+}
+
+#[test]
+fn test_linter_mixed_match_no_false_positive() {
+    // Match with both enum patterns and literal patterns should not produce W203
+    let src = r#"
+    enum Color { Red, Green, Blue }
+    let x = Color::Red
+    match x {
+        Color::Red => "red"
+        42 => "forty-two"
+        _ => "other"
+    }
+    "#;
+    let program = parse(src);
+    let config = magi_lang::linter::LintConfig::default();
+    let result = magi_lang::linter::lint(&program, &config);
+    let w203: Vec<_> = result.diagnostics.iter().filter(|d| d.code.as_deref() == Some("W203")).collect();
+    assert!(w203.is_empty(), "should not produce W203 for mixed match, got: {:?}", w203);
+}

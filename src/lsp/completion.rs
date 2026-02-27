@@ -13,8 +13,9 @@ const KEYWORDS: &[&str] = &[
 
 /// Built-in functions available without import.
 const BUILTINS: &[&str] = &[
-    "len", "range", "assert", "print", "typeof", "to_string", "to_int",
-    "to_float", "abs", "round", "floor", "ceil", "sqrt",
+    "len", "range", "assert", "print", "println", "debug_log", "typeof",
+    "to_string", "to_int", "to_float", "parse_int", "parse_float",
+    "abs", "round", "floor", "ceil", "sqrt",
 ];
 
 /// Find the word prefix (text before cursor only) at a given position.
