@@ -2079,4 +2079,444 @@ mod tests {
         assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapNew(0))));
         assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapSet)));
     }
+
+    // ── Diverse compilation tests ────────────────────────────────────
+
+    #[test]
+    fn test_compile_float_literal() {
+        let module = compile("let x = 3.14;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushF64(f) if (*f - 3.14).abs() < 0.001)));
+    }
+
+    #[test]
+    fn test_compile_bool_literals() {
+        let module = compile("let a = true; let b = false;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushBool(true))));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushBool(false))));
+    }
+
+    #[test]
+    fn test_compile_null_literal() {
+        let module = compile("let x = null;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushNull)));
+    }
+
+    #[test]
+    fn test_compile_array_literal() {
+        let module = compile("let arr = [10, 20, 30];").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::ArrayNew(3))));
+    }
+
+    #[test]
+    fn test_compile_map_literal() {
+        let module = compile(r#"let m = {"a": 1, "b": 2};"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapNew(2))));
+    }
+
+    #[test]
+    fn test_compile_empty_array() {
+        let module = compile("let arr = [];").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::ArrayNew(0))));
+    }
+
+    #[test]
+    fn test_compile_empty_map() {
+        // Note: bare `{}` parses as empty block, not empty map. Use explicit key to get a map.
+        let module = compile(r#"let m = {"a": 1};"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapNew(1))));
+    }
+
+    #[test]
+    fn test_compile_arithmetic_sub() {
+        let module = compile("let x = 10 - 3;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Sub)));
+    }
+
+    #[test]
+    fn test_compile_arithmetic_mul() {
+        let module = compile("let x = 4 * 5;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Mul)));
+    }
+
+    #[test]
+    fn test_compile_arithmetic_div() {
+        let module = compile("let x = 10 / 2;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Div)));
+    }
+
+    #[test]
+    fn test_compile_arithmetic_mod() {
+        let module = compile("let x = 10 % 3;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Rem)));
+    }
+
+    #[test]
+    fn test_compile_comparison_ops() {
+        let module = compile("let a = 1 == 1; let b = 1 != 2; let c = 1 < 2; let d = 2 > 1; let e = 1 <= 2; let f = 2 >= 1;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Eq)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Ne)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Lt)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Gt)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Le)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Ge)));
+    }
+
+    #[test]
+    fn test_compile_negation() {
+        let module = compile("let x = -42;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Neg)));
+    }
+
+    #[test]
+    fn test_compile_method_call_with_args() {
+        let module = compile(r#"let s = "hello"; let r = s.slice(0, 3);"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Method calls with args use RuntimeCall with arg_count = args + 1 (for self).
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { arg_count: 3, .. })));
+    }
+
+    #[test]
+    fn test_compile_chained_calls() {
+        let module = compile(r#"
+            fn double(x) { x * 2 }
+            fn add_one(x) { x + 1 }
+            let r = add_one(double(5));
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        let call_count = main.instructions.iter().filter(|i| matches!(i, Instruction::Call(_))).count();
+        assert!(call_count >= 2, "expected at least 2 calls, got {}", call_count);
+    }
+
+    #[test]
+    fn test_compile_lambda_with_multiple_params() {
+        let module = compile("let f = |a, b| a + b;").unwrap();
+        let lambda = module.functions.iter().find(|f| f.name.starts_with("__lambda_")).unwrap();
+        assert_eq!(lambda.param_count, 2);
+    }
+
+    #[test]
+    fn test_compile_nested_if_else() {
+        let module = compile(r#"
+            let x = 10;
+            let y = if x > 5 {
+                if x > 8 { "big" } else { "medium" }
+            } else {
+                "small"
+            };
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        let if_count = main.instructions.iter().filter(|i| matches!(i, Instruction::If)).count();
+        assert!(if_count >= 2, "expected at least 2 if instructions for nested if-else");
+    }
+
+    #[test]
+    fn test_compile_match_multiple_patterns() {
+        let module = compile(r#"
+            let x = 3;
+            let y = match x {
+                1 => "one",
+                2 => "two",
+                3 => "three",
+                _ => "other",
+            };
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Each non-wildcard arm produces an If.
+        let if_count = main.instructions.iter().filter(|i| matches!(i, Instruction::If)).count();
+        assert!(if_count >= 3, "expected at least 3 if instructions for 3 literal match arms");
+    }
+
+    #[test]
+    fn test_compile_match_with_variable_binding() {
+        let module = compile(r#"
+            let x = 42;
+            let y = match x {
+                v => v,
+            };
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::LocalGet(_))));
+    }
+
+    #[test]
+    fn test_compile_while_break() {
+        let module = compile(r#"
+            let mut i = 0;
+            while true {
+                if i >= 5 { break; }
+                i = i + 1;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Br(_))));
+    }
+
+    #[test]
+    fn test_compile_for_with_continue() {
+        let module = compile(r#"
+            for x in [1, 2, 3, 4, 5] {
+                if x == 3 { continue; }
+                output x;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Print)));
+    }
+
+    #[test]
+    fn test_compile_return_in_function() {
+        let module = compile(r#"
+            fn early_return(x) {
+                if x > 10 { return x; }
+                return 0;
+            }
+        "#).unwrap();
+        let func = module.functions.iter().find(|f| f.name == "early_return").unwrap();
+        let return_count = func.instructions.iter().filter(|i| matches!(i, Instruction::Return)).count();
+        assert!(return_count >= 2, "expected at least 2 return instructions");
+    }
+
+    #[test]
+    fn test_compile_string_interpolation_multiple_parts() {
+        let module = compile(r#"let name = "world"; let greeting = f"hello {name}!";"#).unwrap();
+        // String concat is used to join parts.
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::StringConcat)));
+    }
+
+    #[test]
+    fn test_compile_enum_with_data() {
+        let module = compile(r#"
+            enum Shape { Circle(radius), Rect(w, h) }
+            let s = Shape::Circle(5.0);
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Enum construction creates a MapNew(3): __enum, __variant, __data.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapNew(3))));
+    }
+
+    #[test]
+    fn test_compile_struct_with_multiple_fields() {
+        let module = compile(r#"
+            struct Color { r: int64, g: int64, b: int64 }
+            let c = Color { r: 255, g: 128, b: 0 };
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Struct: __struct + 3 fields = MapNew(4).
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapNew(4))));
+    }
+
+    #[test]
+    fn test_compile_optional_chain_field() {
+        let module = compile(r#"let x = null; let y = x?.name;"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Optional chain checks the null tag.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::GetTag)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::If)));
+    }
+
+    #[test]
+    fn test_compile_try_catch_with_finally() {
+        let module = compile(r#"
+            try {
+                let x = 42;
+            } catch e {
+                output e;
+            } finally {
+                output "done";
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Finally block should produce Print instructions.
+        let print_count = main.instructions.iter().filter(|i| matches!(i, Instruction::Print)).count();
+        assert!(print_count >= 1, "expected at least 1 print in finally block");
+    }
+
+    #[test]
+    fn test_compile_throw() {
+        let module = compile(r#"throw "error";"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Unreachable)));
+    }
+
+    #[test]
+    fn test_compile_list_comprehension_with_filter() {
+        let module = compile("let evens = [x for x in [1, 2, 3, 4] if x % 2 == 0];").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::ArrayNew(0))));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)));
+    }
+
+    #[test]
+    fn test_compile_range_inclusive() {
+        let module = compile("let r = 0..=10;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushBool(true))));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
+    }
+
+    #[test]
+    fn test_compile_range_exclusive() {
+        let module = compile("let r = 0..10;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushBool(false))));
+    }
+
+    #[test]
+    fn test_compile_let_mut_assignment() {
+        let module = compile("let mut x = 0; x = 10;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        let set_count = main.instructions.iter().filter(|i| matches!(i, Instruction::LocalSet(_))).count();
+        assert!(set_count >= 2, "expected at least 2 local sets (init + reassignment)");
+    }
+
+    #[test]
+    fn test_compile_multiple_outputs() {
+        let module = compile("output 1; output 2; output 3;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        let print_count = main.instructions.iter().filter(|i| matches!(i, Instruction::Print)).count();
+        assert_eq!(print_count, 3);
+    }
+
+    #[test]
+    fn test_compile_await_noop() {
+        let module = compile("fn foo() { 42 } let x = await foo();").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Call(_))));
+    }
+
+    #[test]
+    fn test_compile_spawn_noop() {
+        let module = compile("fn foo() { 42 } let x = spawn foo();").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Call(_))));
+    }
+
+    #[test]
+    fn test_compile_index_with_range_slice() {
+        let module = compile("let arr = [1, 2, 3, 4, 5]; let s = arr[1..3];").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Slice syntax generates a RuntimeCall to __slice.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
+    }
+
+    #[test]
+    fn test_compile_type_alias_noop() {
+        let module = compile("type Num = int64; let x: Num = 42;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushI64(42))));
+    }
+
+    #[test]
+    fn test_compile_import_noop() {
+        let module = compile(r#"import "bar";"#).unwrap();
+        // Import statements are no-ops at compile time.
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Only the implicit PushNull + Return from __main.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushNull)));
+    }
+
+    #[test]
+    fn test_compile_use_noop() {
+        let module = compile("use std::math;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushNull)));
+    }
+
+    #[test]
+    fn test_compile_pipe_with_placeholder() {
+        let module = compile(r#"
+            fn add(a, b) { a + b }
+            let r = 5 |> add(10, _);
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Call(_))));
+    }
+
+    #[test]
+    fn test_compile_add_uses_runtime_call() {
+        // Addition uses RuntimeCall __add for dynamic dispatch (string + string vs int + int).
+        let module = compile("let x = 1 + 2;").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
+    }
+
+    #[test]
+    fn test_compile_try_catch_expr() {
+        // TryCatchExpr only compiles try block in WASM.
+        let module = compile(r#"let x = try { 42 } catch e { 0 };"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::PushI64(42))));
+    }
+
+    #[test]
+    fn test_compile_field_access_uses_map_get() {
+        let module = compile(r#"let m = {"x": 1}; let v = m.x;"#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::MapGet)));
+    }
+
+    // ── Negative tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_compile_error_undefined_assignment() {
+        let result = compile("z = 42;");
+        assert!(result.is_err(), "assigning to undefined variable should fail");
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("undefined variable"), "error should mention undefined variable: {}", msg);
+    }
+
+    #[test]
+    fn test_compile_error_compound_assign_undefined() {
+        let result = compile("z += 1;");
+        assert!(result.is_err(), "compound-assigning to undefined variable should fail");
+    }
+
+    #[test]
+    fn test_compile_error_break_outside_loop() {
+        let result = compile("break;");
+        assert!(result.is_err(), "break outside loop should fail");
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("break outside"), "error should mention break outside loop: {}", msg);
+    }
+
+    #[test]
+    fn test_compile_error_continue_outside_loop() {
+        let result = compile("continue;");
+        assert!(result.is_err(), "continue outside loop should fail");
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("continue outside"), "error should mention continue outside loop: {}", msg);
+    }
+
+    #[test]
+    fn test_compile_error_match_guard() {
+        let result = compile(r#"
+            let x = 42;
+            let y = match x {
+                n if n > 10 => "big",
+                _ => "small",
+            };
+        "#);
+        assert!(result.is_err(), "match guards should fail in WASM mode");
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("match guard") || msg.contains("not yet supported"), "error should mention match guards: {}", msg);
+    }
 }

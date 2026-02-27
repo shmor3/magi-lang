@@ -83,6 +83,10 @@ impl<'a> LintContext<'a> {
         // Check duplicate imports
         let diags = rules::check_duplicate_imports(&program.statements);
         self.emit_all(diags);
+
+        // Check same-scope shadowing at program level
+        let diags = rules::check_same_scope_shadowing(&program.statements);
+        self.emit_all(diags);
     }
 
     fn check_statement(&mut self, stmt: &Statement) {
@@ -144,6 +148,9 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
                 }
+                // W211: unused function parameters
+                let diags = rules::check_unused_params(fdef);
+                self.emit_all(diags);
                 self.check_block(&fdef.body);
             }
             StatementKind::AsyncFunctionDef(fdef) => {
@@ -161,6 +168,9 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
                 }
+                // W211: unused function parameters
+                let diags = rules::check_unused_params(fdef);
+                self.emit_all(diags);
                 self.check_block(&fdef.body);
             }
             StatementKind::EnumDef { name, variants } => {
@@ -192,7 +202,7 @@ impl<'a> LintContext<'a> {
                 self.check_block(body);
             }
             StatementKind::WhileLoop { condition, body } => {
-                if let Some(d) = rules::check_constant_condition(condition) {
+                if let Some(d) = rules::check_constant_condition(condition, Some(body)) {
                     self.emit(d);
                 }
                 if let Some(d) = rules::check_empty_block(body, "while-loop", stmt.span) {
@@ -231,6 +241,9 @@ impl<'a> LintContext<'a> {
                 // Don't emit W206 for empty catch blocks — intentional error suppression is idiomatic
                 self.check_block(catch_block);
                 if let Some(fb) = finally_block {
+                    // W212: return/break/continue/throw in finally
+                    let diags = rules::check_return_in_finally(fb, stmt.span);
+                    self.emit_all(diags);
                     self.check_block(fb);
                 }
             }
@@ -258,6 +271,10 @@ impl<'a> LintContext<'a> {
     fn check_block(&mut self, block: &Block) {
         // Check dead code within this block
         let diags = rules::check_dead_code_in_block(&block.statements);
+        self.emit_all(diags);
+
+        // Check same-scope shadowing within this block
+        let diags = rules::check_same_scope_shadowing(&block.statements);
         self.emit_all(diags);
 
         for stmt in &block.statements {
@@ -305,7 +322,7 @@ impl<'a> LintContext<'a> {
                 then_block,
                 else_block,
             } => {
-                if let Some(d) = rules::check_constant_condition(condition) {
+                if let Some(d) = rules::check_constant_condition(condition, None) {
                     self.emit(d);
                 }
                 if let Some(d) = rules::check_empty_block(then_block, "if", expr.span) {
@@ -411,6 +428,9 @@ impl<'a> LintContext<'a> {
                 self.check_block(try_block);
                 self.check_block(catch_block);
                 if let Some(finally) = finally_block {
+                    // W212: return/break/continue/throw in finally
+                    let diags = rules::check_return_in_finally(finally, expr.span);
+                    self.emit_all(diags);
                     self.check_block(finally);
                 }
             }
@@ -776,6 +796,338 @@ fn foo() {
         let codes = lint_codes("try { 1 } catch my_error { 2 }");
         assert!(!codes.contains(&"W200".to_string()),
             "should not warn on snake_case catch var: {:?}", codes);
+    }
+
+    // ── W204: constant condition — while true with break suppression ──
+
+    #[test]
+    fn test_w204_while_true_with_break_suppressed() {
+        // while true { break; } is idiomatic — should NOT warn W204
+        let codes = lint_codes("while true { break; }");
+        assert!(!codes.contains(&"W204".to_string()),
+            "should not warn W204 for while true with break: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w204_while_true_no_break_warns() {
+        // while true { output 1; } has no break — should warn
+        let codes = lint_codes("while true { output 1; }");
+        assert!(codes.contains(&"W204".to_string()),
+            "expected W204 for while true without break: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w204_while_false_warns() {
+        let codes = lint_codes("while false { output 1; }");
+        assert!(codes.contains(&"W204".to_string()),
+            "expected W204 for while false: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w204_while_true_nested_break_suppressed() {
+        // break inside an if within the while body still targets the while loop
+        let codes = lint_codes(r#"
+while true {
+    let x = 1;
+    if x > 0 { break; }
+}
+"#);
+        assert!(!codes.contains(&"W204".to_string()),
+            "should not warn W204 for while true with conditional break: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w204_while_true_break_in_nested_loop_warns() {
+        // break inside an inner loop does NOT break the outer while
+        let codes = lint_codes(r#"
+while true {
+    for x in [1, 2, 3] {
+        break;
+    }
+}
+"#);
+        assert!(codes.contains(&"W204".to_string()),
+            "expected W204: break in inner loop does not target outer while: {:?}", codes);
+    }
+
+    // ── W209: Shadowed variable in same scope ──
+
+    #[test]
+    fn test_w209_same_scope_shadowing() {
+        let codes = lint_codes("let x = 1;\nlet x = 2;");
+        assert!(codes.contains(&"W209".to_string()),
+            "expected W209 for same-scope shadowing, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_no_warning_different_names() {
+        let codes = lint_codes("let x = 1;\nlet y = 2;");
+        assert!(!codes.contains(&"W209".to_string()),
+            "should not warn when names are different: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_nested_scope_no_warning() {
+        // Shadowing in nested scope is intentional and common
+        let codes = lint_codes(r#"
+let x = 1;
+fn foo() {
+    let x = 2;
+    x
+}
+"#);
+        // W209 should NOT fire for the nested `let x = 2` since it's in a different scope
+        let w209_count = codes.iter().filter(|c| c.as_str() == "W209").count();
+        assert_eq!(w209_count, 0,
+            "should not warn for nested scope shadowing: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_underscore_prefix_suppressed() {
+        let codes = lint_codes("let _x = 1;\nlet _x = 2;");
+        assert!(!codes.contains(&"W209".to_string()),
+            "_ prefix should suppress W209: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_let_mut_shadowing() {
+        let codes = lint_codes("let mut x = 1;\nlet x = 2;");
+        assert!(codes.contains(&"W209".to_string()),
+            "expected W209 for let mut followed by let, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_const_shadowing() {
+        let codes = lint_codes("const X = 1;\nconst X = 2;");
+        assert!(codes.contains(&"W209".to_string()),
+            "expected W209 for const shadowing, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_inside_function_body() {
+        let codes = lint_codes(r#"
+fn foo() {
+    let x = 1;
+    let x = 2;
+    x
+}
+"#);
+        assert!(codes.contains(&"W209".to_string()),
+            "expected W209 inside function body, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w209_suggestion_message() {
+        let diags = lint_source("let x = 1;\nlet x = 2;");
+        let w209 = diags.iter().find(|d| d.code.as_deref() == Some("W209")).unwrap();
+        assert!(w209.message.contains("shadows"), "message should mention shadowing: {}", w209.message);
+        assert!(w209.suggestion.is_some(), "should have a suggestion");
+    }
+
+    // ── W211: Unused function parameter ──
+
+    #[test]
+    fn test_w211_unused_param() {
+        let codes = lint_codes("fn foo(x, y) { x }");
+        assert!(codes.contains(&"W211".to_string()),
+            "expected W211 for unused parameter y, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_all_params_used() {
+        let codes = lint_codes("fn foo(x, y) { x + y }");
+        assert!(!codes.contains(&"W211".to_string()),
+            "should not warn when all params used: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_underscore_prefix_suppressed() {
+        let codes = lint_codes("fn foo(x, _y) { x }");
+        assert!(!codes.contains(&"W211".to_string()),
+            "_ prefix should suppress W211: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_param_used_in_nested_block() {
+        let codes = lint_codes(r#"
+fn foo(x) {
+    if true {
+        x + 1
+    } else {
+        0
+    }
+}
+"#);
+        assert!(!codes.contains(&"W211".to_string()),
+            "should not warn when param used in nested block: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_param_used_in_method_call() {
+        let codes = lint_codes("fn foo(arr) { arr.len() }");
+        assert!(!codes.contains(&"W211".to_string()),
+            "should not warn when param used as method receiver: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_param_used_in_string_interpolation() {
+        let codes = lint_codes(r#"fn foo(name) { f"hello {name}" }"#);
+        assert!(!codes.contains(&"W211".to_string()),
+            "should not warn when param used in f-string: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_multiple_unused_params() {
+        let diags = lint_source("fn foo(a, b, c) { 42 }");
+        let w211_count = diags.iter().filter(|d| d.code.as_deref() == Some("W211")).count();
+        assert_eq!(w211_count, 3, "expected W211 for all 3 params, got {}", w211_count);
+    }
+
+    #[test]
+    fn test_w211_suggestion_message() {
+        let diags = lint_source("fn foo(x, y) { x }");
+        let w211 = diags.iter().find(|d| d.code.as_deref() == Some("W211")).unwrap();
+        assert!(w211.message.contains("y"), "message should mention the param name: {}", w211.message);
+        assert!(w211.suggestion.as_ref().unwrap().contains("_y"), "suggestion should suggest _y: {:?}", w211.suggestion);
+    }
+
+    #[test]
+    fn test_w211_async_function() {
+        let codes = lint_codes("async fn foo(x, y) { x }");
+        assert!(codes.contains(&"W211".to_string()),
+            "expected W211 for unused async param y, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w211_param_used_in_lambda() {
+        // Parameter used inside a lambda within the function body
+        let codes = lint_codes(r#"
+fn foo(x) {
+    let f = |y| x + y;
+    f(1)
+}
+"#);
+        assert!(!codes.contains(&"W211".to_string()),
+            "should not warn when param used in nested lambda: {:?}", codes);
+    }
+
+    // ── W212: Return in finally block ──
+
+    #[test]
+    fn test_w212_return_in_finally() {
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally { return 3; }
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "expected W212 for return in finally, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_throw_in_finally() {
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally { throw "error"; }
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "expected W212 for throw in finally, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_break_in_finally() {
+        let codes = lint_codes(r#"
+while true {
+    try { 1 } catch e { 2 } finally { break; }
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "expected W212 for break in finally, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_no_warning_clean_finally() {
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally { output "cleanup"; }
+}
+"#);
+        assert!(!codes.contains(&"W212".to_string()),
+            "should not warn for clean finally block: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_return_in_finally_expr_form() {
+        // Expression form of try/catch/finally
+        let codes = lint_codes(r#"
+fn foo() {
+    let result = try { 1 } catch e { 2 } finally { return 3; };
+    result
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "expected W212 for return in finally (expr form), got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_break_in_loop_inside_finally_no_warning() {
+        // break inside a loop within finally targets the loop, not the finally block
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally {
+        for x in [1, 2, 3] {
+            break;
+        }
+    }
+}
+"#);
+        assert!(!codes.contains(&"W212".to_string()),
+            "break in loop inside finally should not warn: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_return_in_loop_inside_finally_warns() {
+        // return inside a loop within finally still overrides the try/catch
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally {
+        for x in [1, 2, 3] {
+            return 99;
+        }
+    }
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "return in loop inside finally should still warn: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_return_in_fn_inside_finally_no_warning() {
+        // return inside a nested function within finally is for that function, not the finally
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally {
+        fn helper() { return 42; }
+        helper();
+    }
+}
+"#);
+        assert!(!codes.contains(&"W212".to_string()),
+            "return in nested fn inside finally should not warn: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_return_in_if_inside_finally_warns() {
+        let codes = lint_codes(r#"
+fn foo(x) {
+    try { 1 } catch e { 2 } finally {
+        if x > 0 { return 99; }
+    }
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "return in if-block inside finally should warn: {:?}", codes);
     }
 
 }

@@ -17,6 +17,33 @@ const MAX_STRING_OUTPUT: usize = 10_000_000;
 /// Maximum array element count.
 const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 
+/// UTF-8 BOM (byte order mark).
+const UTF8_BOM: &str = "\u{FEFF}";
+
+/// Read a .magi source file, stripping BOM and validating the contents.
+/// Prints an error message and exits with code 1 on failure.
+fn read_source(path: &str) -> String {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path, e);
+            process::exit(1);
+        }
+    };
+    // Strip UTF-8 BOM if present (common with Windows-edited files).
+    let source = if let Some(stripped) = source.strip_prefix(UTF8_BOM) {
+        stripped.to_string()
+    } else {
+        source
+    };
+    // Reject files that contain null bytes (likely binary).
+    if source.contains('\0') {
+        eprintln!("error: '{}' appears to be a binary file", path);
+        process::exit(1);
+    }
+    source
+}
+
 /// A full-featured operation evaluator for standalone execution.
 struct FullEvaluator;
 
@@ -4547,19 +4574,35 @@ fn simple_regex_test(input: &str, pattern: &str) -> bool {
 }
 
 fn print_usage() {
-    eprintln!("MAGI Language v{}", magi_lang::version::version_string());
+    let version = magi_lang::version::version_string();
+    eprintln!("MAGI Language v{}", version);
     eprintln!();
-    eprintln!("Usage:");
-    eprintln!("  magi run <file.magi>           Interpret a .magi file");
-    eprintln!("  magi compile <file.magi>       Compile to .wasm");
-    eprintln!("  magi run-wasm <file.wasm>      Run a compiled .wasm file");
-    eprintln!("  magi check <file.magi>         Type-check and lint a file");
-    eprintln!("  magi lint <file.magi>          Lint a file for style issues");
-    eprintln!("  magi fmt <file.magi>           Format a file");
-    eprintln!("  magi fmt --write <file.magi>   Format a file in-place");
-    eprintln!("  magi fmt --check <file.magi>   Check if a file is formatted");
-    eprintln!("  magi lsp                       Start the LSP server");
-    eprintln!("  magi version                   Show version info");
+    eprintln!("Usage: magi <command> [options] [file]");
+    eprintln!();
+    eprintln!("Commands:");
+    eprintln!("  run <file.magi>             Interpret and execute a .magi file");
+    eprintln!("  check <file.magi>           Type-check and lint (exit 1 on errors)");
+    eprintln!("  lint <file.magi>            Lint for style issues");
+    eprintln!("  fmt [options] <file.magi>   Format source code");
+    eprintln!("  compile <file.magi>         Compile to WebAssembly (.wasm)");
+    eprintln!("  run-wasm <file.wasm>        Execute a compiled .wasm file");
+    eprintln!("  lsp                         Start the Language Server Protocol server");
+    eprintln!("  version                     Show version information");
+    eprintln!();
+    eprintln!("Format options:");
+    eprintln!("  --write, -w                 Write formatted output back to file");
+    eprintln!("  --check, -c                 Check formatting without modifying (exit 1 if unformatted)");
+    eprintln!();
+    eprintln!("Flags:");
+    eprintln!("  --help, -h                  Show this help message");
+    eprintln!("  --version, -V               Show version");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  magi run main.magi          Run a program");
+    eprintln!("  magi main.magi              Shorthand for 'magi run main.magi'");
+    eprintln!("  magi check main.magi        Type-check before deploying");
+    eprintln!("  magi fmt --write main.magi  Format a file in-place");
+    eprintln!("  magi compile main.magi      Compile to dist/main.wasm");
 }
 
 fn main() {
@@ -4571,9 +4614,15 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "--help" | "-h" | "help" => {
+            print_usage();
+        }
+        "--version" | "-V" | "version" => {
+            println!("MAGI Language v{}", magi_lang::version::version_string());
+        }
         "run" => {
             if args.len() < 3 {
-                eprintln!("Error: missing file argument");
+                eprintln!("error: missing file argument");
                 eprintln!("Usage: magi run <file.magi>");
                 process::exit(1);
             }
@@ -4581,7 +4630,7 @@ fn main() {
         }
         "compile" => {
             if args.len() < 3 {
-                eprintln!("Error: missing file argument");
+                eprintln!("error: missing file argument");
                 eprintln!("Usage: magi compile <file.magi>");
                 process::exit(1);
             }
@@ -4589,7 +4638,7 @@ fn main() {
         }
         "run-wasm" => {
             if args.len() < 3 {
-                eprintln!("Error: missing file argument");
+                eprintln!("error: missing file argument");
                 eprintln!("Usage: magi run-wasm <file.wasm>");
                 process::exit(1);
             }
@@ -4597,7 +4646,7 @@ fn main() {
         }
         "check" => {
             if args.len() < 3 {
-                eprintln!("Error: missing file argument");
+                eprintln!("error: missing file argument");
                 eprintln!("Usage: magi check <file.magi>");
                 process::exit(1);
             }
@@ -4605,7 +4654,7 @@ fn main() {
         }
         "lint" => {
             if args.len() < 3 {
-                eprintln!("Error: missing file argument");
+                eprintln!("error: missing file argument");
                 eprintln!("Usage: magi lint <file.magi>");
                 process::exit(1);
             }
@@ -4626,14 +4675,14 @@ fn main() {
             }
 
             if write_in_place && check_only {
-                eprintln!("Error: --write and --check are mutually exclusive");
+                eprintln!("error: --write and --check are mutually exclusive");
                 process::exit(1);
             }
 
             match file_path {
                 Some(path) => cmd_fmt(path, write_in_place, check_only),
                 None => {
-                    eprintln!("Error: missing file argument");
+                    eprintln!("error: missing file argument");
                     eprintln!("Usage: magi fmt [--write] [--check] <file.magi>");
                     process::exit(1);
                 }
@@ -4642,17 +4691,12 @@ fn main() {
         "lsp" => {
             cmd_lsp();
         }
-        "version" => {
-            println!("MAGI Language v{}", magi_lang::version::version_string());
-            let features = magi_lang::version::available_features();
-            println!("Features: {}", features.len());
-        }
         _ => {
             // If first arg is a .magi file, run it directly.
             if args[1].ends_with(".magi") {
                 cmd_run(&args[1]);
             } else {
-                eprintln!("Unknown command: {}", args[1]);
+                eprintln!("error: unknown command '{}'", args[1]);
                 print_usage();
                 process::exit(1);
             }
@@ -4787,18 +4831,12 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
 }
 
 fn cmd_check(path: &str) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading {}: {}", path, e);
-            process::exit(1);
-        }
-    };
+    let source = read_source(path);
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}: error: {}", path, e.line, e);
+            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
             process::exit(1);
         }
     };
@@ -4840,18 +4878,12 @@ fn cmd_check(path: &str) {
 }
 
 fn cmd_lint(path: &str) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading {}: {}", path, e);
-            process::exit(1);
-        }
-    };
+    let source = read_source(path);
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}: parse error: {}", path, e.line, e);
+            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
             process::exit(1);
         }
     };
@@ -4874,18 +4906,12 @@ fn cmd_lint(path: &str) {
 }
 
 fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading {}: {}", path, e);
-            process::exit(1);
-        }
-    };
+    let source = read_source(path);
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}: parse error: {}", path, e.line, e);
+            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
             process::exit(1);
         }
     };
@@ -4904,7 +4930,7 @@ fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
         match fs::write(path, &formatted) {
             Ok(_) => println!("Formatted {}.", path),
             Err(e) => {
-                eprintln!("Error writing {}: {}", path, e);
+                eprintln!("error: cannot write '{}': {}", path, e);
                 process::exit(1);
             }
         }
@@ -4917,25 +4943,19 @@ fn cmd_lsp() {
     match tokio::runtime::Runtime::new() {
         Ok(rt) => rt.block_on(magi_lang::lsp::run_server()),
         Err(e) => {
-            eprintln!("Error: failed to create tokio runtime: {}", e);
+            eprintln!("error: failed to create tokio runtime: {}", e);
             process::exit(1);
         }
     }
 }
 
 fn cmd_run(path: &str) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading {}: {}", path, e);
-            process::exit(1);
-        }
-    };
+    let source = read_source(path);
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}: parse error: {}", path, e.line, e);
+            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
             process::exit(1);
         }
     };
@@ -4952,7 +4972,7 @@ fn cmd_run(path: &str) {
             for log in &interp.logs {
                 println!("{}", log.message);
             }
-            eprintln!("Runtime error: {}", e);
+            eprintln!("{}: runtime error: {}", path, e);
             process::exit(1);
         }
     }
@@ -4964,13 +4984,7 @@ fn cmd_run(path: &str) {
 }
 
 fn cmd_compile(path: &str) {
-    let source = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading {}: {}", path, e);
-            process::exit(1);
-        }
-    };
+    let source = read_source(path);
 
     // Resolve dependencies and prepend their source to create a single compilation unit.
     let file_path = std::path::Path::new(path);
@@ -4993,7 +5007,7 @@ fn cmd_compile(path: &str) {
     let program = match parse_v2(&combined_source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}: parse error: {}", path, e.line, e);
+            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
             process::exit(1);
         }
     };
@@ -5019,7 +5033,7 @@ fn cmd_compile(path: &str) {
     let wasm_bytes = match compiler::compile_to_wasm(&program) {
         Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("Compile error: {}", e);
+            eprintln!("{}: compile error: {}", path, e);
             process::exit(1);
         }
     };
@@ -5028,7 +5042,7 @@ fn cmd_compile(path: &str) {
     let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
     let dist_dir = dir.join("dist");
     if let Err(e) = fs::create_dir_all(&dist_dir) {
-        eprintln!("Error creating dist directory: {}", e);
+        eprintln!("error: cannot create dist directory: {}", e);
         process::exit(1);
     }
 
@@ -5039,7 +5053,7 @@ fn cmd_compile(path: &str) {
             println!("Compiled {} -> {} ({} bytes)", path, out_path.display(), wasm_bytes.len());
         }
         Err(e) => {
-            eprintln!("Error writing {}: {}", out_path.display(), e);
+            eprintln!("error: cannot write '{}': {}", out_path.display(), e);
             process::exit(1);
         }
     }
@@ -5190,14 +5204,14 @@ fn cmd_run_wasm(path: &str) {
     let wasm_bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("Error reading {}: {}", path, e);
+            eprintln!("error: cannot read '{}': {}", path, e);
             process::exit(1);
         }
     };
 
     // Validate WASM magic.
     if wasm_bytes.len() < 8 || &wasm_bytes[0..4] != b"\0asm" {
-        eprintln!("Error: {} is not a valid WASM file", path);
+        eprintln!("error: '{}' is not a valid WASM file", path);
         process::exit(1);
     }
 
@@ -5205,7 +5219,7 @@ fn cmd_run_wasm(path: &str) {
     let module = match wasmtime::Module::new(&engine, &wasm_bytes) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("WASM load error: {:?}", e);
+            eprintln!("error: cannot load '{}': {}", path, e);
             process::exit(1);
         }
     };
@@ -5290,7 +5304,7 @@ fn cmd_run_wasm(path: &str) {
     let instance = match linker.instantiate(&mut store, &module) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("WASM instantiation error: {}", e);
+            eprintln!("error: WASM instantiation failed: {}", e);
             process::exit(1);
         }
     };
@@ -5299,7 +5313,7 @@ fn cmd_run_wasm(path: &str) {
     let main_fn = match instance.get_typed_func::<(), i64>(&mut store, "__main") {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Error: no __main export found: {}", e);
+            eprintln!("error: no __main export found in '{}': {}", path, e);
             process::exit(1);
         }
     };
@@ -5318,7 +5332,7 @@ fn cmd_run_wasm(path: &str) {
             }
         }
         Err(e) => {
-            eprintln!("WASM execution error: {}", e);
+            eprintln!("{}: WASM execution error: {}", path, e);
             process::exit(1);
         }
     }

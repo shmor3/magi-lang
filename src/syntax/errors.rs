@@ -130,6 +130,12 @@ pub enum ErrorCode {
     W207,
     /// Duplicate import
     W208,
+    /// Shadowed variable in same scope
+    W209,
+    /// Unused function parameter
+    W211,
+    /// Return/break/continue/throw in finally block
+    W212,
 }
 
 impl fmt::Display for ErrorCode {
@@ -186,6 +192,9 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W206 => "W206",
             ErrorCode::W207 => "W207",
             ErrorCode::W208 => "W208",
+            ErrorCode::W209 => "W209",
+            ErrorCode::W211 => "W211",
+            ErrorCode::W212 => "W212",
         };
         write!(f, "{}", code)
     }
@@ -257,6 +266,9 @@ impl ErrorCode {
             ErrorCode::W206 => "This block body is empty. Add statements or remove the block.",
             ErrorCode::W207 => "This match arm is unreachable because a previous wildcard or variable pattern already matches all values.",
             ErrorCode::W208 => "This import path has already been imported. Remove the duplicate import.",
+            ErrorCode::W209 => "A variable with the same name is already declared in this scope. This shadows the previous binding. Use a different name or remove the redundant declaration.",
+            ErrorCode::W211 => "This function parameter is never used in the function body. Prefix it with `_` to suppress this warning, or remove it.",
+            ErrorCode::W212 => "Using `return`, `break`, `continue`, or `throw` in a `finally` block overrides the result from `try`/`catch`. This is almost always a bug.",
         }
     }
 }
@@ -363,7 +375,7 @@ mod tests {
             ErrorCode::W112, ErrorCode::W113,
             ErrorCode::W200, ErrorCode::W201, ErrorCode::W202, ErrorCode::W203,
             ErrorCode::W204, ErrorCode::W205, ErrorCode::W206, ErrorCode::W207,
-            ErrorCode::W208,
+            ErrorCode::W208, ErrorCode::W209, ErrorCode::W211, ErrorCode::W212,
         ];
         for code in codes {
             let help = code.help();

@@ -15,6 +15,9 @@ toml = "0.8"
 wasm-encoder = "0.245"
 wasmtime = "29"
 
+[dev-dependencies]
+wasmparser = "0.245"
+
 [[bin]]
 name = "magi"
 path = "src/bin/magi.rs"
