@@ -13,6 +13,7 @@ pub struct FunctionSymbol {
     pub name: String,
     pub params: Vec<String>,
     pub return_type: Option<String>,
+    pub is_async: bool,
     pub line: u32,
     pub col: u32,
 }
@@ -23,6 +24,7 @@ pub struct VariableSymbol {
     pub name: String,
     pub mutable: bool,
     pub constant: bool,
+    pub is_type_alias: bool,
     pub type_annotation: Option<String>,
     pub line: u32,
     pub col: u32,
@@ -149,6 +151,7 @@ pub fn extract_symbols(
     for stmt in &program.statements {
         match &stmt.kind {
             StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
+                let is_async = matches!(&stmt.kind, StatementKind::AsyncFunctionDef(_));
                 let params: Vec<String> = fdef.params.iter().map(|p| {
                     let mut s = String::new();
                     if p.rest {
@@ -168,6 +171,7 @@ pub fn extract_symbols(
                     name: fdef.name.clone(),
                     params,
                     return_type: fdef.return_type.clone(),
+                    is_async,
                     line: fdef.span.start_line,
                     col: name_col,
                 });
@@ -179,6 +183,7 @@ pub fn extract_symbols(
                     name: name.clone(),
                     mutable: false,
                     constant: false,
+                    is_type_alias: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -191,6 +196,7 @@ pub fn extract_symbols(
                     name: name.clone(),
                     mutable: true,
                     constant: false,
+                    is_type_alias: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -203,6 +209,7 @@ pub fn extract_symbols(
                     name: name.clone(),
                     mutable: false,
                     constant: true,
+                    is_type_alias: false,
                     type_annotation: type_annotation.clone(),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -239,6 +246,7 @@ pub fn extract_symbols(
                     name: name.clone(),
                     mutable: false,
                     constant: false,
+                    is_type_alias: true,
                     type_annotation: Some(target.clone()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -251,6 +259,7 @@ pub fn extract_symbols(
                     name: name.clone(),
                     mutable: false,
                     constant: false,
+                    is_type_alias: false,
                     type_annotation: Some("module".to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -262,7 +271,7 @@ pub fn extract_symbols(
                 };
                 extract_symbols(&module_program, source, functions, variables, enums, structs);
             }
-            StatementKind::LetDestructure { pattern, .. } => {
+            StatementKind::LetDestructure { pattern, mutable, .. } => {
                 // Extract variable names from destructure patterns
                 let names = destructure_names(pattern);
                 for name in names {
@@ -270,8 +279,9 @@ pub fn extract_symbols(
                         .unwrap_or(stmt.span.start_col);
                     variables.insert(name.clone(), VariableSymbol {
                         name,
-                        mutable: false,
+                        mutable: *mutable,
                         constant: false,
+                        is_type_alias: false,
                         type_annotation: None,
                         line: stmt.span.start_line,
                         col: name_col,
@@ -322,8 +332,18 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
             let chars: Vec<char> = src_line.chars().collect();
             let start = col as usize;
             let end_char = if start < chars.len() && is_ident_start(chars[start]) {
+                // Identifier: scan alphanumeric + underscore
                 let mut end = start;
                 while end < chars.len() && is_ident_char_unicode(chars[end]) {
+                    end += 1;
+                }
+                end as u32
+            } else if start < chars.len() && chars[start].is_ascii_digit() {
+                // Numeric literal: scan digits, dots, hex chars
+                let mut end = start;
+                while end < chars.len()
+                    && (chars[end].is_ascii_alphanumeric() || chars[end] == '.' || chars[end] == '_')
+                {
                     end += 1;
                 }
                 end as u32

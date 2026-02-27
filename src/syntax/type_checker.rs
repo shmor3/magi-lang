@@ -1525,9 +1525,12 @@ impl TypeChecker {
                     );
                 }
 
+                // Range expressions in index position are valid (array slicing)
+                let is_range_slice = matches!(&index.kind, ExpressionKind::Range { .. });
                 if obj_ty == ChannelType::Array
                     && !is_integer(idx_ty)
                     && idx_ty != ChannelType::Null
+                    && !is_range_slice
                 {
                     self.emit_coded(
                         index.span.start_line,

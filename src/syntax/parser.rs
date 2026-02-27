@@ -330,12 +330,20 @@ impl Parser {
     ) -> Result<Statement, SyntaxError> {
         self.advance(); // consume '['
         let mut elements = Vec::new();
+        let mut has_rest = false;
         while !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
             if self.at(&TokenKind::DotDotDot) {
+                if has_rest {
+                    return Err(SyntaxError {
+                        message: "Only one rest element (...) is allowed in array destructuring".to_string(),
+                        line: self.peek().span.start_line as usize,
+                        column: self.peek().span.start_col as usize,
+                    });
+                }
                 self.advance(); // consume '...'
                 let rest_name = self.expect_identifier()?;
                 elements.push(DestructureElement::Rest(rest_name.text));
-                break; // rest must be last element
+                has_rest = true;
             } else {
                 let name = self.expect_identifier()?;
                 elements.push(DestructureElement::Name(name.text));
@@ -402,16 +410,24 @@ impl Parser {
             // Array destructure: for [a, b] in ...
             self.advance(); // consume [
             let mut elements = Vec::new();
+            let mut has_rest = false;
             while !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
                 if self.at(&TokenKind::DotDotDot) {
+                    if has_rest {
+                        return Err(SyntaxError {
+                            message: "Only one rest element (...) is allowed in array destructuring".to_string(),
+                            line: self.peek().span.start_line as usize,
+                            column: self.peek().span.start_col as usize,
+                        });
+                    }
                     self.advance();
                     let rest_tok = self.expect_identifier()?;
                     elements.push(DestructureElement::Rest(rest_tok.text));
-                    // Rest must be last
-                    break;
+                    has_rest = true;
+                } else {
+                    let name_tok = self.expect_identifier()?;
+                    elements.push(DestructureElement::Name(name_tok.text));
                 }
-                let name_tok = self.expect_identifier()?;
-                elements.push(DestructureElement::Name(name_tok.text));
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }

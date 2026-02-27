@@ -15,7 +15,8 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
             .return_type
             .as_deref()
             .map_or(String::new(), |r| format!(" -> {}", r));
-        let info = format!("```magi\nfn {}({}){}\n```", func.name, params_str, ret);
+        let prefix = if func.is_async { "async fn" } else { "fn" };
+        let info = format!("```magi\n{} {}({}){}\n```", prefix, func.name, params_str, ret);
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -28,17 +29,26 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
     // Look up in variables
     if let Some(var) = state.variables.get(&word) {
         let mut info = String::from("```magi\n");
-        if var.constant {
-            info.push_str("const ");
-        } else if var.mutable {
-            info.push_str("let mut ");
+        if var.is_type_alias {
+            info.push_str("type ");
+            info.push_str(&var.name);
+            if let Some(ty) = &var.type_annotation {
+                info.push_str(" = ");
+                info.push_str(ty);
+            }
         } else {
-            info.push_str("let ");
-        }
-        info.push_str(&var.name);
-        if let Some(ty) = &var.type_annotation {
-            info.push_str(": ");
-            info.push_str(ty);
+            if var.constant {
+                info.push_str("const ");
+            } else if var.mutable {
+                info.push_str("let mut ");
+            } else {
+                info.push_str("let ");
+            }
+            info.push_str(&var.name);
+            if let Some(ty) = &var.type_annotation {
+                info.push_str(": ");
+                info.push_str(ty);
+            }
         }
         info.push_str("\n```");
         return Some(Hover {
@@ -118,13 +128,14 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "len" => Some("Returns the length of an array, string, or map."),
         "range" => Some("Creates an array of integers from start to end."),
         "assert" => Some("Asserts a condition is true; throws on failure."),
+        "assert_eq" => Some("Asserts two values are equal; throws on failure."),
+        "assert_ne" => Some("Asserts two values are not equal; throws on failure."),
+        "assert_throws" => Some("Asserts that a function throws an error when called."),
         "print" => Some("Prints a value to stdout (no newline)."),
         "println" => Some("Prints a value to stdout with a newline."),
         "debug_log" => Some("Logs a debug message."),
         "typeof" => Some("Returns the type name of a value as a string."),
         "to_string" => Some("Converts a value to its string representation."),
-        "to_int" => Some("Converts a value to an integer."),
-        "to_float" => Some("Converts a value to a float."),
         "to_int64" => Some("Converts a value to a 64-bit integer."),
         "to_float64" => Some("Converts a value to a 64-bit float."),
         "to_bool" => Some("Converts a value to a boolean."),
@@ -147,7 +158,6 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "log2" => Some("Returns the base-2 logarithm."),
         "log10" => Some("Returns the base-10 logarithm."),
         "exp" => Some("Returns e raised to a power."),
-        "output" => Some("Outputs a value as the program result."),
         "is_null" => Some("Returns true if the value is null."),
         "is_string" => Some("Returns true if the value is a string."),
         "is_number" => Some("Returns true if the value is a number (int or float)."),

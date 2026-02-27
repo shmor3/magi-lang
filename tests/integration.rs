@@ -7384,3 +7384,78 @@ fn test_arity_mismatch_range() {
     let msg = format!("{}", err);
     assert!(msg.contains("1-2"), "expected '1-2' in arity message: {}", msg);
 }
+
+#[test]
+fn test_range_slice_no_e103_warning() {
+    // Array slicing with range should not produce E103 false positive
+    let src = r#"
+        let arr = [1, 2, 3, 4, 5];
+        let sliced = arr[1..3];
+        output sliced;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let analysis = check_types(&prog, &std::collections::HashSet::new());
+    let e103s: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("E103"))
+        .collect();
+    assert!(e103s.is_empty(), "E103 false positive on range slice: {:?}", e103s);
+}
+
+#[test]
+fn test_rest_in_middle_destructure() {
+    // Rest element in the middle of array destructure should work
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5];
+        let [first, ...middle, last] = arr;
+        output [first, middle, last];
+    "#);
+    assert_eq!(
+        result,
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Array(vec![DataType::Int64(2), DataType::Int64(3), DataType::Int64(4)]),
+            DataType::Int64(5),
+        ])
+    );
+}
+
+#[test]
+fn test_multiple_rest_elements_rejected() {
+    // Multiple rest elements should be a syntax error
+    let result = parse_v2("let [a, ...b, ...c] = arr;");
+    assert!(result.is_err(), "multiple rest elements should be rejected");
+    let err = result.unwrap_err();
+    assert!(err.message.contains("rest"), "error should mention rest: {}", err.message);
+}
+
+#[test]
+fn test_type_alias_lsp_hover() {
+    // Type alias should be tracked correctly in LSP analysis
+    let src = "type MyInt = int64;";
+    let (state, _) = magi_lang::lsp::analysis::analyze_document(src);
+    let var = state.variables.get("MyInt").unwrap();
+    assert!(var.is_type_alias);
+    assert_eq!(var.type_annotation, Some("int64".to_string()));
+    assert!(!var.mutable);
+    assert!(!var.constant);
+}
+
+#[test]
+fn test_async_fn_lsp_symbol() {
+    // Async functions should be tracked correctly in LSP analysis
+    let src = "async fn fetch_data(url) { null }";
+    let (state, _) = magi_lang::lsp::analysis::analyze_document(src);
+    let func = state.functions.get("fetch_data").unwrap();
+    assert!(func.is_async);
+}
+
+#[test]
+fn test_destructure_mutable_lsp_symbol() {
+    // Mutable destructure should be tracked correctly in LSP analysis
+    let src = "let mut [a, b] = [1, 2];";
+    let (state, _) = magi_lang::lsp::analysis::analyze_document(src);
+    let a = state.variables.get("a").unwrap();
+    assert!(a.mutable);
+    let b = state.variables.get("b").unwrap();
+    assert!(b.mutable);
+}
