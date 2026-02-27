@@ -14582,3 +14582,17 @@ fn test_sse_connect_invalid() {
     assert!(result.contains("Error") || result.contains("error"));
 }
 
+// -------------------------------------------------------
+// HTTP Server operations
+// -------------------------------------------------------
+
+#[test]
+fn test_http_server_start_and_stop() {
+    let result = run_eval_unique(r#"
+        let server = http_server_start("127.0.0.1", 0)
+        http_server_stop(server)
+        println("stopped")
+    "#, "http_srv_start_stop");
+    assert!(result.contains("stopped"));
+}
+

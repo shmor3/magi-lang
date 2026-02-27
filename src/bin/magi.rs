@@ -5219,12 +5219,110 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
-            // Remaining operations
+            // HTTP Server operations
             // ================================================================
-            other => Err(EvalError::InvalidInput(format!(
-                "operation '{:?}' is not implemented in the standalone evaluator",
-                other,
-            ))),
+            OperationType::HttpServerStart => {
+                let address = get_string(inputs, "address")?;
+                let port = get_bind_port(inputs, "port")?;
+                let addr = format!("{}:{}", address, port);
+                let listener = std::net::TcpListener::bind(&addr)
+                    .map_err(|e| EvalError::InvalidInput(format!("http_server_start: {}", e)))?;
+                let id = conn_id("http-server");
+                conn_store(&id, Mutex::new(listener));
+                Ok(DataType::String(id))
+            }
+            OperationType::HttpServerReceive => {
+                let sid = get_string(inputs, "server_id")?;
+                // Accept and parse outside conn_with to avoid deadlock when storing client
+                let (stream, addr) = conn_with::<Mutex<std::net::TcpListener>, _>(sid, |mtx| {
+                    let listener = mtx.get_mut().unwrap();
+                    listener.accept().map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))
+                })?;
+                // Parse HTTP request from the accepted stream
+                use std::io::BufRead;
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line)
+                    .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                let parts: Vec<&str> = request_line.trim().splitn(3, ' ').collect();
+                let method = parts.first().unwrap_or(&"GET").to_string();
+                let path = parts.get(1).unwrap_or(&"/").to_string();
+                let mut headers = std::collections::BTreeMap::new();
+                let mut content_length: usize = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line)
+                        .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                    let trimmed = line.trim().to_string();
+                    if trimmed.is_empty() { break; }
+                    if let Some((key, value)) = trimmed.split_once(':') {
+                        let key = key.trim().to_lowercase();
+                        let value = value.trim().to_string();
+                        if key == "content-length" {
+                            content_length = value.parse().unwrap_or(0);
+                        }
+                        headers.insert(key, DataType::String(value));
+                    }
+                }
+                const MAX_BODY: usize = 16 * 1024 * 1024;
+                let body = if content_length > MAX_BODY {
+                    return Err(EvalError::InvalidInput(format!(
+                        "http_server_receive: Content-Length {} exceeds max {}", content_length, MAX_BODY
+                    )));
+                } else if content_length > 0 {
+                    let mut buf = vec![0u8; content_length];
+                    reader.read_exact(&mut buf)
+                        .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                    String::from_utf8_lossy(&buf).to_string()
+                } else { String::new() };
+                let client_id = conn_id("http-client");
+                conn_store(&client_id, Mutex::new(stream));
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("method".into(), DataType::String(method)),
+                    ("path".into(), DataType::String(path)),
+                    ("headers".into(), DataType::Map(headers)),
+                    ("body".into(), DataType::String(body)),
+                    ("client_id".into(), DataType::String(client_id)),
+                    ("address".into(), DataType::String(addr.to_string())),
+                ])))
+            }
+            OperationType::HttpServerRespond => {
+                let cid = get_string(inputs, "client_id")?;
+                let status = match inputs.get("status") {
+                    Some(DataType::Int64(n)) => *n,
+                    Some(DataType::Int32(n)) => *n as i64,
+                    _ => 200,
+                };
+                let body = inputs.get("body").map(|d| d.to_string()).unwrap_or_default();
+                let reason = match status {
+                    200 => "OK", 201 => "Created", 204 => "No Content",
+                    301 => "Moved Permanently", 302 => "Found",
+                    400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+                    404 => "Not Found", 500 => "Internal Server Error", _ => "OK",
+                };
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                    status, reason, body.len(), body
+                );
+                conn_with::<Mutex<std::net::TcpStream>, _>(cid, |mtx| {
+                    use std::io::Write;
+                    let stream = mtx.get_mut().unwrap();
+                    stream.write_all(response.as_bytes())
+                        .map_err(|e| EvalError::InvalidInput(format!("http_server_respond: {}", e)))?;
+                    stream.flush()
+                        .map_err(|e| EvalError::InvalidInput(format!("http_server_respond: {}", e)))?;
+                    Ok(())
+                })?;
+                conn_remove(cid)?;
+                Ok(DataType::Null)
+            }
+            OperationType::HttpServerStop => {
+                let sid = get_string(inputs, "server_id")?;
+                conn_remove(sid)?;
+                Ok(DataType::Null)
+            }
+
+            // All OperationType variants are now handled above.
         }
     }
 }
