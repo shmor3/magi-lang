@@ -717,10 +717,22 @@ impl<'a> Lexer<'a> {
             return self.lex_identifier(start_line, start_col);
         }
 
+        // Decode the actual Unicode character for a better error message
+        let display_char = if ch.is_ascii() {
+            (ch as char).to_string()
+        } else {
+            // Try to decode a UTF-8 character starting at current position
+            let remaining = &self.source[self.pos..];
+            std::str::from_utf8(remaining)
+                .ok()
+                .and_then(|s| s.chars().next())
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| format!("0x{:02X}", ch))
+        };
         Err(SyntaxError {
             line: start_line as usize,
             column: start_col as usize,
-            message: format!("Unexpected character: '{}'", ch as char),
+            message: format!("Unexpected character: '{}'", display_char),
         })
     }
 
@@ -1623,6 +1635,12 @@ mod tests {
     fn test_invalid_char() {
         let err = tokenize("let x = @;").unwrap_err();
         assert!(err.message.contains("Unexpected character"));
+    }
+
+    #[test]
+    fn test_unicode_error_message() {
+        let err = tokenize("let é = 5;").unwrap_err();
+        assert!(err.message.contains('é'), "Expected Unicode char in error, got: {}", err.message);
     }
 
     #[test]
