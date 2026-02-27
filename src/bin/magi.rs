@@ -973,10 +973,15 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Float32(n) => Ok(DataType::Float32(n.ceil())),
                 other => Ok(other.clone()),
             },
-            OperationType::Sqrt => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).sqrt())),
-                Some(Err(f)) => Ok(DataType::Float64(f.sqrt())),
-                None => Ok(DataType::Null),
+            OperationType::Sqrt => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.sqrt()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).sqrt())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.sqrt())),
+                    None => Ok(DataType::Null),
+                }
             },
             OperationType::Power => {
                 let a = inputs.get("a").unwrap_or(&DataType::Null);
@@ -1006,45 +1011,85 @@ impl OperationEvaluator for FullEvaluator {
                     _ => Ok(DataType::Null),
                 }
             },
-            OperationType::Sin => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).sin())),
-                Some(Err(f)) => Ok(DataType::Float64(f.sin())),
-                None => Ok(DataType::Null),
+            OperationType::Sin => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.sin()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).sin())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.sin())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Cos => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).cos())),
-                Some(Err(f)) => Ok(DataType::Float64(f.cos())),
-                None => Ok(DataType::Null),
+            OperationType::Cos => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.cos()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).cos())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.cos())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Tan => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).tan())),
-                Some(Err(f)) => Ok(DataType::Float64(f.tan())),
-                None => Ok(DataType::Null),
+            OperationType::Tan => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.tan()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).tan())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.tan())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Ln => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).ln())),
-                Some(Err(f)) => Ok(DataType::Float64(f.ln())),
-                None => Ok(DataType::Null),
+            OperationType::Ln => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.ln()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).ln())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.ln())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Log2 => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).log2())),
-                Some(Err(f)) => Ok(DataType::Float64(f.log2())),
-                None => Ok(DataType::Null),
+            OperationType::Log2 => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.log2()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).log2())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.log2())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Log10 => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).log10())),
-                Some(Err(f)) => Ok(DataType::Float64(f.log10())),
-                None => Ok(DataType::Null),
+            OperationType::Log10 => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.log10()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).log10())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.log10())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Exp => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).exp())),
-                Some(Err(f)) => Ok(DataType::Float64(f.exp())),
-                None => Ok(DataType::Null),
+            OperationType::Exp => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.exp()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).exp())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.exp())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Sign => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Int64(n.signum())),
-                Some(Err(f)) => Ok(DataType::Float64(f.signum())),
-                None => Ok(DataType::Null),
+            OperationType::Sign => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.signum()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Int64(n.signum())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.signum())),
+                    None => Ok(DataType::Null),
+                }
             },
 
             // Array mutation operations
@@ -1489,20 +1534,35 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // Inverse trigonometric
-            OperationType::Asin => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).asin())),
-                Some(Err(f)) => Ok(DataType::Float64(f.asin())),
-                None => Ok(DataType::Null),
+            OperationType::Asin => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.asin()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).asin())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.asin())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Acos => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).acos())),
-                Some(Err(f)) => Ok(DataType::Float64(f.acos())),
-                None => Ok(DataType::Null),
+            OperationType::Acos => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.acos()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).acos())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.acos())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Atan => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).atan())),
-                Some(Err(f)) => Ok(DataType::Float64(f.atan())),
-                None => Ok(DataType::Null),
+            OperationType::Atan => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.atan()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).atan())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.atan())),
+                    None => Ok(DataType::Null),
+                }
             },
             OperationType::Atan2 => {
                 match (promote_numeric(&a), promote_numeric(&b)) {
@@ -1516,20 +1576,35 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // Hyperbolic
-            OperationType::Sinh => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).sinh())),
-                Some(Err(f)) => Ok(DataType::Float64(f.sinh())),
-                None => Ok(DataType::Null),
+            OperationType::Sinh => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.sinh()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).sinh())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.sinh())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Cosh => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).cosh())),
-                Some(Err(f)) => Ok(DataType::Float64(f.cosh())),
-                None => Ok(DataType::Null),
+            OperationType::Cosh => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.cosh()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).cosh())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.cosh())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::Tanh => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).tanh())),
-                Some(Err(f)) => Ok(DataType::Float64(f.tanh())),
-                None => Ok(DataType::Null),
+            OperationType::Tanh => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.tanh()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).tanh())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.tanh())),
+                    None => Ok(DataType::Null),
+                }
             },
 
             // Arbitrary base logarithm: log(value, base) = ln(value) / ln(base)
@@ -1550,15 +1625,25 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // Angle conversion
-            OperationType::ToRadians => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_radians())),
-                Some(Err(f)) => Ok(DataType::Float64(f.to_radians())),
-                None => Ok(DataType::Null),
+            OperationType::ToRadians => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.to_radians()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_radians())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.to_radians())),
+                    None => Ok(DataType::Null),
+                }
             },
-            OperationType::ToDegrees => match promote_numeric(&input) {
-                Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_degrees())),
-                Some(Err(f)) => Ok(DataType::Float64(f.to_degrees())),
-                None => Ok(DataType::Null),
+            OperationType::ToDegrees => {
+                if let DataType::Float32(n) = &input {
+                    return Ok(DataType::Float32(n.to_degrees()));
+                }
+                match promote_numeric(&input) {
+                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_degrees())),
+                    Some(Err(f)) => Ok(DataType::Float64(f.to_degrees())),
+                    None => Ok(DataType::Null),
+                }
             },
 
             // Linear interpolation: lerp(a, b, t) = a + (b - a) * t
@@ -3111,16 +3196,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UuidIsValid => {
                 match &input {
                     DataType::String(s) => {
-                        let s = s.trim();
-                        let valid = s.len() == 36
-                            && s.chars().enumerate().all(|(i, c)| {
-                                if i == 8 || i == 13 || i == 18 || i == 23 {
-                                    c == '-'
-                                } else {
-                                    c.is_ascii_hexdigit()
-                                }
-                            });
-                        Ok(DataType::Bool(valid))
+                        Ok(DataType::Bool(uuid::Uuid::parse_str(s.trim()).is_ok()))
                     }
                     _ => Ok(DataType::Bool(false)),
                 }
@@ -3128,17 +3204,16 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UuidParse => {
                 match &input {
                     DataType::String(s) => {
-                        let s = s.trim();
-                        if s.len() == 36 {
-                            // Return parts as a map
-                            let mut m = std::collections::BTreeMap::new();
-                            m.insert("full".to_string(), DataType::String(s.to_string()));
-                            m.insert("version".to_string(), DataType::Int64(
-                                u8::from_str_radix(&s[14..15], 16).unwrap_or(0) as i64
-                            ));
-                            Ok(DataType::Map(m))
-                        } else {
-                            Ok(DataType::Null)
+                        match uuid::Uuid::parse_str(s.trim()) {
+                            Ok(parsed) => {
+                                let mut m = std::collections::BTreeMap::new();
+                                m.insert("full".to_string(), DataType::String(parsed.hyphenated().to_string()));
+                                m.insert("version".to_string(), DataType::Int64(
+                                    parsed.get_version_num() as i64
+                                ));
+                                Ok(DataType::Map(m))
+                            }
+                            Err(_) => Ok(DataType::Null),
                         }
                     }
                     _ => Ok(DataType::Null),

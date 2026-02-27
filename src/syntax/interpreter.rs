@@ -1757,7 +1757,7 @@ impl<'a> Interpreter<'a> {
                 "to_int64" => {
                     let v = *n as f64;
                     if v.is_finite() && v >= i64::MIN as f64 && v < i64::MAX as f64 {
-                        Ok(Some(DataType::Int64(*n as i64)))
+                        Ok(Some(DataType::Int64(v as i64)))
                     } else {
                         Ok(Some(DataType::Null))
                     }
