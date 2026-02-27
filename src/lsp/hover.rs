@@ -36,6 +36,25 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
                 info.push_str(" = ");
                 info.push_str(ty);
             }
+        } else if var.type_annotation.as_deref() == Some("module") {
+            info.push_str("mod ");
+            info.push_str(&var.name);
+        } else if let Some(ref ta) = var.type_annotation {
+            if ta.starts_with("import(") {
+                info.push_str("use ");
+                info.push_str(&ta[7..ta.len().saturating_sub(1)]);
+            } else {
+                if var.constant {
+                    info.push_str("const ");
+                } else if var.mutable {
+                    info.push_str("let mut ");
+                } else {
+                    info.push_str("let ");
+                }
+                info.push_str(&var.name);
+                info.push_str(": ");
+                info.push_str(ta);
+            }
         } else {
             if var.constant {
                 info.push_str("const ");
@@ -45,10 +64,6 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
                 info.push_str("let ");
             }
             info.push_str(&var.name);
-            if let Some(ty) = &var.type_annotation {
-                info.push_str(": ");
-                info.push_str(ty);
-            }
         }
         info.push_str("\n```");
         return Some(Hover {

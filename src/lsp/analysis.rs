@@ -293,6 +293,36 @@ pub fn extract_symbols(
                     });
                 }
             }
+            StatementKind::Use { path, alias, glob } => {
+                if !glob {
+                    // For `use foo::bar` or `use foo::bar as baz`, register the local name
+                    let local_name = if let Some(a) = alias {
+                        a.clone()
+                    } else if let Some(last) = path.last() {
+                        last.clone()
+                    } else {
+                        continue;
+                    };
+                    let name_col = if let Some(a) = alias {
+                        find_name_col(source, stmt.span.start_line, a)
+                            .unwrap_or(stmt.span.start_col)
+                    } else if let Some(last) = path.last() {
+                        find_name_col(source, stmt.span.start_line, last)
+                            .unwrap_or(stmt.span.start_col)
+                    } else {
+                        stmt.span.start_col
+                    };
+                    variables.insert(local_name.clone(), VariableSymbol {
+                        name: local_name,
+                        mutable: false,
+                        constant: false,
+                        is_type_alias: false,
+                        type_annotation: Some(format!("import({})", path.join("::"))),
+                        line: stmt.span.start_line,
+                        col: name_col,
+                    });
+                }
+            }
             _ => {}
         }
     }

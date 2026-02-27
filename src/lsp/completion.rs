@@ -94,14 +94,38 @@ pub fn handle_completion(
 
     // User-defined variables
     for (name, var) in &state.variables {
-        let detail = if var.constant {
+        let detail = if var.is_type_alias {
+            if let Some(ref ta) = var.type_annotation {
+                format!("type {} = {}", name, ta)
+            } else {
+                format!("type {}", name)
+            }
+        } else if var.type_annotation.as_deref() == Some("module") {
+            format!("mod {}", name)
+        } else if let Some(ref ta) = var.type_annotation {
+            if ta.starts_with("import(") {
+                format!("use {}", &ta[7..ta.len().saturating_sub(1)])
+            } else if var.constant {
+                format!("const {}: {}", name, ta)
+            } else if var.mutable {
+                format!("let mut {}: {}", name, ta)
+            } else {
+                format!("let {}: {}", name, ta)
+            }
+        } else if var.constant {
             format!("const {}", name)
         } else if var.mutable {
             format!("let mut {}", name)
         } else {
             format!("let {}", name)
         };
-        let kind = if var.constant {
+        let kind = if var.is_type_alias {
+            CompletionItemKind::TYPE_PARAMETER
+        } else if var.type_annotation.as_deref() == Some("module") {
+            CompletionItemKind::MODULE
+        } else if var.type_annotation.as_ref().map_or(false, |t| t.starts_with("import(")) {
+            CompletionItemKind::REFERENCE
+        } else if var.constant {
             CompletionItemKind::CONSTANT
         } else {
             CompletionItemKind::VARIABLE
