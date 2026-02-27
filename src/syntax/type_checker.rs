@@ -1586,7 +1586,14 @@ impl TypeChecker {
                     }
                 }
 
-                // Element type unknown.
+                // Range slice returns same collection type; element access is unknown.
+                if is_range_slice {
+                    match obj_ty {
+                        ChannelType::Array => return ChannelType::Array,
+                        ChannelType::String => return ChannelType::String,
+                        _ => {}
+                    }
+                }
                 ChannelType::Null
             }
 

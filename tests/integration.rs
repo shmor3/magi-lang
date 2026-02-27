@@ -8536,3 +8536,77 @@ fn test_nested_closure_capture_multiple() {
         output [from10(5), from20(5)];
     "#), DataType::Array(vec![DataType::Int64(15), DataType::Int64(25)]));
 }
+
+// ── Round 82: bug fix tests ───────────────
+
+#[test]
+fn test_typeof_in_pipe_no_placeholder() {
+    assert_eq!(run(r#"
+        output 42 |> typeof();
+    "#), DataType::String("int64".to_string()));
+}
+
+#[test]
+fn test_typeof_in_pipe_with_string() {
+    assert_eq!(run(r#"
+        output "hello" |> typeof();
+    "#), DataType::String("string".to_string()));
+}
+
+#[test]
+fn test_println_in_pipe_no_placeholder() {
+    // println in pipe should print the piped value and return it
+    assert_eq!(run(r#"
+        output 42 |> println();
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_debug_log_in_pipe() {
+    assert_eq!(run(r#"
+        output "test" |> debug_log();
+    "#), DataType::String("test".to_string()));
+}
+
+#[test]
+fn test_module_enum_direct_access() {
+    // Enums inside modules are registered under unqualified name by execute()
+    assert_eq!(run(r#"
+        mod shapes {
+            enum Color { Red, Green, Blue }
+        }
+        output Color::Red;
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__enum".to_string(), DataType::String("Color".to_string()));
+        m.insert("__variant".to_string(), DataType::String("Red".to_string()));
+        m
+    }));
+}
+
+#[test]
+fn test_module_qualified_function_call() {
+    assert_eq!(run(r#"
+        mod math {
+            fn square(x) { x * x }
+        }
+        output math::square(5);
+    "#), DataType::Int64(25));
+}
+
+#[test]
+fn test_map_field_dot_access_nested() {
+    // Deeply nested map field access
+    assert_eq!(run(r#"
+        let m = {"a": {"b": {"c": 42}}};
+        output m.a.b.c;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_pipe_typeof_array() {
+    assert_eq!(run(r#"
+        output [1, 2, 3] |> typeof();
+    "#), DataType::String("array".to_string()));
+}

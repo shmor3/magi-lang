@@ -3239,8 +3239,8 @@ impl<'a> Interpreter<'a> {
                     if let Some(val) = iter_result? {
                         result.push(val);
                         if result.len() > MAX_ARRAY_ELEMENTS {
-                            return Err(InterpError::TypeError {
-                                expected: format!("list comprehension result at most {} elements", MAX_ARRAY_ELEMENTS),
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
                                 actual: format!("{}", result.len()),
                                 context: "list comprehension".to_string(),
                                 span: expr.span,
@@ -3323,6 +3323,14 @@ impl<'a> Interpreter<'a> {
                     self.symbols.pop();
                     if let Some((k, v)) = iter_result? {
                         result.insert(k, v);
+                        if result.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} entries", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{}", result.len()),
+                                context: "map comprehension".to_string(),
+                                span: expr.span,
+                            });
+                        }
                     }
                 }
                 Ok(DataType::Map(result))
@@ -3607,10 +3615,8 @@ impl<'a> Interpreter<'a> {
                             }
                         })
                         .collect::<Result<_, _>>()?;
-                    if let Some(val) = evaluated_args.first() {
-                        return Ok(DataType::String(datatype_type_name(val).to_string()));
-                    }
-                    return Ok(DataType::String("null".to_string()));
+                    let val = evaluated_args.first().unwrap_or(piped_value);
+                    return Ok(DataType::String(datatype_type_name(val).to_string()));
                 }
                 if matches!(fn_name.as_str(), "println" | "print" | "debug_log") {
                     let evaluated_args: Vec<DataType> = args.iter()
@@ -3622,16 +3628,14 @@ impl<'a> Interpreter<'a> {
                             }
                         })
                         .collect::<Result<_, _>>()?;
-                    if let Some(val) = evaluated_args.first() {
-                        self.logs.push(LogEntry {
-                            level: if fn_name == "debug_log" { LogLevel::Debug } else { LogLevel::Info },
-                            message: datatype_to_display(val),
-                            line: Some(stage.span.start_line),
-                            node_id: None,
-                        });
-                        return Ok(val.clone());
-                    }
-                    return Ok(DataType::Null);
+                    let val = evaluated_args.first().unwrap_or(piped_value);
+                    self.logs.push(LogEntry {
+                        level: if fn_name == "debug_log" { LogLevel::Debug } else { LogLevel::Info },
+                        message: datatype_to_display(val),
+                        line: Some(stage.span.start_line),
+                        node_id: None,
+                    });
+                    return Ok(val.clone());
                 }
                 if self.functions.contains_key(fn_name.as_str()) {
                     let evaluated_args: Vec<DataType> = args.iter()
@@ -4085,6 +4089,16 @@ impl<'a> Interpreter<'a> {
                                 let qualified = format!("{}::{}", name, def.name);
                                 self.async_fns.insert(qualified.clone());
                                 self.functions.insert(qualified, def.clone());
+                            }
+                            StatementKind::EnumDef { name: enum_name, variants } => {
+                                let qualified = format!("{}::{}", name, enum_name);
+                                self.enum_defs.insert(qualified, variants.clone());
+                                self.enum_defs.insert(enum_name.clone(), variants.clone());
+                            }
+                            StatementKind::StructDef { name: struct_name, fields } => {
+                                let qualified = format!("{}::{}", name, struct_name);
+                                self.struct_defs.insert(qualified, fields.clone());
+                                self.struct_defs.insert(struct_name.clone(), fields.clone());
                             }
                             _ => {}
                         }
