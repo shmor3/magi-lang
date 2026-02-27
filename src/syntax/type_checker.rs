@@ -2871,6 +2871,13 @@ fn expr_contains_break(expr: &Expression) -> bool {
 /// Resolve a method name on a given type to an OperationType name.
 /// Returns None if the method is unknown for that type.
 fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
+    // Generic methods available on ALL types
+    match method {
+        "to_string" | "to_json" | "to_int64" | "to_float64" | "to_bool" | "typeof" => {
+            return Some("generic_method".into());
+        }
+        _ => {}
+    }
     match obj_type {
         ChannelType::Array => match method {
             "push" => Some("array_push".into()),
@@ -2964,14 +2971,7 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             | "tan" => Some("numeric_method".into()),
             _ => None,
         },
-        _ => {
-            // Generic methods available on any type
-            match method {
-                "to_string" => Some("to_string".into()),
-                "clone" => None, // clone is a no-op at type level
-                _ => None,
-            }
-        }
+        _ => None,
     }
 }
 

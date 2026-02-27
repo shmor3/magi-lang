@@ -7729,3 +7729,56 @@ fn test_e400_e409_distinct_codes() {
         magi_lang::syntax::errors::ErrorCode::E409.to_string(),
     );
 }
+
+// ── Round 75: Generic method type checker fix ────────────────────
+
+#[test]
+fn test_to_json_no_false_positive() {
+    // to_json() should be recognized on all types without E201 warning
+    let src = r#"
+        let x = 42;
+        let s = x.to_json();
+        output s;
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let imports = std::collections::HashSet::new();
+    let diags = check_types(&program, &imports);
+    let e201_warnings: Vec<_> = diags.diagnostics.iter().filter(|d| {
+        d.message.contains("Unknown method")
+    }).collect();
+    assert!(e201_warnings.is_empty(), "to_json should not produce E201: {:?}", e201_warnings);
+}
+
+#[test]
+fn test_typeof_method_no_false_positive() {
+    // typeof() as a method should be recognized
+    let src = r#"
+        let arr = [1, 2, 3];
+        let t = arr.typeof();
+        output t;
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let imports = std::collections::HashSet::new();
+    let diags = check_types(&program, &imports);
+    let e201_warnings: Vec<_> = diags.diagnostics.iter().filter(|d| {
+        d.message.contains("Unknown method")
+    }).collect();
+    assert!(e201_warnings.is_empty(), "typeof should not produce E201: {:?}", e201_warnings);
+}
+
+#[test]
+fn test_to_bool_method_no_false_positive() {
+    // to_bool() should be recognized on all types
+    let src = r#"
+        let s = "hello";
+        let b = s.to_bool();
+        output b;
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let imports = std::collections::HashSet::new();
+    let diags = check_types(&program, &imports);
+    let e201_warnings: Vec<_> = diags.diagnostics.iter().filter(|d| {
+        d.message.contains("Unknown method")
+    }).collect();
+    assert!(e201_warnings.is_empty(), "to_bool should not produce E201: {:?}", e201_warnings);
+}
