@@ -5969,3 +5969,82 @@ fn test_path_traversal_dependency_rejected() {
     let result = run(src);
     assert_eq!(result, DataType::Int64(42));
 }
+
+// ── Round 48: formatter, type checker, LSP, linter fixes ──
+
+#[test]
+fn test_formatter_unary_in_method_call() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let src = "(-a).method()";
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    assert!(formatted.contains("(-a).method()"), "unary should be parenthesized: {}", formatted);
+}
+
+#[test]
+fn test_formatter_await_in_field_access() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let src = "(await x).field";
+    let program = parse(src);
+    let formatted = format_program(&program, &FormatConfig::default());
+    assert!(formatted.contains("(await x).field"), "await should be parenthesized: {}", formatted);
+}
+
+#[test]
+fn test_type_checker_rest_params_no_false_error() {
+    let src = r#"
+fn log(msg, ...args) {
+    msg
+}
+log("hello", 1, 2, 3)
+"#;
+    let program = parse(src);
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let arity_errors: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.message.contains("expects") && d.message.contains("arguments"))
+        .collect();
+    assert!(arity_errors.is_empty(), "rest params should not produce arity error: {:?}", arity_errors);
+}
+
+#[test]
+fn test_type_checker_inclusive_range_no_false_warning() {
+    let src = "5..=5";
+    let warnings = typecheck_warnings(src);
+    assert!(!warnings.contains(&"W107".to_string()), "inclusive range 5..=5 should not produce W107: {:?}", warnings);
+}
+
+#[test]
+fn test_type_checker_exclusive_range_warns_when_equal() {
+    let src = "5..5";
+    let warnings = typecheck_warnings(src);
+    assert!(warnings.contains(&"W107".to_string()), "exclusive range 5..5 should produce W107: {:?}", warnings);
+}
+
+#[test]
+fn test_function_defined_in_block() {
+    let src = r#"
+let result = {
+    fn helper(x) { x * 2 }
+    helper(21)
+}
+result
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_function_defined_in_if_block() {
+    let src = r#"
+let x = if true {
+    fn double(n) { n * 2 }
+    double(10)
+} else {
+    0
+}
+x
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(20));
+}

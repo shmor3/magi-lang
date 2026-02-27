@@ -111,11 +111,30 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
 }
 
 /// Find the 1-based column of `name` in the given 1-based source line.
+/// Uses word-boundary matching to avoid matching substrings of other identifiers.
 fn find_name_col(source: &str, line: u32, name: &str) -> Option<u32> {
     let line_text = source.lines().nth(line.saturating_sub(1) as usize)?;
+    let name_bytes = name.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = line_text[start..].find(name) {
+        let abs_offset = start + offset;
+        let before_ok = abs_offset == 0
+            || !line_text.as_bytes().get(abs_offset - 1)
+                .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
+        let after_pos = abs_offset + name_bytes.len();
+        let after_ok = after_pos >= line_text.len()
+            || !line_text.as_bytes().get(after_pos)
+                .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
+        if before_ok && after_ok {
+            let char_col = line_text[..abs_offset].chars().count() as u32;
+            return Some(char_col + 1);
+        }
+        start = abs_offset + 1;
+    }
+    // Fallback to substring match if no word-boundary match found
     let byte_offset = line_text.find(name)?;
     let char_col = line_text[..byte_offset].chars().count() as u32;
-    Some(char_col + 1) // 1-based
+    Some(char_col + 1)
 }
 
 /// Extract top-level symbols from a program.

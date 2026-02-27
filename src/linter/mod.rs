@@ -158,6 +158,11 @@ impl<'a> LintContext<'a> {
                 self.check_block(&fdef.body);
             }
             StatementKind::EnumDef { name, variants } => {
+                // Collect for exhaustiveness checks (handles enums in nested scopes)
+                let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                if !self.enum_defs.iter().any(|(n, _)| n == name) {
+                    self.enum_defs.push((name.clone(), variant_names));
+                }
                 if let Some(d) = rules::check_naming_pascal_case(name, stmt.span) {
                     self.emit(d);
                 }
@@ -254,6 +259,11 @@ impl<'a> LintContext<'a> {
             }
             StatementKind::TestDef { body, .. } => {
                 self.check_block(body);
+            }
+            StatementKind::ModuleDef { body, .. } => {
+                for inner in &body.statements {
+                    self.check_statement(inner);
+                }
             }
             _ => {}
         }

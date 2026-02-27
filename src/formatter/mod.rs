@@ -19,9 +19,10 @@ fn escape_string_contents(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\0' => out.push_str("\\0"),
             c if c.is_control() => {
-                // Escape other control chars as \xHH
-                for b in c.to_string().bytes() {
-                    out.push_str(&format!("\\x{:02x}", b));
+                if (c as u32) < 0x80 {
+                    out.push_str(&format!("\\x{:02x}", c as u32));
+                } else {
+                    out.push_str(&format!("\\u{{{:04x}}}", c as u32));
                 }
             }
             c => out.push(c),
@@ -148,7 +149,7 @@ impl<'a> Formatter<'a> {
     fn fmt_statement(&mut self, stmt: &Statement) {
         match &stmt.kind {
             StatementKind::Import(path) => {
-                self.write(&format!("import \"{}\";", path));
+                self.write(&format!("import \"{}\";", escape_string_contents(path)));
             }
             StatementKind::Let {
                 name,
@@ -479,8 +480,15 @@ impl<'a> Formatter<'a> {
                 }
             }
             ExpressionKind::UnaryOp { op, operand } => {
+                let needs_parens = parent_prec >= 8; // parenthesize when used as postfix object
+                if needs_parens {
+                    self.write("(");
+                }
                 self.write(&op.to_string());
                 self.fmt_expression_prec(operand, 7); // High precedence for unary
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::Call {
                 name,
@@ -588,12 +596,26 @@ impl<'a> Formatter<'a> {
                 }
             }
             ExpressionKind::Await(inner) => {
+                let needs_parens = parent_prec >= 8;
+                if needs_parens {
+                    self.write("(");
+                }
                 self.write("await ");
-                self.fmt_expression(inner);
+                self.fmt_expression_prec(inner, 7);
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::Spawn(inner) => {
+                let needs_parens = parent_prec >= 8;
+                if needs_parens {
+                    self.write("(");
+                }
                 self.write("spawn ");
-                self.fmt_expression(inner);
+                self.fmt_expression_prec(inner, 7);
+                if needs_parens {
+                    self.write(")");
+                }
             }
             ExpressionKind::Lambda { params, body } => {
                 let needs_parens = parent_prec > 0;

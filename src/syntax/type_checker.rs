@@ -53,8 +53,10 @@ pub struct AstDiagnostic {
 #[derive(Clone)]
 struct FunctionSig {
     params: Vec<(String, ChannelType)>,
-    /// Number of required parameters (those without default values).
+    /// Number of required parameters (those without default values and not rest).
     required_params: usize,
+    /// Whether the function has a rest parameter (...args).
+    has_rest: bool,
     return_type: ChannelType,
     def_line: u32,
     used: bool,
@@ -319,7 +321,8 @@ impl TypeChecker {
                         (p.name.clone(), ct)
                     })
                     .collect();
-                let required_params = def.params.iter().filter(|p| p.default.is_none()).count();
+                let has_rest = def.params.iter().any(|p| p.rest);
+                let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
                 let return_type = def
                     .return_type
                     .as_deref()
@@ -330,6 +333,7 @@ impl TypeChecker {
                     FunctionSig {
                         params,
                         required_params,
+                        has_rest,
                         return_type,
                         def_line: stmt.span.start_line,
                         used: false,
@@ -1234,7 +1238,8 @@ impl TypeChecker {
                         sig_mut.used = true;
                     }
                     // Check arity (accounting for default parameters)
-                    if arg_types.len() < sig.required_params || arg_types.len() > sig.params.len() {
+                    let max_args = if sig.has_rest { usize::MAX } else { sig.params.len() };
+                    if arg_types.len() < sig.required_params || arg_types.len() > max_args {
                         let arity_msg = if sig.required_params == sig.params.len() {
                             format!("{}", sig.params.len())
                         } else {
@@ -1520,7 +1525,7 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // Range expression: range(start, end)
             // -----------------------------------------------------------------
-            ExpressionKind::Range { start, end, .. } => {
+            ExpressionKind::Range { start, end, inclusive } => {
                 let start_ty = self.infer_expr(start);
                 let end_ty = self.infer_expr(end);
 
@@ -1547,7 +1552,8 @@ impl TypeChecker {
 
                 // W7: Empty range (start >= end with literals).
                 if let (Some(s), Some(e)) = (literal_int(start), literal_int(end)) {
-                    if s >= e {
+                    let is_empty = if *inclusive { s > e } else { s >= e };
+                    if is_empty {
                         self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
@@ -1707,8 +1713,16 @@ impl TypeChecker {
 
                 // Check for exhaustiveness
                 let has_catchall = arms.iter().any(|arm| {
-                    matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_))
-                        && arm.guard.is_none()
+                    if arm.guard.is_some() {
+                        return false;
+                    }
+                    match &arm.pattern {
+                        Pattern::Wildcard | Pattern::Variable(_) => true,
+                        Pattern::Or(alternatives) => alternatives.iter().any(|alt| {
+                            matches!(alt, Pattern::Wildcard | Pattern::Variable(_))
+                        }),
+                        _ => false,
+                    }
                 });
                 if !has_catchall {
                     // Check if all enum variants are covered
@@ -2050,8 +2064,10 @@ impl TypeChecker {
             Pattern::TypePattern { name, .. } => {
                 self.define_var(name, ChannelType::Null, false, span.start_line, span.start_col);
             }
-            Pattern::RangePattern { .. } => {
-                // No variables to bind
+            Pattern::RangePattern { start, end, .. } => {
+                // No variables to bind, but walk the bound expressions for type checking
+                self.infer_expr(start);
+                self.infer_expr(end);
             }
         }
     }
