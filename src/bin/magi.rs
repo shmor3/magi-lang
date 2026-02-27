@@ -2646,13 +2646,16 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
-            // Regex operations (basic built-in implementation)
+            // Regex operations (regex crate)
             // ================================================================
             OperationType::RegexMatch => {
                 let pattern = inputs.get("input_1").or(inputs.get("pattern")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        Ok(DataType::Bool(simple_regex_test(s, pat)))
+                        match regex::Regex::new(pat) {
+                            Ok(re) => Ok(DataType::Bool(re.is_match(s))),
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_match: {}", e))),
+                        }
                     }
                     _ => Ok(DataType::Bool(false)),
                 }
@@ -2661,7 +2664,10 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        Ok(DataType::Bool(simple_regex_test(s, pat)))
+                        match regex::Regex::new(pat) {
+                            Ok(re) => Ok(DataType::Bool(re.is_match(s))),
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_test: {}", e))),
+                        }
                     }
                     _ => Ok(DataType::Bool(false)),
                 }
@@ -2671,14 +2677,18 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern, &replacement) {
                     (DataType::String(s), DataType::String(pat), DataType::String(rep)) => {
-                        // Simple: treat pattern as literal for now
-                        let result = s.replace(pat.as_str(), rep.as_str());
-                        if result.len() > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!(
-                                "regex_replace result exceeds {} byte limit", MAX_STRING_OUTPUT
-                            )));
+                        match regex::Regex::new(pat) {
+                            Ok(re) => {
+                                let result = re.replace_all(s, rep.as_str()).to_string();
+                                if result.len() > MAX_STRING_OUTPUT {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "regex_replace result exceeds {} byte limit", MAX_STRING_OUTPUT
+                                    )));
+                                }
+                                Ok(DataType::String(result))
+                            }
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_replace: {}", e))),
                         }
-                        Ok(DataType::String(result))
                     }
                     _ => Ok(input.clone()),
                 }
@@ -2687,11 +2697,12 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        // Simple: find the literal pattern in the string
-                        if let Some(pos) = s.find(pat.as_str()) {
-                            Ok(DataType::String(s[pos..pos + pat.len()].to_string()))
-                        } else {
-                            Ok(DataType::Null)
+                        match regex::Regex::new(pat) {
+                            Ok(re) => match re.find(s) {
+                                Some(m) => Ok(DataType::String(m.as_str().to_string())),
+                                None => Ok(DataType::Null),
+                            },
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_extract: {}", e))),
                         }
                     }
                     _ => Ok(DataType::Null),
@@ -2701,35 +2712,28 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        if pat.is_empty() {
-                            return Err(EvalError::InvalidInput("regex_split: empty pattern".to_string()));
+                        match regex::Regex::new(pat) {
+                            Ok(re) => {
+                                let parts: Vec<DataType> = re.split(s)
+                                    .take(MAX_ARRAY_ELEMENTS + 1)
+                                    .map(|p| DataType::String(p.to_string()))
+                                    .collect();
+                                if parts.len() > MAX_ARRAY_ELEMENTS {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "regex_split result exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                                    )));
+                                }
+                                Ok(DataType::Array(parts))
+                            }
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_split: {}", e))),
                         }
-                        let parts: Vec<DataType> = s.split(pat.as_str())
-                            .take(MAX_ARRAY_ELEMENTS + 1)
-                            .map(|p| DataType::String(p.to_string()))
-                            .collect();
-                        if parts.len() > MAX_ARRAY_ELEMENTS {
-                            return Err(EvalError::InvalidInput(format!(
-                                "regex_split result exceeds {} element limit", MAX_ARRAY_ELEMENTS
-                            )));
-                        }
-                        Ok(DataType::Array(parts))
                     }
                     _ => Ok(DataType::Array(vec![])),
                 }
             }
             OperationType::RegexEscape => {
                 match &input {
-                    DataType::String(s) => {
-                        let escaped: String = s.chars().map(|c| {
-                            if "\\^$.|?*+()[]{}".contains(c) {
-                                format!("\\{}", c)
-                            } else {
-                                c.to_string()
-                            }
-                        }).collect();
-                        Ok(DataType::String(escaped))
-                    }
+                    DataType::String(s) => Ok(DataType::String(regex::escape(s))),
                     _ => Ok(DataType::Null),
                 }
             }
@@ -2737,11 +2741,20 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        // Simple: return array with the match (or empty if no match)
-                        if s.contains(pat.as_str()) {
-                            Ok(DataType::Array(vec![DataType::String(pat.clone())]))
-                        } else {
-                            Ok(DataType::Array(vec![]))
+                        match regex::Regex::new(pat) {
+                            Ok(re) => match re.captures(s) {
+                                Some(caps) => {
+                                    let groups: Vec<DataType> = caps.iter()
+                                        .map(|m| match m {
+                                            Some(m) => DataType::String(m.as_str().to_string()),
+                                            None => DataType::Null,
+                                        })
+                                        .collect();
+                                    Ok(DataType::Array(groups))
+                                }
+                                None => Ok(DataType::Array(vec![])),
+                            },
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_captures: {}", e))),
                         }
                     }
                     _ => Ok(DataType::Array(vec![])),
@@ -2751,21 +2764,21 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        if pat.is_empty() {
-                            return Ok(DataType::Array(vec![]));
-                        }
-                        let mut results = Vec::new();
-                        let mut start = 0;
-                        while let Some(pos) = s[start..].find(pat.as_str()) {
-                            results.push(DataType::String(pat.clone()));
-                            start += pos + pat.len();
-                            if results.len() >= MAX_ARRAY_ELEMENTS {
-                                return Err(EvalError::InvalidInput(format!(
-                                    "regex_find_all result exceeds {} element limit", MAX_ARRAY_ELEMENTS
-                                )));
+                        match regex::Regex::new(pat) {
+                            Ok(re) => {
+                                let matches: Vec<DataType> = re.find_iter(s)
+                                    .take(MAX_ARRAY_ELEMENTS + 1)
+                                    .map(|m| DataType::String(m.as_str().to_string()))
+                                    .collect();
+                                if matches.len() > MAX_ARRAY_ELEMENTS {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "regex_find_all result exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                                    )));
+                                }
+                                Ok(DataType::Array(matches))
                             }
+                            Err(e) => Err(EvalError::InvalidInput(format!("regex_find_all: {}", e))),
                         }
-                        Ok(DataType::Array(results))
                     }
                     _ => Ok(DataType::Array(vec![])),
                 }
@@ -5650,11 +5663,6 @@ fn md5(data: &[u8]) -> [u8; 16] {
     result[8..12].copy_from_slice(&c0.to_le_bytes());
     result[12..16].copy_from_slice(&d0.to_le_bytes());
     result
-}
-
-/// Simple regex test (treats pattern as literal string match)
-fn simple_regex_test(input: &str, pattern: &str) -> bool {
-    input.contains(pattern)
 }
 
 // =============================================================================
