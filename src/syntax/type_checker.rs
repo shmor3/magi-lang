@@ -1722,10 +1722,29 @@ impl TypeChecker {
                         arg_types.insert(0, obj_ty);
                         return refine_call_output(op, &arg_types);
                     }
-                    // Known built-in method handled by the interpreter directly
-                    // (e.g., array.first(), int.abs(), string.is_empty())
-                    // Return Null (unknown type) without warning
-                    return ChannelType::Null;
+                    // Known built-in method handled by the interpreter directly.
+                    // Refine return type for common patterns.
+                    return match name.as_str() {
+                        "string_predicate" => ChannelType::Bool, // is_empty, is_numeric, is_alphabetic
+                        "array_length" | "string_length" | "map_size" | "bytes_length" => ChannelType::Int64,
+                        "array_contains" | "string_contains" | "bytes_contains" | "map_has" => ChannelType::Bool,
+                        "generic_method" => match method.as_str() {
+                            "to_string" | "to_json" => ChannelType::String,
+                            "to_int64" => ChannelType::Int64,
+                            "to_float64" => ChannelType::Float64,
+                            "to_bool" => ChannelType::Bool,
+                            "typeof" => ChannelType::String,
+                            _ => ChannelType::Null,
+                        },
+                        "numeric_method" => match method.as_str() {
+                            "to_string" => ChannelType::String,
+                            "to_int64" => ChannelType::Int64,
+                            "to_float64" => ChannelType::Float64,
+                            "is_nan" | "is_infinite" => ChannelType::Bool,
+                            _ => obj_ty, // abs, sign, pow, min, max, clamp preserve receiver type
+                        },
+                        _ => ChannelType::Null,
+                    };
                 }
 
                 // Unknown method — warn (but suppress if receiver type is unknown/Null)
