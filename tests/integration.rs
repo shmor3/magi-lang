@@ -35,6 +35,10 @@ impl OperationEvaluator for StubEvaluator {
             .or_else(|| inputs.get("string"))
             .cloned()
             .unwrap_or(DataType::Null);
+        let array = inputs.get("array").cloned().unwrap_or(DataType::Null);
+        let value = inputs.get("value").cloned().unwrap_or(DataType::Null);
+        let map = inputs.get("map").cloned().unwrap_or(DataType::Null);
+        let key = inputs.get("key").cloned().unwrap_or(DataType::Null);
 
         match op {
             // Arithmetic
@@ -157,39 +161,64 @@ impl OperationEvaluator for StubEvaluator {
             },
 
             // Array
-            OperationType::ArrayLength => match &input {
+            OperationType::ArrayLength => match &array {
                 DataType::Array(arr) => Ok(DataType::Int64(arr.len() as i64)),
                 _ => Ok(DataType::Int64(0)),
             },
             OperationType::ArrayPush => {
-                let mut arr = match &a {
-                    DataType::Array(arr) => arr.clone(),
+                let mut arr = match &array {
+                    DataType::Array(a) => a.clone(),
                     _ => vec![],
                 };
-                arr.push(b);
+                arr.push(value.clone());
                 Ok(DataType::Array(arr))
             }
-            OperationType::ArrayPop => match &input {
+            OperationType::ArrayPop => match &array {
                 DataType::Array(arr) if !arr.is_empty() => {
                     Ok(arr.last().cloned().unwrap_or(DataType::Null))
                 }
                 _ => Ok(DataType::Null),
             },
             OperationType::ArraySlice => {
-                // Used by slice syntax.
-                Ok(DataType::Null)
+                let start_val = inputs.get("input_1").or(inputs.get("start")).cloned().unwrap_or(DataType::Int64(0));
+                let end_val = inputs.get("input_2").or(inputs.get("end")).cloned();
+                match &array {
+                    DataType::Array(arr) => {
+                        let len = arr.len() as i64;
+                        let start = {
+                            let n = start_val.to_i64().unwrap_or(0);
+                            if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                        };
+                        let end = match &end_val {
+                            Some(v) => {
+                                let n = v.to_i64().unwrap_or(len);
+                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                            }
+                            None => arr.len(),
+                        };
+                        if start >= end {
+                            Ok(DataType::Array(vec![]))
+                        } else {
+                            Ok(DataType::Array(arr[start..end].to_vec()))
+                        }
+                    }
+                    _ => Ok(DataType::Array(vec![])),
+                }
             }
-            OperationType::ArraySort => match &input {
+            OperationType::ArraySort => match &array {
                 DataType::Array(arr) => {
                     let mut sorted = arr.clone();
                     sorted.sort_by(|a, b| {
-                        a.to_i64().unwrap_or(0).cmp(&b.to_i64().unwrap_or(0))
+                        match (a, b) {
+                            (DataType::String(x), DataType::String(y)) => x.cmp(y),
+                            _ => a.to_i64().unwrap_or(0).cmp(&b.to_i64().unwrap_or(0)),
+                        }
                     });
                     Ok(DataType::Array(sorted))
                 }
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArrayReverse => match &input {
+            OperationType::ArrayReverse => match &array {
                 DataType::Array(arr) => {
                     let mut rev = arr.clone();
                     rev.reverse();
@@ -197,21 +226,120 @@ impl OperationEvaluator for StubEvaluator {
                 }
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArrayContains => match (&a, &b) {
+            OperationType::ArrayContains => match (&array, &value) {
                 (DataType::Array(arr), val) => Ok(DataType::Bool(arr.contains(val))),
                 _ => Ok(DataType::Bool(false)),
             },
-            OperationType::ArrayJoin => match (&a, &b) {
-                (DataType::Array(arr), DataType::String(sep)) => {
-                    let s: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
-                    Ok(DataType::String(s.join(sep)))
+            OperationType::ArrayJoin => {
+                let sep = inputs.get("input_1").cloned().unwrap_or(DataType::String(",".to_string()));
+                match &array {
+                    DataType::Array(arr) => {
+                        let sep_str = match &sep {
+                            DataType::String(s) => s.clone(),
+                            _ => ",".to_string(),
+                        };
+                        let s: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
+                        Ok(DataType::String(s.join(&sep_str)))
+                    }
+                    _ => Ok(DataType::String(String::new())),
                 }
-                _ => Ok(DataType::String(String::new())),
+            },
+            OperationType::ArrayGet => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 { return Ok(DataType::Null); }
+                        Ok(arr.get(i as usize).cloned().unwrap_or(DataType::Null))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::ArraySet => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 { return Ok(DataType::Array(arr.clone())); }
+                        let idx = i as usize;
+                        let mut new_arr = arr.clone();
+                        if idx < new_arr.len() {
+                            new_arr[idx] = value.clone();
+                        }
+                        Ok(DataType::Array(new_arr))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::ArrayFlatten => match &array {
+                DataType::Array(arr) => {
+                    let mut flat = Vec::new();
+                    for item in arr {
+                        if let DataType::Array(inner) = item {
+                            flat.extend(inner.clone());
+                        } else {
+                            flat.push(item.clone());
+                        }
+                    }
+                    Ok(DataType::Array(flat))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ArrayUnique => match &array {
+                DataType::Array(arr) => {
+                    let mut seen = Vec::new();
+                    for item in arr {
+                        if !seen.contains(item) {
+                            seen.push(item.clone());
+                        }
+                    }
+                    Ok(DataType::Array(seen))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ArrayConcat => match (&a, &b) {
+                (DataType::Array(a_arr), DataType::Array(b_arr)) => {
+                    let mut result = a_arr.clone();
+                    result.extend(b_arr.clone());
+                    Ok(DataType::Array(result))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ArrayInsert => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(0);
+                        let idx = if i < 0 { 0 } else { (i as usize).min(arr.len()) };
+                        let mut new_arr = arr.clone();
+                        new_arr.insert(idx, value.clone());
+                        Ok(DataType::Array(new_arr))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::ArrayRemove => {
+                let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 || i as usize >= arr.len() { return Ok(DataType::Array(arr.clone())); }
+                        let mut new_arr = arr.clone();
+                        new_arr.remove(i as usize);
+                        Ok(DataType::Array(new_arr))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::ArrayFilterNulls => match &array {
+                DataType::Array(arr) => {
+                    Ok(DataType::Array(arr.iter().filter(|v| !matches!(v, DataType::Null)).cloned().collect()))
+                }
+                _ => Ok(DataType::Null),
             },
 
             // Map operations
             OperationType::MapGet => {
-                // FieldAccess uses "map"/"key", Index uses "a"/"b"
                 let map_val = inputs.get("map").or(inputs.get("a")).cloned().unwrap_or(DataType::Null);
                 let key_val = inputs.get("key").or(inputs.get("b")).cloned().unwrap_or(DataType::Null);
                 match (&map_val, &key_val) {
@@ -222,26 +350,60 @@ impl OperationEvaluator for StubEvaluator {
                 }
             }
             OperationType::MapSet => {
-                let map_val = inputs.get("map").or(inputs.get("a")).cloned().unwrap_or(DataType::Null);
-                let key_val = inputs.get("key").or(inputs.get("b")).cloned().unwrap_or(DataType::String(String::new()));
-                let value = inputs.get("value").or(inputs.get("c")).cloned().unwrap_or(DataType::Null);
+                let map_val = inputs.get("map").cloned().unwrap_or(DataType::Null);
+                let key_val = inputs.get("key").cloned().unwrap_or(DataType::String(String::new()));
+                let val = inputs.get("value").cloned().unwrap_or(DataType::Null);
                 match (&map_val, &key_val) {
                     (DataType::Map(map), DataType::String(k)) => {
                         let mut new_map = map.clone();
-                        new_map.insert(k.clone(), value);
+                        new_map.insert(k.clone(), val);
                         Ok(DataType::Map(new_map))
                     }
                     _ => Ok(DataType::Null),
                 }
             }
-            OperationType::MapKeys => match &input {
-                DataType::Map(map) => Ok(DataType::Array(
-                    map.keys().map(|k| DataType::String(k.clone())).collect(),
+            OperationType::MapKeys => match &map {
+                DataType::Map(m) => Ok(DataType::Array(
+                    m.keys().map(|k| DataType::String(k.clone())).collect(),
                 )),
                 _ => Ok(DataType::Array(vec![])),
             },
-            OperationType::MapValues => match &input {
-                DataType::Map(map) => Ok(DataType::Array(map.values().cloned().collect())),
+            OperationType::MapValues => match &map {
+                DataType::Map(m) => Ok(DataType::Array(m.values().cloned().collect())),
+                _ => Ok(DataType::Array(vec![])),
+            },
+            OperationType::MapHas => match (&map, &key) {
+                (DataType::Map(m), DataType::String(k)) => Ok(DataType::Bool(m.contains_key(k))),
+                _ => Ok(DataType::Bool(false)),
+            },
+            OperationType::MapDelete => match (&map, &key) {
+                (DataType::Map(m), DataType::String(k)) => {
+                    let mut new_map = m.clone();
+                    new_map.remove(k);
+                    Ok(DataType::Map(new_map))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::MapMerge => match (&a, &b) {
+                (DataType::Map(m1), DataType::Map(m2)) => {
+                    let mut merged = m1.clone();
+                    for (k, v) in m2 {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    Ok(DataType::Map(merged))
+                }
+                _ => Ok(DataType::Null),
+            },
+            OperationType::MapSize => match &map {
+                DataType::Map(m) => Ok(DataType::Int64(m.len() as i64)),
+                _ => Ok(DataType::Int64(0)),
+            },
+            OperationType::MapEntries => match &map {
+                DataType::Map(m) => {
+                    Ok(DataType::Array(m.iter().map(|(k, v)| {
+                        DataType::Array(vec![DataType::String(k.clone()), v.clone()])
+                    }).collect()))
+                }
                 _ => Ok(DataType::Array(vec![])),
             },
 
@@ -320,6 +482,242 @@ impl OperationEvaluator for StubEvaluator {
                     }
                 }
                 Ok(DataType::String(to_json_stub(&input)))
+            },
+
+            // Range
+            OperationType::Range => {
+                let start = inputs.get("start").or(inputs.get("a")).and_then(|v| v.to_i64()).unwrap_or(0);
+                let end = inputs.get("end").or(inputs.get("b")).and_then(|v| v.to_i64()).unwrap_or(0);
+                let step = inputs.get("step").and_then(|v| v.to_i64()).unwrap_or(if start <= end { 1 } else { -1 });
+                if step == 0 { return Ok(DataType::Array(vec![])); }
+                let mut result = Vec::new();
+                let mut i = start;
+                loop {
+                    if step > 0 && i >= end { break; }
+                    if step < 0 && i <= end { break; }
+                    result.push(DataType::Int64(i));
+                    i = match i.checked_add(step) {
+                        Some(v) => v,
+                        None => break,
+                    };
+                }
+                Ok(DataType::Array(result))
+            },
+
+            // String length
+            OperationType::Length => match &input {
+                DataType::String(s) => Ok(DataType::Int64(s.chars().count() as i64)),
+                _ => Ok(DataType::Int64(0)),
+            },
+
+            // String operations
+            OperationType::Split => {
+                let delim = inputs.get("delimiter").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &delim) {
+                    (DataType::String(s), DataType::String(sep)) => {
+                        if sep.is_empty() {
+                            return Err(EvalError::InvalidInput("split delimiter must not be empty".to_string()));
+                        }
+                        let parts: Vec<DataType> = s.split(sep.as_str()).map(|p| DataType::String(p.to_string())).collect();
+                        Ok(DataType::Array(parts))
+                    }
+                    _ => Ok(DataType::Array(vec![])),
+                }
+            },
+            OperationType::Contains => {
+                let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::String(s), DataType::String(sub)) => Ok(DataType::Bool(s.contains(sub.as_str()))),
+                    _ => Ok(DataType::Bool(false)),
+                }
+            },
+            OperationType::Replace => {
+                let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                let replace = inputs.get("replace").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
+                match (&input, &search, &replace) {
+                    (DataType::String(s), DataType::String(from), DataType::String(to)) => {
+                        Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::StartsWith => {
+                let prefix = inputs.get("prefix").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &prefix) {
+                    (DataType::String(s), DataType::String(p)) => Ok(DataType::Bool(s.starts_with(p.as_str()))),
+                    _ => Ok(DataType::Bool(false)),
+                }
+            },
+            OperationType::EndsWith => {
+                let suffix = inputs.get("suffix").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &suffix) {
+                    (DataType::String(s), DataType::String(sfx)) => Ok(DataType::Bool(s.ends_with(sfx.as_str()))),
+                    _ => Ok(DataType::Bool(false)),
+                }
+            },
+            OperationType::IndexOf => {
+                let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (&input, &search) {
+                    (DataType::String(s), DataType::String(sub)) => {
+                        match s.find(sub.as_str()) {
+                            Some(byte_pos) => Ok(DataType::Int64(s[..byte_pos].chars().count() as i64)),
+                            None => Ok(DataType::Int64(-1)),
+                        }
+                    }
+                    _ => Ok(DataType::Int64(-1)),
+                }
+            },
+            OperationType::Substring => {
+                let start_val = inputs.get("input_1").cloned().unwrap_or(DataType::Int64(0));
+                let end_val = inputs.get("input_2").cloned();
+                match &input {
+                    DataType::String(s) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let len = chars.len() as i64;
+                        let start = start_val.to_i64().unwrap_or(0).max(0).min(len) as usize;
+                        let end = match end_val {
+                            Some(v) => v.to_i64().unwrap_or(len).max(0).min(len) as usize,
+                            None => chars.len(),
+                        };
+                        if start >= end {
+                            Ok(DataType::String(String::new()))
+                        } else {
+                            Ok(DataType::String(chars[start..end].iter().collect()))
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::ToUpper => match &input {
+                DataType::String(s) => Ok(DataType::String(s.to_uppercase())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ToLower => match &input {
+                DataType::String(s) => Ok(DataType::String(s.to_lowercase())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Trim => match &input {
+                DataType::String(s) => Ok(DataType::String(s.trim().to_string())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::TrimStart => match &input {
+                DataType::String(s) => Ok(DataType::String(s.trim_start().to_string())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::TrimEnd => match &input {
+                DataType::String(s) => Ok(DataType::String(s.trim_end().to_string())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringReverse => match &input {
+                DataType::String(s) => Ok(DataType::String(s.chars().rev().collect())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringRepeat => {
+                let count = inputs.get("input_1").or(inputs.get("count")).cloned().unwrap_or(DataType::Int64(0));
+                match &input {
+                    DataType::String(s) => {
+                        let n = count.to_i64().unwrap_or(0).max(0) as usize;
+                        Ok(DataType::String(s.repeat(n)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::StringLines => match &input {
+                DataType::String(s) => Ok(DataType::Array(s.lines().map(|l| DataType::String(l.to_string())).collect())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::StringChars => match &input {
+                DataType::String(s) => Ok(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect())),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::CharAt => {
+                let idx = inputs.get("input_1").cloned().unwrap_or(DataType::Int64(0));
+                match &input {
+                    DataType::String(s) => {
+                        let i = idx.to_i64().unwrap_or(0);
+                        if i < 0 { return Ok(DataType::Null); }
+                        Ok(s.chars().nth(i as usize).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+
+            // Type conversion
+            OperationType::ToInt64 => match &input {
+                DataType::Int64(n) => Ok(DataType::Int64(*n)),
+                DataType::Float64(f) => {
+                    if f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
+                        Ok(DataType::Int64(*f as i64))
+                    } else {
+                        Ok(DataType::Null)
+                    }
+                }
+                DataType::String(s) => Ok(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null)),
+                DataType::Bool(b) => Ok(DataType::Int64(if *b { 1 } else { 0 })),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ToFloat64 => match &input {
+                DataType::Float64(f) => Ok(DataType::Float64(*f)),
+                DataType::Int64(n) => Ok(DataType::Float64(*n as f64)),
+                DataType::String(s) => Ok(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null)),
+                DataType::Bool(b) => Ok(DataType::Float64(if *b { 1.0 } else { 0.0 })),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::ToBool => match &input {
+                DataType::Bool(b) => Ok(DataType::Bool(*b)),
+                DataType::Int64(n) => Ok(DataType::Bool(*n != 0)),
+                DataType::Float64(f) => Ok(DataType::Bool(*f != 0.0 && !f.is_nan())),
+                DataType::String(s) => Ok(DataType::Bool(!s.is_empty())),
+                DataType::Null => Ok(DataType::Bool(false)),
+                DataType::Array(a) => Ok(DataType::Bool(!a.is_empty())),
+                DataType::Map(m) => Ok(DataType::Bool(!m.is_empty())),
+                _ => Ok(DataType::Bool(true)),
+            },
+
+            // Power
+            OperationType::Power => match (&a, &b) {
+                (DataType::Int64(x), DataType::Int64(y)) => {
+                    if *y < 0 {
+                        Ok(DataType::Float64((*x as f64).powi(*y as i32)))
+                    } else {
+                        match x.checked_pow(*y as u32) {
+                            Some(v) => Ok(DataType::Int64(v)),
+                            None => Ok(DataType::Null),
+                        }
+                    }
+                }
+                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x.powf(*y))),
+                (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64((*x as f64).powf(*y))),
+                (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x.powi(*y as i32))),
+                _ => Ok(DataType::Null),
+            },
+
+            // Min/Max builtins
+            OperationType::Min => match (&a, &b) {
+                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(*x.min(y))),
+                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x.min(*y))),
+                _ => Ok(DataType::Null),
+            },
+            OperationType::Max => match (&a, &b) {
+                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(*x.max(y))),
+                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x.max(*y))),
+                _ => Ok(DataType::Null),
+            },
+
+            // Assert
+            OperationType::Assert => {
+                let condition = inputs.get("condition").cloned().unwrap_or(DataType::Null);
+                let message = inputs.get("message").cloned().unwrap_or(DataType::String("assertion failed".to_string()));
+                match condition {
+                    DataType::Bool(true) => Ok(DataType::Null),
+                    _ => {
+                        let msg = match message {
+                            DataType::String(s) => s,
+                            _ => "assertion failed".to_string(),
+                        };
+                        Err(EvalError::InvalidInput(msg))
+                    }
+                }
             },
 
             // Catch-all
@@ -10174,11 +10572,8 @@ fn test_for_loop_break_exits_early() {
 // ═══════════════════════════════════════════════════════════
 // End-to-end integration tests: realistic multi-feature programs
 //
-// NOTE: The StubEvaluator has port-name mismatches for some array
-// operations (.push(), .contains(), arr[idx], map["key"]).
-// These tests use spread syntax [...arr, elem] instead of .push(),
-// .find() instead of .contains(), destructuring or .first()/.last()
-// instead of indexing, and field access map.key instead of map["key"].
+// NOTE: The StubEvaluator now supports most operations with correct port names.
+// These tests exercise realistic multi-feature programs.
 // ═══════════════════════════════════════════════════════════
 
 #[test]
@@ -11276,5 +11671,723 @@ fn test_e2e_linked_list_operations() {
         ]),
         DataType::Int64(5),
         DataType::Int64(2),
+    ]));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Tests for newly-supported StubEvaluator operations
+// ═══════════════════════════════════════════════════════════
+
+// -- Map operations --
+
+#[test]
+fn test_map_has_key() {
+    assert_eq!(run(r#"
+        let m = {"name": "Alice", "age": 30};
+        [m.has("name"), m.has("email")]
+    "#), DataType::Array(vec![DataType::Bool(true), DataType::Bool(false)]));
+}
+
+#[test]
+fn test_map_delete_key() {
+    assert_eq!(run(r#"
+        let m = {"a": 1, "b": 2, "c": 3};
+        let m2 = m.delete("b");
+        m2.keys()
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_map_merge() {
+    assert_eq!(run(r#"
+        let m1 = {"a": 1, "b": 2};
+        let m2 = {"b": 99, "c": 3};
+        let merged = m1.merge(m2);
+        [merged.a, merged.b, merged.c]
+    "#), DataType::Array(vec![
+        DataType::Int64(1),
+        DataType::Int64(99),
+        DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_map_size() {
+    assert_eq!(run(r#"
+        let m = {"x": 1, "y": 2, "z": 3};
+        m.size()
+    "#), DataType::Int64(3));
+}
+
+#[test]
+fn test_map_entries() {
+    // BTreeMap keys are sorted, so entries come out in order
+    assert_eq!(run(r#"
+        let m = {"a": 1, "b": 2};
+        let entries = m.entries();
+        entries.len()
+    "#), DataType::Int64(2));
+}
+
+#[test]
+fn test_map_values_and_keys() {
+    assert_eq!(run(r#"
+        let m = {"x": 10, "y": 20};
+        let ks = m.keys();
+        let vs = m.values();
+        [ks.len(), vs.len()]
+    "#), DataType::Array(vec![DataType::Int64(2), DataType::Int64(2)]));
+}
+
+#[test]
+fn test_map_set_method() {
+    assert_eq!(run(r#"
+        let m = {"a": 1};
+        let m2 = m.set("b", 2);
+        [m2.a, m2.b]
+    "#), DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]));
+}
+
+// -- Array operations --
+
+#[test]
+fn test_array_contains_method() {
+    assert_eq!(run(r#"
+        let arr = [1, 2, 3, 4, 5];
+        [arr.contains(3), arr.contains(99)]
+    "#), DataType::Array(vec![DataType::Bool(true), DataType::Bool(false)]));
+}
+
+#[test]
+fn test_array_flatten() {
+    assert_eq!(run(r#"
+        let nested = [[1, 2], [3, 4], [5]];
+        nested.flatten()
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2),
+        DataType::Int64(3), DataType::Int64(4),
+        DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_array_flatten_mixed() {
+    // Non-array elements pass through unchanged
+    assert_eq!(run(r#"
+        let mixed = [1, [2, 3], 4, [5]];
+        mixed.flatten()
+    "#), DataType::Array(vec![
+        DataType::Int64(1),
+        DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4),
+        DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_array_unique() {
+    assert_eq!(run(r#"
+        let arr = [1, 2, 3, 2, 1, 4, 3];
+        arr.unique()
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2),
+        DataType::Int64(3), DataType::Int64(4),
+    ]));
+}
+
+#[test]
+fn test_array_slice_method() {
+    assert_eq!(run(r#"
+        let arr = [10, 20, 30, 40, 50];
+        arr.slice(1, 4)
+    "#), DataType::Array(vec![
+        DataType::Int64(20), DataType::Int64(30), DataType::Int64(40),
+    ]));
+}
+
+#[test]
+fn test_array_slice_negative_indices() {
+    assert_eq!(run(r#"
+        let arr = [10, 20, 30, 40, 50];
+        arr.slice(-3, -1)
+    "#), DataType::Array(vec![
+        DataType::Int64(30), DataType::Int64(40),
+    ]));
+}
+
+#[test]
+fn test_array_push_method() {
+    assert_eq!(run(r#"
+        let mut arr = [1, 2];
+        arr = arr.push(3);
+        arr
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_array_insert_method() {
+    assert_eq!(run(r#"
+        let arr = [1, 2, 4, 5];
+        arr.insert(2, 3)
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4), DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_array_remove_method() {
+    assert_eq!(run(r#"
+        let arr = [10, 20, 30, 40];
+        arr.remove(1)
+    "#), DataType::Array(vec![
+        DataType::Int64(10), DataType::Int64(30), DataType::Int64(40),
+    ]));
+}
+
+#[test]
+fn test_array_sort_strings() {
+    assert_eq!(run(r#"
+        ["banana", "apple", "cherry"].sort()
+    "#), DataType::Array(vec![
+        DataType::String("apple".to_string()),
+        DataType::String("banana".to_string()),
+        DataType::String("cherry".to_string()),
+    ]));
+}
+
+#[test]
+fn test_array_filter_nulls() {
+    assert_eq!(run(r#"
+        [1, null, 2, null, 3].filter_nulls()
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+    ]));
+}
+
+// -- String operations --
+
+#[test]
+fn test_string_split_method() {
+    assert_eq!(run(r#"
+        "a,b,c".split(",")
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("b".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_string_replace_method() {
+    assert_eq!(run(r#"
+        "hello world".replace("world", "MAGI")
+    "#), DataType::String("hello MAGI".to_string()));
+}
+
+#[test]
+fn test_string_index_of() {
+    assert_eq!(run(r#"
+        ["hello".index_of("llo"), "hello".index_of("xyz")]
+    "#), DataType::Array(vec![DataType::Int64(2), DataType::Int64(-1)]));
+}
+
+#[test]
+fn test_string_lines_via_method() {
+    assert_eq!(run(r#"
+        "a\nb\nc".lines()
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("b".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_string_chars_method() {
+    assert_eq!(run(r#"
+        "abc".chars()
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("b".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_string_char_at() {
+    assert_eq!(run(r#"
+        ["hello".char_at(0), "hello".char_at(4)]
+    "#), DataType::Array(vec![
+        DataType::String("h".to_string()),
+        DataType::String("o".to_string()),
+    ]));
+}
+
+// -- Combined feature tests using new operations --
+
+#[test]
+fn test_map_iteration_with_entries() {
+    // Iterate over map entries, filter and transform
+    assert_eq!(run(r#"
+        let scores = {"alice": 85, "bob": 92, "carol": 78, "dave": 95};
+        let high_scorers = scores.entries()
+            .filter(|entry| {
+                let [_name, score] = entry;
+                score >= 90
+            })
+            .map(|entry| {
+                let [name, score] = entry;
+                f"{name}: {score}"
+            });
+        high_scorers.sort()
+    "#), DataType::Array(vec![
+        DataType::String("bob: 92".to_string()),
+        DataType::String("dave: 95".to_string()),
+    ]));
+}
+
+#[test]
+fn test_array_pipeline_flatten_unique_sort() {
+    // Chain flatten, unique, and sort
+    assert_eq!(run(r#"
+        let groups = [[3, 1, 4], [1, 5, 9], [2, 6, 5]];
+        groups.flatten().unique().sort()
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4), DataType::Int64(5), DataType::Int64(6),
+        DataType::Int64(9),
+    ]));
+}
+
+#[test]
+fn test_map_has_in_conditional_logic() {
+    // Use map.has() for conditional branching
+    assert_eq!(run(r#"
+        fn get_or_default(m, k, default) {
+            if m.has(k) { m.get(k) } else { default }
+        }
+        let config = {"host": "localhost", "port": 8080};
+        [
+            get_or_default(config, "host", "0.0.0.0"),
+            get_or_default(config, "timeout", 30),
+        ]
+    "#), DataType::Array(vec![
+        DataType::String("localhost".to_string()),
+        DataType::Int64(30),
+    ]));
+}
+
+#[test]
+fn test_string_split_and_rejoin() {
+    // Split, transform, rejoin
+    assert_eq!(run(r#"
+        let words = "hello world foo bar".split(" ");
+        let upper_words = words.map(|w| w.to_upper());
+        upper_words.join(" ")
+    "#), DataType::String("HELLO WORLD FOO BAR".to_string()));
+}
+
+#[test]
+fn test_array_contains_with_filter() {
+    // Use contains to check membership during filtering
+    assert_eq!(run(r#"
+        let allowed = [2, 4, 6, 8, 10];
+        let candidates = [1, 2, 3, 4, 5, 6, 7, 8];
+        candidates.filter(|x| allowed.contains(x))
+    "#), DataType::Array(vec![
+        DataType::Int64(2), DataType::Int64(4),
+        DataType::Int64(6), DataType::Int64(8),
+    ]));
+}
+
+#[test]
+fn test_map_delete_in_loop() {
+    // Progressively delete keys from a map
+    assert_eq!(run(r#"
+        let mut m = {"a": 1, "b": 2, "c": 3, "d": 4};
+        let to_remove = ["b", "d"];
+        for k in to_remove {
+            m = m.delete(k);
+        }
+        m.keys()
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_map_merge_accumulator() {
+    // Build a map by merging successive entries using set
+    assert_eq!(run(r#"
+        let entries = [["x", 1], ["y", 2], ["z", 3]];
+        let mut result = {"_init": 0};
+        result = result.delete("_init");
+        for entry in entries {
+            let [k, v] = entry;
+            result = result.set(k, v);
+        }
+        [result.x, result.y, result.z]
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_array_reverse_sort_chain() {
+    // Sort then reverse for descending order
+    assert_eq!(run(r#"
+        [5, 3, 8, 1, 9, 2].sort().reverse()
+    "#), DataType::Array(vec![
+        DataType::Int64(9), DataType::Int64(8), DataType::Int64(5),
+        DataType::Int64(3), DataType::Int64(2), DataType::Int64(1),
+    ]));
+}
+
+#[test]
+fn test_string_split_filter_join() {
+    // Parse CSV-like data, filter empty fields
+    assert_eq!(run(r#"
+        let csv = "Alice,,Bob,,Carol";
+        let fields = csv.split(",");
+        let non_empty = fields.filter(|f| f.len() > 0);
+        non_empty.join(", ")
+    "#), DataType::String("Alice, Bob, Carol".to_string()));
+}
+
+#[test]
+fn test_e2e_word_frequency_counter() {
+    // Count word frequency using map operations
+    assert_eq!(run(r#"
+        let text = "the cat sat on the mat the cat";
+        let words = text.split(" ");
+        let mut counts = {"_init": 0};
+        counts = counts.delete("_init");
+        for word in words {
+            if counts.has(word) {
+                let c = counts.get(word);
+                counts = counts.set(word, c + 1);
+            } else {
+                counts = counts.set(word, 1);
+            }
+        }
+        [counts.get("the"), counts.get("cat"), counts.get("sat"), counts.get("on"), counts.get("mat")]
+    "#), DataType::Array(vec![
+        DataType::Int64(3), DataType::Int64(2),
+        DataType::Int64(1), DataType::Int64(1), DataType::Int64(1),
+    ]));
+}
+
+#[test]
+fn test_e2e_set_operations_via_arrays() {
+    // Implement set union, intersection, difference using array operations
+    assert_eq!(run(r#"
+        fn set_union(a, b) {
+            [...a, ...b].unique()
+        }
+        fn set_intersection(a, b) {
+            a.filter(|x| b.contains(x))
+        }
+        fn set_difference(a, b) {
+            a.filter(|x| !b.contains(x))
+        }
+
+        let s1 = [1, 2, 3, 4, 5];
+        let s2 = [3, 4, 5, 6, 7];
+
+        let union = set_union(s1, s2).sort();
+        let inter = set_intersection(s1, s2).sort();
+        let diff = set_difference(s1, s2).sort();
+
+        output [union, inter, diff];
+    "#), DataType::Array(vec![
+        DataType::Array(vec![
+            DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+            DataType::Int64(4), DataType::Int64(5), DataType::Int64(6),
+            DataType::Int64(7),
+        ]),
+        DataType::Array(vec![
+            DataType::Int64(3), DataType::Int64(4), DataType::Int64(5),
+        ]),
+        DataType::Array(vec![
+            DataType::Int64(1), DataType::Int64(2),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_map_based_cache() {
+    // Simple cache using map has/get/set
+    assert_eq!(run(r#"
+        fn make_cache() {
+            let m = {"_init": 0};
+            m.delete("_init")
+        }
+
+        fn cache_get(cache, key) {
+            if cache.has(key) { cache.get(key) } else { null }
+        }
+
+        fn cache_set(cache, key, val) {
+            cache.set(key, val)
+        }
+
+        let mut cache = make_cache();
+        cache = cache_set(cache, "user:1", "Alice");
+        cache = cache_set(cache, "user:2", "Bob");
+        cache = cache_set(cache, "user:3", "Carol");
+
+        let r1 = cache_get(cache, "user:1");
+        let r2 = cache_get(cache, "user:99");
+        let r3 = cache.size();
+
+        cache = cache.delete("user:2");
+        let r4 = cache.size();
+        let r5 = cache.has("user:2");
+
+        output [r1, r2, r3, r4, r5];
+    "#), DataType::Array(vec![
+        DataType::String("Alice".to_string()),
+        DataType::Null,
+        DataType::Int64(3),
+        DataType::Int64(2),
+        DataType::Bool(false),
+    ]));
+}
+
+#[test]
+fn test_e2e_string_tokenizer() {
+    // Tokenize a simple expression using string methods
+    assert_eq!(run(r#"
+        fn tokenize(input) {
+            let chars = input.chars();
+            let mut tokens = [];
+            let mut current = "";
+            for ch in chars {
+                if ch == " " {
+                    if current.len() > 0 {
+                        tokens = [...tokens, current];
+                        current = "";
+                    }
+                } else if ch == "+" || ch == "-" || ch == "*" || ch == "/" {
+                    if current.len() > 0 {
+                        tokens = [...tokens, current];
+                        current = "";
+                    }
+                    tokens = [...tokens, ch];
+                } else {
+                    current = current + ch;
+                }
+            }
+            if current.len() > 0 {
+                tokens = [...tokens, current];
+            }
+            tokens
+        }
+
+        tokenize("42 + 7 * 3 - 1")
+    "#), DataType::Array(vec![
+        DataType::String("42".to_string()),
+        DataType::String("+".to_string()),
+        DataType::String("7".to_string()),
+        DataType::String("*".to_string()),
+        DataType::String("3".to_string()),
+        DataType::String("-".to_string()),
+        DataType::String("1".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_nested_map_operations() {
+    // Build and query nested maps
+    assert_eq!(run(r#"
+        let db = {
+            "users": {
+                "alice": {"role": "admin", "active": true},
+                "bob": {"role": "user", "active": false},
+                "carol": {"role": "user", "active": true},
+            }
+        };
+
+        let users = db.users;
+        let user_names = users.keys();
+        let active_users = user_names.filter(|name| {
+            let user = users.get(name);
+            user.active
+        });
+        active_users.sort()
+    "#), DataType::Array(vec![
+        DataType::String("alice".to_string()),
+        DataType::String("carol".to_string()),
+    ]));
+}
+
+#[test]
+fn test_e2e_matrix_operations_with_flatten() {
+    // Matrix transpose using map + flatten + slice
+    assert_eq!(run(r#"
+        fn get(arr, i) {
+            arr.get(i)
+        }
+
+        let matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+        let row0 = get(matrix, 0);
+        let row1 = get(matrix, 1);
+        let row2 = get(matrix, 2);
+
+        // Extract columns manually
+        let col0 = [get(row0, 0), get(row1, 0), get(row2, 0)];
+        let col1 = [get(row0, 1), get(row1, 1), get(row2, 1)];
+        let col2 = [get(row0, 2), get(row1, 2), get(row2, 2)];
+
+        let transposed = [col0, col1, col2];
+
+        // Also flatten the original
+        let flat = matrix.flatten();
+
+        output [transposed, flat];
+    "#), DataType::Array(vec![
+        DataType::Array(vec![
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(4), DataType::Int64(7)]),
+            DataType::Array(vec![DataType::Int64(2), DataType::Int64(5), DataType::Int64(8)]),
+            DataType::Array(vec![DataType::Int64(3), DataType::Int64(6), DataType::Int64(9)]),
+        ]),
+        DataType::Array(vec![
+            DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+            DataType::Int64(4), DataType::Int64(5), DataType::Int64(6),
+            DataType::Int64(7), DataType::Int64(8), DataType::Int64(9),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_group_by_with_map_operations() {
+    // Group items by category using map operations
+    assert_eq!(run(r#"
+        let items = [
+            {"name": "apple", "category": "fruit"},
+            {"name": "banana", "category": "fruit"},
+            {"name": "carrot", "category": "vegetable"},
+            {"name": "lettuce", "category": "vegetable"},
+            {"name": "cherry", "category": "fruit"},
+        ];
+
+        let mut groups = {"_init": 0};
+        groups = groups.delete("_init");
+        for item in items {
+            let cat = item.category;
+            let name = item.name;
+            if groups.has(cat) {
+                let existing = groups.get(cat);
+                groups = groups.set(cat, [...existing, name]);
+            } else {
+                groups = groups.set(cat, [name]);
+            }
+        }
+
+        let fruits = groups.get("fruit");
+        let vegs = groups.get("vegetable");
+        output [fruits, vegs];
+    "#), DataType::Array(vec![
+        DataType::Array(vec![
+            DataType::String("apple".to_string()),
+            DataType::String("banana".to_string()),
+            DataType::String("cherry".to_string()),
+        ]),
+        DataType::Array(vec![
+            DataType::String("carrot".to_string()),
+            DataType::String("lettuce".to_string()),
+        ]),
+    ]));
+}
+
+#[test]
+fn test_e2e_array_insert_remove_build() {
+    // Build a sorted array by inserting elements at the right position
+    assert_eq!(run(r#"
+        fn sorted_insert(arr, val) {
+            let mut i = 0;
+            while i < arr.len() {
+                if val < arr.get(i) {
+                    return arr.insert(i, val)
+                }
+                i = i + 1;
+            }
+            [...arr, val]
+        }
+
+        let mut sorted = [];
+        let values = [5, 3, 8, 1, 9, 2, 7, 4, 6];
+        for v in values {
+            sorted = sorted_insert(sorted, v);
+        }
+        sorted
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4), DataType::Int64(5), DataType::Int64(6),
+        DataType::Int64(7), DataType::Int64(8), DataType::Int64(9),
+    ]));
+}
+
+#[test]
+fn test_e2e_string_replace_chain() {
+    // Chain multiple string replacements
+    assert_eq!(run(r#"
+        let template = "Hello, {name}! You have {count} messages.";
+        let result = template
+            .replace("{name}", "Alice")
+            .replace("{count}", "5");
+        result
+    "#), DataType::String("Hello, Alice! You have 5 messages.".to_string()));
+}
+
+#[test]
+fn test_e2e_map_keys_values_round_trip() {
+    // Reconstruct a map from its keys and values
+    assert_eq!(run(r#"
+        let original = {"x": 10, "y": 20, "z": 30};
+        let ks = original.keys();
+        let vs = original.values();
+
+        // Zip keys and values, then build new map
+        let pairs = ks.zip(vs);
+        let mut rebuilt = {"_init": 0};
+        rebuilt = rebuilt.delete("_init");
+        for pair in pairs {
+            let [k, v] = pair;
+            rebuilt = rebuilt.set(k, v * 2);
+        }
+        [rebuilt.x, rebuilt.y, rebuilt.z]
+    "#), DataType::Array(vec![
+        DataType::Int64(20), DataType::Int64(40), DataType::Int64(60),
+    ]));
+}
+
+#[test]
+fn test_e2e_deduplication_pipeline() {
+    // Remove duplicate records from a list using unique and flatten
+    assert_eq!(run(r#"
+        let batches = [
+            [1, 2, 3],
+            [3, 4, 5],
+            [5, 6, 7],
+        ];
+        let all = batches.flatten();
+        let deduped = all.unique().sort();
+        let count = deduped.len();
+        [deduped, count]
+    "#), DataType::Array(vec![
+        DataType::Array(vec![
+            DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+            DataType::Int64(4), DataType::Int64(5), DataType::Int64(6),
+            DataType::Int64(7),
+        ]),
+        DataType::Int64(7),
     ]));
 }

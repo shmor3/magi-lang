@@ -2,7 +2,7 @@
 
 use crate::linter;
 use crate::syntax::ast::*;
-use crate::syntax::parser::parse_v2;
+use crate::syntax::parser::parse_v2_recovering;
 use crate::syntax::type_checker::{self, AstDiagnostic};
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::*;
@@ -64,20 +64,30 @@ pub struct DocumentState {
 pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
     let mut all_diagnostics = Vec::new();
 
-    let program = match parse_v2(source) {
-        Ok(p) => Some(p),
-        Err(e) => {
-            all_diagnostics.push(AstDiagnostic {
-                line: e.line as u32,
-                column: e.column as u32,
-                message: e.message.clone(),
-                severity: crate::eval::DiagnosticSeverity::Error,
-                code: None,
-                help: None,
-                suggestion: None,
-            });
-            None
-        }
+    let (parsed_program, parse_errors) = parse_v2_recovering(source);
+
+    // Add all parse errors as diagnostics
+    for e in &parse_errors {
+        all_diagnostics.push(AstDiagnostic {
+            line: e.line as u32,
+            column: e.column as u32,
+            message: e.message.clone(),
+            severity: crate::eval::DiagnosticSeverity::Error,
+            code: None,
+            help: None,
+            suggestion: None,
+        });
+    }
+
+    // Use the partial program even if there were errors (for symbol extraction).
+    // Only run type checker and linter if there were no parse errors, since
+    // a partial AST may cause confusing secondary diagnostics.
+    let program = if parse_errors.is_empty() {
+        Some(parsed_program)
+    } else if parsed_program.statements.is_empty() {
+        None
+    } else {
+        Some(parsed_program)
     };
 
     let mut functions = HashMap::new();
@@ -86,23 +96,25 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
     let mut structs = HashMap::new();
 
     if let Some(ref prog) = program {
-        // Type check
-        let imports = HashSet::new();
-        let analysis = type_checker::check_types(prog, &imports);
-        all_diagnostics.extend(analysis.diagnostics);
+        if parse_errors.is_empty() {
+            // Only run type checker and linter on a complete (error-free) AST.
+            // Partial ASTs from error recovery would produce confusing secondary diagnostics.
+            let imports = HashSet::new();
+            let analysis = type_checker::check_types(prog, &imports);
+            all_diagnostics.extend(analysis.diagnostics);
 
-        // Lint
-        let lint_config = linter::LintConfig::default();
-        let lint_result = linter::lint(prog, &lint_config);
-        all_diagnostics.extend(lint_result.diagnostics);
+            let lint_config = linter::LintConfig::default();
+            let lint_result = linter::lint(prog, &lint_config);
+            all_diagnostics.extend(lint_result.diagnostics);
 
-        // Deduplicate diagnostics that may overlap between type checker and linter.
-        // Key: (line, column, code) — if two diagnostics share the same location and
-        // error code, keep only the first one (type checker takes priority since it
-        // runs first).
-        deduplicate_diagnostics(&mut all_diagnostics);
+            // Deduplicate diagnostics that may overlap between type checker and linter.
+            // Key: (line, column, code) — if two diagnostics share the same location and
+            // error code, keep only the first one (type checker takes priority since it
+            // runs first).
+            deduplicate_diagnostics(&mut all_diagnostics);
+        }
 
-        // Extract symbols
+        // Extract symbols even from partial programs for IDE features
         extract_symbols(prog, source, &mut functions, &mut variables, &mut enums, &mut structs);
     }
 

@@ -23,6 +23,8 @@ pub struct Parser {
     /// When true, suppress struct literal parsing (e.g., in if/while/for conditions
     /// and match guards where `{` starts a block, not a struct).
     no_struct_literal: bool,
+    /// Accumulated errors during error-recovering parse.
+    errors: Vec<SyntaxError>,
 }
 
 impl Parser {
@@ -32,7 +34,84 @@ impl Parser {
             pos: 0,
             depth: 0,
             no_struct_literal: false,
+            errors: Vec::new(),
         }
+    }
+
+    /// Skip tokens until we reach a likely statement boundary.
+    /// Used for error recovery so parsing can continue after a syntax error.
+    fn synchronize(&mut self) {
+        // First, advance past the current token to avoid infinite loops
+        // when the current token is itself one of the synchronization points.
+        self.advance();
+
+        while !self.at(&TokenKind::Eof) {
+            // If we just passed a semicolon, that's a statement boundary.
+            // Check if the *previous* token was a semicolon.
+            if self.tokens[self.pos.saturating_sub(1)].kind == TokenKind::Semicolon {
+                return;
+            }
+
+            // If we just passed a closing brace, that's a block boundary.
+            if self.tokens[self.pos.saturating_sub(1)].kind == TokenKind::RBrace {
+                return;
+            }
+
+            // If the current token starts a new statement, stop here.
+            match self.peek_kind() {
+                TokenKind::Fn
+                | TokenKind::Let
+                | TokenKind::Const
+                | TokenKind::If
+                | TokenKind::For
+                | TokenKind::While
+                | TokenKind::Loop
+                | TokenKind::Enum
+                | TokenKind::Struct
+                | TokenKind::Match
+                | TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::Import
+                | TokenKind::Use
+                | TokenKind::Type
+                | TokenKind::Test
+                | TokenKind::Mod
+                | TokenKind::Pub
+                | TokenKind::Async
+                | TokenKind::Try
+                | TokenKind::Throw
+                | TokenKind::Output => return,
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    /// Parse the program with error recovery. On a statement parse failure,
+    /// record the error, skip to the next statement boundary, and continue.
+    pub fn parse_program_recovering(&mut self) -> (Program, Vec<SyntaxError>) {
+        let start = self.peek().span;
+        let mut statements = Vec::new();
+
+        while !self.at(&TokenKind::Eof) {
+            match self.parse_statement() {
+                Ok(stmt) => statements.push(stmt),
+                Err(e) => {
+                    self.errors.push(e);
+                    self.synchronize();
+                }
+            }
+        }
+
+        let end = self.peek().span;
+        let program = Program {
+            statements,
+            span: start.merge(end),
+        };
+        let errors = std::mem::take(&mut self.errors);
+        (program, errors)
     }
 
     fn enter_depth(&mut self) -> Result<(), SyntaxError> {
@@ -2565,6 +2644,30 @@ pub fn parse_v2(source: &str) -> Result<Program, SyntaxError> {
     parser.parse_program()
 }
 
+/// Parse v2 source code with error recovery.
+///
+/// Returns a (possibly partial) program and a list of all syntax errors found.
+/// If the lexer fails, the first error is a lexer error and the program is empty.
+/// If there are no errors, the vec is empty and the program is complete.
+///
+/// This is intended for IDE/LSP use where showing multiple diagnostics at once
+/// is preferable to stopping at the first error.
+pub fn parse_v2_recovering(source: &str) -> (Program, Vec<SyntaxError>) {
+    let tokens = match super::lexer::tokenize(source) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            // Lexer error — return empty program with the error
+            let empty = Program {
+                statements: Vec::new(),
+                span: Span::default(),
+            };
+            return (empty, vec![e]);
+        }
+    };
+    let mut parser = Parser::new(tokens);
+    parser.parse_program_recovering()
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -3778,5 +3881,100 @@ output result;
             },
             _ => panic!("expected ExprStatement"),
         }
+    }
+
+    // =========================================================================
+    // Error recovery tests (parse_v2_recovering)
+    // =========================================================================
+
+    #[test]
+    fn test_recovering_no_errors() {
+        let (prog, errors) = parse_v2_recovering("let x = 1; let y = 2;");
+        assert!(errors.is_empty());
+        assert_eq!(prog.statements.len(), 2);
+    }
+
+    #[test]
+    fn test_recovering_single_error() {
+        let (prog, errors) = parse_v2_recovering("let = 1; let y = 2;");
+        assert!(!errors.is_empty());
+        // Should still recover and parse `let y = 2`
+        assert!(prog.statements.len() >= 1, "expected at least 1 recovered statement, got {}", prog.statements.len());
+    }
+
+    #[test]
+    fn test_recovering_multiple_errors() {
+        let source = "let = 1;\nlet = 2;\nlet z = 3;";
+        let (prog, errors) = parse_v2_recovering(source);
+        assert!(errors.len() >= 2, "expected at least 2 errors, got {}", errors.len());
+        // Should recover and parse `let z = 3`
+        assert!(prog.statements.len() >= 1, "expected at least 1 recovered statement");
+        // Verify the valid statement is `let z = 3`
+        let last = prog.statements.last().unwrap();
+        match &last.kind {
+            StatementKind::Let { name, .. } => assert_eq!(name, "z"),
+            _ => panic!("expected Let for z"),
+        }
+    }
+
+    #[test]
+    fn test_recovering_valid_between_errors() {
+        let source = "let = ;\nfn foo() { 1 }\nlet = ;";
+        let (prog, errors) = parse_v2_recovering(source);
+        assert!(errors.len() >= 2, "expected at least 2 errors, got {}", errors.len());
+        // Should recover the fn definition
+        let has_fn = prog.statements.iter().any(|s| matches!(&s.kind, StatementKind::FunctionDef(def) if def.name == "foo"));
+        assert!(has_fn, "expected fn foo to be recovered");
+    }
+
+    #[test]
+    fn test_recovering_preserves_parse_v2_behavior() {
+        // parse_v2 should still return Err on the first error
+        let result = parse_v2("let = 1; let y = 2;");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_recovering_keyword_sync() {
+        // Error followed by a keyword-started statement
+        let source = "let = ;\nfor i in [1,2,3] { output i; }";
+        let (prog, errors) = parse_v2_recovering(source);
+        assert!(!errors.is_empty());
+        // Should recover and parse the for loop
+        let has_for = prog.statements.iter().any(|s| matches!(&s.kind, StatementKind::ForLoop { .. }));
+        assert!(has_for, "expected for loop to be recovered");
+    }
+
+    #[test]
+    fn test_recovering_brace_sync() {
+        // Malformed function followed by valid code
+        let source = "fn { } let x = 42;";
+        let (prog, errors) = parse_v2_recovering(source);
+        assert!(!errors.is_empty());
+        // Should recover and parse `let x = 42`
+        let has_let = prog.statements.iter().any(|s| matches!(&s.kind, StatementKind::Let { name, .. } if name == "x"));
+        assert!(has_let, "expected let x to be recovered");
+    }
+
+    #[test]
+    fn test_recovering_empty_source() {
+        let (prog, errors) = parse_v2_recovering("");
+        assert!(errors.is_empty());
+        assert!(prog.statements.is_empty());
+    }
+
+    #[test]
+    fn test_recovering_all_errors() {
+        // Source with no valid statements at all (lexer error)
+        let (prog, errors) = parse_v2_recovering("@@@ ;;; @@@");
+        assert!(!errors.is_empty());
+        assert!(prog.statements.is_empty());
+    }
+
+    #[test]
+    fn test_recovering_parser_level_all_errors() {
+        // Multiple parser-level errors, no valid statements
+        let (_, errors) = parse_v2_recovering("let = ; let = ;");
+        assert!(errors.len() >= 2, "expected at least 2 errors, got {}", errors.len());
     }
 }
