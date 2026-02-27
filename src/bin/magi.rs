@@ -790,9 +790,6 @@ impl OperationEvaluator for FullEvaluator {
                 match &input {
                     DataType::String(s) => {
                         let w = width.to_i64().unwrap_or(0).max(0) as usize;
-                        if w > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!("pad_start width exceeds {} byte limit", MAX_STRING_OUTPUT)));
-                        }
                         let pad_str = match &fill {
                             Some(DataType::String(f)) if !f.is_empty() => f.clone(),
                             _ => " ".to_string(),
@@ -801,7 +798,13 @@ impl OperationEvaluator for FullEvaluator {
                         if char_count >= w {
                             Ok(DataType::String(s.clone()))
                         } else {
-                            let padding: String = pad_str.chars().cycle().take(w - char_count).collect();
+                            let pad_chars = w - char_count;
+                            // Check estimated byte size (pad chars * max bytes per fill char)
+                            let max_pad_bytes = pad_chars.saturating_mul(pad_str.len());
+                            if s.len().saturating_add(max_pad_bytes) > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!("pad_start result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                            }
+                            let padding: String = pad_str.chars().cycle().take(pad_chars).collect();
                             Ok(DataType::String(format!("{}{}", padding, s)))
                         }
                     }
@@ -814,9 +817,6 @@ impl OperationEvaluator for FullEvaluator {
                 match &input {
                     DataType::String(s) => {
                         let w = width.to_i64().unwrap_or(0).max(0) as usize;
-                        if w > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!("pad_end width exceeds {} byte limit", MAX_STRING_OUTPUT)));
-                        }
                         let pad_str = match &fill {
                             Some(DataType::String(f)) if !f.is_empty() => f.clone(),
                             _ => " ".to_string(),
@@ -825,7 +825,12 @@ impl OperationEvaluator for FullEvaluator {
                         if char_count >= w {
                             Ok(DataType::String(s.clone()))
                         } else {
-                            let padding: String = pad_str.chars().cycle().take(w - char_count).collect();
+                            let pad_chars = w - char_count;
+                            let max_pad_bytes = pad_chars.saturating_mul(pad_str.len());
+                            if s.len().saturating_add(max_pad_bytes) > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!("pad_end result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                            }
+                            let padding: String = pad_str.chars().cycle().take(pad_chars).collect();
                             Ok(DataType::String(format!("{}{}", s, padding)))
                         }
                     }
@@ -1419,9 +1424,13 @@ fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
 }
 
 fn cmd_lsp() {
-    tokio::runtime::Runtime::new()
-        .expect("failed to create tokio runtime")
-        .block_on(magi_lang::lsp::run_server());
+    match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt.block_on(magi_lang::lsp::run_server()),
+        Err(e) => {
+            eprintln!("Error: failed to create tokio runtime: {}", e);
+            process::exit(1);
+        }
+    }
 }
 
 fn cmd_run(path: &str) {

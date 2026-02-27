@@ -7533,3 +7533,127 @@ fn test_screaming_snake_case_no_w200() {
         .collect();
     assert!(w200s.is_empty(), "W200 false positive for SCREAMING_SNAKE_CASE: {:?}", w200s);
 }
+
+#[test]
+fn test_max_call_depth() {
+    // Infinite recursion should hit max call depth
+    // Needs larger stack due to deep recursion in debug mode
+    let result = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let err = run_err(r#"
+                fn boom() { boom() }
+                boom()
+            "#);
+            let msg = format!("{}", err);
+            assert!(msg.contains("call depth") || msg.contains("recursion") || msg.contains("E401") || msg.contains("Maximum"),
+                "expected max call depth error: {}", msg);
+        })
+        .unwrap()
+        .join();
+    result.unwrap();
+}
+
+#[test]
+fn test_compound_assign_on_immutable() {
+    // Compound assignment on immutable variable should error
+    let err = run_err(r#"
+        let x = 5;
+        x += 1;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("immutable") || msg.contains("mutable") || msg.contains("cannot assign"),
+        "expected immutability error: {}", msg);
+}
+
+#[test]
+fn test_map_comprehension_success() {
+    // Map comprehension should produce correct output
+    // Key must be a string literal, value can be any expression
+    let result = run(r#"
+        let data = [1, 2, 3];
+        let doubled = {"item": v * 2 for v in data};
+        output doubled;
+    "#);
+    // Map comprehension creates map entries — last iteration value wins for same key
+    match &result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("item"), Some(&DataType::Int64(6)));
+        }
+        other => panic!("expected map, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_w102_variable_shadowing() {
+    // Variable shadowing within same scope should warn
+    let src = r#"
+        let x = 1;
+        let x = 2;
+        output x;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let analysis = check_types(&prog, &std::collections::HashSet::new());
+    let w102s: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W102"))
+        .collect();
+    assert!(!w102s.is_empty(), "Expected W102 for variable shadowing");
+}
+
+#[test]
+fn test_w101_unused_import() {
+    // Unused import should trigger W101
+    let src = r#"
+        import "unused_plugin";
+        output 42;
+    "#;
+    let prog = parse_v2(src).unwrap();
+    let mut imports = std::collections::HashSet::new();
+    imports.insert("unused_plugin".to_string());
+    let analysis = check_types(&prog, &imports);
+    let w101s: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W101"))
+        .collect();
+    assert!(!w101s.is_empty(), "Expected W101 for unused import");
+}
+
+#[test]
+fn test_loop_break_with_value() {
+    // Loop with break value should return the break value
+    let result = run(r#"
+        let x = loop {
+            break 42;
+        };
+        output x;
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_for_loop_last_value() {
+    // For loop returns the last iteration body value
+    let result = run(r#"
+        let mut last = 0;
+        for i in [1, 2, 3] {
+            last = i * 10;
+        }
+        output last;
+    "#);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+#[test]
+fn test_while_break_value() {
+    // While loop with break value via loop expression
+    let result = run(r#"
+        let mut i = 0;
+        let x = loop {
+            i = i + 1;
+            if i == 5 {
+                break i * 100;
+            }
+        };
+        output x;
+    "#);
+    assert_eq!(result, DataType::Int64(500));
+}
