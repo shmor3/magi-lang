@@ -1,6 +1,6 @@
 /*
  * MAGI Language Showcase
- * Version: 0.2.0-alpha
+ * Version: 0.3.0-alpha
  *
  * A comprehensive tour of every major language feature.
  * Run with: magi run examples/showcase/main.magi

@@ -421,7 +421,7 @@ pub fn handle_completion(
             CompletionItemKind::TYPE_PARAMETER
         } else if var.type_annotation.as_deref() == Some("module") {
             CompletionItemKind::MODULE
-        } else if var.type_annotation.as_ref().map_or(false, |t| t.starts_with("import(")) {
+        } else if var.type_annotation.as_ref().is_some_and(|t| t.starts_with("import(")) {
             CompletionItemKind::REFERENCE
         } else if var.constant {
             CompletionItemKind::CONSTANT
@@ -458,7 +458,7 @@ pub fn handle_completion(
     }
 
     // User-defined structs
-    for (name, _) in &state.structs {
+    for name in state.structs.keys() {
         items.push(CompletionItem {
             label: name.clone(),
             kind: Some(CompletionItemKind::STRUCT),

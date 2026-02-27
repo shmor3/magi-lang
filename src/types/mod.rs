@@ -569,6 +569,7 @@ impl std::fmt::Display for ChannelType {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

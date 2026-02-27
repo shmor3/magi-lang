@@ -152,11 +152,11 @@ fn find_name_col(source: &str, line: u32, name: &str) -> Option<u32> {
         let abs_offset = start + offset;
         let before_ok = abs_offset == 0
             || !line_text.as_bytes().get(abs_offset - 1)
-                .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
+                .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
         let after_pos = abs_offset + name_bytes.len();
         let after_ok = after_pos >= line_text.len()
             || !line_text.as_bytes().get(after_pos)
-                .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
+                .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
         if before_ok && after_ok {
             let char_col = line_text[..abs_offset].chars().count() as u32;
             return Some(char_col + 1);
@@ -1422,7 +1422,7 @@ mod tests {
         let source = "while true { output 1; }";
         let (_, diagnostics) = analyze_document(source);
         let const_cond_diags: Vec<_> = diagnostics.iter()
-            .filter(|d| d.message.contains("always") && d.code.as_deref().map_or(false, |c| c == "W204" || c == "W105"))
+            .filter(|d| d.message.contains("always") && d.code.as_deref().is_some_and(|c| c == "W204" || c == "W105"))
             .collect();
         assert_eq!(const_cond_diags.len(), 1,
             "expected exactly 1 constant condition diagnostic (W204), got {}: {:?}",

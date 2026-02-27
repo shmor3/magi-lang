@@ -16,6 +16,12 @@ pub struct IrModule {
     pub globals: Vec<IrGlobal>,
 }
 
+impl Default for IrModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IrModule {
     pub fn new() -> Self {
         Self {

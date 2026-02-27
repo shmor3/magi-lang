@@ -7,7 +7,7 @@ use std::fmt;
 
 /// The current MAGI language version.
 pub const MAJOR: u32 = 0;
-pub const MINOR: u32 = 2;
+pub const MINOR: u32 = 3;
 pub const PATCH: u32 = 0;
 
 /// Pre-release label (empty string for stable releases).
@@ -27,7 +27,7 @@ pub fn current() -> Version {
     }
 }
 
-/// Returns the current version as a string (e.g., "0.2.0-alpha").
+/// Returns the current version as a string (e.g., "0.3.0-alpha").
 pub fn version_string() -> String {
     current().to_string()
 }
@@ -331,7 +331,7 @@ mod tests {
     fn test_current_version() {
         let v = current();
         assert_eq!(v.major, 0);
-        assert_eq!(v.minor, 2);
+        assert_eq!(v.minor, 3);
         assert_eq!(v.patch, 0);
         assert_eq!(v.pre_release, Some("alpha".to_string()));
     }
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn test_version_string() {
         let s = version_string();
-        assert!(s.starts_with("0.2.0"));
+        assert!(s.starts_with("0.3.0"));
     }
 
     #[test]

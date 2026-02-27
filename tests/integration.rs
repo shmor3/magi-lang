@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! Integration tests for the MAGI language.
 //!
 //! Tests the full pipeline: source → lexer → parser → type_checker → interpreter
@@ -476,7 +477,7 @@ impl OperationEvaluator for StubEvaluator {
                         DataType::Int64(n) => format!("{}", n),
                         DataType::Float64(f) => format!("{}", f),
                         DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-                        DataType::Array(arr) => format!("[{}]", arr.iter().map(|v| to_json_stub(v)).collect::<Vec<_>>().join(",")),
+                        DataType::Array(arr) => format!("[{}]", arr.iter().map(to_json_stub).collect::<Vec<_>>().join(",")),
                         DataType::Map(m) => format!("{{{}}}", m.iter().filter(|(k,_)| !k.starts_with("__")).map(|(k,v)| format!("\"{}\":{}", k, to_json_stub(v))).collect::<Vec<_>>().join(",")),
                         _ => "null".to_string(),
                     }
@@ -1499,7 +1500,7 @@ fn test_type_check_enum_struct() {
 fn test_version_info() {
     let v = magi_lang::version::current();
     assert_eq!(v.major, 0);
-    assert_eq!(v.minor, 2);
+    assert_eq!(v.minor, 3);
     assert!(!v.is_stable());
 }
 
@@ -3810,7 +3811,7 @@ fn test_type_checker_error_codes_on_conditions() {
     let program = parse_v2(source).unwrap();
     let analysis = check_types(&program, &HashSet::new());
     let has_e101 = analysis.diagnostics.iter().any(|d| {
-        d.code.as_ref().map_or(false, |c: &String| c.contains("E101"))
+        d.code.as_ref().is_some_and(|c: &String| c.contains("E101"))
     });
     assert!(has_e101, "Expected E101 for non-bool if condition, got: {:?}", analysis.diagnostics);
 }
@@ -3822,7 +3823,7 @@ fn test_type_checker_error_codes_on_unknown_function() {
     let program = parse_v2(source).unwrap();
     let analysis = check_types(&program, &HashSet::new());
     let has_e201 = analysis.diagnostics.iter().any(|d| {
-        d.code.as_ref().map_or(false, |c: &String| c.contains("E201"))
+        d.code.as_ref().is_some_and(|c: &String| c.contains("E201"))
     });
     assert!(has_e201, "Expected E201 for unknown function, got: {:?}", analysis.diagnostics);
 }
@@ -3834,7 +3835,7 @@ fn test_type_checker_error_codes_on_arity_mismatch() {
     let program = parse_v2(source).unwrap();
     let analysis = check_types(&program, &HashSet::new());
     let has_e405 = analysis.diagnostics.iter().any(|d| {
-        d.code.as_ref().map_or(false, |c: &String| c.contains("E405"))
+        d.code.as_ref().is_some_and(|c: &String| c.contains("E405"))
     });
     assert!(has_e405, "Expected E405 for arity mismatch, got: {:?}", analysis.diagnostics);
 }
@@ -8887,7 +8888,7 @@ fn test_deeply_nested_patterns_error() {
     for _ in 0..200 {
         src.push('[');
     }
-    src.push_str("_");
+    src.push('_');
     for _ in 0..200 {
         src.push(']');
     }
@@ -14013,4 +14014,376 @@ fn test_smoke_error_recovery() {
     assert!(!errs3.is_empty(), "Expected error for @ token");
     // Should still have some recovered statements
     let _ = prog3;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Round 82: Final coverage sweep — 18 tests for critical gaps
+// ═══════════════════════════════════════════════════════════
+
+/// Type alias used as annotation on a variable that feeds into a match arm.
+/// Exercises type alias resolution + match interaction end-to-end.
+#[test]
+fn test_type_alias_used_in_match_context() {
+    let result = run(r#"
+        type Num = int64
+        let x: Num = 42;
+        let label = match x {
+            0 => "zero",
+            42 => "answer",
+            _ => "other",
+        };
+        label
+    "#);
+    assert_eq!(result, DataType::String("answer".to_string()));
+}
+
+/// Type alias inside a module, resolved by the type checker.
+/// Ensures module-scoped type aliases do not leak or cause errors.
+#[test]
+fn test_type_alias_inside_module_type_check() {
+    let warnings = typecheck_warnings(r#"
+        mod math {
+            type Real = float64
+            fn square(x: Real) -> float64 { x * x }
+        }
+    "#);
+    // Should not produce any warnings — Real resolves to float64
+    let alias_errors: Vec<_> = warnings.iter().filter(|w| w.as_str() == "E100").collect();
+    assert!(alias_errors.is_empty(),
+        "Type alias inside module should resolve cleanly, got: {:?}", warnings);
+}
+
+/// Type alias chain: A -> B -> int64, used in const def. Verifies the
+/// type checker follows multi-hop alias chains.
+#[test]
+fn test_type_alias_chain_in_const() {
+    let warnings = typecheck_warnings(r#"
+        type A = int64
+        type B = A
+        const val: B = 10;
+    "#);
+    // No type mismatch warnings expected
+    let mismatch: Vec<_> = warnings.iter().filter(|w| w.contains("E100")).collect();
+    assert!(mismatch.is_empty(), "Chained alias should resolve, got: {:?}", mismatch);
+}
+
+/// Error recovery parser preserves function definitions through syntax errors.
+/// Important for LSP which needs partial ASTs.
+#[test]
+fn test_error_recovery_preserves_functions_and_modules() {
+    use magi_lang::syntax::parser::parse_v2_recovering;
+    use magi_lang::syntax::ast::StatementKind;
+
+    // Use parser-level errors (not lexer errors like @@@)
+    let src = r#"
+        fn good_fn(x) { x + 1 }
+        let = ;
+        fn another_good(y) { y * 2 }
+        let also_bad = ;
+    "#;
+
+    let (prog, errors) = parse_v2_recovering(src);
+    assert!(!errors.is_empty(), "Should have syntax errors");
+
+    // Check that we recovered at least one function definition
+    let has_fn = prog.statements.iter().any(|s| matches!(&s.kind, StatementKind::FunctionDef(f) if f.name == "good_fn" || f.name == "another_good"));
+    assert!(has_fn, "Error recovery should preserve function definitions, got: {:?}",
+        prog.statements.iter().map(|s| format!("{:?}", std::mem::discriminant(&s.kind))).collect::<Vec<_>>());
+}
+
+/// Error recovery with module-level construct — ensures mod blocks survive.
+#[test]
+fn test_error_recovery_with_module_block() {
+    use magi_lang::syntax::parser::parse_v2_recovering;
+    use magi_lang::syntax::ast::StatementKind;
+
+    // Module first, then parser-level errors (not lexer errors)
+    let src = r#"
+        mod utils {
+            fn helper() { 1 }
+        }
+        let = ;
+        let y = 100;
+    "#;
+    let (prog, errors) = parse_v2_recovering(src);
+    assert!(!errors.is_empty(), "Should have errors from malformed let");
+
+    let has_module = prog.statements.iter().any(|s| matches!(&s.kind, StatementKind::ModuleDef { name, .. } if name == "utils"));
+    assert!(has_module, "Module definition should survive error recovery");
+}
+
+/// W209 (same-scope shadowing) standalone integration test with let mut.
+#[test]
+fn test_lint_w209_shadow_let_mut_then_let() {
+    use magi_lang::linter::{lint, LintConfig};
+    let config = LintConfig::default();
+
+    let src = "let mut x = 1; let x = 2; output x;";
+    let program = parse(src);
+    let result = lint(&program, &config);
+    let codes: Vec<_> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W209".to_string()),
+        "let mut followed by let in same scope should trigger W209, got: {:?}", codes);
+}
+
+/// W209 not triggered for variables in nested scope.
+#[test]
+fn test_lint_w209_no_false_positive_nested_scope() {
+    use magi_lang::linter::{lint, LintConfig};
+    let config = LintConfig::default();
+
+    let src = r#"
+        let x = 1;
+        if true {
+            let x = 2;
+            output x;
+        }
+        output x;
+    "#;
+    let program = parse(src);
+    let result = lint(&program, &config);
+    let w209_count = result.diagnostics.iter().filter(|d| d.code.as_deref() == Some("W209")).count();
+    assert_eq!(w209_count, 0,
+        "Nested scope shadowing should not trigger W209, got {} occurrences", w209_count);
+}
+
+/// W212 standalone test: break in finally block.
+#[test]
+fn test_lint_w212_break_in_finally() {
+    use magi_lang::linter::{lint, LintConfig};
+    let config = LintConfig::default();
+
+    let src = r#"
+        for i in 0..5 {
+            try {
+                output i;
+            } catch e {
+                output e;
+            } finally {
+                break;
+            }
+        }
+    "#;
+    let program = parse(src);
+    let result = lint(&program, &config);
+    let codes: Vec<_> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
+    assert!(codes.contains(&"W212".to_string()),
+        "break in finally should trigger W212, got: {:?}", codes);
+}
+
+/// W212 not triggered when finally has no control flow.
+#[test]
+fn test_lint_w212_clean_finally_no_warning() {
+    use magi_lang::linter::{lint, LintConfig};
+    let config = LintConfig::default();
+
+    let src = r#"
+        try {
+            output 1;
+        } catch e {
+            output e;
+        } finally {
+            output "cleanup";
+        }
+    "#;
+    let program = parse(src);
+    let result = lint(&program, &config);
+    let w212_count = result.diagnostics.iter().filter(|d| d.code.as_deref() == Some("W212")).count();
+    assert_eq!(w212_count, 0,
+        "Clean finally block should not trigger W212, got {} occurrences", w212_count);
+}
+
+/// Formatter roundtrip for a program containing module, enum, struct, and type alias.
+/// Verifies format(parse(format(x))) == format(x) (idempotency).
+#[test]
+fn test_formatter_roundtrip_module_enum_struct_type_alias() {
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let config = FormatConfig::default();
+
+    let src = r#"
+        type Id = int64
+
+        enum Color {
+            Red,
+            Green,
+            Blue,
+        }
+
+        struct Point {
+            x: float64,
+            y: float64,
+        }
+
+        mod shapes {
+            fn area(p) {
+                p.x * p.y
+            }
+        }
+    "#;
+
+    let program = parse(src);
+    let formatted = format_program(&program, &config);
+    assert!(!formatted.is_empty(), "Formatted output should not be empty");
+
+    let reparsed = parse_v2(&formatted).unwrap_or_else(|e| panic!("Re-parse failed: {}", e));
+    let reformatted = format_program(&reparsed, &config);
+    assert_eq!(formatted, reformatted,
+        "Formatter not idempotent for module/enum/struct/type_alias.\nFirst:\n{}\nSecond:\n{}", formatted, reformatted);
+}
+
+/// Test runner isolates module definitions between tests.
+#[test]
+fn test_test_runner_module_isolation() {
+    let src = r#"
+        mod math {
+            fn double(x) { x * 2 }
+        }
+
+        test "use module fn" {
+            assert(math::double(5) == 10);
+        }
+
+        test "module still accessible" {
+            assert(math::double(3) == 6);
+        }
+    "#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    for r in &results {
+        assert!(r.passed, "Test '{}' failed: {:?}", r.name, r.error_message);
+    }
+    assert_eq!(results.len(), 2, "Expected 2 test results");
+}
+
+/// Map destructuring in a for-loop with array of maps.
+#[test]
+fn test_for_loop_map_destructure_array_of_maps() {
+    let result = run(r#"
+        let data = [
+            { "name": "Alice", "age": 30 },
+            { "name": "Bob", "age": 25 },
+        ];
+        let mut names = [];
+        for {name} in data {
+            names = names.push(name);
+        }
+        names
+    "#);
+    match &result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0], DataType::String("Alice".to_string()));
+            assert_eq!(arr[1], DataType::String("Bob".to_string()));
+        }
+        other => panic!("Expected Array, got {:?}", other),
+    }
+}
+
+/// Map destructuring in for-loop with alias: `for {name: n, age: a} in ...`
+#[test]
+fn test_for_loop_map_destructure_with_alias() {
+    let result = run(r#"
+        let people = [
+            { "name": "X", "age": 1 },
+            { "name": "Y", "age": 2 },
+        ];
+        let mut total = 0;
+        for {age: a} in people {
+            total = total + a;
+        }
+        total
+    "#);
+    assert_eq!(result, DataType::Int64(3));
+}
+
+/// Optional chaining with field access then further field access.
+/// Tests `obj?.field.nested` propagation of null through the chain.
+#[test]
+fn test_optional_chain_field_then_field() {
+    // Non-null case: access nested field
+    let result = run(r#"
+        let obj = { "data": { "value": 42 } };
+        let x = obj?.data;
+        x.value
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+
+    // Null case: ?. short-circuits to null
+    let result2 = run(r#"
+        let obj = null;
+        obj?.data
+    "#);
+    assert_eq!(result2, DataType::Null);
+}
+
+/// Nested try-catch-finally as expression inside another expression.
+#[test]
+fn test_nested_try_catch_finally_as_expr() {
+    let result = run(r#"
+        let val = try {
+            let inner = try {
+                throw "inner_error";
+            } catch e {
+                f"caught: {e}"
+            } finally {
+                let cleanup = 0;
+            };
+            inner
+        } catch e {
+            "outer_catch"
+        };
+        val
+    "#);
+    assert_eq!(result, DataType::String("caught: inner_error".to_string()));
+}
+
+/// Type checker warns on unknown type alias target.
+#[test]
+fn test_type_checker_unknown_alias_target_warns() {
+    let warnings = typecheck_warnings(r#"
+        type Foo = nonexistent_type
+        let x: Foo = 42;
+    "#);
+    // Should get a warning about unknown type
+    let has_unknown = warnings.iter().any(|w| w == "E100");
+    assert!(has_unknown,
+        "Unknown alias target should produce E100, got: {:?}", warnings);
+}
+
+/// Type checker W208: duplicate use-import detection (integration level).
+#[test]
+fn test_type_checker_w208_duplicate_use_import() {
+    let warnings = typecheck_warnings(r#"
+        mod utils {
+            fn helper() { 1 }
+        }
+        use utils::helper;
+        use utils::helper;
+    "#);
+    let has_w208 = warnings.iter().any(|w| w == "W208");
+    assert!(has_w208,
+        "Duplicate use-import should produce W208, got: {:?}", warnings);
+}
+
+/// Pipe operator combined with lambda variable and method call.
+/// Exercises pipe resolution + lambda capture interaction.
+#[test]
+fn test_pipe_with_lambda_and_method_chain() {
+    let result = run(r#"
+        let double = |x| x * 2
+        let result = 5 |> double(_)
+        result
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+
+    // Chained with another lambda
+    let result2 = run(r#"
+        let inc = |x| x + 1
+        let double = |x| x * 2
+        let result = 3 |> inc(_) |> double(_)
+        result
+    "#);
+    assert_eq!(result2, DataType::Int64(8));
 }

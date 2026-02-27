@@ -64,7 +64,7 @@ pub fn check_naming_pascal_case(name: &str, span: Span) -> Option<AstDiagnostic>
         return None;
     }
     // PascalCase: starts with uppercase, no underscores
-    let first_upper = name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+    let first_upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     let no_underscores = !name.contains('_');
     if first_upper && no_underscores {
         return None;

@@ -250,11 +250,9 @@ impl OperationEvaluator for FullEvaluator {
                 match &array {
                     DataType::Array(arr) => {
                         let len = arr.len() as i64;
-                        let start = match &start_val {
-                            v => {
-                                let n = v.to_i64().unwrap_or(0);
-                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                            }
+                        let start = {
+                            let n = start_val.to_i64().unwrap_or(0);
+                            if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
                         };
                         let end = match &end_val {
                             Some(v) => {
@@ -277,13 +275,10 @@ impl OperationEvaluator for FullEvaluator {
                     let mut sorted = arr.clone();
                     sorted.sort_by(|a, b| {
                         // Try numeric comparison first (handles cross-type: Int32, Int64, Float32, Float64, etc.)
-                        match (promote_numeric(a), promote_numeric(b)) {
-                            (Some(pa), Some(pb)) => {
-                                let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                                let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                return fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal);
-                            }
-                            _ => {}
+                        if let (Some(pa), Some(pb)) = (promote_numeric(a), promote_numeric(b)) {
+                            let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                            let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                            return fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal);
                         }
                         match (a, b) {
                             (DataType::String(x), DataType::String(y)) => x.cmp(y),
@@ -992,15 +987,14 @@ impl OperationEvaluator for FullEvaluator {
                         DataType::Uint32(n) => format!("{}", n),
                         DataType::Uint64(n) => format!("{}", n),
                         DataType::Float64(f) => {
-                            if f.is_nan() { "null".to_string() }
-                            else if f.is_infinite() { "null".to_string() }
+                            if !f.is_finite() { "null".to_string() }
                             else if *f == (*f as i64 as f64) && f.abs() < 1e15 { format!("{}.0", *f as i64) }
                             else { format!("{}", f) }
                         }
                         DataType::Float32(f) => to_json(&DataType::Float64(*f as f64)),
                         DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")),
                         DataType::Array(arr) => {
-                            let parts: Vec<String> = arr.iter().map(|v| to_json(v)).collect();
+                            let parts: Vec<String> = arr.iter().map(to_json).collect();
                             format!("[{}]", parts.join(","))
                         }
                         DataType::Map(m) => {
@@ -1038,11 +1032,11 @@ impl OperationEvaluator for FullEvaluator {
                 None => Ok(DataType::Null),
             },
             OperationType::BitShiftLeft => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) if y >= 0 && y < 64 => Ok(DataType::Int64(x << y)),
+                (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x << y)),
                 _ => Ok(DataType::Null),
             },
             OperationType::BitShiftRight => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) if y >= 0 && y < 64 => Ok(DataType::Int64(x >> y)),
+                (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x >> y)),
                 _ => Ok(DataType::Null),
             },
 
@@ -1154,7 +1148,7 @@ impl OperationEvaluator for FullEvaluator {
                         let flo = match lo { Ok(i) => i as f64, Err(f) => f };
                         let fhi = match hi { Ok(i) => i as f64, Err(f) => f };
                         let clamped = fv.max(flo).min(fhi);
-                        if matches!(v, Ok(_)) && matches!(lo, Ok(_)) && matches!(hi, Ok(_)) {
+                        if v.is_ok() && lo.is_ok() && hi.is_ok() {
                             Ok(DataType::Int64(clamped as i64))
                         } else {
                             Ok(DataType::Float64(clamped))
@@ -1260,7 +1254,7 @@ impl OperationEvaluator for FullEvaluator {
                             if let Ok(f) = s.parse::<f64>() { return Ok(DataType::Float64(f)); }
                             Err(format!("Invalid JSON: {}", s))
                         }
-                        parse_json_value(s).map_err(|e| EvalError::InvalidInput(e))
+                        parse_json_value(s).map_err(EvalError::InvalidInput)
                     }
                     _ => Err(EvalError::InvalidInput(format!("ParseJson expects String, got {:?}", input))),
                 }
@@ -2158,7 +2152,7 @@ impl OperationEvaluator for FullEvaluator {
                         DataType::Float32(f) => to_json_compact(&DataType::Float64(*f as f64)),
                         DataType::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")),
                         DataType::Array(arr) => {
-                            let parts: Vec<String> = arr.iter().map(|v| to_json_compact(v)).collect();
+                            let parts: Vec<String> = arr.iter().map(to_json_compact).collect();
                             format!("[{}]", parts.join(","))
                         }
                         DataType::Map(m) => {
@@ -2321,9 +2315,9 @@ impl OperationEvaluator for FullEvaluator {
                     .unwrap_or_default()
                     .as_nanos() as u64;
                 let mut bytes = [0u8; 16];
-                for i in 0..16 {
+                for b in &mut bytes {
                     seed = xorshift64(seed);
-                    bytes[i] = seed as u8;
+                    *b = seed as u8;
                 }
                 bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
                 bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
@@ -3119,9 +3113,9 @@ impl OperationEvaluator for FullEvaluator {
                     .unwrap_or_default()
                     .as_nanos() as u64;
                 let mut bytes = [0u8; 16];
-                for i in 0..16 {
+                for b in &mut bytes {
                     seed = xorshift64(seed);
-                    bytes[i] = seed as u8;
+                    *b = seed as u8;
                 }
                 bytes[6] = (bytes[6] & 0x0f) | 0x40;
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -3298,7 +3292,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Array(arr) => {
                         let mut seen = Vec::new();
                         for item in arr {
-                            let already = seen.iter().any(|s: &DataType| *s == item);
+                            let already = seen.contains(&item);
                             if !already {
                                 seen.push(item);
                             }
@@ -3452,7 +3446,7 @@ impl OperationEvaluator for FullEvaluator {
                                 let mut sorted = nums.clone();
                                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                                 let mid = sorted.len() / 2;
-                                if sorted.len() % 2 == 0 {
+                                if sorted.len().is_multiple_of(2) {
                                     Ok(DataType::Float64((sorted[mid - 1] + sorted[mid]) / 2.0))
                                 } else {
                                     Ok(DataType::Float64(sorted[mid]))
@@ -4067,7 +4061,7 @@ impl OperationEvaluator for FullEvaluator {
                 if bits > 0 {
                     result.push(alphabet[((buffer << (5 - bits)) & 0x1F) as usize] as char);
                 }
-                while result.len() % 8 != 0 {
+                while !result.len().is_multiple_of(8) {
                     result.push('=');
                 }
                 Ok(DataType::String(result))
@@ -4700,7 +4694,7 @@ fn yaml_parse_block_mapping(lines: &[&str], mut line_idx: usize, base_indent: us
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') { line_idx += 1; continue; }
         let indent = yaml_indent(line);
-        if indent < base_indent || indent > base_indent { break; }
+        if indent != base_indent { break; }
         if !yaml_is_mapping_line(trimmed) { break; }
         let (key, value_part) = yaml_split_mapping_line(trimmed);
         let key_str = yaml_unquote(&key);
@@ -4983,7 +4977,7 @@ fn yaml_is_mapping_line(trimmed: &str) -> bool {
     let chars: Vec<char> = trimmed.chars().collect();
     for (i, &c) in chars.iter().enumerate() {
         if in_single { if c == '\'' { in_single = false; } continue; }
-        if in_double { if c == '\\' { continue; } if c == '"' { in_double = false; } continue; }
+        if in_double { if c == '\\' { continue; } else if c == '"' { in_double = false; } continue; }
         if c == '\'' { in_single = true; continue; }
         if c == '"' { in_double = true; continue; }
         if c == ':' && (i + 1 >= chars.len() || chars[i + 1] == ' ') { return true; }
@@ -5046,8 +5040,8 @@ fn yaml_unquote(s: &str) -> String {
 fn yaml_collect_flow(lines: &[&str], start: usize, open: char, close: char) -> Result<String, EvalError> {
     let mut result = String::new();
     let mut depth = 0i32;
-    for i in start..lines.len() {
-        let line = lines[i].trim();
+    for line_str in &lines[start..] {
+        let line = line_str.trim();
         for c in line.chars() {
             if c == open { depth += 1; }
             if c == close { depth -= 1; }
@@ -5062,13 +5056,13 @@ fn yaml_collect_flow(lines: &[&str], start: usize, open: char, close: char) -> R
 
 fn yaml_flow_line_count(lines: &[&str], start: usize, open: char, close: char) -> usize {
     let mut depth = 0i32;
-    for i in start..lines.len() {
-        let line = lines[i].trim();
+    for (offset, line_str) in lines[start..].iter().enumerate() {
+        let line = line_str.trim();
         for c in line.chars() {
             if c == open { depth += 1; }
             if c == close { depth -= 1; }
         }
-        if depth <= 0 { return i - start + 1; }
+        if depth <= 0 { return offset + 1; }
     }
     lines.len() - start
 }
@@ -5729,7 +5723,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
         4 => {
             // String: payload is memory offset.
             let offset = payload as usize;
-            if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+            if offset.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<string@{}>", offset);
             }
             let len = u32::from_le_bytes([
@@ -5748,7 +5742,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
             // Layout: [i32 length][i32 capacity][i64 elem0][i64 elem1]...
             const MAX_DISPLAY_ELEMENTS: usize = 10_000;
             let ptr = payload as usize;
-            if ptr.checked_add(4).map_or(true, |end| end > data.len()) {
+            if ptr.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<array@{}>", ptr);
             }
             let raw_len = u32::from_le_bytes([
@@ -5761,7 +5755,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
                     Some(o) => o,
                     None => break,
                 };
-                if elem_offset.checked_add(8).map_or(true, |end| end > data.len()) {
+                if elem_offset.checked_add(8).is_none_or(|end| end > data.len()) {
                     break;
                 }
                 let elem = i64::from_le_bytes([
@@ -5782,7 +5776,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
             // Layout: [i32 count][i32 capacity][i64 key0][i64 val0]...
             const MAX_DISPLAY_ENTRIES: usize = 10_000;
             let ptr = payload as usize;
-            if ptr.checked_add(4).map_or(true, |end| end > data.len()) {
+            if ptr.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<map@{}>", ptr);
             }
             let raw_count = u32::from_le_bytes([
@@ -5799,7 +5793,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
                     Some(o) => o,
                     None => break,
                 };
-                if val_offset.checked_add(8).map_or(true, |end| end > data.len()) {
+                if val_offset.checked_add(8).is_none_or(|end| end > data.len()) {
                     break;
                 }
                 let key = i64::from_le_bytes([

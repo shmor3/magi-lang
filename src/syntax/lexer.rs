@@ -1128,7 +1128,7 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.peek() {
             if is_valid_digit(ch) {
                 self.advance();
-            } else if ch == b'_' && self.peek_at(1).is_some_and(|c| is_valid_digit(c)) {
+            } else if ch == b'_' && self.peek_at(1).is_some_and(is_valid_digit) {
                 self.advance(); // underscore between digits
             } else {
                 break;
@@ -1139,7 +1139,7 @@ impl<'a> Lexer<'a> {
             return Err(SyntaxError {
                 line: start_line as usize,
                 column: start_col as usize,
-                message: format!("Expected digits after base prefix"),
+                message: "Expected digits after base prefix".to_string(),
             });
         }
 
@@ -1150,7 +1150,7 @@ impl<'a> Lexer<'a> {
         let value = i64::from_str_radix(&digits, base).map_err(|_| SyntaxError {
             line: start_line as usize,
             column: start_col as usize,
-            message: format!("Invalid numeric literal"),
+            message: "Invalid numeric literal".to_string(),
         })?;
 
         Ok(Token {

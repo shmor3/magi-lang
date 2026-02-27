@@ -2673,6 +2673,7 @@ pub fn parse_v2_recovering(source: &str) -> (Program, Vec<SyntaxError>) {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 
@@ -3899,7 +3900,7 @@ output result;
         let (prog, errors) = parse_v2_recovering("let = 1; let y = 2;");
         assert!(!errors.is_empty());
         // Should still recover and parse `let y = 2`
-        assert!(prog.statements.len() >= 1, "expected at least 1 recovered statement, got {}", prog.statements.len());
+        assert!(!prog.statements.is_empty(), "expected at least 1 recovered statement, got {}", prog.statements.len());
     }
 
     #[test]
@@ -3908,7 +3909,7 @@ output result;
         let (prog, errors) = parse_v2_recovering(source);
         assert!(errors.len() >= 2, "expected at least 2 errors, got {}", errors.len());
         // Should recover and parse `let z = 3`
-        assert!(prog.statements.len() >= 1, "expected at least 1 recovered statement");
+        assert!(!prog.statements.is_empty(), "expected at least 1 recovered statement");
         // Verify the valid statement is `let z = 3`
         let last = prog.statements.last().unwrap();
         match &last.kind {

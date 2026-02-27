@@ -853,7 +853,7 @@ impl<'a> Interpreter<'a> {
                         other => {
                             return Err(InterpError::TypeError {
                                 expected: "Bool".to_string(),
-                                actual: datatype_type_name(&other).to_string(),
+                                actual: datatype_type_name(other).to_string(),
                                 context: "while condition".to_string(),
                                 span: condition.span,
                             });
@@ -1281,7 +1281,7 @@ impl<'a> Interpreter<'a> {
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            result.push(self.call_lambda_with_args(&args[0], &[item.clone()], span)?);
+                            result.push(self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?);
                         }
                         Ok(Some(DataType::Array(result)))
                     }
@@ -1290,7 +1290,7 @@ impl<'a> Interpreter<'a> {
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let keep = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let keep = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if keep.to_bool() {
                                 result.push(item.clone());
                             }
@@ -1310,7 +1310,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let matches = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if matches.to_bool() {
                                 return Ok(Some(item.clone()));
                             }
@@ -1321,7 +1321,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find_index".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for (i, item) in arr.iter().enumerate() {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let matches = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if matches.to_bool() {
                                 return Ok(Some(DataType::Int64(i as i64)));
                             }
@@ -1332,7 +1332,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "any".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let matches = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if matches.to_bool() {
                                 return Ok(Some(DataType::Bool(true)));
                             }
@@ -1343,7 +1343,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "all".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let matches = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if !matches.to_bool() {
                                 return Ok(Some(DataType::Bool(false)));
                             }
@@ -1355,7 +1355,7 @@ impl<'a> Interpreter<'a> {
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let mapped = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let mapped = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             match mapped {
                                 DataType::Array(inner) => result.extend(inner),
                                 other => result.push(other),
@@ -1375,7 +1375,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "each".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                         }
                         Ok(Some(DataType::Null))
                     }
@@ -1418,7 +1418,7 @@ impl<'a> Interpreter<'a> {
                         let mut groups: std::collections::BTreeMap<String, Vec<DataType>> = std::collections::BTreeMap::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let key = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let key = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             let key_str = key.to_string_lossy();
                             groups.entry(key_str).or_default().push(item.clone());
                         }
@@ -1470,7 +1470,7 @@ impl<'a> Interpreter<'a> {
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let keep = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let keep = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if !keep.to_bool() { break; }
                             result.push(item.clone());
                         }
@@ -1483,7 +1483,7 @@ impl<'a> Interpreter<'a> {
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             if skipping {
-                                let skip = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                                let skip = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                                 if skip.to_bool() { continue; }
                                 skipping = false;
                             }
@@ -1497,7 +1497,7 @@ impl<'a> Interpreter<'a> {
                         let mut falses = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                            let matches = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if matches.to_bool() {
                                 trues.push(item.clone());
                             } else {
@@ -1596,7 +1596,7 @@ impl<'a> Interpreter<'a> {
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let new_v = self.call_lambda_with_args(&args[0], &[v.clone()], span)?;
+                            let new_v = self.call_lambda_with_args(&args[0], std::slice::from_ref(v), span)?;
                             result.insert(k.clone(), new_v);
                         }
                         Ok(Some(DataType::Map(result)))
@@ -1694,9 +1694,7 @@ impl<'a> Interpreter<'a> {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n))),
                 "to_int64" => {
-                    if !n.is_finite() {
-                        Ok(Some(DataType::Null))
-                    } else if *n > i64::MAX as f64 || *n < i64::MIN as f64 {
+                    if !n.is_finite() || *n > i64::MAX as f64 || *n < i64::MIN as f64 {
                         Ok(Some(DataType::Null))
                     } else {
                         Ok(Some(DataType::Int64(*n as i64)))
@@ -2332,7 +2330,7 @@ impl<'a> Interpreter<'a> {
         };
 
         // Check arity (accounting for default parameters and rest params)
-        let has_rest = func.params.last().map_or(false, |p| p.rest);
+        let has_rest = func.params.last().is_some_and(|p| p.rest);
         let required = func.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
         let max_positional = if has_rest { usize::MAX } else { func.params.len() };
         if args.len() < required || args.len() > max_positional {
@@ -3625,9 +3623,7 @@ impl<'a> Interpreter<'a> {
                             let finally_result = self.exec_block(finally);
                             self.heap.pop_scope();
                             self.symbols.pop();
-                            if finally_result.is_err() {
-                                return finally_result;
-                            }
+                            finally_result?;
                         }
                         return try_result;
                     }
@@ -3655,9 +3651,7 @@ impl<'a> Interpreter<'a> {
                     let finally_result = self.exec_block(finally);
                     self.heap.pop_scope();
                     self.symbols.pop();
-                    if finally_result.is_err() {
-                        return finally_result;
-                    }
+                    finally_result?;
                 }
                 result
             }
@@ -3688,7 +3682,7 @@ impl<'a> Interpreter<'a> {
                         })
                         .collect::<Result<_, _>>()?;
                     // If no args provided, use the piped value
-                    let val = evaluated_args.first().unwrap_or(&piped_value);
+                    let val = evaluated_args.first().unwrap_or(piped_value);
                     let length = match val {
                         DataType::Array(a) => a.len() as i64,
                         DataType::String(s) => s.chars().count() as i64,
@@ -4387,6 +4381,12 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "is_infinite",
             "is_finite",
             "approx_eq",
+            "math_sum",
+            "math_product",
+            "math_average",
+            "math_min_of",
+            "math_max_of",
+            "math_count",
         ],
         "cmp" => vec![
             "equal",
@@ -4431,6 +4431,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "string_chars",
             "string_join",
             "string_template",
+            "string_format",
             "regex_match",
             "regex_replace",
             "regex_extract",
@@ -4446,6 +4447,15 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "to_json",
             "parse_int",
             "parse_float",
+            "typeof",
+            "default",
+            "is_null",
+            "is_string",
+            "is_number",
+            "is_array",
+            "is_map",
+            "is_bool",
+            "is_bytes",
         ],
         "array" => vec![
             "array_get",
@@ -4861,7 +4871,7 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
         _ => None,
     };
     // Fall back to generic methods that work on any type
-    result.or_else(|| match method {
+    result.or(match method {
         "to_string" => Some(OperationType::ToString),
         "to_int64" => Some(OperationType::ToInt64),
         "to_float64" => Some(OperationType::ToFloat64),
@@ -5380,6 +5390,7 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::syntax::ast::{Expression, ExpressionKind, Span};

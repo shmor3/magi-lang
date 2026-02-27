@@ -95,6 +95,12 @@ struct LoopContext {
     continue_depth: u32,
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
@@ -166,7 +172,7 @@ impl Compiler {
                     self.module.functions.push(IrFunction {
                         name: f.name.clone(),
                         param_count: f.params.len() as u32,
-                        has_rest: f.params.last().map_or(false, |p| p.rest),
+                        has_rest: f.params.last().is_some_and(|p| p.rest),
                         locals: Vec::new(),
                         instructions: Vec::new(),
                         exported: false,
@@ -807,7 +813,7 @@ impl Compiler {
                 self.module.functions.push(IrFunction {
                     name: lambda_name.clone(),
                     param_count: params.len() as u32,
-                    has_rest: params.last().map_or(false, |p| p.rest),
+                    has_rest: params.last().is_some_and(|p| p.rest),
                     locals: Vec::new(),
                     instructions: Vec::new(),
                     exported: false,
@@ -820,7 +826,7 @@ impl Compiler {
                 {
                     let fb = self.fb()?;
                     fb.param_count = params.len() as u32;
-                    fb.has_rest = params.last().map_or(false, |p| p.rest);
+                    fb.has_rest = params.last().is_some_and(|p| p.rest);
                 }
                 for param in params {
                     self.define_local(&param.name, ValType::Tagged, false)?;
@@ -1160,7 +1166,7 @@ impl Compiler {
         {
             let fb = self.fb()?;
             fb.param_count = func.params.len() as u32;
-            fb.has_rest = func.params.last().map_or(false, |p| p.rest);
+            fb.has_rest = func.params.last().is_some_and(|p| p.rest);
         }
 
         // Define parameter locals.
@@ -1751,6 +1757,7 @@ impl Compiler {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::syntax::parser::parse_v2;

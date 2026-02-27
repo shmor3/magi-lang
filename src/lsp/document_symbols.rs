@@ -173,11 +173,11 @@ fn find_variant_range(source: &str, def_line: u32, name: &str) -> Range {
             // Verify word boundary (check for alphanumeric or underscore)
             let before_ok = byte_offset == 0
                 || !lines[line_idx].as_bytes().get(byte_offset - 1)
-                    .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
+                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
             let after_pos = byte_offset + name.len();
             let after_ok = after_pos >= lines[line_idx].len()
                 || !lines[line_idx].as_bytes().get(after_pos)
-                    .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_');
+                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
             if before_ok && after_ok {
                 let char_col = lines[line_idx][..byte_offset].chars().count() as u32;
                 let start_utf16 = char_col_to_utf16(lines[line_idx], char_col);

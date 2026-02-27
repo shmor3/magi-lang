@@ -318,11 +318,7 @@ pub fn suggest_name(name: &str, available: &[&str]) -> Option<String> {
     for &candidate in available {
         // Quick skip: length difference too large
         let cand_char_len = candidate.chars().count();
-        let len_diff = if name_char_len > cand_char_len {
-            name_char_len - cand_char_len
-        } else {
-            cand_char_len - name_char_len
-        };
+        let len_diff = name_char_len.abs_diff(cand_char_len);
         if len_diff > max_distance {
             continue;
         }

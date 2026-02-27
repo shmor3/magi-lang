@@ -18,6 +18,12 @@ pub struct WasmCodegen {
     string_data_offset: u32,
 }
 
+impl Default for WasmCodegen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WasmCodegen {
     pub fn new() -> Self {
         Self {
@@ -565,7 +571,7 @@ impl WasmCodegen {
             Instruction::BrTable(targets, default) => {
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::BrTable(
-                    targets.iter().copied().collect::<Vec<_>>().into(),
+                    targets.to_vec().into(),
                     *default,
                 ));
             }
@@ -1557,7 +1563,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const((tag::I64 as i64) << 56));
                         f.instruction(&WasmInst::I64Or);
                         f.instruction(&WasmInst::Else);
-                        f.instruction(&WasmInst::I64Const(((tag::I64 as i64) << 56) | 0));
+                        f.instruction(&WasmInst::I64Const((tag::I64 as i64) << 56));
                         f.instruction(&WasmInst::End);
                         f.instruction(&WasmInst::End);
                         f.instruction(&WasmInst::End);
@@ -4776,7 +4782,7 @@ mod tests {
         data[4] = b'h';
         data[5] = b'i';
 
-        let val = (4i64 << 56) | 0; // string at offset 0
+        let val = 4i64 << 56; // string at offset 0
         assert_eq!(format_tagged(val, &data), "hi");
     }
 
@@ -4792,7 +4798,7 @@ mod tests {
         // Length = 100 (way past end of data)
         data[0..4].copy_from_slice(&100u32.to_le_bytes());
 
-        let val = (4i64 << 56) | 0;
+        let val = 4i64 << 56;
         assert_eq!(format_tagged(val, &data), "<string@0>");
     }
 
@@ -4802,7 +4808,7 @@ mod tests {
         // Length = 0
         data[0..4].copy_from_slice(&0u32.to_le_bytes());
 
-        let val = (4i64 << 56) | 0;
+        let val = 4i64 << 56;
         assert_eq!(format_tagged(val, &data), "");
     }
 
@@ -4842,7 +4848,7 @@ mod tests {
         let elem1 = (2i64 << 56) | 7;
         data[16..24].copy_from_slice(&elem1.to_le_bytes());
 
-        let val = (5i64 << 56) | 0;
+        let val = 5i64 << 56;
         assert_eq!(format_tagged(val, &data), "[42, 7]");
     }
 
@@ -4852,7 +4858,7 @@ mod tests {
         data[0..4].copy_from_slice(&0u32.to_le_bytes());
         data[4..8].copy_from_slice(&0u32.to_le_bytes());
 
-        let val = (5i64 << 56) | 0;
+        let val = 5i64 << 56;
         assert_eq!(format_tagged(val, &data), "[]");
     }
 
