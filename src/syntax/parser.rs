@@ -869,6 +869,7 @@ impl Parser {
     // =========================================================================
 
     fn parse_block(&mut self) -> Result<Block, SyntaxError> {
+        self.enter_depth()?;
         let start_tok = self.expect(&TokenKind::LBrace)?;
         let start = start_tok.span;
         let mut statements = Vec::new();
@@ -944,6 +945,7 @@ impl Parser {
         }
 
         let end_tok = self.expect(&TokenKind::RBrace)?;
+        self.exit_depth();
         Ok(Block {
             statements,
             tail_expr,
@@ -1784,7 +1786,9 @@ impl Parser {
         let else_block = if self.eat(&TokenKind::Else) {
             if self.at(&TokenKind::If) {
                 // else if — parse nested if as a block containing a single tail expression
+                self.enter_depth()?;
                 let nested_if = self.parse_if_expr()?;
+                self.exit_depth();
                 let span = nested_if.span;
                 Some(Block {
                     statements: Vec::new(),
@@ -1895,6 +1899,13 @@ impl Parser {
     }
 
     fn parse_single_pattern(&mut self) -> Result<Pattern, SyntaxError> {
+        self.enter_depth()?;
+        let result = self.parse_single_pattern_inner();
+        self.exit_depth();
+        result
+    }
+
+    fn parse_single_pattern_inner(&mut self) -> Result<Pattern, SyntaxError> {
         let tok = self.peek().clone();
         match &tok.kind {
             TokenKind::IntLiteral => {
@@ -2305,6 +2316,7 @@ impl Parser {
                     message: format!("Error in f-string expression: {}", e.message),
                 })?;
                 let mut inner_parser = Parser::new(inner_tokens);
+                inner_parser.depth = self.depth;
                 let expr = inner_parser.parse_expression().map_err(|e| SyntaxError {
                     line: tok.span.start_line as usize,
                     column: tok.span.start_col as usize,

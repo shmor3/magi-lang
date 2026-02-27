@@ -8610,3 +8610,67 @@ fn test_pipe_typeof_array() {
         output [1, 2, 3] |> typeof();
     "#), DataType::String("array".to_string()));
 }
+
+// ── Round 83: parser depth and edge case tests ───────────────
+
+#[test]
+fn test_deeply_nested_blocks_error() {
+    // 200 nested fn blocks should exceed MAX_PARSE_DEPTH (128)
+    let mut src = String::new();
+    for i in 0..200 {
+        src.push_str(&format!("fn f{}() {{ ", i));
+    }
+    src.push_str("output 1;");
+    for _ in 0..200 {
+        src.push_str(" }");
+    }
+    let result = parse_v2(&src);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().message.contains("nesting"));
+}
+
+#[test]
+fn test_deeply_nested_if_else_error() {
+    // 200 else-if chains should exceed depth limit
+    let mut src = String::from("output ");
+    for _ in 0..200 {
+        src.push_str("if true { 0 } else ");
+    }
+    src.push_str("{ 1 };");
+    let result = parse_v2(&src);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().message.contains("nesting"));
+}
+
+#[test]
+fn test_deeply_nested_patterns_error() {
+    // 200 nested array patterns should exceed depth limit
+    let mut src = String::from("match x { ");
+    for _ in 0..200 {
+        src.push('[');
+    }
+    src.push_str("_");
+    for _ in 0..200 {
+        src.push(']');
+    }
+    src.push_str(" => 1 }");
+    // Wrap in fn + output to make it a valid program start
+    let full = format!("fn test(x) {{ {} }}", src);
+    let result = parse_v2(&full);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_moderate_nesting_ok() {
+    // 50 levels of nesting should be fine (< 128 limit)
+    let mut src = String::new();
+    for i in 0..50 {
+        src.push_str(&format!("fn f{}() {{ ", i));
+    }
+    src.push_str("output 1;");
+    for _ in 0..50 {
+        src.push_str(" }");
+    }
+    let result = parse_v2(&src);
+    assert!(result.is_ok());
+}

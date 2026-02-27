@@ -30,17 +30,36 @@ impl MagiLanguageServer {
     }
 
     async fn on_change(&self, uri: Url, text: String) {
-        let (state, diagnostics) = analyze_document(&text);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (state, diagnostics) = analyze_document(&text);
+            let lsp_diagnostics: Vec<Diagnostic> = diagnostics
+                .iter()
+                .map(|d| to_lsp_diagnostic_with_source(d, Some(&text)))
+                .collect();
+            (state, lsp_diagnostics)
+        }));
 
-        let lsp_diagnostics: Vec<Diagnostic> = diagnostics
-            .iter()
-            .map(|d| to_lsp_diagnostic_with_source(d, Some(&text)))
-            .collect();
-
-        self.documents.write().await.insert(uri.clone(), state);
-        self.client
-            .publish_diagnostics(uri, lsp_diagnostics, None)
-            .await;
+        match result {
+            Ok((state, lsp_diagnostics)) => {
+                self.documents.write().await.insert(uri.clone(), state);
+                self.client
+                    .publish_diagnostics(uri, lsp_diagnostics, None)
+                    .await;
+            }
+            Err(_) => {
+                // Analysis panicked — publish a generic error diagnostic
+                let diag = Diagnostic {
+                    range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: "Internal analysis error".to_string(),
+                    source: Some("magi".to_string()),
+                    ..Default::default()
+                };
+                self.client
+                    .publish_diagnostics(uri, vec![diag], None)
+                    .await;
+            }
+        }
     }
 }
 

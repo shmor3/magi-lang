@@ -2094,6 +2094,19 @@ impl<'a> Interpreter<'a> {
                         match item {
                             DataType::Float64(f) => { has_float = true; float_sum += f; }
                             DataType::Float32(f) => { has_float = true; float_sum += *f as f64; }
+                            DataType::Uint64(u) => {
+                                if let Ok(i) = i64::try_from(*u) {
+                                    if !int_overflow {
+                                        match int_sum.checked_add(i) {
+                                            Some(v) => int_sum = v,
+                                            None => { has_float = true; float_sum += int_sum as f64 + i as f64; int_overflow = true; }
+                                        }
+                                    } else { float_sum += i as f64; }
+                                } else {
+                                    has_float = true;
+                                    float_sum += *u as f64;
+                                }
+                            }
                             _ => {
                                 if !int_overflow {
                                     match int_sum.checked_add(item.to_i64().unwrap_or(0)) {
@@ -2125,12 +2138,24 @@ impl<'a> Interpreter<'a> {
                         match item {
                             DataType::Float64(f) => { has_float = true; float_prod *= f; }
                             DataType::Float32(f) => { has_float = true; float_prod *= *f as f64; }
+                            DataType::Uint64(u) => {
+                                if let Ok(i) = i64::try_from(*u) {
+                                    if !int_overflow {
+                                        match int_prod.checked_mul(i) {
+                                            Some(v) => int_prod = v,
+                                            None => { has_float = true; float_prod *= int_prod as f64 * i as f64; int_overflow = true; }
+                                        }
+                                    } else { float_prod *= i as f64; }
+                                } else {
+                                    has_float = true;
+                                    float_prod *= *u as f64;
+                                }
+                            }
                             _ => {
                                 if !int_overflow {
                                     match int_prod.checked_mul(item.to_i64().unwrap_or(1)) {
                                         Some(v) => int_prod = v,
                                         None => {
-                                            // Overflow: promote to float
                                             has_float = true;
                                             float_prod *= int_prod as f64 * item.to_i64().unwrap_or(1) as f64;
                                             int_overflow = true;
