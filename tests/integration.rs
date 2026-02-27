@@ -14478,3 +14478,31 @@ fn test_decompress_zstd_invalid() {
     assert!(result.contains("Error") || result.contains("error"));
 }
 
+#[test]
+fn test_key_generate() {
+    let result = run_eval_unique(r#"
+        let k = key_generate()
+        println(typeof(k))
+    "#, "keygen");
+    assert!(result.contains("map"));
+}
+
+#[test]
+fn test_cert_generate_and_parse() {
+    let result = run_eval_unique(r#"
+        let c = cert_generate("test.example.com")
+        let info = cert_parse(c.cert_pem)
+        println(info.subject)
+    "#, "cert_parse");
+    assert!(result.contains("test.example.com"));
+}
+
+#[test]
+fn test_cert_verify_valid() {
+    let result = run_eval_unique(r#"
+        let c = cert_generate("test.example.com")
+        let v = cert_verify(c.cert_pem)
+        println(v.valid)
+    "#, "cert_verify");
+    assert!(result.contains("true"));
+}

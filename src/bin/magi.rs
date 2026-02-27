@@ -4787,8 +4787,91 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
-            // Remaining operations that require external dependencies
-            // (certificates, etc.)
+            // Certificate / TLS operations
+            // ================================================================
+            OperationType::CertGenerate | OperationType::CertSelfSigned => {
+                let cn = get_string(inputs, "cn")?;
+                let mut params = rcgen::CertificateParams::new(vec![cn.to_string()])
+                    .map_err(|e| EvalError::InvalidInput(format!("cert_generate: {}", e)))?;
+                let mut dn = rcgen::DistinguishedName::new();
+                dn.push(rcgen::DnType::CommonName, cn);
+                params.distinguished_name = dn;
+                let key_pair = rcgen::KeyPair::generate()
+                    .map_err(|e| EvalError::InvalidInput(format!("cert_generate key: {}", e)))?;
+                let cert = params.self_signed(&key_pair)
+                    .map_err(|e| EvalError::InvalidInput(format!("cert_generate: {}", e)))?;
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("cert_pem".into(), DataType::String(cert.pem())),
+                    ("key_pem".into(), DataType::String(key_pair.serialize_pem())),
+                ])))
+            }
+            OperationType::CertParse | OperationType::CertInfo => {
+                let pem = get_string(inputs, "pem")?;
+                let (_, pem_block) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+                    .map_err(|e| EvalError::InvalidInput(format!("cert_parse pem: {}", e)))?;
+                let cert = pem_block.parse_x509()
+                    .map_err(|e| EvalError::InvalidInput(format!("cert_parse x509: {}", e)))?;
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("subject".into(), DataType::String(cert.subject().to_string()));
+                m.insert("issuer".into(), DataType::String(cert.issuer().to_string()));
+                m.insert("serial".into(), DataType::String(cert.tbs_certificate.raw_serial_as_string()));
+                m.insert("not_before".into(), DataType::String(
+                    cert.validity().not_before.to_rfc2822().unwrap_or_default()));
+                m.insert("not_after".into(), DataType::String(
+                    cert.validity().not_after.to_rfc2822().unwrap_or_default()));
+                m.insert("version".into(), DataType::Int64(cert.version().0 as i64));
+                if op == OperationType::CertParse {
+                    m.insert("signature_algorithm".into(), DataType::String(
+                        cert.signature_algorithm.algorithm.to_string()));
+                    m.insert("is_ca".into(), DataType::Bool(cert.is_ca()));
+                }
+                Ok(DataType::Map(m))
+            }
+            OperationType::CertVerify => {
+                let pem = get_string(inputs, "pem")?;
+                let result = match x509_parser::pem::parse_x509_pem(pem.as_bytes()) {
+                    Ok((_, pem_block)) => match pem_block.parse_x509() {
+                        Ok(cert) => {
+                            let now = chrono::Utc::now().timestamp();
+                            let not_before = cert.validity().not_before.timestamp();
+                            let not_after = cert.validity().not_after.timestamp();
+                            if now < not_before {
+                                std::collections::BTreeMap::from([
+                                    ("valid".into(), DataType::Bool(false)),
+                                    ("error".into(), DataType::String("Certificate not yet valid".into())),
+                                ])
+                            } else if now > not_after {
+                                std::collections::BTreeMap::from([
+                                    ("valid".into(), DataType::Bool(false)),
+                                    ("error".into(), DataType::String("Certificate has expired".into())),
+                                ])
+                            } else {
+                                std::collections::BTreeMap::from([("valid".into(), DataType::Bool(true))])
+                            }
+                        }
+                        Err(e) => std::collections::BTreeMap::from([
+                            ("valid".into(), DataType::Bool(false)),
+                            ("error".into(), DataType::String(format!("Failed to parse X509: {}", e))),
+                        ]),
+                    },
+                    Err(e) => std::collections::BTreeMap::from([
+                        ("valid".into(), DataType::Bool(false)),
+                        ("error".into(), DataType::String(format!("Failed to parse PEM: {}", e))),
+                    ]),
+                };
+                Ok(DataType::Map(result))
+            }
+            OperationType::KeyGenerate => {
+                let key_pair = rcgen::KeyPair::generate()
+                    .map_err(|e| EvalError::InvalidInput(format!("key_generate: {}", e)))?;
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("private_pem".into(), DataType::String(key_pair.serialize_pem())),
+                    ("public_pem".into(), DataType::String(key_pair.public_key_pem())),
+                ])))
+            }
+
+            // ================================================================
+            // Remaining operations
             // ================================================================
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
