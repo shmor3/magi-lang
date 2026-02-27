@@ -1359,15 +1359,14 @@ fn test_const_binding() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-fn test_compile_showcase_rejects_guards() {
-    // The showcase uses match guards which are not yet supported in WASM compilation.
+fn test_compile_showcase_rejects_unsupported() {
+    // The showcase uses features not yet supported in WASM compilation
+    // (spread in array literals, match guards, etc.).
     let src = include_str!("../examples/showcase/main.magi");
     let program = parse(src);
     let mut compiler_inst = compiler::Compiler::new();
     let result = compiler_inst.compile(&program);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("match guards"), "expected match guard error, got: {err}");
+    assert!(result.is_err(), "showcase should fail WASM compilation due to unsupported features");
 }
 
 #[test]
@@ -12390,4 +12389,520 @@ fn test_e2e_deduplication_pipeline() {
         ]),
         DataType::Int64(7),
     ]));
+}
+
+// ── Round 82: HOF audit — edge-case coverage ──
+
+#[test]
+fn test_hof_map_empty_array() {
+    assert_eq!(
+        run("[].map(|x| x * 2)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_filter_empty_array() {
+    assert_eq!(
+        run("[].filter(|x| x > 0)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_reduce_empty_array_returns_initial() {
+    assert_eq!(
+        run("[].reduce(42, |acc, x| acc + x)"),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_hof_find_empty_array() {
+    assert_eq!(
+        run("[].find(|x| x > 0)"),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_hof_find_index_empty_array() {
+    assert_eq!(
+        run("[].find_index(|x| x > 0)"),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_hof_any_empty_array() {
+    assert_eq!(
+        run("[].any(|x| x > 0)"),
+        DataType::Bool(false)
+    );
+}
+
+#[test]
+fn test_hof_all_empty_array() {
+    // all on empty array should be vacuously true
+    assert_eq!(
+        run("[].all(|x| x > 0)"),
+        DataType::Bool(true)
+    );
+}
+
+#[test]
+fn test_hof_each_empty_array() {
+    assert_eq!(
+        run("[].each(|x| x)"),
+        DataType::Null
+    );
+}
+
+#[test]
+fn test_hof_flat_map_empty_array() {
+    assert_eq!(
+        run("[].flat_map(|x| [x, x])"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_flat_map_non_array_return() {
+    // When callback returns a non-array, it should be included as-is
+    assert_eq!(
+        run("[1, 2, 3].flat_map(|x| x * 10)"),
+        DataType::Array(vec![DataType::Int64(10), DataType::Int64(20), DataType::Int64(30)])
+    );
+}
+
+#[test]
+fn test_hof_flat_map_mixed_return() {
+    // Some callbacks return arrays, some return scalars
+    assert_eq!(
+        run(r#"[1, 2, 3].flat_map(|x| if x == 2 { [x, x] } else { x })"#),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(2), DataType::Int64(2),
+            DataType::Int64(3),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_sort_by_empty_array() {
+    assert_eq!(
+        run("[].sort_by(|a, b| a - b)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_sort_by_single_element() {
+    assert_eq!(
+        run("[42].sort_by(|a, b| a - b)"),
+        DataType::Array(vec![DataType::Int64(42)])
+    );
+}
+
+#[test]
+fn test_hof_sort_by_all_equal() {
+    assert_eq!(
+        run("[5, 5, 5].sort_by(|a, b| a - b)"),
+        DataType::Array(vec![DataType::Int64(5), DataType::Int64(5), DataType::Int64(5)])
+    );
+}
+
+#[test]
+fn test_hof_group_by_empty_array() {
+    let result = run(r#"[].group_by(|x| "a")"#);
+    match result {
+        DataType::Map(m) => assert_eq!(m.len(), 0),
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_hof_min_by_single_element() {
+    assert_eq!(
+        run("[99].min_by(|a, b| a - b)"),
+        DataType::Int64(99)
+    );
+}
+
+#[test]
+fn test_hof_max_by_single_element() {
+    assert_eq!(
+        run("[99].max_by(|a, b| a - b)"),
+        DataType::Int64(99)
+    );
+}
+
+#[test]
+fn test_hof_take_while_all_pass() {
+    assert_eq!(
+        run("[1, 2, 3].take_while(|x| x > 0)"),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)])
+    );
+}
+
+#[test]
+fn test_hof_take_while_none_pass() {
+    assert_eq!(
+        run("[1, 2, 3].take_while(|x| x > 10)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_take_while_empty_array() {
+    assert_eq!(
+        run("[].take_while(|x| x > 0)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_skip_while_all_pass() {
+    assert_eq!(
+        run("[1, 2, 3].skip_while(|x| x > 0)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_skip_while_none_pass() {
+    assert_eq!(
+        run("[1, 2, 3].skip_while(|x| x > 10)"),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)])
+    );
+}
+
+#[test]
+fn test_hof_skip_while_empty_array() {
+    assert_eq!(
+        run("[].skip_while(|x| x > 0)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_partition_empty_array() {
+    assert_eq!(
+        run("[].partition(|x| x > 0)"),
+        DataType::Array(vec![
+            DataType::Array(vec![]),
+            DataType::Array(vec![]),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_partition_all_match() {
+    assert_eq!(
+        run("[1, 2, 3].partition(|x| x > 0)"),
+        DataType::Array(vec![
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]),
+            DataType::Array(vec![]),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_partition_none_match() {
+    assert_eq!(
+        run("[1, 2, 3].partition(|x| x > 10)"),
+        DataType::Array(vec![
+            DataType::Array(vec![]),
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_scan_empty_array() {
+    assert_eq!(
+        run("[].scan(0, |acc, x| acc + x)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_enumerate_empty_array() {
+    assert_eq!(
+        run("[].enumerate()"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_zip_empty_arrays() {
+    assert_eq!(
+        run("[].zip([])"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_zip_different_lengths() {
+    // zip truncates to the shorter array
+    assert_eq!(
+        run("[1, 2, 3].zip([10, 20])"),
+        DataType::Array(vec![
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(10)]),
+            DataType::Array(vec![DataType::Int64(2), DataType::Int64(20)]),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_zip_second_longer() {
+    assert_eq!(
+        run("[1].zip([10, 20, 30])"),
+        DataType::Array(vec![
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(10)]),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_chunk_empty_array() {
+    assert_eq!(
+        run("[].chunk(3)"),
+        DataType::Array(vec![])
+    );
+}
+
+#[test]
+fn test_hof_chunk_exact_division() {
+    assert_eq!(
+        run("[1, 2, 3, 4].chunk(2)"),
+        DataType::Array(vec![
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]),
+            DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)]),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_chunk_size_larger_than_array() {
+    assert_eq!(
+        run("[1, 2].chunk(10)"),
+        DataType::Array(vec![
+            DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]),
+        ])
+    );
+}
+
+// Map HOF edge cases
+
+#[test]
+fn test_hof_filter_entries_empty_map() {
+    let result = run(r#"
+        let m = {"_": 0}.delete("_");
+        m.filter_entries(|k, v| true)
+    "#);
+    match result {
+        DataType::Map(m) => assert_eq!(m.len(), 0),
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_hof_map_values_empty_map() {
+    let result = run(r#"
+        let m = {"_": 0}.delete("_");
+        m.map_values(|v| v * 2)
+    "#);
+    match result {
+        DataType::Map(m) => assert_eq!(m.len(), 0),
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_hof_map_keys_empty_map() {
+    let result = run(r#"
+        let m = {"_": 0}.delete("_");
+        m.map_keys(|k| k + "!")
+    "#);
+    match result {
+        DataType::Map(m) => assert_eq!(m.len(), 0),
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_hof_map_keys_collision() {
+    // When map_keys produces duplicate keys, last one wins (BTreeMap ordering)
+    let result = run(r#"
+        let m = {"a": 1, "b": 2, "c": 3};
+        m.map_keys(|k| "same")
+    "#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 1);
+            // BTreeMap iterates in alphabetical order: a, b, c
+            // Last one to insert "same" key is c=3
+            assert_eq!(m.get("same"), Some(&DataType::Int64(3)));
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_hof_filter_entries_all_removed() {
+    let result = run(r#"
+        let m = {"a": 1, "b": 2};
+        m.filter_entries(|k, v| false)
+    "#);
+    match result {
+        DataType::Map(m) => assert_eq!(m.len(), 0),
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+// HOF arity error tests
+
+#[test]
+fn test_hof_map_no_args_error() {
+    let err = run_err("[1,2,3].map()");
+    match err {
+        InterpError::ArityMismatch { name, .. } => assert_eq!(name, "map"),
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_hof_filter_no_args_error() {
+    let err = run_err("[1,2,3].filter()");
+    match err {
+        InterpError::ArityMismatch { name, .. } => assert_eq!(name, "filter"),
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_hof_reduce_one_arg_error() {
+    let err = run_err("[1,2,3].reduce(0)");
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "reduce");
+            assert_eq!(expected, "2");
+            assert_eq!(actual, 1);
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_hof_scan_one_arg_error() {
+    let err = run_err("[1,2,3].scan(0)");
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "scan");
+            assert_eq!(expected, "2");
+            assert_eq!(actual, 1);
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_hof_enumerate_with_args_error() {
+    let err = run_err("[1,2,3].enumerate(1)");
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "enumerate");
+            assert_eq!(expected, "0");
+            assert_eq!(actual, 1);
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_hof_zip_non_array_error() {
+    let err = run_err(r#"[1,2,3].zip(42)"#);
+    match err {
+        InterpError::TypeError { expected, .. } => assert_eq!(expected, "Array"),
+        _ => panic!("expected TypeError, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_hof_sort_by_non_numeric_comparator_error() {
+    let err = run_err(r#"[1,2,3].sort_by(|a, b| "not a number")"#);
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert!(context.contains("sort_by"), "context should mention sort_by, got: {}", context);
+        }
+        _ => panic!("expected TypeError, got {:?}", err),
+    }
+}
+
+// HOF chaining tests
+
+#[test]
+fn test_hof_chain_filter_map() {
+    assert_eq!(
+        run("[1, 2, 3, 4, 5].filter(|x| x % 2 == 0).map(|x| x * 10)"),
+        DataType::Array(vec![DataType::Int64(20), DataType::Int64(40)])
+    );
+}
+
+#[test]
+fn test_hof_chain_map_flat_map() {
+    assert_eq!(
+        run("[1, 2].map(|x| x + 10).flat_map(|x| [x, x + 100])"),
+        DataType::Array(vec![
+            DataType::Int64(11), DataType::Int64(111),
+            DataType::Int64(12), DataType::Int64(112),
+        ])
+    );
+}
+
+#[test]
+fn test_hof_chain_filter_reduce() {
+    assert_eq!(
+        run("[1, 2, 3, 4, 5].filter(|x| x > 2).reduce(0, |acc, x| acc + x)"),
+        DataType::Int64(12)
+    );
+}
+
+#[test]
+fn test_hof_skip_while_does_not_resume_skipping() {
+    // After skipping stops, all remaining elements are kept even if they match the predicate
+    assert_eq!(
+        run("[1, 2, 3, 1, 2].skip_while(|x| x < 3)"),
+        DataType::Array(vec![DataType::Int64(3), DataType::Int64(1), DataType::Int64(2)])
+    );
+}
+
+#[test]
+fn test_hof_group_by_single_group() {
+    let result = run(r#"[1, 2, 3].group_by(|x| "all")"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 1);
+            assert_eq!(
+                m.get("all"),
+                Some(&DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]))
+            );
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_hof_group_by_numeric_keys() {
+    // group_by converts keys to strings via to_string_lossy
+    let result = run("[1, 2, 3, 4].group_by(|x| x % 2)");
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 2);
+            assert!(m.contains_key("0"));
+            assert!(m.contains_key("1"));
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
 }

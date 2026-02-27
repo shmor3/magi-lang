@@ -2,36 +2,153 @@
  * MAGI Language Showcase
  * Version: 0.2.0-alpha
  *
- * Demonstrates all major language features including:
- * - Structs and enums
- * - Higher-order functions on collections
- * - Pattern matching with type/enum/range patterns
- * - Destructuring in let bindings and for loops
- * - Range expressions and slicing
- * - List and map comprehensions
- * - Closures and lambdas
- * - Rest parameters and spread calls
- * - Error propagation with ?
- * - Pipe operator, optional chaining, null coalescing
- * - String interpolation, multiline strings, raw strings
+ * A comprehensive tour of every major language feature.
+ * Run with: magi run examples/showcase/main.magi
  */
 
-/* ─── Block comments can be /* nested */ like this ─── */
+/* Block comments can be /* nested */ like this */
 
-// ═══════════════════════════════════════════════════════
-// 1. Struct and Enum Definitions
-// ═══════════════════════════════════════════════════════
+// ================================================================
+// 1. Constants, Variables, and Type Annotations
+// ================================================================
+
+output "=== 1. Constants and Variables ===";
+
+const PI = 3.14159265;
+const MAX_ITEMS = 100;
+
+let greeting = "hello";
+let mut counter = 0;
+counter += 1;
+
+// Type annotations (optional)
+let radius: float64 = 5.0;
+let label: string = "circle";
+
+output f"PI = {PI}, MAX_ITEMS = {MAX_ITEMS}";
+output f"Greeting: {greeting}, Radius: {radius}, Label: {label}, Counter: {counter}";
+
+// ================================================================
+// 2. Numeric Types and Literals
+// ================================================================
+
+output "";
+output "=== 2. Numeric Types and Literals ===";
+
+// Standard numeric types
+let int_val = 42;
+let float_val = 3.14;
+
+// Hex, octal, binary literals
+let hex_val = 0xFF;
+let oct_val = 0o77;
+let bin_val = 0b1010;
+
+// Underscore separators for readability
+let big_num = 1_000_000;
+
+output f"Int: {int_val}, Float: {float_val}";
+output f"Hex 0xFF = {hex_val}, Octal 0o77 = {oct_val}, Binary 0b1010 = {bin_val}";
+output f"One million: {big_num}";
+
+// Number methods
+let abs_val = (-42).abs();
+let rounded = 3.7.round();
+let floored = 3.7.floor();
+let ceiled = 3.2.ceil();
+
+output f"abs(-42) = {abs_val}";
+output f"round(3.7) = {rounded}, floor(3.7) = {floored}, ceil(3.2) = {ceiled}";
+
+// ================================================================
+// 3. Strings and Interpolation
+// ================================================================
+
+output "";
+output "=== 3. Strings ===";
+
+// String interpolation with expressions
+let lang = "MAGI";
+let x = 42;
+output f"Welcome to {lang}! The answer is {x}, doubled is {x * 2}";
+
+// Multiline strings
+let poem = """
+Roses are red,
+Violets are blue,
+MAGI is great,
+And so are you.
+""";
+output f"Poem has {len(poem)} characters";
+
+// Raw strings (no escape processing)
+let raw = r"Backslashes are literal: \n \t \\";
+output f"Raw: {raw}";
+
+// String methods
+let text = "  Hello, World!  ";
+output f"Trimmed: '{text.trim()}'";
+output f"Upper: {text.trim().to_upper()}";
+output f"Lower: {text.trim().to_lower()}";
+let csv = "a,b,c,d";
+let parts = csv.split(",");
+output f"Split '{csv}': {parts}";
+let has_comma = csv.contains(",");
+output f"Contains comma: {has_comma}";
+let starts_a = csv.starts_with("a");
+output f"Starts with 'a': {starts_a}";
+let replaced_csv = csv.replace(",", " | ");
+output f"Replaced: {replaced_csv}";
+let char_arr = "abc".chars();
+output f"Chars of 'abc': {char_arr}";
+let rev_str = "hello".reverse();
+output f"Reversed 'hello': {rev_str}";
+let repeated = "ha".repeat(3);
+output f"Repeat: {repeated}";
+
+// String slicing
+let hello = "Hello, World!"[0..5];
+output f"Sliced: {hello}";
+
+// ================================================================
+// 4. Structs
+// ================================================================
+
+output "";
+output "=== 4. Structs ===";
 
 struct Point {
     x: float64,
     y: float64
 }
 
-struct Person {
-    name: string,
-    age: int64,
-    email: string
+struct Color {
+    r: int64,
+    g: int64,
+    b: int64
 }
+
+let origin = Point { x: 0.0, y: 0.0 };
+let target = Point { x: 3.0, y: 4.0 };
+let red = Color { r: 255, g: 0, b: 0 };
+
+output f"Origin: ({origin.x}, {origin.y})";
+output f"Target: ({target.x}, {target.y})";
+output f"Red: rgb({red.r}, {red.g}, {red.b})";
+
+fn distance_sq(p1, p2) {
+    let dx = p1.x - p2.x;
+    let dy = p1.y - p2.y;
+    dx * dx + dy * dy
+}
+output f"Distance squared: {distance_sq(origin, target)}";
+
+// ================================================================
+// 5. Enums with Data
+// ================================================================
+
+output "";
+output "=== 5. Enums ===";
 
 enum Shape {
     Circle(radius),
@@ -44,30 +161,58 @@ enum Result {
     Err(message)
 }
 
-// ═══════════════════════════════════════════════════════
-// 2. Functions with Various Features
-// ═══════════════════════════════════════════════════════
-
-fn distance(p1, p2) {
-    let dx = p1.x - p2.x;
-    let dy = p1.y - p2.y;
-    (dx * dx + dy * dy)
+enum Option {
+    Some(value),
+    None
 }
 
-fn area(shape) {
-    match shape {
-        Shape::Circle(r) => 3.14159 * r * r,
-        Shape::Rectangle(w, h) => w * h,
-        Shape::Triangle(a, b, c) => {
-            let s = (a + b + c) / 2.0;
-            s * (s - a) * (s - b) * (s - c)
-        },
-        _ => 0.0,
+let shapes = [
+    Shape::Circle(5.0),
+    Shape::Rectangle(4.0, 6.0),
+    Shape::Triangle(3.0, 4.0, 5.0),
+];
+
+fn shape_name(s) {
+    match s {
+        Shape::Circle(_) => "circle",
+        Shape::Rectangle(_, _) => "rectangle",
+        Shape::Triangle(_, _, _) => "triangle",
     }
 }
 
-// Variadic function with rest parameters
-fn sum(first, ...rest) {
+fn area(s) {
+    match s {
+        Shape::Circle(r) => 3.14159265 * r * r,
+        Shape::Rectangle(w, h) => w * h,
+        Shape::Triangle(a, b, c) => {
+            // Heron's formula (squared for simplicity)
+            let s = (a + b + c) / 2.0;
+            s * (s - a) * (s - b) * (s - c)
+        },
+    }
+}
+
+for shape in shapes {
+    output f"  {shape_name(shape)} area = {area(shape)}";
+}
+
+// ================================================================
+// 6. Functions
+// ================================================================
+
+output "";
+output "=== 6. Functions ===";
+
+// Basic function
+fn add(a, b) { a + b }
+
+// Default parameters
+fn greet(who, greeting = "Hello") {
+    f"{greeting}, {who}!"
+}
+
+// Rest parameters (variadic)
+fn sum_all(first, ...rest) {
     let mut total = first;
     for n in rest {
         total = total + n;
@@ -76,297 +221,374 @@ fn sum(first, ...rest) {
 }
 
 // Higher-order function
-fn apply_twice(f, x) {
-    f(f(x))
+fn apply_twice(f, val) {
+    f(f(val))
 }
 
-fn safe_divide(a, b) {
-    if b == 0 {
-        Result::Err("division by zero")
-    } else {
-        Result::Ok(a / b)
-    }
+// Recursive function
+fn fibonacci(n) {
+    if n <= 1 { n } else { fibonacci(n - 1) + fibonacci(n - 2) }
 }
 
-// ═══════════════════════════════════════════════════════
-// 3. Working with Data
-// ═══════════════════════════════════════════════════════
+output f"add(3, 4) = {add(3, 4)}";
+let g1 = greet("World");
+let g2 = greet("World", "Hi");
+output f"greet default: {g1}";
+output f"greet custom:  {g2}";
+output f"sum_all(1..5) = {sum_all(1, 2, 3, 4, 5)}";
 
-let origin = Point { x: 0.0, y: 0.0 };
-let target = Point { x: 3.0, y: 4.0 };
-let dist_sq = distance(origin, target);
-output f"Distance squared from origin to target: {dist_sq}";
+let double = |x| x * 2;
+output f"apply_twice(double, 5) = {apply_twice(double, 5)}";
+output f"fibonacci(10) = {fibonacci(10)}";
 
-// Enum construction and pattern matching
-let circle = Shape::Circle(5.0);
-let rect = Shape::Rectangle(4.0, 6.0);
-let tri = Shape::Triangle(3.0, 4.0, 5.0);
+// Spread call
+let nums = [10, 20, 30];
+output f"sum_all(...[10,20,30]) = {sum_all(...nums)}";
 
-output f"Circle area: {area(circle)}";
-output f"Rectangle area: {area(rect)}";
+// ================================================================
+// 7. Closures and Lambdas
+// ================================================================
 
-// ═══════════════════════════════════════════════════════
-// 4. Range Expressions and Slicing
-// ═══════════════════════════════════════════════════════
+output "";
+output "=== 7. Closures and Lambdas ===";
 
-let numbers = 1..11;  // [1, 2, 3, ..., 10]
-let inclusive = 1..=5; // [1, 2, 3, 4, 5]
+// Simple lambdas
+let square = |x| x * x;
+let multiply = |a, b| a * b;
+output f"square(7) = {square(7)}";
+output f"multiply(3, 4) = {multiply(3, 4)}";
 
-output f"Range 1..11 has {len(numbers)} elements";
-output f"Range 1..=5 has {len(inclusive)} elements";
+// Lambda with default parameter
+let inc = |x, step = 1| x + step;
+output f"inc(5) = {inc(5)}, inc(5, 3) = {inc(5, 3)}";
+
+// Multi-line lambda with block body
+let clamp = |val, lo, hi| {
+    if val < lo { lo }
+    else if val > hi { hi }
+    else { val }
+};
+output f"clamp(150, 0, 100) = {clamp(150, 0, 100)}";
+
+// ================================================================
+// 8. Compound Assignment
+// ================================================================
+
+output "";
+output "=== 8. Compound Assignment ===";
+
+let mut val = 10;
+val += 5;
+output f"10 += 5 = {val}";
+val -= 3;
+output f"  -= 3  = {val}";
+val *= 2;
+output f"  *= 2  = {val}";
+val /= 4;
+output f"  /= 4  = {val}";
+val %= 5;
+output f"  %%= 5  = {val}";
+
+// ================================================================
+// 9. Ranges and Slicing
+// ================================================================
+
+output "";
+output "=== 9. Ranges and Slicing ===";
+
+let exclusive = 1..6;
+let inclusive = 1..=5;
+output f"1..6     = {exclusive}";
+output f"1..=5    = {inclusive}";
+output f"Lengths: {len(exclusive)}, {len(inclusive)}";
 
 // Array slicing
-let first_five = numbers[0..5];
-output f"First five: {first_five}";
+let arr = [10, 20, 30, 40, 50, 60];
+output f"arr[1..4]    = {arr[1..4]}";
+output f"arr[-3..6]   = {arr[-3..6]}";
 
-let middle = numbers[3..7];
-output f"Middle: {middle}";
+// ================================================================
+// 10. Pattern Matching
+// ================================================================
 
-// String slicing
-let greeting = "Hello, World!";
-let hello = greeting[0..5];
-output f"Sliced: {hello}";
+output "";
+output "=== 10. Pattern Matching ===";
 
-// ═══════════════════════════════════════════════════════
-// 5. Higher-Order Methods on Collections
-// ═══════════════════════════════════════════════════════
-
-let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-// Map, filter, reduce
-let doubled = data.map(|x| x * 2);
-let evens = data.filter(|x| x % 2 == 0);
-let total = data.reduce(0, |acc, x| acc + x);
-
-output f"Doubled: {doubled}";
-output f"Evens: {evens}";
-output f"Sum: {total}";
-
-// Find, any, all
-let first_gt_5 = data.find(|x| x > 5);
-let has_negative = data.any(|x| x < 0);
-let all_positive = data.all(|x| x > 0);
-
-output f"First > 5: {first_gt_5}";
-output f"Has negative: {has_negative}";
-output f"All positive: {all_positive}";
-
-// Enumerate and zip
-let names = ["alice", "bob", "charlie"];
-let ages = [30, 25, 35];
-let indexed = names.enumerate();
-let pairs = names.zip(ages);
-
-output f"Indexed: {indexed}";
-output f"Pairs: {pairs}";
-
-// Group by, partition
-let grouped = data.group_by(|x| {
-    if x % 2 == 0 { "even" } else { "odd" }
-});
-let parts = data.partition(|x| x <= 5);
-
-output f"Grouped: {grouped}";
-output f"Partitioned: {parts}";
-
-// Chunk
-let chunks = data.chunk(3);
-output f"Chunks of 3: {chunks}";
-
-// Take/skip while
-let taken = data.take_while(|x| x < 6);
-let skipped = data.skip_while(|x| x < 6);
-output f"Take while < 6: {taken}";
-output f"Skip while < 6: {skipped}";
-
-// Scan (intermediate accumulators)
-let running_sum = data.scan(0, |acc, x| acc + x);
-output f"Running sum: {running_sum}";
-
-// ═══════════════════════════════════════════════════════
-// 6. Destructuring
-// ═══════════════════════════════════════════════════════
-
-// Array destructuring
-let [first, second, ...rest] = [10, 20, 30, 40, 50];
-output f"First: {first}, Second: {second}, Rest: {rest}";
-
-// Map destructuring
-let {name, age} = {"name": "Alice", "age": 30, "city": "NYC"};
-output f"Name: {name}, Age: {age}";
-
-// Destructuring in for loops
-let people = [
-    {"name": "Alice", "age": 30},
-    {"name": "Bob", "age": 25},
-    {"name": "Charlie", "age": 35},
-];
-
-for {name, age} in people {
-    output f"{name} is {age} years old";
-}
-
-let coords = [[1, 2], [3, 4], [5, 6]];
-for [x, y] in coords {
-    output f"Point: ({x}, {y})";
-}
-
-// ═══════════════════════════════════════════════════════
-// 7. List and Map Comprehensions
-// ═══════════════════════════════════════════════════════
-
-let squares = [x * x for x in 1..=10];
-output f"Squares: {squares}";
-
-let even_squares = [x * x for x in 1..=10 if x % 2 == 0];
-output f"Even squares: {even_squares}";
-
-// ═══════════════════════════════════════════════════════
-// 8. Closures and Lambdas
-// ═══════════════════════════════════════════════════════
-
-let mul = |x| x * 3;
-output f"mul(5) = {mul(5)}";
-
-// Passing lambdas to higher-order functions
-let double = |x| x * 2;
-let result = apply_twice(double, 5);
-output f"apply_twice(double, 5) = {result}";
-
-// ═══════════════════════════════════════════════════════
-// 9. Rest Parameters and Spread Calls
-// ═══════════════════════════════════════════════════════
-
-let s = sum(1, 2, 3, 4, 5);
-output f"sum(1, 2, 3, 4, 5) = {s}";
-
-let args = [10, 20, 30];
-let spread_result = sum(...args);
-output f"sum(...[10, 20, 30]) = {spread_result}";
-
-// ═══════════════════════════════════════════════════════
-// 10. Pattern Matching (Advanced)
-// ═══════════════════════════════════════════════════════
-
+// Literal patterns, or-patterns, type patterns, guards
 fn classify(value) {
     match value {
         0 => "zero",
         1 | 2 | 3 => "small",
         n: int64 if n > 100 => "large",
-        n: int64 => "medium",
+        _n: int64 => "medium",
         s: string => f"text: {s}",
         _ => "unknown",
     }
 }
 
-output f"classify(0) = {classify(0)}";
-output f"classify(2) = {classify(2)}";
-output f"classify(50) = {classify(50)}";
-output f"classify(200) = {classify(200)}";
+output f"classify(0)     = {classify(0)}";
+output f"classify(2)     = {classify(2)}";
+output f"classify(50)    = {classify(50)}";
+output f"classify(200)   = {classify(200)}";
+let c_hi = classify("hi");
+output f"classify 'hi' = {c_hi}";
 
-// Enum pattern matching with data extraction
-fn unwrap_result(r) {
-    match r {
-        Result::Ok(v) => f"Success: {v}",
-        Result::Err(e) => f"Error: {e}",
+// Enum pattern matching
+fn unwrap_or(result, default) {
+    match result {
+        Result::Ok(v) => v,
+        Result::Err(_) => default,
     }
 }
 
-let ok = safe_divide(10, 2);
-let err = safe_divide(10, 0);
-output unwrap_result(ok);
-output unwrap_result(err);
+fn safe_divide(a, b) {
+    if b == 0 { Result::Err("division by zero") } else { Result::Ok(a / b) }
+}
 
-// ═══════════════════════════════════════════════════════
-// 11. Pipe Operator
-// ═══════════════════════════════════════════════════════
+output f"10 / 2 = {unwrap_or(safe_divide(10, 2), 0)}";
+output f"10 / 0 = {unwrap_or(safe_divide(10, 0), 0)}";
 
-let pipe_result = [1, 2, 3, 4, 5]
-    |> len(_);
-output f"Piped length: {pipe_result}";
-
-// ═══════════════════════════════════════════════════════
-// 12. Null Safety
-// ═══════════════════════════════════════════════════════
-
-let config = {"database": {"host": "localhost", "port": 5432}};
-let host = config?.database?.host;
-let missing = config?.cache?.host;
-let fallback = missing ?? "default-host";
-
-output f"Host: {host}";
-output f"Missing: {missing}";
-output f"Fallback: {fallback}";
-
-// ═══════════════════════════════════════════════════════
-// 13. String Features
-// ═══════════════════════════════════════════════════════
-
-let multiline = """
-This is a
-multiline string
-that preserves newlines.
-""";
-output f"Multiline length: {len(multiline)}";
-
-let raw = r"No \escape \processing \here";
-output f"Raw string: {raw}";
-
-// String interpolation with expressions
-let x = 42;
-output f"The answer is {x}, and doubled is {x * 2}";
-
-// ═══════════════════════════════════════════════════════
-// 14. Number Methods
-// ═══════════════════════════════════════════════════════
-
-let neg = (-5).abs();
-let rounded = 3.7.round();
-let floored = 3.7.floor();
-let ceiled = 3.2.ceil();
-
-output f"|-5| = {neg}";
-output f"round(3.7) = {rounded}";
-output f"floor(3.7) = {floored}";
-output f"ceil(3.2) = {ceiled}";
-
-// ═══════════════════════════════════════════════════════
-// 15. Error Handling
-// ═══════════════════════════════════════════════════════
-
-fn risky_operation(flag) {
-    if flag {
-        throw "something went wrong";
+// Range patterns in match
+fn temperature_label(temp) {
+    match temp {
+        0..=10 => "cold",
+        11..=25 => "comfortable",
+        26..=35 => "warm",
+        _ => "extreme",
     }
-    "success"
 }
 
-let caught = try {
-    risky_operation(true)
-} catch err {
-    f"Caught: {err}"
-};
-output caught;
+output f"5 degrees:  {temperature_label(5)}";
+output f"20 degrees: {temperature_label(20)}";
+output f"30 degrees: {temperature_label(30)}";
+output f"50 degrees: {temperature_label(50)}";
 
-let safe = try {
-    risky_operation(false)
-} catch err {
-    f"Caught: {err}"
-};
-output safe;
+// ================================================================
+// 11. Higher-Order Methods on Collections
+// ================================================================
 
-// ═══════════════════════════════════════════════════════
-// 16. Loops and Control Flow
-// ═══════════════════════════════════════════════════════
+output "";
+output "=== 11. Collection HOFs ===";
 
-// While loop with mutation
-let mut count = 0;
-while count < 5 {
-    count = count + 1;
+let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// Core: map, filter, reduce
+output f"map *2:     {data.map(|x| x * 2)}";
+output f"filter >5:  {data.filter(|x| x > 5)}";
+output f"reduce sum: {data.reduce(0, |acc, x| acc + x)}";
+
+// Search: find, any, all
+output f"find >7:    {data.find(|x| x > 7)}";
+output f"any <0:     {data.any(|x| x < 0)}";
+output f"all >0:     {data.all(|x| x > 0)}";
+
+// Transform: sort, reverse, unique, flat_map
+output f"sort desc:  {[5,1,3,2,4].sort()}";
+output f"reverse:    {[1,2,3].reverse()}";
+output f"unique:     {[1,1,2,2,3,3].unique()}";
+output f"flat_map:   {[[1,2],[3,4]].flat_map(|x| x)}";
+
+// Grouping: group_by, partition, chunk
+let grouped = data.group_by(|x| if x % 2 == 0 { "even" } else { "odd" });
+output f"group_by:   {grouped}";
+output f"partition:  {data.partition(|x| x <= 5)}";
+output f"chunk(4):   {data.chunk(4)}";
+
+// Indexing: enumerate, zip
+let letters = ["a", "b", "c"];
+let indexed = letters.enumerate();
+output f"enumerate:  {indexed}";
+let zipped = [1, 2, 3].zip(["x", "y", "z"]);
+output f"zip:        {zipped}";
+
+// Windowing: take_while, skip_while, scan
+output f"take <4:    {data.take_while(|x| x < 4)}";
+output f"skip <4:    {data.skip_while(|x| x < 4)}";
+output f"scan sum:   {[1,2,3,4].scan(0, |acc, x| acc + x)}";
+
+// Sort/min/max by custom comparator
+let words = ["cherry", "fig", "apple", "date"];
+let by_len = words.sort_by(|a, b| len(a) - len(b));
+output f"sort_by len: {by_len}";
+output f"min_by len:  {words.min_by(|a, b| len(a) - len(b))}";
+output f"max_by len:  {words.max_by(|a, b| len(a) - len(b))}";
+
+// ================================================================
+// 12. Destructuring
+// ================================================================
+
+output "";
+output "=== 12. Destructuring ===";
+
+// Array destructuring with rest
+let [first, second, ...rest] = [10, 20, 30, 40, 50];
+output f"first={first}, second={second}, rest={rest}";
+
+// Map destructuring
+let {city, population} = {"city": "Tokyo", "population": 14000000, "country": "Japan"};
+output f"city={city}, population={population}";
+
+// Destructuring in for loops
+let records = [
+    {"name": "Alice", "score": 95},
+    {"name": "Bob", "score": 87},
+];
+for {name, score} in records {
+    output f"  {name}: {score}";
 }
-output f"Counted to: {count}";
 
-// Loop with break
+let points = [[1, 2], [3, 4], [5, 6]];
+for [px, py] in points {
+    output f"  ({px}, {py})";
+}
+
+// ================================================================
+// 13. Comprehensions
+// ================================================================
+
+output "";
+output "=== 13. Comprehensions ===";
+
+// List comprehension
+let squares = [n * n for n in 1..=6];
+output f"Squares: {squares}";
+
+// List comprehension with filter
+let even_sq = [n * n for n in 1..=10 if n % 2 == 0];
+output f"Even squares: {even_sq}";
+
+// ================================================================
+// 14. Pipe Operator
+// ================================================================
+
+output "";
+output "=== 14. Pipe Operator ===";
+
+// Pipe passes the left value into _ placeholder on the right
+fn add_prefix(s) { f"[INFO] {s}" }
+fn to_upper_str(s) { s.to_upper() }
+
+let msg = "hello world"
+    |> to_upper_str(_)
+    |> add_prefix(_);
+output msg;
+
+let pipe_len = [1, 2, 3, 4, 5] |> len(_);
+output f"Piped length: {pipe_len}";
+
+// ================================================================
+// 15. Null Safety: Optional Chaining and Null Coalescing
+// ================================================================
+
+output "";
+output "=== 15. Null Safety ===";
+
+let config = {
+    "database": {"host": "localhost", "port": 5432},
+    "app": {"name": "MyApp"},
+};
+
+// Optional chaining (?.) returns null instead of erroring
+let db_host = config?.database?.host;
+let cache_host = config?.cache?.host;
+output f"db host:    {db_host}";
+output f"cache host: {cache_host}";
+
+// Null coalescing (??) provides a fallback
+let host = cache_host ?? "127.0.0.1";
+output f"fallback:   {host}";
+
+// Chained together
+let port = config?.cache?.port ?? 6379;
+output f"cache port: {port}";
+
+// ================================================================
+// 16. Error Handling: try/catch/finally, throw
+// ================================================================
+
+output "";
+output "=== 16. Error Handling ===";
+
+fn parse_positive(s) {
+    let n = to_int64(s);
+    if n == null {
+        throw f"'{s}' is not a number";
+    }
+    if n <= 0 {
+        throw f"{n} is not positive";
+    }
+    n
+}
+
+// try/catch as expression
+let result1 = try {
+    parse_positive("42")
+} catch err {
+    f"Error: {err}"
+};
+output f"parse '42':   {result1}";
+
+let result2 = try {
+    parse_positive("abc")
+} catch err {
+    f"Error: {err}"
+};
+output f"parse 'abc':  {result2}";
+
+// try/catch/finally
+let result3 = try {
+    parse_positive("-5")
+} catch err {
+    f"Caught: {err}"
+} finally {
+    output "  (finally block ran)";
+};
+output f"parse '-5':   {result3}";
+
+// Try-propagate operator (?)
+fn find_user(id) {
+    if id == 1 { {"name": "Alice"} } else { null }
+}
+
+fn get_user_name(id) {
+    let user = find_user(id)?;
+    user.name
+}
+
+output f"user 1: {get_user_name(1)}";
+let user99 = try { get_user_name(99) } catch _e { "not found" };
+output f"user 99: {user99}";
+
+// ================================================================
+// 17. Loops and Control Flow
+// ================================================================
+
+output "";
+output "=== 17. Loops and Control Flow ===";
+
+// For loop
+let mut total = 0;
+for n in 1..=10 {
+    total = total + n;
+}
+output f"Sum 1..=10: {total}";
+
+// For with continue
+let mut odd_sum = 0;
+for n in 1..=10 {
+    if n % 2 == 0 { continue; }
+    odd_sum = odd_sum + n;
+}
+output f"Odd sum: {odd_sum}";
+
+// While loop
+let mut count = 1;
+while count < 100 {
+    count = count * 2;
+}
+output f"First power of 2 >= 100: {count}";
+
+// Loop with break (infinite loop that returns a value)
 let mut i = 0;
 let found = loop {
     if i * i > 50 {
@@ -376,14 +598,81 @@ let found = loop {
 };
 output f"First i where i*i > 50: {found}";
 
-// For loop with continue
-let mut sum_odd = 0;
-for n in 1..=10 {
-    if n % 2 == 0 {
-        continue;
-    }
-    sum_odd = sum_odd + n;
-}
-output f"Sum of odds 1-10: {sum_odd}";
+// ================================================================
+// 18. Modules
+// ================================================================
 
-output "═══ Showcase Complete ═══";
+output "";
+output "=== 18. Modules ===";
+
+mod utils {
+    fn double(x) { x * 2 }
+    fn triple(x) { x * 3 }
+    fn negate(x) { -x }
+}
+
+use utils::double;
+use utils::triple;
+
+output f"double(7) = {double(7)}";
+output f"triple(7) = {triple(7)}";
+
+// ================================================================
+// 19. Type Aliases
+// ================================================================
+
+output "";
+output "=== 19. Type Aliases ===";
+
+// Type aliases give semantic names to existing types
+type UserId = int64;
+type Name = string;
+type Scores = array;
+
+// Used for documentation; the runtime treats them as their base types
+let user_id = 42;
+let user_name = "Charlie";
+let user_scores = [95, 87, 92];
+output f"User {user_id}: {user_name}, scores: {user_scores}";
+
+// ================================================================
+// 20. Async / Await / Spawn
+// ================================================================
+
+output "";
+output "=== 20. Async/Await ===";
+
+async fn compute(a, b) {
+    a * b + 1
+}
+
+let future = spawn compute(6, 7);
+let async_result = await future;
+output f"async compute(6, 7) = {async_result}";
+
+// Multiple spawns
+let f1 = spawn compute(3, 4);
+let f2 = spawn compute(5, 6);
+let r1 = await f1;
+let r2 = await f2;
+output f"parallel: {r1} and {r2}";
+
+// ================================================================
+// 21. Spread in Arrays
+// ================================================================
+
+output "";
+output "=== 21. Spread ===";
+
+let head = [1, 2];
+let tail = [4, 5];
+let combined = [...head, 3, ...tail];
+output f"[...{head}, 3, ...{tail}] = {combined}";
+
+// ================================================================
+// Summary
+// ================================================================
+
+output "";
+output "=== Showcase Complete ===";
+output "All 21 feature sections executed successfully.";

@@ -70,6 +70,8 @@ struct FunctionSig {
 /// Metadata tracked per variable binding.
 struct VarInfo {
     channel_type: ChannelType,
+    /// Original declared type annotation (if any). Used to warn on incompatible reassignment.
+    declared_type: Option<ChannelType>,
     mutable: bool,
     used: bool,
     mutated: bool,
@@ -266,6 +268,7 @@ impl TypeChecker {
                 name.to_string(),
                 VarInfo {
                     channel_type: ct,
+                    declared_type: None,
                     mutable,
                     used: false,
                     mutated: false,
@@ -406,6 +409,12 @@ impl TypeChecker {
                     name,
                 );
                 self.define_var(name, ct, true, stmt.span.start_line, stmt.span.start_col);
+                // Store declared type annotation for reassignment checks.
+                if let Some(ann) = type_annotation.as_deref().and_then(ChannelType::parse) {
+                    if let Some(info) = self.lookup_mut(name) {
+                        info.declared_type = Some(ann);
+                    }
+                }
             }
 
             // -----------------------------------------------------------------
@@ -415,9 +424,9 @@ impl TypeChecker {
                 let new_type = self.infer_expr(value);
 
                 // Check existence first.
-                let (exists, is_mutable) = match self.lookup(name) {
-                    Some(info) => (true, info.mutable),
-                    None => (false, false),
+                let (exists, is_mutable, declared_type) = match self.lookup(name) {
+                    Some(info) => (true, info.mutable, info.declared_type),
+                    None => (false, false, None),
                 };
 
                 if !exists {
@@ -439,6 +448,27 @@ impl TypeChecker {
                         super::errors::ErrorCode::E404,
                         None,
                     );
+                }
+
+                // Warn if assigning an incompatible type to a type-annotated variable.
+                if let Some(decl) = declared_type {
+                    if new_type != ChannelType::Null
+                        && !new_type.is_compatible_with(&decl)
+                    {
+                        self.emit_coded(
+                            stmt.span.start_line,
+                            stmt.span.start_col,
+                            format!(
+                                "Assigning '{}' to variable '{}' declared as '{}'",
+                                new_type.as_str(),
+                                name,
+                                decl.as_str(),
+                            ),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::E100,
+                            None,
+                        );
+                    }
                 }
 
                 // Update the variable's type and mark used + mutated.
@@ -794,9 +824,9 @@ impl TypeChecker {
             StatementKind::CompoundAssign { name, op, value } => {
                 let val_type = self.infer_expr(value);
 
-                let (exists, is_mutable, var_type) = match self.lookup(name) {
-                    Some(info) => (true, info.mutable, info.channel_type),
-                    None => (false, false, ChannelType::Null),
+                let (exists, is_mutable, var_type, declared_type) = match self.lookup(name) {
+                    Some(info) => (true, info.mutable, info.channel_type, info.declared_type),
+                    None => (false, false, ChannelType::Null, None),
                 };
 
                 if !exists {
@@ -860,6 +890,27 @@ impl TypeChecker {
                         super::errors::ErrorCode::W107,
                         None,
                     );
+                }
+
+                // Warn if compound assignment produces a type incompatible with the declared annotation.
+                if let Some(decl) = declared_type {
+                    if result_type != ChannelType::Null
+                        && !result_type.is_compatible_with(&decl)
+                    {
+                        self.emit_coded(
+                            stmt.span.start_line,
+                            stmt.span.start_col,
+                            format!(
+                                "Compound assignment produces '{}' but variable '{}' is declared as '{}'",
+                                result_type.as_str(),
+                                name,
+                                decl.as_str(),
+                            ),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::E100,
+                            None,
+                        );
+                    }
                 }
 
                 if let Some(info) = self.lookup_mut(name) {
@@ -5058,6 +5109,392 @@ test "reads outer" { let r = x + 1; output r; }"#,
             warns.iter().any(|d| d.message.contains("missing field 'y'")),
             "Expected missing field warning, got: {:?}", warns
         );
+    }
+
+    // =========================================================================
+    // Audit: Binary operation type inference
+    // =========================================================================
+
+    #[test]
+    fn test_binop_int64_plus_int64() {
+        let a = check("let x = 1 + 2;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_binop_int64_plus_float64() {
+        let a = check("let x = 1 + 2.5;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_binop_float64_plus_float64() {
+        let a = check("let x = 1.0 + 2.5;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_binop_string_concat_left() {
+        let a = check("let x = \"hello\" + 42;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::String));
+    }
+
+    #[test]
+    fn test_binop_string_concat_right() {
+        let a = check("let x = 42 + \"hello\";\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::String));
+    }
+
+    #[test]
+    fn test_binop_comparison_returns_bool() {
+        let a = check("let x = 1 > 2;\nlet y = 1 == 1;\nlet z = 1 != 2;\noutput x;\noutput y;\noutput z;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("y"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("z"), Some(&ChannelType::Bool));
+    }
+
+    #[test]
+    fn test_binop_div_returns_float64() {
+        let a = check("let x = 10 / 3;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_binop_mod_preserves_int64() {
+        let a = check("let x = 10 % 3;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_binop_mod_with_float_returns_float64() {
+        let a = check("let x = 10.5 % 3.0;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_binop_sub_preserves_int64() {
+        let a = check("let x = 10 - 3;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_binop_mul_preserves_int64() {
+        let a = check("let x = 10 * 3;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_binop_and_returns_bool() {
+        let a = check("let x = true && false;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+    }
+
+    #[test]
+    fn test_binop_or_returns_bool() {
+        let a = check("let x = true || false;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+    }
+
+    // =========================================================================
+    // Audit: Unary operation type inference
+    // =========================================================================
+
+    #[test]
+    fn test_unary_neg_int64() {
+        let a = check("let x = -42;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_unary_neg_float64() {
+        let a = check("let x = -3.14;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_unary_not_bool() {
+        let a = check("let x = !true;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+    }
+
+    #[test]
+    fn test_unary_not_int_warns_returns_bool() {
+        let a = check("let n = 42;\nlet x = !n;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+        // Should warn about non-bool operand
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Logical NOT expects bool")),
+            "Expected warning about NOT on non-bool, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_unary_neg_string_warns() {
+        let a = check(r#"let s = "hello"; let x = -s; output x;"#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Negation expects numeric")),
+            "Expected warning about negation on string, got: {:?}", w
+        );
+    }
+
+    // =========================================================================
+    // Audit: Assignment type compatibility
+    // =========================================================================
+
+    #[test]
+    fn test_assignment_type_annotated_compatible() {
+        // Int64 assigned Int64 - no warning
+        let a = check("let mut x: int64 = 1;\nx = 42;\noutput x;");
+        let w: Vec<_> = warnings(&a).into_iter()
+            .filter(|d| d.message.contains("Assigning"))
+            .collect();
+        assert!(w.is_empty(), "Expected no assignment warning, got: {:?}", w);
+    }
+
+    #[test]
+    fn test_assignment_type_annotated_incompatible() {
+        // Int64 assigned String - should warn
+        let a = check(r#"let mut x: int64 = 1; x = "hello"; output x;"#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Assigning") && d.message.contains("string") && d.message.contains("int64")),
+            "Expected type incompatibility warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_assignment_type_annotated_numeric_widening() {
+        // Float64 assigned Int64 - compatible (Int64 is compatible with Float64)
+        let a = check("let mut x: float64 = 1.0;\nx = 42;\noutput x;");
+        let w: Vec<_> = warnings(&a).into_iter()
+            .filter(|d| d.message.contains("Assigning"))
+            .collect();
+        assert!(w.is_empty(), "Expected no assignment warning for numeric widening, got: {:?}", w);
+    }
+
+    #[test]
+    fn test_assignment_no_annotation_no_warning() {
+        // No type annotation - no incompatibility warning even for different types
+        let a = check(r#"let mut x = 1; x = "hello"; output x;"#);
+        let w: Vec<_> = warnings(&a).into_iter()
+            .filter(|d| d.message.contains("Assigning"))
+            .collect();
+        assert!(w.is_empty(), "Expected no assignment warning without annotation, got: {:?}", w);
+    }
+
+    #[test]
+    fn test_compound_assignment_type_annotated_incompatible() {
+        // String += with Int64 variable
+        let a = check(r#"let mut x: int64 = 1; x += "hello"; output x;"#);
+        let w = warnings(&a);
+        // The compound assignment x += "hello" does infer_binop(Add, Int64, String) = String
+        // String is not compatible with Int64, so should warn
+        assert!(
+            w.iter().any(|d| d.message.contains("Compound assignment") && d.message.contains("string") && d.message.contains("int64")),
+            "Expected compound assignment type incompatibility warning, got: {:?}", w
+        );
+    }
+
+    // =========================================================================
+    // Audit: Function call type inference (multi-branch returns)
+    // =========================================================================
+
+    #[test]
+    fn test_fn_returns_declared_type_at_callsite() {
+        // With a declared return type, call site gets that type
+        let a = check(r#"
+            fn foo(x: bool) -> float64 {
+                if x { 1 } else { 2.5 }
+            }
+            let r = foo(true);
+            output r;
+        "#);
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_fn_without_return_type_returns_null_at_callsite() {
+        // Without a declared return type, call site gets Null (unknown)
+        let a = check(r#"
+            fn foo(x: bool) {
+                if x { 1 } else { 2.5 }
+            }
+            let r = foo(true);
+            output r;
+        "#);
+        // Two-pass limitation: undeclared return type means Null at call site
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
+    }
+
+    #[test]
+    fn test_fn_body_unifies_branch_types() {
+        // The body's IfElse unifies Int64 and Float64 to Float64 internally
+        // No body/return mismatch error since return type is Float64, body is Float64
+        let a = check(r#"
+            fn foo(x: bool) -> float64 {
+                if x { 1 } else { 2.5 }
+            }
+            output foo(true);
+        "#);
+        let errs = errors(&a);
+        assert!(errs.is_empty(), "Expected no errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn test_fn_body_mismatched_warns() {
+        // Function body returns String or Int64 - IfElse warns about mismatch
+        let a = check(r#"
+            fn bar(x: bool) {
+                if x { "hello" } else { 42 }
+            }
+            let r = bar(true);
+            output r;
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("mismatched types")),
+            "Expected mismatched types warning in if/else, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_fn_declared_return_type_propagates() {
+        let a = check(r#"
+            fn add(a: int64, b: int64) -> int64 {
+                a + b
+            }
+            let r = add(1, 2);
+            output r;
+        "#);
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Int64));
+    }
+
+    // =========================================================================
+    // Audit: Match expression type inference
+    // =========================================================================
+
+    #[test]
+    fn test_match_unifies_same_type() {
+        let a = check(r#"
+            let x = 1;
+            let r = match x {
+                1 => 10,
+                2 => 20,
+                _ => 30,
+            };
+            output r;
+        "#);
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_match_unifies_numeric_promotion() {
+        let a = check(r#"
+            let x = 1;
+            let r = match x {
+                1 => 10,
+                2 => 2.5,
+                _ => 30,
+            };
+            output r;
+        "#);
+        // Int64 and Float64 should unify to Float64
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_match_mismatched_arms_returns_null() {
+        let a = check(r#"
+            let x = 1;
+            let r = match x {
+                1 => "hello",
+                2 => 42,
+                _ => true,
+            };
+            output r;
+        "#);
+        // String, Int64, Bool cannot unify -> Null
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
+    }
+
+    // =========================================================================
+    // Audit: Array element types
+    // =========================================================================
+
+    #[test]
+    fn test_array_literal_uniform_type() {
+        let a = check("let x = [1, 2, 3];\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Array));
+    }
+
+    #[test]
+    fn test_array_literal_mixed_types() {
+        // Mixed types in array literal - should still be Array type (no element tracking)
+        let a = check(r#"let x = [1, "hello", true]; output x;"#);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Array));
+    }
+
+    #[test]
+    fn test_array_literal_empty() {
+        let a = check("let x = [];\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Array));
+    }
+
+    // =========================================================================
+    // Audit: Additional edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_if_else_numeric_promotion() {
+        let a = check("let x = if true { 1 } else { 2.5 };\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_try_catch_numeric_promotion() {
+        let a = check(r#"
+            let x = try { 42 } catch e { 3.14 };
+            output x;
+        "#);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+    }
+
+    #[test]
+    fn test_null_coalesce_type() {
+        let a = check("let x = null ?? 42;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_binop_arithmetic_on_bool_warns() {
+        let a = check("let x = true + 1;\noutput x;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Arithmetic operator") && d.message.contains("bool")),
+            "Expected arithmetic on bool warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_binop_comparison_cross_type_warns() {
+        let a = check(r#"let x = 1 == "hello"; output x;"#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Comparing")),
+            "Expected cross-type comparison warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_binop_comparison_cross_numeric_no_warning() {
+        // Int64 == Float64 should not warn (cross-numeric is allowed)
+        let a = check("let x = 1 == 1.0;\noutput x;");
+        let w: Vec<_> = warnings(&a).into_iter()
+            .filter(|d| d.message.contains("Comparing"))
+            .collect();
+        assert!(w.is_empty(), "Expected no comparison warning for cross-numeric, got: {:?}", w);
     }
 
 }
