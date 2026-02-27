@@ -14430,3 +14430,51 @@ fn test_http_request_unsupported_method() {
     let result = run_eval(r#"std::http_request("INVALID", "http://10.0.0.1/", "", {})"#);
     assert!(result.contains("blocked") || result.contains("Unsupported") || result.contains("Error") || result.contains("error"));
 }
+
+/// Run a magi script via the CLI binary, using a unique temp file to avoid race conditions.
+fn run_eval_unique(src: &str, name: &str) -> String {
+    let dir = std::env::temp_dir();
+    let file = dir.join(format!("_magi_{}.magi", name));
+    std::fs::write(&file, src).expect("write temp file");
+    let bin = env!("CARGO_BIN_EXE_magi");
+    let output = std::process::Command::new(bin)
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("run magi binary");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    format!("{}{}", stdout, stderr)
+}
+
+#[test]
+fn test_compress_zstd_roundtrip() {
+    let result = run_eval_unique(r#"
+        let data = to_bytes("hello world zstd compression test data")
+        let compressed = compress_zstd(data)
+        let decompressed = decompress_zstd(compressed)
+        println(from_bytes(decompressed))
+    "#, "zstd_rt");
+    assert!(result.contains("hello world zstd"));
+}
+
+#[test]
+fn test_compress_lz4_roundtrip() {
+    let result = run_eval_unique(r#"
+        let data = to_bytes("lz4 compression test data here")
+        let compressed = compress_lz4(data)
+        let decompressed = decompress_lz4(compressed)
+        println(from_bytes(decompressed))
+    "#, "lz4_rt");
+    assert!(result.contains("lz4 compression"));
+}
+
+#[test]
+fn test_decompress_zstd_invalid() {
+    let result = run_eval_unique(
+        r#"decompress_zstd(to_bytes("not compressed"))"#,
+        "zstd_inv",
+    );
+    assert!(result.contains("Error") || result.contains("error"));
+}
+

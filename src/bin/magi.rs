@@ -4,6 +4,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::Read as _;
 use std::net::IpAddr;
 use std::process;
 use std::sync::{LazyLock, Mutex};
@@ -4725,8 +4726,69 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
+            // Compression operations
+            // ================================================================
+            OperationType::CompressZstd => {
+                let bytes = data_to_bytes(&input);
+                let compressed = zstd::encode_all(bytes.as_slice(), 3)
+                    .map_err(|e| EvalError::InvalidInput(format!("compress_zstd: {}", e)))?;
+                Ok(DataType::Bytes(compressed))
+            }
+            OperationType::DecompressZstd => {
+                let bytes = match &input {
+                    DataType::Bytes(b) => b.as_slice(),
+                    _ => return Err(EvalError::InvalidInput("decompress_zstd: expected bytes input".into())),
+                };
+                const MAX_DECOMPRESS: usize = 64 * 1024 * 1024;
+                let mut decoder = zstd::Decoder::new(bytes)
+                    .map_err(|e| EvalError::InvalidInput(format!("decompress_zstd: {}", e)))?;
+                let mut output = Vec::with_capacity(bytes.len().min(1024 * 1024));
+                let mut buf = [0u8; 8192];
+                loop {
+                    let n = decoder.read(&mut buf)
+                        .map_err(|e| EvalError::InvalidInput(format!("decompress_zstd: {}", e)))?;
+                    if n == 0 { break; }
+                    if output.len() + n > MAX_DECOMPRESS {
+                        return Err(EvalError::InvalidInput(format!(
+                            "Decompressed output exceeds {} byte limit", MAX_DECOMPRESS
+                        )));
+                    }
+                    output.extend_from_slice(&buf[..n]);
+                }
+                Ok(DataType::Bytes(output))
+            }
+            OperationType::CompressLz4 => {
+                let bytes = data_to_bytes(&input);
+                let compressed = lz4_flex::compress_prepend_size(&bytes);
+                Ok(DataType::Bytes(compressed))
+            }
+            OperationType::DecompressLz4 => {
+                let bytes = match &input {
+                    DataType::Bytes(b) => b.as_slice(),
+                    _ => return Err(EvalError::InvalidInput("decompress_lz4: expected bytes input".into())),
+                };
+                const MAX_DECOMPRESS: usize = 64 * 1024 * 1024;
+                if bytes.len() >= 4 {
+                    let claimed = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+                    if claimed > MAX_DECOMPRESS {
+                        return Err(EvalError::InvalidInput(format!(
+                            "LZ4 claimed size {} exceeds {} byte limit", claimed, MAX_DECOMPRESS
+                        )));
+                    }
+                }
+                let decompressed = lz4_flex::decompress_size_prepended(bytes)
+                    .map_err(|e| EvalError::InvalidInput(format!("decompress_lz4: {}", e)))?;
+                if decompressed.len() > MAX_DECOMPRESS {
+                    return Err(EvalError::InvalidInput(format!(
+                        "Decompressed output exceeds {} byte limit", MAX_DECOMPRESS
+                    )));
+                }
+                Ok(DataType::Bytes(decompressed))
+            }
+
+            // ================================================================
             // Remaining operations that require external dependencies
-            // (compression, certificates, etc.)
+            // (certificates, etc.)
             // ================================================================
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
