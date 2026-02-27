@@ -8,24 +8,8 @@ use crate::eval::DiagnosticSeverity;
 /// Convert a name to snake_case, handling acronyms correctly.
 /// e.g. "HTTPServer" → "http_server", "myFunc" → "my_func"
 fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    let chars: Vec<char> = name.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if c.is_ascii_uppercase() {
-            let prev_upper = i > 0 && chars[i - 1].is_ascii_uppercase();
-            let next_lower = i + 1 < chars.len() && chars[i + 1].is_ascii_lowercase();
-            // Insert underscore before:
-            // 1. A capital that follows a lowercase (camelCase boundary)
-            // 2. A capital in an acronym run that precedes a lowercase (e.g. the S in HTTPServer)
-            if i > 0 && (!prev_upper || next_lower) {
-                result.push('_');
-            }
-            result.push(c.to_ascii_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-    result
+    use heck::ToSnakeCase;
+    name.to_snake_case()
 }
 
 /// Check that a name uses snake_case (for functions and variables).

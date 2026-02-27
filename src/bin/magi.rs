@@ -122,37 +122,19 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 /// Validate that a URL uses an allowed scheme (http/https/ws/wss) and does
 /// not target a blocked host.
 #[allow(dead_code)]
-fn validate_url(url: &str) -> Result<(), EvalError> {
-    // Extract scheme.
-    let Some(rest) = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .or_else(|| url.strip_prefix("ws://"))
-        .or_else(|| url.strip_prefix("wss://"))
-    else {
-        return Err(EvalError::InvalidInput(
-            "URL scheme must be http, https, ws, or wss".to_string(),
-        ));
-    };
+fn validate_url(url_str: &str) -> Result<(), EvalError> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| EvalError::InvalidInput(format!("Invalid URL: {}", e)))?;
 
-    // Extract host (before first '/' or '?' or '#' or ':' for port).
-    let host = rest
-        .split(&['/', '?', '#'][..])
-        .next()
-        .unwrap_or(rest);
-    // Strip port if present.
-    let host = if let Some(bracket_end) = host.find(']') {
-        // IPv6 literal [::1]:port
-        &host[..=bracket_end]
-    } else if let Some(colon) = host.rfind(':') {
-        &host[..colon]
-    } else {
-        host
-    };
-
-    if host.is_empty() {
-        return Err(EvalError::InvalidInput("URL has empty host".to_string()));
+    match parsed.scheme() {
+        "http" | "https" | "ws" | "wss" => {}
+        scheme => return Err(EvalError::InvalidInput(
+            format!("URL scheme must be http, https, ws, or wss, got: {}", scheme)
+        )),
     }
+
+    let host = parsed.host_str()
+        .ok_or_else(|| EvalError::InvalidInput("URL has empty host".to_string()))?;
 
     validate_host(host)
 }
@@ -2948,24 +2930,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSlug => {
                 match &input {
                     DataType::String(s) => {
-                        let slug: String = s.to_lowercase().chars().map(|c| {
-                            if c.is_alphanumeric() { c } else { '-' }
-                        }).collect();
-                        // Collapse multiple hyphens and trim
-                        let mut result = String::new();
-                        let mut last_was_hyphen = true;
-                        for c in slug.chars() {
-                            if c == '-' {
-                                if !last_was_hyphen {
-                                    result.push('-');
-                                    last_was_hyphen = true;
-                                }
-                            } else {
-                                result.push(c);
-                                last_was_hyphen = false;
-                            }
-                        }
-                        Ok(DataType::String(result.trim_matches('-').to_string()))
+                        Ok(DataType::String(slug::slugify(s)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3027,12 +2992,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlEscape => {
                 match &input {
                     DataType::String(s) => {
-                        let escaped = s.replace('&', "&amp;")
-                            .replace('<', "&lt;")
-                            .replace('>', "&gt;")
-                            .replace('"', "&quot;")
-                            .replace('\'', "&#39;");
-                        Ok(DataType::String(escaped))
+                        Ok(DataType::String(html_escape::encode_text(s).into_owned()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3040,13 +3000,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlUnescape => {
                 match &input {
                     DataType::String(s) => {
-                        let unescaped = s.replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&quot;", "\"")
-                            .replace("&#39;", "'")
-                            .replace("&#x27;", "'")
-                            .replace("&amp;", "&");
-                        Ok(DataType::String(unescaped))
+                        Ok(DataType::String(html_escape::decode_html_entities(s).into_owned()))
                     }
                     _ => Ok(DataType::Null),
                 }

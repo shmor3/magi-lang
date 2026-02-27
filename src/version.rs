@@ -16,13 +16,16 @@ pub const PRE_RELEASE: &str = "alpha";
 /// Returns the current MAGI language version as a `Version`.
 pub fn current() -> Version {
     Version {
-        major: MAJOR,
-        minor: MINOR,
-        patch: PATCH,
-        pre_release: if PRE_RELEASE.is_empty() {
-            None
-        } else {
-            Some(PRE_RELEASE.to_string())
+        inner: semver::Version {
+            major: MAJOR as u64,
+            minor: MINOR as u64,
+            patch: PATCH as u64,
+            pre: if PRE_RELEASE.is_empty() {
+                semver::Prerelease::EMPTY
+            } else {
+                semver::Prerelease::new(PRE_RELEASE).unwrap_or(semver::Prerelease::EMPTY)
+            },
+            build: semver::BuildMetadata::EMPTY,
         },
     }
 }
@@ -35,78 +38,39 @@ pub fn version_string() -> String {
 /// A semantic version for the MAGI language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-    pub pre_release: Option<String>,
+    inner: semver::Version,
 }
 
 impl Version {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
-            major,
-            minor,
-            patch,
-            pre_release: None,
+            inner: semver::Version::new(major as u64, minor as u64, patch as u64),
         }
     }
 
     pub fn with_pre_release(mut self, pre: &str) -> Self {
-        self.pre_release = Some(pre.to_string());
+        self.inner.pre = semver::Prerelease::new(pre).unwrap_or(semver::Prerelease::EMPTY);
         self
     }
 
     /// Parse a version string like "0.2.0" or "1.0.0-beta.1".
     pub fn parse(s: &str) -> Result<Self, VersionError> {
-        let (version_part, pre_release) = if let Some((v, pre)) = s.split_once('-') {
-            (v, Some(pre.to_string()))
-        } else {
-            (s, None)
-        };
-
-        let parts: Vec<&str> = version_part.split('.').collect();
-        if parts.len() != 3 {
-            return Err(VersionError::InvalidFormat(s.to_string()));
-        }
-
-        let major = parts[0]
-            .parse()
-            .map_err(|_| VersionError::InvalidFormat(s.to_string()))?;
-        let minor = parts[1]
-            .parse()
-            .map_err(|_| VersionError::InvalidFormat(s.to_string()))?;
-        let patch = parts[2]
-            .parse()
-            .map_err(|_| VersionError::InvalidFormat(s.to_string()))?;
-
-        Ok(Self {
-            major,
-            minor,
-            patch,
-            pre_release,
-        })
+        let s = s.strip_prefix('v').unwrap_or(s);
+        semver::Version::parse(s)
+            .map(|inner| Self { inner })
+            .map_err(|_| VersionError::InvalidFormat(s.to_string()))
     }
 
     /// Check if this version is compatible with another version.
-    ///
-    /// Compatibility rules (semver):
-    /// - Major 0: only exact minor matches are compatible (0.2.x compat with 0.2.y)
-    /// - Major 1+: same major version is compatible (1.x.y compat with 1.a.b)
     pub fn is_compatible_with(&self, other: &Version) -> bool {
-        if self.major == 0 && other.major == 0 {
-            // In pre-1.0, minor versions are breaking.
-            self.minor == other.minor
+        if self.inner.major == 0 && other.inner.major == 0 {
+            self.inner.minor == other.inner.minor
         } else {
-            self.major == other.major
+            self.inner.major == other.inner.major
         }
     }
 
     /// Check if this version satisfies a requirement string.
-    ///
-    /// Supported formats:
-    /// - `"0.2.0"` — exact match
-    /// - `"^0.2.0"` — compatible (caret range)
-    /// - `">=0.2.0"` — minimum version
     pub fn satisfies(&self, requirement: &str) -> Result<bool, VersionError> {
         let req = requirement.trim();
 
@@ -129,7 +93,6 @@ impl Version {
             let base = Version::parse(rest)?;
             Ok(self == &base)
         } else {
-            // Exact match.
             let base = Version::parse(req)?;
             Ok(self == &base)
         }
@@ -137,27 +100,47 @@ impl Version {
 
     /// Returns the version tuple (major, minor, patch).
     pub fn tuple(&self) -> (u32, u32, u32) {
-        (self.major, self.minor, self.patch)
+        (self.inner.major as u32, self.inner.minor as u32, self.inner.patch as u32)
+    }
+
+    /// The major version number.
+    pub fn major(&self) -> u32 {
+        self.inner.major as u32
+    }
+
+    /// The minor version number.
+    pub fn minor(&self) -> u32 {
+        self.inner.minor as u32
+    }
+
+    /// The patch version number.
+    pub fn patch(&self) -> u32 {
+        self.inner.patch as u32
     }
 
     /// Is this a pre-release version?
     pub fn is_pre_release(&self) -> bool {
-        self.pre_release.is_some()
+        !self.inner.pre.is_empty()
     }
 
     /// Is this a stable (1.0+) release?
     pub fn is_stable(&self) -> bool {
-        self.major >= 1 && self.pre_release.is_none()
+        self.inner.major >= 1 && self.inner.pre.is_empty()
+    }
+
+    /// The pre-release string, if any.
+    pub fn pre_release(&self) -> Option<String> {
+        if self.inner.pre.is_empty() {
+            None
+        } else {
+            Some(self.inner.pre.to_string())
+        }
     }
 }
 
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
-        if let Some(pre) = &self.pre_release {
-            write!(f, "-{}", pre)?;
-        }
-        Ok(())
+        write!(f, "{}", self.inner)
     }
 }
 
@@ -169,16 +152,7 @@ impl PartialOrd for Version {
 
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.major
-            .cmp(&other.major)
-            .then(self.minor.cmp(&other.minor))
-            .then(self.patch.cmp(&other.patch))
-            .then_with(|| match (&self.pre_release, &other.pre_release) {
-                (None, None) => std::cmp::Ordering::Equal,
-                (Some(_), None) => std::cmp::Ordering::Less, // pre-release < release
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some(a), Some(b)) => a.cmp(b),
-            })
+        self.inner.cmp(&other.inner)
     }
 }
 
@@ -200,55 +174,32 @@ pub struct FeatureSet {
 /// Individual language features with their introduction version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Feature {
-    /// Core language (variables, functions, loops, conditionals).
     Core,
-    /// Pattern matching with match expressions.
     PatternMatching,
-    /// Async/await support.
     AsyncAwait,
-    /// Pipe operator (|>).
     PipeOperator,
-    /// String interpolation (f"...").
     StringInterpolation,
-    /// Optional chaining (?.).
     OptionalChaining,
-    /// Null coalescing (??).
     NullCoalescing,
-    /// Closures/lambdas (|x| expr).
     Closures,
-    /// Destructuring (let [a, b] = ...).
     Destructuring,
-    /// Higher-order array/map methods (.map, .filter, .reduce).
     HigherOrderMethods,
-    /// Range expressions (0..10, 0..=10).
     RangeExpressions,
-    /// List/map comprehensions ([x for x in arr]).
     Comprehensions,
-    /// Enum types.
     Enums,
-    /// Struct types.
     Structs,
-    /// Rest parameters (...args).
     RestParams,
-    /// Spread in function calls (f(...args)).
     SpreadCalls,
-    /// Try-propagate operator (?).
     TryPropagate,
-    /// Block comments (/* */).
     BlockComments,
-    /// Multiline strings (""" """).
     MultilineStrings,
-    /// Raw strings (r"...").
     RawStrings,
-    /// WASM compilation target.
     WasmCompilation,
 }
 
 impl Feature {
-    /// The version at which this feature was introduced.
     pub fn since(&self) -> Version {
         match self {
-            // v0.1.0 — initial release
             Feature::Core
             | Feature::PatternMatching
             | Feature::AsyncAwait
@@ -259,7 +210,6 @@ impl Feature {
             | Feature::Closures
             | Feature::Destructuring => Version::new(0, 1, 0),
 
-            // v0.2.0 — comprehensive improvements
             Feature::HigherOrderMethods
             | Feature::RangeExpressions
             | Feature::Comprehensions
@@ -275,11 +225,8 @@ impl Feature {
         }
     }
 
-    /// Check if this feature is available at a given version.
-    /// Pre-release versions of a release are considered to include that release's features.
     pub fn available_at(&self, version: &Version) -> bool {
         let since = self.since();
-        // A pre-release like 0.2.0-alpha includes 0.2.0 features.
         if version.is_pre_release() && version.tuple() == since.tuple() {
             return true;
         }
@@ -287,7 +234,6 @@ impl Feature {
     }
 }
 
-/// Get all features available at the current language version.
 pub fn available_features() -> Vec<Feature> {
     let v = current();
     all_features()
@@ -296,7 +242,6 @@ pub fn available_features() -> Vec<Feature> {
         .collect()
 }
 
-/// Get all defined features.
 pub fn all_features() -> Vec<Feature> {
     vec![
         Feature::Core,
@@ -330,10 +275,10 @@ mod tests {
     #[test]
     fn test_current_version() {
         let v = current();
-        assert_eq!(v.major, 0);
-        assert_eq!(v.minor, 3);
-        assert_eq!(v.patch, 0);
-        assert_eq!(v.pre_release, Some("alpha".to_string()));
+        assert_eq!(v.major(), 0);
+        assert_eq!(v.minor(), 3);
+        assert_eq!(v.patch(), 0);
+        assert_eq!(v.pre_release(), Some("alpha".to_string()));
     }
 
     #[test]
@@ -349,11 +294,11 @@ mod tests {
     fn test_version_parse() {
         let v = Version::parse("1.2.3").unwrap();
         assert_eq!(v.tuple(), (1, 2, 3));
-        assert_eq!(v.pre_release, None);
+        assert_eq!(v.pre_release(), None);
 
         let v = Version::parse("0.2.0-beta.1").unwrap();
         assert_eq!(v.tuple(), (0, 2, 0));
-        assert_eq!(v.pre_release, Some("beta.1".to_string()));
+        assert_eq!(v.pre_release(), Some("beta.1".to_string()));
     }
 
     #[test]
