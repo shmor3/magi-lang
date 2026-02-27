@@ -546,14 +546,17 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Int64(_) => Ok(input.clone()),
                 DataType::Int32(n) => Ok(DataType::Int64(*n as i64)),
                 DataType::Uint32(n) => Ok(DataType::Int64(*n as i64)),
-                DataType::Uint64(n) => Ok(DataType::Int64(*n as i64)),
+                DataType::Uint64(n) => {
+                    if *n > i64::MAX as u64 { Ok(DataType::Null) }
+                    else { Ok(DataType::Int64(*n as i64)) }
+                }
                 DataType::Float32(f) => {
                     let f = *f as f64;
-                    if f.is_nan() || f.is_infinite() { Ok(DataType::Null) }
+                    if f.is_nan() || f.is_infinite() || f < (i64::MIN as f64) || f >= (i64::MAX as f64 + 1.0) { Ok(DataType::Null) }
                     else { Ok(DataType::Int64(f as i64)) }
                 }
                 DataType::Float64(f) => {
-                    if f.is_nan() || f.is_infinite() {
+                    if f.is_nan() || f.is_infinite() || *f < (i64::MIN as f64) || *f >= (i64::MAX as f64 + 1.0) {
                         Ok(DataType::Null)
                     } else {
                         Ok(DataType::Int64(*f as i64))

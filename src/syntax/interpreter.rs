@@ -2310,7 +2310,17 @@ impl<'a> Interpreter<'a> {
                     if let ExpressionKind::Spread(inner) = &elem.kind {
                         let val = self.eval_expr(inner)?;
                         match val {
-                            DataType::Array(arr) => items.extend(arr),
+                            DataType::Array(arr) => {
+                                items.extend(arr);
+                                if items.len() > MAX_ARRAY_ELEMENTS {
+                                    return Err(InterpError::ResourceLimit {
+                                        limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
+                                        actual: format!("{} elements", items.len()),
+                                        context: "array spread".to_string(),
+                                        span: elem.span,
+                                    });
+                                }
+                            }
                             other => {
                                 return Err(InterpError::TypeError {
                                     expected: "Array".to_string(),
@@ -3043,8 +3053,8 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     if result.len() > MAX_STRING_OUTPUT {
-                        return Err(InterpError::TypeError {
-                            expected: format!("string interpolation result at most {} bytes", MAX_STRING_OUTPUT),
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{} bytes", MAX_STRING_OUTPUT),
                             actual: format!("{} bytes", result.len()),
                             context: "string interpolation".to_string(),
                             span: expr.span,

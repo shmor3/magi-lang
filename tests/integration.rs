@@ -7657,3 +7657,35 @@ fn test_while_break_value() {
     "#);
     assert_eq!(result, DataType::Int64(500));
 }
+
+#[test]
+fn test_string_interpolation_resource_limit() {
+    // Very large string interpolation should produce ResourceLimit, not TypeError
+    let err = run_err(r#"
+        let big = "x".repeat(5000000);
+        output f"{big}{big}{big}";
+    "#);
+    assert!(matches!(err, InterpError::ResourceLimit { .. }),
+        "Expected ResourceLimit, got: {:?}", err);
+}
+
+#[test]
+fn test_array_spread_resource_limit() {
+    // Spread operations that exceed the element limit should error
+    let err = run_err(r#"
+        fn make_big() {
+            let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+            let mut big = arr;
+            let mut i = 0;
+            while i < 20 {
+                big = [...big, ...big];
+                i = i + 1;
+            }
+            big
+        }
+        output make_big();
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("limit") || msg.contains("resource") || msg.contains("element") || msg.contains("iteration"),
+        "Expected resource limit error: {}", msg);
+}
