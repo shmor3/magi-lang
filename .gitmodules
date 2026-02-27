@@ -1,0 +1,3 @@
+[submodule "packages/magi-csv"]
+	path = packages/magi-csv
+	url = https://github.com/shmor3/magi-csv.git

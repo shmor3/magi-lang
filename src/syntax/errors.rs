@@ -197,8 +197,8 @@ impl ErrorCode {
         match self {
             // Type errors
             ErrorCode::E100 => "A value of the wrong type was used where a specific type was expected. Check the types of your variables and ensure they match what the operation or function expects.",
-            ErrorCode::E101 => "Conditions in `if`, `while`, and `assert` must be boolean (`true`/`false`). If you have a number or string, compare it explicitly: `x != 0` or `s != \"\"`.",
-            ErrorCode::E102 => "The `for..in` loop requires an iterable (array). Use `range(start, end)` for numeric loops, or ensure the value is an array.",
+            ErrorCode::E101 => "Conditions in `if`, `while`, `&&`, `||`, `!`, and match guards must be boolean (`true`/`false`). If you have a number or string, compare it explicitly: `x != 0` or `s != \"\"`.",
+            ErrorCode::E102 => "The `for..in` loop requires an iterable (array, map, or string). Use `range(start, end)` for numeric loops, or ensure the value is iterable.",
             ErrorCode::E103 => "The operation received an argument of the wrong type. Check the operation's expected input types.",
             ErrorCode::E104 => "Division or modulo by zero is undefined. Check that your divisor is not zero before the operation.",
             ErrorCode::E105 => "Array indices must be non-negative integers. Use `len(arr) - 1` to access the last element.",

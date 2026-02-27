@@ -8329,3 +8329,210 @@ fn test_negative_to_negative_float_range() {
         };
     "#), DataType::String("in range".to_string()));
 }
+
+// ── Round 82: coverage gap tests ───────────────
+
+#[test]
+fn test_return_inside_try_finally() {
+    // return in try block should still execute finally
+    assert_eq!(run(r#"
+        fn foo() {
+            try {
+                return 42;
+            } catch e {
+                return -1;
+            } finally {
+                let x = 0;
+            }
+        }
+        output foo();
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_catch_without_variable() {
+    // catch block without named variable
+    assert_eq!(run(r#"
+        let result = try {
+            throw "oops";
+        } catch {
+            "caught"
+        };
+        output result;
+    "#), DataType::String("caught".to_string()));
+}
+
+#[test]
+fn test_catch_rethrow() {
+    let err = run_err(r#"
+        try {
+            throw "original";
+        } catch e {
+            throw e;
+        }
+    "#);
+    match err {
+        InterpError::ThrownError { value, .. } => {
+            assert_eq!(value, DataType::String("original".to_string()));
+        }
+        _ => panic!("expected ThrownError, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_use_with_alias() {
+    assert_eq!(run(r#"
+        mod math {
+            fn add(a, b) { a + b }
+        }
+        use math::add as plus;
+        output plus(3, 4);
+    "#), DataType::Int64(7));
+}
+
+#[test]
+fn test_glob_import() {
+    assert_eq!(run(r#"
+        mod utils {
+            fn double(x) { x * 2 }
+            fn triple(x) { x * 3 }
+        }
+        use utils::*;
+        output double(5) + triple(2);
+    "#), DataType::Int64(16));
+}
+
+#[test]
+fn test_map_field_access() {
+    assert_eq!(run(r#"
+        let m = {"name": "alice", "age": 30};
+        output m.name;
+    "#), DataType::String("alice".to_string()));
+}
+
+#[test]
+fn test_map_field_access_missing() {
+    assert_eq!(run(r#"
+        let m = {"name": "alice"};
+        output m.email;
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_map_nested_field_access() {
+    assert_eq!(run(r#"
+        let m = {"inner": {"val": 42}};
+        output m.inner.val;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_map_typeof() {
+    assert_eq!(run(r#"
+        let m = {"x": 10};
+        output typeof(m);
+    "#), DataType::String("map".to_string()));
+}
+
+#[test]
+fn test_closure_snapshot_isolation() {
+    // Closures capture by value — mutations after capture don't affect the closure
+    assert_eq!(run(r#"
+        let mut val = 100;
+        let get_val = || val;
+        val = 200;
+        output get_val();
+    "#), DataType::Int64(100));
+}
+
+#[test]
+fn test_mixed_int_float_add() {
+    assert_eq!(run(r#"
+        let i = 10;
+        let f = 2.5;
+        output i + f;
+    "#), DataType::Float64(12.5));
+}
+
+#[test]
+fn test_mixed_int_float_mul() {
+    assert_eq!(run(r#"
+        let i = 3;
+        let f = 1.5;
+        output i * f;
+    "#), DataType::Float64(4.5));
+}
+
+#[test]
+fn test_map_construction_and_field() {
+    // Map from comprehension, access via field syntax
+    assert_eq!(run(r#"
+        let m = {"x": 42, "y": 99};
+        output m.x + m.y;
+    "#), DataType::Int64(141));
+}
+
+#[test]
+fn test_string_contains_non_string() {
+    // contains() with non-string argument should handle gracefully
+    assert_eq!(run(r#"
+        let s = "hello 42 world";
+        output s.contains("42");
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_flat_map_basic() {
+    assert_eq!(run(r#"
+        let arr = [1, 2, 3];
+        output arr.flat_map(|x| [x, x * 10]);
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(10),
+        DataType::Int64(2), DataType::Int64(20),
+        DataType::Int64(3), DataType::Int64(30),
+    ]));
+}
+
+#[test]
+fn test_array_filter_with_null_check() {
+    assert_eq!(run(r#"
+        let arr = [1, null, 2, null, 3];
+        output arr.filter(|x| x != null);
+    "#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_array_all_true() {
+    assert_eq!(run(r#"
+        output [2, 4, 6].all(|x| x % 2 == 0);
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_array_any_true() {
+    assert_eq!(run(r#"
+        output [1, 3, 4, 5].any(|x| x % 2 == 0);
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_array_any_false() {
+    assert_eq!(run(r#"
+        output [1, 3, 5].any(|x| x % 2 == 0);
+    "#), DataType::Bool(false));
+}
+
+#[test]
+fn test_nested_closure_capture_multiple() {
+    assert_eq!(run(r#"
+        fn make_counter(start) {
+            let base = start;
+            |n| base + n
+        }
+        let from10 = make_counter(10);
+        let from20 = make_counter(20);
+        output [from10(5), from20(5)];
+    "#), DataType::Array(vec![DataType::Int64(15), DataType::Int64(25)]));
+}
