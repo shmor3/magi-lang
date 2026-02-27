@@ -39,7 +39,7 @@ impl OperationEvaluator for StubEvaluator {
         match op {
             // Arithmetic
             OperationType::Add => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x + y)),
+                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x.wrapping_add(*y))),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x + y)),
                 (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 + y)),
                 (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x + *y as f64)),
@@ -49,14 +49,14 @@ impl OperationEvaluator for StubEvaluator {
                 _ => Ok(DataType::Null),
             },
             OperationType::Subtract => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x - y)),
+                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x.wrapping_sub(*y))),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x - y)),
                 (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 - y)),
                 (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x - *y as f64)),
                 _ => Ok(DataType::Null),
             },
             OperationType::Multiply => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x * y)),
+                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x.wrapping_mul(*y))),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x * y)),
                 (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 * y)),
                 (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x * *y as f64)),
@@ -135,7 +135,7 @@ impl OperationEvaluator for StubEvaluator {
                 _ => Ok(DataType::Bool(true)),
             },
             OperationType::Negate => match &input {
-                DataType::Int64(x) => Ok(DataType::Int64(-x)),
+                DataType::Int64(x) => Ok(DataType::Int64(x.wrapping_neg())),
                 DataType::Float64(x) => Ok(DataType::Float64(-x)),
                 _ => Ok(DataType::Null),
             },
@@ -247,7 +247,7 @@ impl OperationEvaluator for StubEvaluator {
 
             // Type conversion
             OperationType::Abs => match &input {
-                DataType::Int64(n) => Ok(DataType::Int64(n.abs())),
+                DataType::Int64(n) => Ok(DataType::Int64(n.checked_abs().unwrap_or(i64::MAX))),
                 DataType::Float64(n) => Ok(DataType::Float64(n.abs())),
                 _ => Ok(DataType::Null),
             },
@@ -1333,15 +1333,17 @@ fn test_fstring_unclosed_brace() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-fn test_w104_empty_loop_body() {
+fn test_w104_empty_loop_body_moved_to_linter() {
+    // W104 (empty block) is now handled by the linter as W206.
     let codes = typecheck_warnings("for x in [1, 2, 3] {}");
-    assert!(codes.contains(&"W104".to_string()), "expected W104, got: {:?}", codes);
+    assert!(!codes.contains(&"W104".to_string()), "W104 should no longer be emitted by type checker, got: {:?}", codes);
 }
 
 #[test]
-fn test_w105_infinite_loop() {
+fn test_w105_infinite_loop_moved_to_linter() {
+    // W105 (while true) is now handled by the linter as W204.
     let codes = typecheck_warnings("while true {}");
-    assert!(codes.contains(&"W105".to_string()), "expected W105, got: {:?}", codes);
+    assert!(!codes.contains(&"W105".to_string()), "W105 should no longer be emitted by type checker, got: {:?}", codes);
 }
 
 #[test]
@@ -6283,18 +6285,18 @@ let _y = match x {
 
 #[test]
 fn test_while_true_with_break_no_w105() {
-    // while true { break; } should NOT warn W105
+    // W105 moved to linter as W204; type checker no longer emits it
     let codes = typecheck_warnings(r#"
 while true {
     break;
 }
 "#);
-    assert!(!codes.contains(&"W105".to_string()), "should not warn W105, got {:?}", codes);
+    assert!(!codes.contains(&"W105".to_string()), "W105 should no longer be emitted by type checker, got {:?}", codes);
 }
 
 #[test]
 fn test_while_true_with_break_in_if_no_w105() {
-    // while true { if cond { break; } } should NOT warn W105
+    // W105 moved to linter as W204; type checker no longer emits it
     let codes = typecheck_warnings(r#"
 let mut i = 0
 while true {
@@ -6302,17 +6304,18 @@ while true {
     if i > 5 { break; }
 }
 "#);
-    assert!(!codes.contains(&"W105".to_string()), "should not warn W105, got {:?}", codes);
+    assert!(!codes.contains(&"W105".to_string()), "W105 should no longer be emitted by type checker, got {:?}", codes);
 }
 
 #[test]
-fn test_while_true_without_break_warns_w105() {
+fn test_while_true_without_break_no_w105() {
+    // W105 moved to linter as W204; type checker no longer emits it
     let codes = typecheck_warnings(r#"
 while true {
     output 1;
 }
 "#);
-    assert!(codes.contains(&"W105".to_string()), "expected W105, got {:?}", codes);
+    assert!(!codes.contains(&"W105".to_string()), "W105 should no longer be emitted by type checker, got {:?}", codes);
 }
 
 #[test]
@@ -6601,7 +6604,7 @@ fn test_closure_with_default_param_override() {
 
 #[test]
 fn test_while_true_break_in_match_no_w105() {
-    // expr_contains_break must handle Match expressions
+    // W105 moved to linter as W204; type checker no longer emits it
     let codes = typecheck_warnings(r#"
 let mut x = 0
 while true {
@@ -6613,7 +6616,7 @@ while true {
 }
 "#);
     assert!(!codes.contains(&"W105".to_string()),
-        "Should not warn W105 when break is inside match arm, got {:?}", codes);
+        "W105 should no longer be emitted by type checker, got {:?}", codes);
 }
 #[test]
 fn test_array_method_in_expression() {
@@ -7395,8 +7398,8 @@ fn test_map_comprehension_success() {
 }
 
 #[test]
-fn test_w102_variable_shadowing() {
-    // Variable shadowing within same scope should warn
+fn test_w102_variable_shadowing_moved_to_linter() {
+    // W102 (same-scope shadowing) is now handled by the linter as W209.
     let src = r#"
         let x = 1;
         let x = 2;
@@ -7407,7 +7410,7 @@ fn test_w102_variable_shadowing() {
     let w102s: Vec<_> = analysis.diagnostics.iter()
         .filter(|d| d.code.as_deref() == Some("W102"))
         .collect();
-    assert!(!w102s.is_empty(), "Expected W102 for variable shadowing");
+    assert!(w102s.is_empty(), "W102 should no longer be emitted by type checker, got {:?}", w102s);
 }
 
 #[test]
@@ -8242,6 +8245,34 @@ fn test_map_typeof() {
         let m = {"x": 10};
         output typeof(m);
     "#), DataType::String("map".to_string()));
+}
+
+#[test]
+fn test_map_index_with_string_key() {
+    // Bug fix: map["key"] should use MapGet, not ArrayGet
+    assert_eq!(run(r#"
+        let m = {"name": "alice", "age": 30};
+        output m["name"];
+    "#), DataType::String("alice".to_string()));
+}
+
+#[test]
+fn test_map_index_with_variable_key() {
+    // Dynamic key via variable
+    assert_eq!(run(r#"
+        let m = {"x": 10, "y": 20};
+        let key = "y";
+        output m[key];
+    "#), DataType::Int64(20));
+}
+
+#[test]
+fn test_map_index_missing_key() {
+    // Missing key returns null
+    assert_eq!(run(r#"
+        let m = {"a": 1};
+        output m["b"];
+    "#), DataType::Null);
 }
 
 #[test]

@@ -259,25 +259,8 @@ impl TypeChecker {
                 None,
             );
         }
-        // W102: Variable shadowing within the same scope.
-        // Suppress for _-prefixed names (intentional discard pattern).
-        if !name.starts_with('_') {
-            if let Some(scope) = self.env.last() {
-                if let Some(prev) = scope.get(name) {
-                    self.emit_coded(
-                        line,
-                        col,
-                        format!(
-                            "Variable '{}' shadows previous definition on line {}",
-                            name, prev.def_line
-                        ),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W102,
-                        None,
-                    );
-                }
-            }
-        }
+        // W102 (same-scope shadowing) is handled by the linter as W209.
+        // Removed from type checker to avoid duplicate diagnostics in LSP.
         if let Some(scope) = self.env.last_mut() {
             scope.insert(
                 name.to_string(),
@@ -493,16 +476,7 @@ impl TypeChecker {
                     );
                 }
 
-                if is_empty_block(body) {
-                    self.emit_coded(
-                        stmt.span.start_line,
-                        stmt.span.start_col,
-                        "Empty loop body".to_string(),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W104,
-                        None,
-                    );
-                }
+                // W104 (empty block) is handled by the linter as W206.
 
                 self.push_scope();
                 self.loop_depth += 1;
@@ -553,32 +527,8 @@ impl TypeChecker {
                     );
                 }
 
-                // W105: Infinite while loop (literal true condition, no break in body).
-                if matches!(
-                    &condition.kind,
-                    ExpressionKind::Literal(Literal::Bool(true))
-                ) && !block_contains_break(body) {
-                    self.emit_coded(
-                        condition.span.start_line,
-                        condition.span.start_col,
-                        "Loop condition is always true".to_string(),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W105,
-                        None,
-                    );
-                }
-
-                // W104: Empty loop body.
-                if is_empty_block(body) {
-                    self.emit_coded(
-                        stmt.span.start_line,
-                        stmt.span.start_col,
-                        "Empty loop body".to_string(),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W104,
-                        None,
-                    );
-                }
+                // W105 (while-true) is handled by the linter as W204.
+                // W104 (empty block) is handled by the linter as W206.
 
                 self.push_scope();
                 self.loop_depth += 1;
@@ -2051,16 +2001,7 @@ impl TypeChecker {
             // loop { body } — infinite loop with break value
             // -----------------------------------------------------------------
             ExpressionKind::Loop(block) => {
-                if is_empty_block(block) {
-                    self.emit_coded(
-                        expr.span.start_line,
-                        expr.span.start_col,
-                        "Empty loop body".to_string(),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W104,
-                        None,
-                    );
-                }
+                // W104 (empty block) is handled by the linter as W206.
                 self.push_scope();
                 self.loop_depth += 1;
                 self.check_block(block);
@@ -2324,7 +2265,7 @@ impl TypeChecker {
                     }
                 }
                 // Collect all unique variable names from all alternatives,
-                // binding each only once to avoid duplicate W102 warnings.
+                // binding each only once to avoid duplicate definitions.
                 let mut bound = std::collections::HashSet::new();
                 for alt in alternatives {
                     self.bind_pattern_vars_collecting(alt, val_type, span, &mut bound);
@@ -3020,54 +2961,8 @@ fn as_variable(expr: &Expression) -> Option<&str> {
     }
 }
 
-/// Check if a block is empty (no statements and no tail expression).
-fn is_empty_block(block: &Block) -> bool {
-    block.statements.is_empty() && block.tail_expr.is_none()
-}
-
-/// Check if a block contains a break statement (shallow — does not recurse into nested loops).
-fn block_contains_break(block: &Block) -> bool {
-    for stmt in &block.statements {
-        match &stmt.kind {
-            StatementKind::Break(_) => return true,
-            StatementKind::TryCatch { try_block, catch_block, .. } => {
-                if block_contains_break(try_block) { return true; }
-                if block_contains_break(catch_block) { return true; }
-            }
-            // Don't recurse into nested loops — their breaks are for the inner loop.
-            StatementKind::ForLoop { .. } | StatementKind::WhileLoop { .. } => {}
-            StatementKind::ExprStatement(expr) => {
-                if expr_contains_break(expr) { return true; }
-            }
-            _ => {}
-        }
-    }
-    // Also check tail expression
-    if let Some(tail) = &block.tail_expr {
-        if expr_contains_break(tail) { return true; }
-    }
-    false
-}
-
-/// Check if an expression contains a break statement (for if-else blocks, etc.).
-fn expr_contains_break(expr: &Expression) -> bool {
-    match &expr.kind {
-        ExpressionKind::IfElse { then_block, else_block, .. } => {
-            if block_contains_break(then_block) { return true; }
-            if let Some(eb) = else_block {
-                if block_contains_break(eb) { return true; }
-            }
-            false
-        }
-        ExpressionKind::Block(block) => block_contains_break(block),
-        ExpressionKind::Match { arms, .. } => {
-            arms.iter().any(|arm| block_contains_break(&arm.body))
-        }
-        // Don't recurse into loop expressions — their breaks are for the inner loop.
-        ExpressionKind::Loop(_) => false,
-        _ => false,
-    }
-}
+// is_empty_block, block_contains_break, expr_contains_break removed —
+// these checks are now handled by the linter (W206, W204).
 
 /// Return available method names for a given ChannelType (for "did you mean?" suggestions).
 fn available_methods_for_channel_type(obj_type: ChannelType) -> Vec<&'static str> {
@@ -4023,12 +3918,14 @@ output r;"#,
     // =========================================================================
 
     #[test]
-    fn test_variable_shadowing_warns() {
+    fn test_variable_shadowing_moved_to_linter() {
+        // W102 (shadowing) now handled by linter W209
         let a = check("let x = 1;\nlet x = 2;\noutput x;");
         let w = warnings(&a);
-        assert!(w
+        assert!(!w
             .iter()
-            .any(|d| d.message.contains("shadows previous definition")));
+            .any(|d| d.message.contains("shadows previous definition")),
+            "shadowing check should no longer be emitted by type checker");
     }
 
     #[test]
@@ -4076,26 +3973,32 @@ output r;"#,
     }
 
     #[test]
-    fn test_empty_for_body_warns() {
+    fn test_empty_for_body_moved_to_linter() {
+        // W104 (empty block) now handled by linter W206
         let a = check("let items = [1, 2, 3];\nfor _x in items {}");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Empty loop body")));
+        assert!(!w.iter().any(|d| d.message.contains("Empty loop body")),
+            "empty block check should no longer be emitted by type checker");
     }
 
     #[test]
-    fn test_empty_while_body_warns() {
+    fn test_empty_while_body_moved_to_linter() {
+        // W104 (empty block) now handled by linter W206
         let a = check("let mut c = true;\nwhile c {}");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Empty loop body")));
+        assert!(!w.iter().any(|d| d.message.contains("Empty loop body")),
+            "empty block check should no longer be emitted by type checker");
     }
 
     #[test]
-    fn test_infinite_while_warns() {
+    fn test_infinite_while_moved_to_linter() {
+        // W105 (while true) now handled by linter W204
         let a = check("while true { 1; }");
         let w = warnings(&a);
-        assert!(w
+        assert!(!w
             .iter()
-            .any(|d| d.message.contains("Loop condition is always true")));
+            .any(|d| d.message.contains("Loop condition is always true")),
+            "while-true check should no longer be emitted by type checker");
     }
 
     #[test]
@@ -4703,10 +4606,12 @@ output r;"#,
     // =========================================================================
 
     #[test]
-    fn test_loop_empty_body_warns() {
+    fn test_loop_empty_body_moved_to_linter() {
+        // W104 (empty block) now handled by linter W206
         let a = check("let _r = loop {};");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Empty loop body")));
+        assert!(!w.iter().any(|d| d.message.contains("Empty loop body")),
+            "empty block check should no longer be emitted by type checker");
     }
 
     #[test]
@@ -4911,14 +4816,12 @@ output r;"#,
     }
 
     #[test]
-    fn test_diagnostic_code_for_shadowing() {
+    fn test_w102_shadowing_moved_to_linter() {
+        // W102 is now handled by the linter as W209.
         let a = check("let x = 1;\nlet x = 2;\noutput x;");
         let warns = warnings(&a);
-        let d = warns
-            .iter()
-            .find(|d| d.message.contains("shadows"))
-            .unwrap();
-        assert_eq!(d.code.as_deref(), Some("W102"));
+        let shadow = warns.iter().find(|d| d.code.as_deref() == Some("W102"));
+        assert!(shadow.is_none(), "W102 should no longer be emitted by type checker");
     }
 
     #[test]
@@ -4998,11 +4901,12 @@ test "reads outer" { let r = x + 1; output r; }"#,
     }
 
     #[test]
-    fn test_w102_suppressed_for_underscore_prefix() {
+    fn test_w102_no_longer_emitted() {
+        // W102 is now handled by the linter as W209.
         let a = check("let _x = 1;\nlet _x = 2;\noutput _x;");
         let warns = warnings(&a);
         let shadow = warns.iter().find(|d| d.code.as_deref() == Some("W102"));
-        assert!(shadow.is_none(), "W102 should be suppressed for _-prefixed names");
+        assert!(shadow.is_none(), "W102 should no longer be emitted by type checker");
     }
 
     #[test]

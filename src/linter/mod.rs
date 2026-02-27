@@ -148,9 +148,7 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
                 }
-                // W211: unused function parameters
-                let diags = rules::check_unused_params(fdef);
-                self.emit_all(diags);
+                // W211 (unused params) removed — handled by type checker as W109.
                 self.check_block(&fdef.body);
             }
             StatementKind::AsyncFunctionDef(fdef) => {
@@ -168,9 +166,7 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
                 }
-                // W211: unused function parameters
-                let diags = rules::check_unused_params(fdef);
-                self.emit_all(diags);
+                // W211 (unused params) removed — handled by type checker as W109.
                 self.check_block(&fdef.body);
             }
             StatementKind::EnumDef { name, variants } => {
@@ -926,89 +922,14 @@ fn foo() {
 
     // ── W211: Unused function parameter ──
 
+    // ── W211: Removed — unused params now handled by type checker W109 ──
+
     #[test]
-    fn test_w211_unused_param() {
+    fn test_w211_no_longer_emitted() {
+        // W211 (unused params) moved to type checker as W109.
         let codes = lint_codes("fn foo(x, y) { x }");
-        assert!(codes.contains(&"W211".to_string()),
-            "expected W211 for unused parameter y, got {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_all_params_used() {
-        let codes = lint_codes("fn foo(x, y) { x + y }");
         assert!(!codes.contains(&"W211".to_string()),
-            "should not warn when all params used: {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_underscore_prefix_suppressed() {
-        let codes = lint_codes("fn foo(x, _y) { x }");
-        assert!(!codes.contains(&"W211".to_string()),
-            "_ prefix should suppress W211: {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_param_used_in_nested_block() {
-        let codes = lint_codes(r#"
-fn foo(x) {
-    if true {
-        x + 1
-    } else {
-        0
-    }
-}
-"#);
-        assert!(!codes.contains(&"W211".to_string()),
-            "should not warn when param used in nested block: {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_param_used_in_method_call() {
-        let codes = lint_codes("fn foo(arr) { arr.len() }");
-        assert!(!codes.contains(&"W211".to_string()),
-            "should not warn when param used as method receiver: {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_param_used_in_string_interpolation() {
-        let codes = lint_codes(r#"fn foo(name) { f"hello {name}" }"#);
-        assert!(!codes.contains(&"W211".to_string()),
-            "should not warn when param used in f-string: {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_multiple_unused_params() {
-        let diags = lint_source("fn foo(a, b, c) { 42 }");
-        let w211_count = diags.iter().filter(|d| d.code.as_deref() == Some("W211")).count();
-        assert_eq!(w211_count, 3, "expected W211 for all 3 params, got {}", w211_count);
-    }
-
-    #[test]
-    fn test_w211_suggestion_message() {
-        let diags = lint_source("fn foo(x, y) { x }");
-        let w211 = diags.iter().find(|d| d.code.as_deref() == Some("W211")).unwrap();
-        assert!(w211.message.contains("y"), "message should mention the param name: {}", w211.message);
-        assert!(w211.suggestion.as_ref().unwrap().contains("_y"), "suggestion should suggest _y: {:?}", w211.suggestion);
-    }
-
-    #[test]
-    fn test_w211_async_function() {
-        let codes = lint_codes("async fn foo(x, y) { x }");
-        assert!(codes.contains(&"W211".to_string()),
-            "expected W211 for unused async param y, got {:?}", codes);
-    }
-
-    #[test]
-    fn test_w211_param_used_in_lambda() {
-        // Parameter used inside a lambda within the function body
-        let codes = lint_codes(r#"
-fn foo(x) {
-    let f = |y| x + y;
-    f(1)
-}
-"#);
-        assert!(!codes.contains(&"W211".to_string()),
-            "should not warn when param used in nested lambda: {:?}", codes);
+            "W211 should no longer be emitted by linter, got {:?}", codes);
     }
 
     // ── W212: Return in finally block ──

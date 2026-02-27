@@ -2881,17 +2881,30 @@ impl<'a> Interpreter<'a> {
                 }
                 let idx = self.eval_expr(index)?;
 
-                let inputs = HashMap::from([
-                    ("array".to_string(), obj),
-                    ("index".to_string(), idx),
-                ]);
-
-                self.evaluator.eval_operation(OperationType::ArrayGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
-                    InterpError::EvalError {
-                        error: e,
-                        span: expr.span,
-                    }
-                })
+                // Dispatch MapGet for map indexing (map["key"]), ArrayGet otherwise
+                if matches!(obj, DataType::Map(_)) {
+                    let inputs = HashMap::from([
+                        ("map".to_string(), obj),
+                        ("key".to_string(), idx),
+                    ]);
+                    self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
+                        InterpError::EvalError {
+                            error: e,
+                            span: expr.span,
+                        }
+                    })
+                } else {
+                    let inputs = HashMap::from([
+                        ("array".to_string(), obj),
+                        ("index".to_string(), idx),
+                    ]);
+                    self.evaluator.eval_operation(OperationType::ArrayGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
+                        InterpError::EvalError {
+                            error: e,
+                            span: expr.span,
+                        }
+                    })
+                }
             }
 
             ExpressionKind::FieldAccess { object, field } => {

@@ -433,12 +433,34 @@ impl<'a> Formatter<'a> {
         self.newline();
         self.indent();
 
-        for stmt in &block.statements {
+        let mut prev_was_def = false;
+        for (i, stmt) in block.statements.iter().enumerate() {
+            let is_def = matches!(
+                &stmt.kind,
+                StatementKind::FunctionDef(_)
+                    | StatementKind::AsyncFunctionDef(_)
+                    | StatementKind::EnumDef { .. }
+                    | StatementKind::StructDef { .. }
+                    | StatementKind::ModuleDef { .. }
+                    | StatementKind::TestDef { .. }
+                    | StatementKind::ConstDef { .. }
+                    | StatementKind::TypeAlias { .. }
+            );
+
+            if i > 0 && (is_def || prev_was_def) {
+                self.newline();
+            }
+
             self.fmt_statement(stmt);
             self.newline();
+
+            prev_was_def = is_def;
         }
 
         if let Some(tail) = &block.tail_expr {
+            if prev_was_def {
+                self.newline();
+            }
             self.fmt_expression(tail);
             self.newline();
         }
@@ -1898,5 +1920,238 @@ fn main() {
             formatted2
         );
         assert_idempotent(source2);
+    }
+
+    // -----------------------------------------------------------------
+    // Blank lines between definitions inside blocks
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_blank_lines_in_module_body() {
+        let source = "mod utils {\n    fn a() { 1 }\n    fn b() { 2 }\n}";
+        let result = format_source(source);
+        assert!(
+            result.contains("fn a() { 1 }\n\n    fn b() { 2 }"),
+            "should have blank line between fns in module body: {}",
+            result
+        );
+        assert_idempotent(&result);
+    }
+
+    #[test]
+    fn test_blank_lines_in_block_mixed_defs_and_stmts() {
+        let source = "mod m {\n    let x = 1;\n    fn f() { x }\n    let y = 2;\n}";
+        let result = format_source(source);
+        // Should have blank line before fn (def after non-def) and after fn (non-def after def)
+        assert!(
+            result.contains("let x = 1;\n\n    fn f() { x }\n\n    let y = 2;"),
+            "should have blank lines around fn in block: {}",
+            result
+        );
+        assert_idempotent(&result);
+    }
+
+    #[test]
+    fn test_blank_line_before_tail_expr_after_def() {
+        let source = "fn outer() {\n    fn inner() { 1 }\n    inner()\n}";
+        let result = format_source(source);
+        assert!(
+            result.contains("fn inner() { 1 }\n\n    inner()"),
+            "should have blank line between fn def and tail expr: {}",
+            result
+        );
+        assert_idempotent(&result);
+    }
+
+    // -----------------------------------------------------------------
+    // Edge cases: empty/single/nested arrays
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_empty_array() {
+        let result = format_source("let a = [];");
+        assert!(result.contains("let a = [];"), "got: {}", result);
+        assert_idempotent("let a = [];");
+    }
+
+    #[test]
+    fn test_single_element_array() {
+        let result = format_source("let a = [1];");
+        assert!(result.contains("let a = [1];"), "got: {}", result);
+        assert_idempotent("let a = [1];");
+    }
+
+    #[test]
+    fn test_nested_arrays() {
+        let result = format_source("let a = [[1, 2], [3, 4]];");
+        assert!(result.contains("[[1, 2], [3, 4]]"), "got: {}", result);
+        assert_idempotent("let a = [[1, 2], [3, 4]];");
+    }
+
+    // -----------------------------------------------------------------
+    // TryPropagate
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_try_propagate_formatting() {
+        assert_batch_idempotent(&[
+            ("try_prop_call", "let x = foo()?;"),
+            ("try_prop_method", "let x = obj.method()?;"),
+            ("try_prop_chain", "let x = foo()?.bar();"),
+            ("try_prop_field", "let x = foo()?.field;"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Inclusive ranges
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_inclusive_range_formatting() {
+        assert_batch_idempotent(&[
+            ("incl_range", "let r = 0..=10;"),
+            ("incl_range_for", "for x in 0..=10 {}"),
+            ("incl_range_match", "match x {\n    0..=10 => true,\n    _ => false\n}"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Default and rest parameters
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_default_and_rest_params() {
+        assert_batch_idempotent(&[
+            ("default_param", "fn f(x, y = 10) { x + y }"),
+            ("default_typed", "fn f(x: int64, y: int64 = 10) -> int64 { x + y }"),
+            ("rest_param", "fn f(x, ...args) { x }"),
+            ("rest_only", "fn f(...args) { args }"),
+            ("default_lambda", "let f = |x, y = 10| x + y;"),
+            ("rest_lambda", "let f = |x, ...rest| x;"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Async function definitions
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_async_fn_formatting() {
+        assert_batch_idempotent(&[
+            ("async_fn_simple", "async fn fetch() { 42 }"),
+            ("async_fn_typed", "async fn fetch(url: string) -> string { url }"),
+            ("async_fn_body", "async fn fetch() {\n    let x = await get();\n    x\n}"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Test definitions
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_test_def_formatting() {
+        assert_batch_idempotent(&[
+            ("test_simple", "test \"basic\" {\n    assert(true);\n}"),
+            ("test_complex", "test \"complex test\" {\n    let x = 42;\n    assert(x == 42);\n}"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Module definitions with complex bodies
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_module_def_formatting() {
+        let source = r#"
+mod math {
+    const PI = 3.14159;
+
+    fn add(a, b) { a + b }
+
+    fn multiply(a, b) { a * b }
+}
+"#;
+        assert_idempotent(source);
+    }
+
+    // -----------------------------------------------------------------
+    // Keyword arguments
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_kwargs_formatting() {
+        assert_batch_idempotent(&[
+            ("kwargs_only", "let x = f(name=1);"),
+            ("kwargs_multi", "let x = f(a=1, b=2, c=3);"),
+            ("kwargs_mixed", "let x = f(1, 2, name=3);"),
+            ("method_kwargs", "let x = obj.f(1, name=2);"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Spread operator
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_spread_formatting() {
+        assert_batch_idempotent(&[
+            ("spread_array", "let a = [...other, 1, 2];"),
+            ("spread_multi", "let a = [...x, ...y, ...z];"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Comprehensions with destructuring
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_comprehension_destructure() {
+        assert_batch_idempotent(&[
+            ("list_comp_destr", "[a + b for [a, b] in pairs]"),
+            ("list_comp_map_destr", "[v for {k, v} in entries]"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Enum/struct construction edge cases
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_enum_struct_construct() {
+        assert_batch_idempotent(&[
+            ("enum_no_args", "let x = Color::Red;"),
+            ("enum_one_arg", "let x = Result::Ok(42);"),
+            ("enum_multi_args", "let x = Shape::Rect(10, 20);"),
+            ("struct_empty", "let x = Empty {};"),
+            ("struct_single", "let x = Point { x: 1.0 };"),
+            ("struct_multi", "let x = Point { x: 1.0, y: 2.0 };"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Loop expression
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_loop_expression() {
+        assert_batch_idempotent(&[
+            ("loop_break", "loop {\n    break;\n}"),
+            ("loop_break_val", "let x = loop {\n    break 42;\n};"),
+            ("loop_complex", "let x = loop {\n    let v = next();\n    if v > 10 {\n        break v;\n    }\n};"),
+        ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Await and spawn in various positions
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_await_spawn_positions() {
+        assert_batch_idempotent(&[
+            ("await_call", "let x = await fetch();"),
+            ("await_method", "let x = (await fetch()).body;"),
+            ("spawn_call", "let x = spawn task();"),
+            ("spawn_block", "let x = spawn {\n    let y = 1;\n    y + 2\n};"),
+        ]);
     }
 }

@@ -96,6 +96,12 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
         let lint_result = linter::lint(prog, &lint_config);
         all_diagnostics.extend(lint_result.diagnostics);
 
+        // Deduplicate diagnostics that may overlap between type checker and linter.
+        // Key: (line, column, code) — if two diagnostics share the same location and
+        // error code, keep only the first one (type checker takes priority since it
+        // runs first).
+        deduplicate_diagnostics(&mut all_diagnostics);
+
         // Extract symbols
         extract_symbols(prog, source, &mut functions, &mut variables, &mut enums, &mut structs);
     }
@@ -110,6 +116,18 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
     };
 
     (state, all_diagnostics)
+}
+
+/// Deduplicate diagnostics by (line, column, code).
+/// When two diagnostics share the same location and error code, the first one wins
+/// (type checker diagnostics are added first, so they take priority).
+/// Also deduplicates diagnostics at the same location with no code.
+fn deduplicate_diagnostics(diagnostics: &mut Vec<AstDiagnostic>) {
+    let mut seen = HashSet::new();
+    diagnostics.retain(|d| {
+        let key = (d.line, d.column, d.code.clone().unwrap_or_default());
+        seen.insert(key)
+    });
 }
 
 /// Find the 1-based column of `name` in the given 1-based source line.
@@ -1336,5 +1354,98 @@ mod tests {
         let (state, _) = analyze_document(source);
         assert!(state.variables.contains_key("a"));
         assert!(state.variables.contains_key("b"));
+    }
+
+    // ── Deduplication tests ──
+
+    #[test]
+    fn test_no_duplicate_shadowing_warnings() {
+        // Both type checker (W102) and linter (W209) used to warn about shadowing.
+        // After cleanup, only the linter should emit W209.
+        let source = "let x = 1;\nlet x = 2;\noutput x;";
+        let (_, diagnostics) = analyze_document(source);
+        let shadow_diags: Vec<_> = diagnostics.iter()
+            .filter(|d| d.message.contains("shadow"))
+            .collect();
+        assert_eq!(shadow_diags.len(), 1,
+            "expected exactly 1 shadowing diagnostic (W209), got {}: {:?}",
+            shadow_diags.len(), shadow_diags);
+        assert_eq!(shadow_diags[0].code.as_deref(), Some("W209"));
+    }
+
+    #[test]
+    fn test_no_duplicate_empty_block_warnings() {
+        // Both type checker (W104) and linter (W206) used to warn about empty blocks.
+        // After cleanup, only the linter should emit W206.
+        let source = "for _x in [1, 2, 3] {}";
+        let (_, diagnostics) = analyze_document(source);
+        let empty_diags: Vec<_> = diagnostics.iter()
+            .filter(|d| d.message.to_lowercase().contains("empty"))
+            .collect();
+        assert_eq!(empty_diags.len(), 1,
+            "expected exactly 1 empty block diagnostic (W206), got {}: {:?}",
+            empty_diags.len(), empty_diags);
+        assert_eq!(empty_diags[0].code.as_deref(), Some("W206"));
+    }
+
+    #[test]
+    fn test_no_duplicate_unused_param_warnings() {
+        // Both type checker (W109) and linter (W211) used to warn about unused params.
+        // After cleanup, only the type checker should emit W109.
+        let source = "fn foo(x, y) { output x; }";
+        let (_, diagnostics) = analyze_document(source);
+        let unused_param_diags: Vec<_> = diagnostics.iter()
+            .filter(|d| d.message.to_lowercase().contains("unused") && d.message.to_lowercase().contains("parameter"))
+            .collect();
+        assert_eq!(unused_param_diags.len(), 1,
+            "expected exactly 1 unused param diagnostic (W109), got {}: {:?}",
+            unused_param_diags.len(), unused_param_diags);
+        assert_eq!(unused_param_diags[0].code.as_deref(), Some("W109"));
+    }
+
+    #[test]
+    fn test_no_duplicate_while_true_warnings() {
+        // Both type checker (W105) and linter (W204) used to warn about while true.
+        // After cleanup, only the linter should emit W204.
+        let source = "while true { output 1; }";
+        let (_, diagnostics) = analyze_document(source);
+        let const_cond_diags: Vec<_> = diagnostics.iter()
+            .filter(|d| d.message.contains("always") && d.code.as_deref().map_or(false, |c| c == "W204" || c == "W105"))
+            .collect();
+        assert_eq!(const_cond_diags.len(), 1,
+            "expected exactly 1 constant condition diagnostic (W204), got {}: {:?}",
+            const_cond_diags.len(), const_cond_diags);
+        assert_eq!(const_cond_diags[0].code.as_deref(), Some("W204"));
+    }
+
+    #[test]
+    fn test_deduplicate_diagnostics_function() {
+        let mut diags = vec![
+            AstDiagnostic {
+                line: 1, column: 1,
+                message: "first".to_string(),
+                severity: crate::eval::DiagnosticSeverity::Warning,
+                code: Some("W100".to_string()),
+                help: None, suggestion: None,
+            },
+            AstDiagnostic {
+                line: 1, column: 1,
+                message: "duplicate".to_string(),
+                severity: crate::eval::DiagnosticSeverity::Warning,
+                code: Some("W100".to_string()),
+                help: None, suggestion: None,
+            },
+            AstDiagnostic {
+                line: 2, column: 1,
+                message: "different location".to_string(),
+                severity: crate::eval::DiagnosticSeverity::Warning,
+                code: Some("W100".to_string()),
+                help: None, suggestion: None,
+            },
+        ];
+        deduplicate_diagnostics(&mut diags);
+        assert_eq!(diags.len(), 2, "expected 2 after dedup, got {}", diags.len());
+        assert_eq!(diags[0].message, "first");
+        assert_eq!(diags[1].message, "different location");
     }
 }
