@@ -859,6 +859,45 @@ impl TypeChecker {
                 // Check that operation makes sense for the types
                 let result_type = self.infer_binop(*op, var_type, val_type, stmt.span);
 
+                // Check for suspicious literal patterns (E104, W107)
+                // E104: Division/modulo by zero literal
+                if (*op == BinOp::Div || *op == BinOp::Mod)
+                    && (literal_int(value) == Some(0) || literal_float(value) == Some(0.0))
+                {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        "Division by zero".to_string(),
+                        DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E104,
+                        None,
+                    );
+                }
+                // W107: Modulo by 1
+                if *op == BinOp::Mod && literal_int(value) == Some(1) {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        "Modulo by 1 always returns 0".to_string(),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W107,
+                        None,
+                    );
+                }
+                // W107: Multiply by 0
+                if *op == BinOp::Mul
+                    && (literal_int(value) == Some(0) || literal_float(value) == Some(0.0))
+                {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        "Multiplication by 0 always returns 0".to_string(),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W107,
+                        None,
+                    );
+                }
+
                 if let Some(info) = self.lookup_mut(name) {
                     info.channel_type = result_type;
                     info.used = true;
@@ -2972,7 +3011,8 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "starts_with" => Some("starts_with".into()),
             "ends_with" => Some("ends_with".into()),
             "replace" => Some("replace".into()),
-            "chars" | "lines" => Some("string_chars".into()),
+            "chars" => Some("string_chars".into()),
+            "lines" => Some("string_lines".into()),
             "repeat" => Some("string_repeat".into()),
             "substring" | "slice" => Some("substring".into()),
             "index_of" => Some("index_of".into()),
