@@ -113,7 +113,11 @@ impl WasmCodegen {
                 mutable: true,
                 shared: false,
             },
-            &wasm_encoder::ConstExpr::i32_const(self.string_data_offset as i32 + self.calc_string_data_size(ir) as i32),
+            &wasm_encoder::ConstExpr::i32_const({
+                let offset = self.string_data_offset;
+                let size = self.calc_string_data_size(ir);
+                (offset.saturating_add(size)) as i32
+            }),
         );
         module.section(&globals);
 
@@ -724,7 +728,7 @@ impl WasmCodegen {
                     // Strategy: allocate first, then store. But elements are on stack...
                     // Use t1 to save elements one at a time.
                     // Better strategy: allocate, save base, then pop elements into slots in reverse.
-                    let alloc_size = 8 + count * 8;
+                    let alloc_size = 8u32.saturating_add(count.saturating_mul(8));
                     // bump alloc
                     f.instruction(&WasmInst::GlobalGet(0));
                     f.instruction(&WasmInst::GlobalGet(0));
@@ -751,7 +755,7 @@ impl WasmCodegen {
                         // Compute address: base + 8 + i*8
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Const((8 + i * 8) as i32));
+                        f.instruction(&WasmInst::I32Const(8i32.saturating_add((i as i32).saturating_mul(8))));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
