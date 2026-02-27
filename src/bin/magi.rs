@@ -9,6 +9,8 @@ use std::net::IpAddr;
 use std::process;
 use std::sync::{LazyLock, Mutex};
 
+use rand::Rng;
+
 use magi_lang::compiler;
 use magi_lang::eval::{DiagnosticSeverity, EvalError, OperationEvaluator};
 use magi_lang::syntax::interpreter::{resolve_package_from_source, Interpreter, ResolvedPackage};
@@ -2212,12 +2214,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HexEncode => {
                 match &input {
                     DataType::Bytes(b) => {
-                        let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-                        Ok(DataType::String(hex))
+                        Ok(DataType::String(hex::encode(b)))
                     }
                     DataType::String(s) => {
-                        let hex: String = s.as_bytes().iter().map(|byte| format!("{:02x}", byte)).collect();
-                        Ok(DataType::String(hex))
+                        Ok(DataType::String(hex::encode(s.as_bytes())))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2308,7 +2308,7 @@ impl OperationEvaluator for FullEvaluator {
                     return Ok(DataType::Null);
                 }
                 let hash = Sha256::digest(&data);
-                Ok(DataType::String(hash.iter().map(|b| format!("{:02x}", b)).collect()))
+                Ok(DataType::String(hex::encode(hash)))
             }
 
             // ================================================================
@@ -2322,7 +2322,7 @@ impl OperationEvaluator for FullEvaluator {
                     return Ok(DataType::Null);
                 }
                 let hash = Md5::digest(&data);
-                Ok(DataType::String(hash.iter().map(|b| format!("{:02x}", b)).collect()))
+                Ok(DataType::String(hex::encode(hash)))
             }
 
             // ================================================================
@@ -2540,40 +2540,20 @@ impl OperationEvaluator for FullEvaluator {
             // Random operations
             // ================================================================
             OperationType::RandomInt => {
-                // Simple pseudo-random using system time
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let val = xorshift64(seed);
-                Ok(DataType::Int64(val as i64))
+                let val: i64 = rand::rng().random();
+                Ok(DataType::Int64(val))
             }
             OperationType::RandomFloat => {
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let val = xorshift64(seed);
-                Ok(DataType::Float64((val as f64) / (u64::MAX as f64)))
+                let val: f64 = rand::rng().random_range(0.0..1.0);
+                Ok(DataType::Float64(val))
             }
             OperationType::RandomBool => {
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let val = xorshift64(seed);
-                Ok(DataType::Bool(val & 1 == 0))
+                Ok(DataType::Bool(rand::rng().random::<bool>()))
             }
             OperationType::RandomRange => {
                 match (a.to_i64(), b.to_i64()) {
                     (Some(lo), Some(hi)) if lo < hi => {
-                        let seed = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        let val = xorshift64(seed);
-                        let range = (hi - lo) as u64;
-                        let result = lo + (val % range) as i64;
+                        let result = rand::rng().random_range(lo..hi);
                         Ok(DataType::Int64(result))
                     }
                     (Some(lo), Some(hi)) if lo == hi => Ok(DataType::Int64(lo)),
@@ -2584,12 +2564,7 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) if !arr.is_empty() => {
-                        let seed = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        let val = xorshift64(seed);
-                        let idx = (val as usize) % arr.len();
+                        let idx = rand::rng().random_range(0..arr.len());
                         Ok(arr[idx].clone())
                     }
                     _ => Ok(DataType::Null),
@@ -2599,40 +2574,15 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(mut arr) => {
-                        let mut seed = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        for i in (1..arr.len()).rev() {
-                            seed = xorshift64(seed);
-                            let j = (seed as usize) % (i + 1);
-                            arr.swap(i, j);
-                        }
+                        use rand::seq::SliceRandom;
+                        arr.shuffle(&mut rand::rng());
                         Ok(DataType::Array(arr))
                     }
                     _ => Ok(DataType::Null),
                 }
             }
             OperationType::RandomUuid => {
-                // UUID v4: random with version/variant bits
-                let mut seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let mut bytes = [0u8; 16];
-                for b in &mut bytes {
-                    seed = xorshift64(seed);
-                    *b = seed as u8;
-                }
-                bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-                bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
-                Ok(DataType::String(format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
-                    bytes[8], bytes[9], bytes[10], bytes[11],
-                    bytes[12], bytes[13], bytes[14], bytes[15]
-                )))
+                Ok(DataType::String(uuid::Uuid::new_v4().to_string()))
             }
 
             // ================================================================
@@ -3426,24 +3376,7 @@ impl OperationEvaluator for FullEvaluator {
             // UUID operations
             // ================================================================
             OperationType::UuidV4 => {
-                let mut seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let mut bytes = [0u8; 16];
-                for b in &mut bytes {
-                    seed = xorshift64(seed);
-                    *b = seed as u8;
-                }
-                bytes[6] = (bytes[6] & 0x0f) | 0x40;
-                bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                Ok(DataType::String(format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
-                    bytes[8], bytes[9], bytes[10], bytes[11],
-                    bytes[12], bytes[13], bytes[14], bytes[15]
-                )))
+                Ok(DataType::String(uuid::Uuid::new_v4().to_string()))
             }
             OperationType::UuidNil => {
                 Ok(DataType::String("00000000-0000-0000-0000-000000000000".to_string()))
@@ -4148,15 +4081,8 @@ impl OperationEvaluator for FullEvaluator {
                 let count = inputs.get("input_1").or(inputs.get("count"))
                     .and_then(|v| v.to_i64()).unwrap_or(16) as usize;
                 let count = count.min(1_000_000);
-                let mut seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                let mut bytes = Vec::with_capacity(count);
-                for _ in 0..count {
-                    seed = xorshift64(seed);
-                    bytes.push(seed as u8);
-                }
+                let mut bytes = vec![0u8; count];
+                rand::rng().fill(&mut bytes[..]);
                 Ok(DataType::Bytes(bytes))
             }
             OperationType::RandomString => {
@@ -4164,14 +4090,10 @@ impl OperationEvaluator for FullEvaluator {
                     .and_then(|v| v.to_i64()).unwrap_or(16) as usize;
                 let length = length.min(MAX_STRING_OUTPUT);
                 let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-                let mut seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
+                let mut rng = rand::rng();
                 let mut result = String::with_capacity(length);
                 for _ in 0..length {
-                    seed = xorshift64(seed);
-                    result.push(chars[(seed as usize) % chars.len()] as char);
+                    result.push(chars[rng.random_range(0..chars.len())] as char);
                 }
                 Ok(DataType::String(result))
             }
@@ -4181,18 +4103,10 @@ impl OperationEvaluator for FullEvaluator {
                     .and_then(|v| v.to_i64()).unwrap_or(1) as usize;
                 match arr_val {
                     DataType::Array(mut arr) => {
+                        use rand::seq::SliceRandom;
                         let count = count.min(arr.len());
-                        let mut seed = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        // Fisher-Yates partial shuffle
-                        for i in 0..count {
-                            seed = xorshift64(seed);
-                            let j = i + (seed as usize) % (arr.len() - i);
-                            arr.swap(i, j);
-                        }
-                        Ok(DataType::Array(arr[..count].to_vec()))
+                        let (shuffled, _) = arr.partial_shuffle(&mut rand::rng(), count);
+                        Ok(DataType::Array(shuffled.to_vec()))
                     }
                     _ => Ok(DataType::Array(vec![])),
                 }
@@ -4273,7 +4187,7 @@ impl OperationEvaluator for FullEvaluator {
                     return Ok(DataType::Null);
                 }
                 let hash = Sha512::digest(&data);
-                Ok(DataType::String(hash.iter().map(|b| format!("{:02x}", b)).collect()))
+                Ok(DataType::String(hex::encode(hash)))
             }
             OperationType::HashCrc32 => {
                 let data = data_to_bytes(&input);
@@ -4302,31 +4216,16 @@ impl OperationEvaluator for FullEvaluator {
                     .map_err(|e| EvalError::InvalidInput(format!("hmac_sha256: {}", e)))?;
                 mac.update(&data);
                 let result = mac.finalize();
-                Ok(DataType::String(result.into_bytes().iter().map(|b| format!("{:02x}", b)).collect()))
+                Ok(DataType::String(hex::encode(result.into_bytes())))
             }
             OperationType::ConstantTimeEq => {
+                use subtle::ConstantTimeEq;
                 match (&a, &b) {
                     (DataType::String(s1), DataType::String(s2)) => {
-                        if s1.len() != s2.len() {
-                            Ok(DataType::Bool(false))
-                        } else {
-                            let mut result = 0u8;
-                            for (a, b) in s1.bytes().zip(s2.bytes()) {
-                                result |= a ^ b;
-                            }
-                            Ok(DataType::Bool(result == 0))
-                        }
+                        Ok(DataType::Bool(s1.as_bytes().ct_eq(s2.as_bytes()).into()))
                     }
                     (DataType::Bytes(b1), DataType::Bytes(b2)) => {
-                        if b1.len() != b2.len() {
-                            Ok(DataType::Bool(false))
-                        } else {
-                            let mut result = 0u8;
-                            for (a, b) in b1.iter().zip(b2.iter()) {
-                                result |= a ^ b;
-                            }
-                            Ok(DataType::Bool(result == 0))
-                        }
+                        Ok(DataType::Bool(b1.ct_eq(b2).into()))
                     }
                     _ => Ok(DataType::Bool(false)),
                 }
@@ -4341,65 +4240,30 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => s.as_bytes().to_vec(),
                     _ => return Ok(DataType::Null),
                 };
-                let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-                let mut result = String::new();
-                let mut buffer: u64 = 0;
-                let mut bits = 0;
-                for byte in &data {
-                    buffer = (buffer << 8) | (*byte as u64);
-                    bits += 8;
-                    while bits >= 5 {
-                        bits -= 5;
-                        result.push(alphabet[((buffer >> bits) & 0x1F) as usize] as char);
-                    }
-                }
-                if bits > 0 {
-                    result.push(alphabet[((buffer << (5 - bits)) & 0x1F) as usize] as char);
-                }
-                while !result.len().is_multiple_of(8) {
-                    result.push('=');
-                }
-                Ok(DataType::String(result))
+                Ok(DataType::String(data_encoding::BASE32.encode(&data)))
             }
             OperationType::Base32Decode => {
                 match &input {
                     DataType::String(s) => {
-                        let s = s.trim_end_matches('=');
-                        let mut result = Vec::new();
-                        let mut buffer: u64 = 0;
-                        let mut bits = 0;
-                        for ch in s.chars() {
-                            let val = match ch {
-                                'A'..='Z' => ch as u8 - b'A',
-                                '2'..='7' => ch as u8 - b'2' + 26,
-                                'a'..='z' => ch as u8 - b'a', // lowercase tolerance
-                                _ => return Err(EvalError::InvalidInput(format!("base32_decode: invalid character '{}'", ch))),
-                            };
-                            buffer = (buffer << 5) | val as u64;
-                            bits += 5;
-                            if bits >= 8 {
-                                bits -= 8;
-                                result.push((buffer >> bits) as u8);
-                            }
+                        match data_encoding::BASE32.decode(s.as_bytes()) {
+                            Ok(decoded) => Ok(DataType::Bytes(decoded)),
+                            Err(_) => Ok(DataType::Null),
                         }
-                        Ok(DataType::Bytes(result))
                     }
                     _ => Ok(DataType::Null),
                 }
             }
 
             // ================================================================
-            // HashBlake3: placeholder using double SHA-256 XOR
+            // HashBlake3
             // ================================================================
             OperationType::HashBlake3 => {
-                // Placeholder: use SHA-256 until blake3 crate is added
-                use sha2::{Sha256, Digest};
                 let data = data_to_bytes(&input);
                 if data.is_empty() && matches!(input, DataType::Null) {
                     return Ok(DataType::Null);
                 }
-                let hash = Sha256::digest(&data);
-                Ok(DataType::String(hash.iter().map(|b| format!("{:02x}", b)).collect()))
+                let hash = blake3::hash(&data);
+                Ok(DataType::String(hash.to_hex().to_string()))
             }
 
             // ================================================================
@@ -5436,14 +5300,6 @@ fn num_cmp(
     }
 }
 
-/// Simple xorshift64 PRNG
-fn xorshift64(mut seed: u64) -> u64 {
-    if seed == 0 { seed = 1; }
-    seed ^= seed << 13;
-    seed ^= seed >> 7;
-    seed ^= seed << 17;
-    seed
-}
 
 // =============================================================================
 // YAML helpers (serde_yaml conversion)

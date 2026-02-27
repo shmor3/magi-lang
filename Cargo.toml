@@ -31,6 +31,11 @@ base64 = "0.22"
 url = "2"
 csv = "1"
 serde_yaml = "0.9"
+blake3 = "1"
+rand = "0.9"
+subtle = "2"
+hex = "0.4"
+data-encoding = "2"
 
 [dev-dependencies]
 wasmparser = "0.245"
