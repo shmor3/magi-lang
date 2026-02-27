@@ -250,6 +250,65 @@ fn get_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalEr
     }
 }
 
+/// Extract a port number from an input map, allowing port 0 (OS-assigned).
+#[allow(dead_code)]
+fn get_bind_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalError> {
+    match inputs.get(key) {
+        Some(DataType::Int64(n)) => {
+            let n = *n;
+            if (0..=65535).contains(&n) {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (0-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(DataType::Int32(n)) => {
+            let n = *n as i64;
+            if (0..=65535).contains(&n) {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (0-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(DataType::Uint32(n)) => {
+            let n = *n as u64;
+            if n <= 65535 {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (0-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(DataType::Uint64(n)) => {
+            let n = *n;
+            if n <= 65535 {
+                Ok(n as u16)
+            } else {
+                Err(EvalError::InvalidInput(format!(
+                    "Port out of range (0-65535): {}",
+                    n
+                )))
+            }
+        }
+        Some(other) => Err(EvalError::InvalidInput(format!(
+            "Expected numeric port for '{}', got: {:?}",
+            key, other
+        ))),
+        None => Err(EvalError::InvalidInput(format!(
+            "Missing required input: {}",
+            key
+        ))),
+    }
+}
+
 /// Extract a string reference from an input map.
 #[allow(dead_code)]
 fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'a str, EvalError> {
@@ -4868,6 +4927,124 @@ impl OperationEvaluator for FullEvaluator {
                     ("private_pem".into(), DataType::String(key_pair.serialize_pem())),
                     ("public_pem".into(), DataType::String(key_pair.public_key_pem())),
                 ])))
+            }
+
+            // ================================================================
+            // TCP operations
+            // ================================================================
+            OperationType::TcpConnect => {
+                let host = get_string(inputs, "host")?;
+                validate_host(host)?;
+                let port = get_port(inputs, "port")?;
+                let addr = format!("{}:{}", host, port);
+                let sock_addr: std::net::SocketAddr = addr
+                    .parse()
+                    .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: invalid address: {}", e)))?;
+                let stream = std::net::TcpStream::connect_timeout(
+                    &sock_addr,
+                    std::time::Duration::from_millis(5000),
+                )
+                .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: {}", e)))?;
+                let id = conn_id("tcp");
+                conn_store(&id, Mutex::new(stream));
+                Ok(DataType::String(id))
+            }
+            OperationType::TcpWrite => {
+                let cid = get_string(inputs, "conn_id")?;
+                let data = inputs.get("data").cloned().unwrap_or(DataType::Null);
+                let bytes = data_to_bytes(&data);
+                conn_with::<Mutex<std::net::TcpStream>, _>(cid, |mtx| {
+                    use std::io::Write;
+                    let stream = mtx
+                        .get_mut()
+                        .map_err(|_| EvalError::InvalidInput("tcp lock poisoned".into()))?;
+                    let written = stream
+                        .write(&bytes)
+                        .map_err(|e| EvalError::InvalidInput(format!("tcp_write: {}", e)))?;
+                    stream
+                        .flush()
+                        .map_err(|e| EvalError::InvalidInput(format!("tcp_write flush: {}", e)))?;
+                    Ok(DataType::Int64(written as i64))
+                })
+            }
+            OperationType::TcpRead => {
+                let cid = get_string(inputs, "conn_id")?;
+                conn_with::<Mutex<std::net::TcpStream>, _>(cid, |mtx| {
+                    let stream = mtx
+                        .get_mut()
+                        .map_err(|_| EvalError::InvalidInput("tcp lock poisoned".into()))?;
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream
+                        .read(&mut buf)
+                        .map_err(|e| EvalError::InvalidInput(format!("tcp_read: {}", e)))?;
+                    buf.truncate(n);
+                    Ok(DataType::Bytes(buf))
+                })
+            }
+            OperationType::TcpClose => {
+                let cid = get_string(inputs, "conn_id")?;
+                conn_remove(cid)?;
+                Ok(DataType::Null)
+            }
+            OperationType::TcpBind => {
+                let address = get_string(inputs, "address")?;
+                let port = get_bind_port(inputs, "port")?;
+                let addr = format!("{}:{}", address, port);
+                let listener = std::net::TcpListener::bind(&addr)
+                    .map_err(|e| EvalError::InvalidInput(format!("tcp_bind: {}", e)))?;
+                let id = conn_id("tcp-listener");
+                conn_store(&id, Mutex::new(listener));
+                Ok(DataType::String(id))
+            }
+            OperationType::TcpAccept => {
+                let lid = get_string(inputs, "listener_id")?;
+                // Accept inside conn_with, return stream+addr; store stream outside to avoid deadlock.
+                let (stream, addr) =
+                    conn_with::<Mutex<std::net::TcpListener>, _>(lid, |mtx| {
+                        let listener = mtx.get_mut().map_err(|_| {
+                            EvalError::InvalidInput("tcp listener lock poisoned".into())
+                        })?;
+                        listener.set_nonblocking(true).map_err(|e| {
+                            EvalError::InvalidInput(format!("tcp_accept: {}", e))
+                        })?;
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(30000);
+                        let result = loop {
+                            match listener.accept() {
+                                Ok(r) => break Ok(r),
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    if std::time::Instant::now() >= deadline {
+                                        listener.set_nonblocking(false).ok();
+                                        break Err(EvalError::InvalidInput(
+                                            "tcp_accept: timed out".into(),
+                                        ));
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(10));
+                                }
+                                Err(e) => {
+                                    listener.set_nonblocking(false).ok();
+                                    break Err(EvalError::InvalidInput(format!(
+                                        "tcp_accept: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        };
+                        listener.set_nonblocking(false).ok();
+                        result
+                    })?;
+                stream.set_nonblocking(false).ok();
+                let id = conn_id("tcp");
+                conn_store(&id, Mutex::new(stream));
+                Ok(DataType::Map(std::collections::BTreeMap::from([
+                    ("conn_id".into(), DataType::String(id)),
+                    ("address".into(), DataType::String(addr.to_string())),
+                ])))
+            }
+            OperationType::TcpServerClose => {
+                let lid = get_string(inputs, "listener_id")?;
+                conn_remove(lid)?;
+                Ok(DataType::Null)
             }
 
             // ================================================================

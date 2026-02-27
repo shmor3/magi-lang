@@ -14506,3 +14506,27 @@ fn test_cert_verify_valid() {
     "#, "cert_verify");
     assert!(result.contains("true"));
 }
+
+// -------------------------------------------------------
+// TCP operations
+// -------------------------------------------------------
+
+#[test]
+fn test_tcp_bind_and_close() {
+    let result = run_eval_unique(r#"
+        let listener = tcp_bind("127.0.0.1", 0)
+        tcp_server_close(listener)
+        println("closed")
+    "#, "tcp_bind_close");
+    assert!(result.contains("closed"));
+}
+
+#[test]
+fn test_tcp_connect_refused() {
+    let result = run_eval_unique(
+        r#"tcp_connect("127.0.0.1", 1)"#,
+        "tcp_connect_refused",
+    );
+    assert!(result.contains("Error") || result.contains("error"));
+}
+
