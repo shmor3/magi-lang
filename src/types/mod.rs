@@ -181,7 +181,7 @@ impl DataType {
                 }
             }
             DataType::Float64(f) => {
-                if f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                if f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
                     Some(*f as i64)
                 } else {
                     None

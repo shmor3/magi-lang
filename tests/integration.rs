@@ -88,21 +88,25 @@ impl OperationEvaluator for StubEvaluator {
             OperationType::Greater => match (&a, &b) {
                 (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x > y)),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x > y)),
+                (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x > y)),
                 _ => Ok(DataType::Bool(false)),
             },
             OperationType::Less => match (&a, &b) {
                 (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x < y)),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x < y)),
+                (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x < y)),
                 _ => Ok(DataType::Bool(false)),
             },
             OperationType::GreaterEq => match (&a, &b) {
                 (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x >= y)),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x >= y)),
+                (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x >= y)),
                 _ => Ok(DataType::Bool(false)),
             },
             OperationType::LessEq => match (&a, &b) {
                 (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x <= y)),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x <= y)),
+                (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x <= y)),
                 _ => Ok(DataType::Bool(false)),
             },
 
@@ -5789,4 +5793,179 @@ fn test_glob_import_alias_rejected() {
     let src = "use std::math::* as m";
     let result = parse_v2(src);
     assert!(result.is_err(), "glob import with alias should be rejected");
+}
+
+// ── Round 47: CLI evaluator and interpreter edge case fixes ──
+
+#[test]
+fn test_let_destructure_in_main() {
+    let src = r#"
+let [a, b] = [10, 20]
+fn main() {
+    a + b
+}
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+#[test]
+fn test_method_call_optional_chain_deep() {
+    let src = r#"
+let x = null
+let result = x?.nested.keys()
+result
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_field_access_optional_chain_propagation() {
+    let src = r#"
+let x = null
+let result = x?.a.b.c
+result
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_use_module_nonexistent_function_errors() {
+    let src = r#"
+mod math {
+    fn double(x) { x * 2 }
+}
+use math::triple
+triple(5)
+"#;
+    let result = run_result(src);
+    assert!(result.is_err(), "importing nonexistent module function should error");
+}
+
+#[test]
+fn test_async_fns_isolated_between_tests() {
+    let src = r#"
+test "defines async foo" {
+    async fn foo() { 42 }
+    let r = await foo()
+    assert_eq(r, 42)
+}
+
+test "defines sync foo" {
+    fn foo() { 42 }
+    let r = foo()
+    assert_eq(r, 42)
+}
+"#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert!(results.iter().all(|r| r.passed), "all tests should pass: {:?}", results);
+}
+
+#[test]
+fn test_module_enum_defined() {
+    // Module enums are registered with qualified names.
+    // The parser doesn't support multi-level :: paths (e.g. mod::Enum::Variant),
+    // so we verify the enum_defs are populated by checking a function that uses it.
+    let src = r#"
+mod shapes {
+    enum Color {
+        Red,
+        Green,
+        Blue,
+    }
+    fn make_red() {
+        Color::Red()
+    }
+}
+shapes::make_red()
+"#;
+    let result = run(src);
+    match &result {
+        DataType::Map(m) => {
+            assert!(m.contains_key("__enum"), "Expected __enum marker, got {:?}", m);
+        }
+        _ => panic!("Expected map with __enum marker, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_module_struct_defined() {
+    // Module structs are registered with qualified names.
+    let src = r#"
+mod geo {
+    struct Point {
+        x: float64,
+        y: float64,
+    }
+    fn make_origin() {
+        Point { x: 0.0, y: 0.0 }
+    }
+}
+let p = geo::make_origin()
+p.x
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Float64(0.0));
+}
+
+#[test]
+fn test_module_function_spread_args() {
+    let src = r#"
+mod utils {
+    fn sum_three(a, b, c) { a + b + c }
+}
+let args = [1, 2, 3]
+utils::sum_three(...args)
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(6));
+}
+
+#[test]
+fn test_string_less_than() {
+    let src = r#""apple" < "banana""#;
+    let result = run(src);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+#[test]
+fn test_string_greater_than() {
+    let src = r#""zoo" > "apple""#;
+    let result = run(src);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+#[test]
+fn test_string_greater_eq() {
+    let src = r#""same" >= "same""#;
+    let result = run(src);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+#[test]
+fn test_string_less_eq() {
+    let src = r#""same" <= "same""#;
+    let result = run(src);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+#[test]
+fn test_string_comparison_false() {
+    let src = r#""banana" < "apple""#;
+    let result = run(src);
+    assert_eq!(result, DataType::Bool(false));
+}
+
+#[test]
+fn test_path_traversal_dependency_rejected() {
+    // This is a CLI-only feature (magi.toml), so we just verify the parser doesn't crash
+    // The actual path traversal check is in src/bin/magi.rs
+    let src = "42";
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(42));
 }

@@ -581,7 +581,7 @@ impl<'a> Interpreter<'a> {
                     self.struct_defs.insert(name.clone(), fields.clone());
                 }
                 StatementKind::ModuleDef { name, body } => {
-                    // Register module functions with qualified names
+                    // Register module functions, enums, and structs with qualified names
                     for inner in &body.statements {
                         match &inner.kind {
                             StatementKind::FunctionDef(def) => {
@@ -592,6 +592,18 @@ impl<'a> Interpreter<'a> {
                                 let qualified = format!("{}::{}", name, def.name);
                                 self.async_fns.insert(qualified.clone());
                                 self.functions.insert(qualified, def.clone());
+                            }
+                            StatementKind::EnumDef { name: ename, variants } => {
+                                let qualified = format!("{}::{}", name, ename);
+                                self.enum_defs.insert(qualified, variants.clone());
+                                // Also register unqualified for use within module functions
+                                self.enum_defs.insert(ename.clone(), variants.clone());
+                            }
+                            StatementKind::StructDef { name: sname, fields } => {
+                                let qualified = format!("{}::{}", name, sname);
+                                self.struct_defs.insert(qualified, fields.clone());
+                                // Also register unqualified for use within module functions
+                                self.struct_defs.insert(sname.clone(), fields.clone());
                             }
                             _ => {}
                         }
@@ -614,7 +626,8 @@ impl<'a> Interpreter<'a> {
                     StatementKind::Use { .. }
                     | StatementKind::ConstDef { .. }
                     | StatementKind::Let { .. }
-                    | StatementKind::LetMut { .. } => {
+                    | StatementKind::LetMut { .. }
+                    | StatementKind::LetDestructure { .. } => {
                         self.exec_statement(stmt)?;
                     }
                     _ => {}
@@ -867,8 +880,15 @@ impl<'a> Interpreter<'a> {
 
             StatementKind::ExprStatement(expr) => self.eval_expr(expr),
 
-            StatementKind::FunctionDef(_) | StatementKind::AsyncFunctionDef(_) => {
-                // Already collected in pass 1; nothing to do here.
+            StatementKind::FunctionDef(def) => {
+                // Register function (may already exist from pass 1, but also handles
+                // functions defined inside blocks like test bodies or if-else)
+                self.functions.insert(def.name.clone(), def.clone());
+                Ok(DataType::Null)
+            }
+            StatementKind::AsyncFunctionDef(def) => {
+                self.async_fns.insert(def.name.clone());
+                self.functions.insert(def.name.clone(), def.clone());
                 Ok(DataType::Null)
             }
 
@@ -1074,6 +1094,19 @@ impl<'a> Interpreter<'a> {
                         if alias.is_some() && !self.functions.contains_key(&func_name) {
                             self.functions.insert(func_name, func);
                         }
+                    } else {
+                        let prefix = format!("{}::", path[..path.len()-1].join("::"));
+                        let available: Vec<String> = self.functions.keys()
+                            .filter(|k| k.starts_with(&prefix))
+                            .map(|k| k[prefix.len()..].to_string())
+                            .collect();
+                        let refs: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
+                        let suggestion = super::errors::suggest_name(&func_name, &refs);
+                        return Err(InterpError::UnknownOperation {
+                            name: full_path,
+                            span: stmt.span,
+                            suggestion,
+                        });
                     }
                 }
                 Ok(DataType::Null)
@@ -2705,6 +2738,11 @@ impl<'a> Interpreter<'a> {
             ExpressionKind::FieldAccess { object, field } => {
                 let obj = self.eval_expr(object)?;
 
+                // Optional chaining: propagate null from ?. through field access
+                if matches!(obj, DataType::Null) && Self::has_optional_chain(&object.kind) {
+                    return Ok(DataType::Null);
+                }
+
                 let inputs = HashMap::from([
                     ("map".to_string(), obj),
                     ("key".to_string(), DataType::String(field.clone())),
@@ -2818,7 +2856,7 @@ impl<'a> Interpreter<'a> {
 
                 // Optional chaining: if object came from ?. and evaluated to null, propagate null
                 if matches!(obj, DataType::Null)
-                    && matches!(object.kind, ExpressionKind::OptionalChain { .. })
+                    && Self::has_optional_chain(&object.kind)
                 {
                     return Ok(DataType::Null);
                 }
@@ -3172,9 +3210,7 @@ impl<'a> Interpreter<'a> {
                 if !self.enum_defs.contains_key(enum_name.as_str()) {
                     let qualified_name = format!("{}::{}", enum_name, variant);
                     if self.functions.contains_key(qualified_name.as_str()) {
-                        let evaluated_args: Vec<DataType> = args.iter()
-                            .map(|a| self.eval_expr(a))
-                            .collect::<Result<_, _>>()?;
+                        let evaluated_args = self.eval_call_args(args)?;
                         return self.call_function(&qualified_name, &evaluated_args, expr.span);
                     }
                     return Err(InterpError::TypeError {
@@ -3937,6 +3973,7 @@ impl<'a> Interpreter<'a> {
                 let saved_structs = self.struct_defs.clone();
                 let saved_closures = self.closure_captures.clone();
                 let saved_stacks = self.saved_symbol_stacks.clone();
+                let saved_async_fns = self.async_fns.clone();
                 self.symbols.push(HashMap::new());
                 self.heap.push_scope();
 
@@ -3953,6 +3990,7 @@ impl<'a> Interpreter<'a> {
                 self.struct_defs = saved_structs;
                 self.closure_captures = saved_closures;
                 self.saved_symbol_stacks = saved_stacks;
+                self.async_fns = saved_async_fns;
 
                 match test_result {
                     Ok(_) => {

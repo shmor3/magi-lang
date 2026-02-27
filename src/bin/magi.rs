@@ -55,47 +55,70 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Subtract => num_binop(&a, &b, i64::checked_sub, |x, y| x - y),
             OperationType::Multiply => num_binop(&a, &b, i64::checked_mul, |x, y| x * y),
             OperationType::Divide => {
-                match (&a, &b) {
-                    (DataType::Int64(x), DataType::Int64(y)) => {
-                        if *y == 0 { return Err(EvalError::DivisionByZero); }
-                        match x.checked_div(*y) {
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(Ok(x)), Some(Ok(y))) => {
+                        if y == 0 { return Err(EvalError::DivisionByZero); }
+                        match x.checked_div(y) {
                             Some(v) => Ok(DataType::Int64(v)),
                             None => Err(EvalError::InvalidInput("integer overflow".to_string())),
                         }
                     }
-                    (DataType::Float64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
-                    (DataType::Int64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
-                    (DataType::Float64(_), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
-                    (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x / y)),
-                    (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 / y)),
-                    (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x / *y as f64)),
+                    (Some(av), Some(bv)) => {
+                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                        if fb == 0.0 { return Err(EvalError::DivisionByZero); }
+                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Float64(fa / fb))
+                    }
                     _ => Ok(DataType::Null),
                 }
             }
-            OperationType::Modulo => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => {
-                    if *y == 0 { return Err(EvalError::DivisionByZero); }
-                    match x.checked_rem(*y) {
-                        Some(v) => Ok(DataType::Int64(v)),
-                        None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+            OperationType::Modulo => {
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(Ok(x)), Some(Ok(y))) => {
+                        if y == 0 { return Err(EvalError::DivisionByZero); }
+                        match x.checked_rem(y) {
+                            Some(v) => Ok(DataType::Int64(v)),
+                            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                        }
                     }
+                    (Some(av), Some(bv)) => {
+                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                        if fb == 0.0 { return Err(EvalError::DivisionByZero); }
+                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Float64(fa % fb))
+                    }
+                    _ => Ok(DataType::Null),
                 }
-                (DataType::Float64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
-                (DataType::Int64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
-                (DataType::Float64(_), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x % y)),
-                (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 % y)),
-                (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x % *y as f64)),
-                _ => Ok(DataType::Null),
-            },
+            }
 
             // Comparison
-            OperationType::Equal => Ok(DataType::Bool(a == b)),
-            OperationType::NotEqual => Ok(DataType::Bool(a != b)),
-            OperationType::Greater => num_cmp(&a, &b, |x, y| x > y, |x, y| x > y),
-            OperationType::Less => num_cmp(&a, &b, |x, y| x < y, |x, y| x < y),
-            OperationType::GreaterEq => num_cmp(&a, &b, |x, y| x >= y, |x, y| x >= y),
-            OperationType::LessEq => num_cmp(&a, &b, |x, y| x <= y, |x, y| x <= y),
+            OperationType::Equal => {
+                if a == b { return Ok(DataType::Bool(true)); }
+                // Cross-type numeric equality (e.g. Float32(1.0) == Float64(1.0))
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(av), Some(bv)) => {
+                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Bool(fa == fb))
+                    }
+                    _ => Ok(DataType::Bool(false)),
+                }
+            }
+            OperationType::NotEqual => {
+                if a == b { return Ok(DataType::Bool(false)); }
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(av), Some(bv)) => {
+                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Bool(fa != fb))
+                    }
+                    _ => Ok(DataType::Bool(true)),
+                }
+            }
+            OperationType::Greater => num_cmp(&a, &b, |x, y| x > y, |x, y| x > y, |x, y| x > y),
+            OperationType::Less => num_cmp(&a, &b, |x, y| x < y, |x, y| x < y, |x, y| x < y),
+            OperationType::GreaterEq => num_cmp(&a, &b, |x, y| x >= y, |x, y| x >= y, |x, y| x >= y),
+            OperationType::LessEq => num_cmp(&a, &b, |x, y| x <= y, |x, y| x <= y, |x, y| x <= y),
 
             // Logical
             OperationType::And => match (&a, &b) {
@@ -115,7 +138,9 @@ impl OperationEvaluator for FullEvaluator {
                     Some(v) => Ok(DataType::Int64(v)),
                     None => Err(EvalError::InvalidInput("integer overflow".to_string())),
                 },
+                DataType::Int32(x) => Ok(DataType::Int64(-(*x as i64))),
                 DataType::Float64(x) => Ok(DataType::Float64(-x)),
+                DataType::Float32(x) => Ok(DataType::Float64(-(*x as f64))),
                 _ => Ok(DataType::Null),
             },
 
@@ -178,7 +203,34 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Array(arr) if !arr.is_empty() => Ok(arr.last().cloned().unwrap_or(DataType::Null)),
                 _ => Ok(DataType::Null),
             },
-            OperationType::ArraySlice => Ok(DataType::Null),
+            OperationType::ArraySlice => {
+                let start_val = inputs.get("input_1").or(inputs.get("start")).cloned().unwrap_or(DataType::Int64(0));
+                let end_val = inputs.get("input_2").or(inputs.get("end")).cloned();
+                match &array {
+                    DataType::Array(arr) => {
+                        let len = arr.len() as i64;
+                        let start = match &start_val {
+                            v => {
+                                let n = v.to_i64().unwrap_or(0);
+                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                            }
+                        };
+                        let end = match &end_val {
+                            Some(v) => {
+                                let n = v.to_i64().unwrap_or(len);
+                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                            }
+                            None => arr.len(),
+                        };
+                        if start >= end {
+                            Ok(DataType::Array(vec![]))
+                        } else {
+                            Ok(DataType::Array(arr[start..end].to_vec()))
+                        }
+                    }
+                    _ => Ok(DataType::Array(vec![])),
+                }
+            }
             OperationType::ArraySort => match &array {
                 DataType::Array(arr) => {
                     let mut sorted = arr.clone();
@@ -329,7 +381,9 @@ impl OperationEvaluator for FullEvaluator {
                 let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
                 match (&input, &search) {
                     (DataType::String(s), DataType::String(sub)) => {
-                        Ok(DataType::Int64(s.find(sub.as_str()).map(|i| i as i64).unwrap_or(-1)))
+                        Ok(DataType::Int64(s.find(sub.as_str()).map(|byte_idx| {
+                            s[..byte_idx].chars().count() as i64
+                        }).unwrap_or(-1)))
                     }
                     _ => Ok(DataType::Int64(-1)),
                 }
@@ -597,19 +651,36 @@ impl OperationEvaluator for FullEvaluator {
     }
 }
 
+/// Promote a DataType to either i64 or f64 for arithmetic.
+fn promote_numeric(val: &DataType) -> Option<Result<i64, f64>> {
+    match val {
+        DataType::Int64(x) => Some(Ok(*x)),
+        DataType::Int32(x) => Some(Ok(*x as i64)),
+        DataType::Uint32(x) => Some(Ok(*x as i64)),
+        DataType::Uint64(x) => {
+            if *x <= i64::MAX as u64 { Some(Ok(*x as i64)) } else { Some(Err(*x as f64)) }
+        }
+        DataType::Float64(x) => Some(Err(*x)),
+        DataType::Float32(x) => Some(Err(*x as f64)),
+        _ => None,
+    }
+}
+
 fn num_binop(
     a: &DataType, b: &DataType,
     int_op: fn(i64, i64) -> Option<i64>,
     float_op: fn(f64, f64) -> f64,
 ) -> Result<DataType, EvalError> {
-    match (a, b) {
-        (DataType::Int64(x), DataType::Int64(y)) => match int_op(*x, *y) {
+    match (promote_numeric(a), promote_numeric(b)) {
+        (Some(Ok(x)), Some(Ok(y))) => match int_op(x, y) {
             Some(v) => Ok(DataType::Int64(v)),
             None => Err(EvalError::InvalidInput("integer overflow".to_string())),
         },
-        (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x, *y))),
-        (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x as f64, *y))),
-        (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(float_op(*x, *y as f64))),
+        (Some(av), Some(bv)) => {
+            let fa = match av { Ok(i) => i as f64, Err(f) => f };
+            let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+            Ok(DataType::Float64(float_op(fa, fb)))
+        }
         _ => Ok(DataType::Null),
     }
 }
@@ -618,12 +689,19 @@ fn num_cmp(
     a: &DataType, b: &DataType,
     int_op: fn(&i64, &i64) -> bool,
     float_op: fn(&f64, &f64) -> bool,
+    str_op: fn(&str, &str) -> bool,
 ) -> Result<DataType, EvalError> {
-    match (a, b) {
-        (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(int_op(x, y))),
-        (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(float_op(x, y))),
-        (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Bool(float_op(&(*x as f64), y))),
-        (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Bool(float_op(x, &(*y as f64)))),
+    // String comparison
+    if let (DataType::String(x), DataType::String(y)) = (a, b) {
+        return Ok(DataType::Bool(str_op(x, y)));
+    }
+    match (promote_numeric(a), promote_numeric(b)) {
+        (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Bool(int_op(&x, &y))),
+        (Some(av), Some(bv)) => {
+            let fa = match av { Ok(i) => i as f64, Err(f) => f };
+            let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+            Ok(DataType::Bool(float_op(&fa, &fb)))
+        }
         _ => Ok(DataType::Bool(false)),
     }
 }
@@ -772,10 +850,20 @@ fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage
             None => continue,
         };
 
-        // Security: reject absolute paths and paths with suspicious components
+        // Security: reject absolute paths and path traversal that escapes the project
         if std::path::Path::new(rel_path).is_absolute() {
             eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
             continue;
+        }
+        // Check if resolved path escapes the project root
+        let dep_resolved = dir.join(rel_path);
+        if let (Ok(project_canonical), Ok(dep_canonical)) = (dir.canonicalize(), dep_resolved.canonicalize()) {
+            // Find the common ancestor: the project root's parent (to allow sibling dirs)
+            let project_root = project_canonical.parent().unwrap_or(&project_canonical);
+            if !dep_canonical.starts_with(project_root) {
+                eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+                continue;
+            }
         }
 
         let dep_dir = dir.join(rel_path);
