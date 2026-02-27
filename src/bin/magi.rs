@@ -5048,6 +5048,65 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
+            // UDP operations
+            // ================================================================
+            OperationType::UdpBind => {
+                let address = get_string(inputs, "address")?;
+                let port = get_bind_port(inputs, "port")?;
+                let addr = format!("{}:{}", address, port);
+                let socket = std::net::UdpSocket::bind(&addr)
+                    .map_err(|e| EvalError::InvalidInput(format!("udp_bind: {}", e)))?;
+                let id = conn_id("udp");
+                conn_store(&id, Mutex::new(socket));
+                Ok(DataType::String(id))
+            }
+            OperationType::UdpSendTo => {
+                let sid = get_string(inputs, "socket_id")?;
+                let data = inputs.get("data").cloned().unwrap_or(DataType::Null);
+                let address = get_string(inputs, "address")?;
+                let port = get_port(inputs, "port")?;
+                let target = format!("{}:{}", address, port);
+                let bytes = data_to_bytes(&data);
+                conn_with::<Mutex<std::net::UdpSocket>, _>(sid, |mtx| {
+                    let socket = mtx
+                        .get_mut()
+                        .map_err(|_| EvalError::InvalidInput("udp lock poisoned".into()))?;
+                    let sent = socket
+                        .send_to(&bytes, &target)
+                        .map_err(|e| EvalError::InvalidInput(format!("udp_send_to: {}", e)))?;
+                    Ok(DataType::Int64(sent as i64))
+                })
+            }
+            OperationType::UdpRecvFrom => {
+                let sid = get_string(inputs, "socket_id")?;
+                conn_with::<Mutex<std::net::UdpSocket>, _>(sid, |mtx| {
+                    let socket = mtx
+                        .get_mut()
+                        .map_err(|_| EvalError::InvalidInput("udp lock poisoned".into()))?;
+                    socket
+                        .set_read_timeout(Some(std::time::Duration::from_millis(30000)))
+                        .map_err(|e| {
+                            EvalError::InvalidInput(format!("udp set_read_timeout: {}", e))
+                        })?;
+                    let mut buf = vec![0u8; 4096];
+                    let (n, addr) = socket.recv_from(&mut buf).map_err(|e| {
+                        EvalError::InvalidInput(format!("udp_recv_from: {}", e))
+                    })?;
+                    buf.truncate(n);
+                    Ok(DataType::Map(std::collections::BTreeMap::from([
+                        ("data".into(), DataType::Bytes(buf)),
+                        ("address".into(), DataType::String(addr.ip().to_string())),
+                        ("port".into(), DataType::Int64(addr.port() as i64)),
+                    ])))
+                })
+            }
+            OperationType::UdpClose => {
+                let sid = get_string(inputs, "socket_id")?;
+                conn_remove(sid)?;
+                Ok(DataType::Null)
+            }
+
+            // ================================================================
             // Remaining operations
             // ================================================================
             other => Err(EvalError::InvalidInput(format!(

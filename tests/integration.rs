@@ -14530,3 +14530,29 @@ fn test_tcp_connect_refused() {
     assert!(result.contains("Error") || result.contains("error"));
 }
 
+// -------------------------------------------------------
+// UDP operations
+// -------------------------------------------------------
+
+#[test]
+fn test_udp_bind_and_close() {
+    let result = run_eval_unique(r#"
+        let sock = udp_bind("127.0.0.1", 0)
+        udp_close(sock)
+        println("closed")
+    "#, "udp_bind_close");
+    assert!(result.contains("closed"));
+}
+
+#[test]
+fn test_udp_sendto_loopback() {
+    let result = run_eval_unique(r#"
+        let s1 = udp_bind("127.0.0.1", 0)
+        let s2 = udp_bind("127.0.0.1", 0)
+        udp_close(s1)
+        udp_close(s2)
+        println("ok")
+    "#, "udp_sendto_loop");
+    assert!(result.contains("ok"));
+}
+
