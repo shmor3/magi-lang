@@ -8093,3 +8093,65 @@ fn test_triple_quoted_string() {
     let result = run("output \"\"\"hello world\"\"\";");
     assert_eq!(result, DataType::String("hello world".to_string()));
 }
+
+// Round 79: min_by/max_by arity check before empty-array check
+#[test]
+fn test_min_by_no_args() {
+    let err = run_err("let a = [3,1,2]; output a.min_by();");
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "min_by");
+            assert_eq!(expected, "1");
+            assert_eq!(actual, 0);
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_max_by_no_args() {
+    let err = run_err("let a = [3,1,2]; output a.max_by();");
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "max_by");
+            assert_eq!(expected, "1");
+            assert_eq!(actual, 0);
+        }
+        _ => panic!("expected ArityMismatch, got {:?}", err),
+    }
+}
+
+#[test]
+fn test_min_by_empty_array() {
+    assert_eq!(run("let a = []; output a.min_by(|a, b| a - b);"), DataType::Null);
+}
+
+#[test]
+fn test_max_by_empty_array() {
+    assert_eq!(run("let a = []; output a.max_by(|a, b| a - b);"), DataType::Null);
+}
+
+#[test]
+fn test_min_by_basic() {
+    assert_eq!(run("output [3,1,2].min_by(|a, b| a - b);"), DataType::Int64(1));
+}
+
+#[test]
+fn test_max_by_basic() {
+    assert_eq!(run("output [3,1,2].max_by(|a, b| a - b);"), DataType::Int64(3));
+}
+
+#[test]
+fn test_enumerate_basic() {
+    // enumerate returns [[0, elem], [1, elem], ...] — check length
+    assert_eq!(run("output [10,20,30].enumerate().len();"), DataType::Int64(3));
+}
+
+#[test]
+fn test_group_by_basic() {
+    // group_by returns a map — check it's a map
+    assert_eq!(run(r#"
+        let result = [1,2,3,4,5].group_by(|x| if x % 2 == 0 { "even" } else { "odd" });
+        output typeof(result);
+    "#), DataType::String("map".to_string()));
+}

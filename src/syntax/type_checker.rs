@@ -1744,6 +1744,16 @@ impl TypeChecker {
                             "is_nan" | "is_infinite" => ChannelType::Bool,
                             _ => obj_ty, // abs, sign, pow, min, max, clamp preserve receiver type
                         },
+                        "array_hof" => match method.as_str() {
+                            "any" | "all" => ChannelType::Bool,
+                            "group_by" => ChannelType::Map,
+                            "each" => ChannelType::Null,
+                            "min_by" | "max_by" => ChannelType::Null, // element type unknown
+                            _ => ChannelType::Array, // map, filter, flat_map, sort_by, partition, scan, take_while, skip_while, zip, enumerate, chunk
+                        },
+                        "map_hof" => ChannelType::Map,
+                        "base64_encode" => ChannelType::String,
+                        "base64_decode" => ChannelType::Bytes,
                         _ => ChannelType::Null,
                     };
                 }

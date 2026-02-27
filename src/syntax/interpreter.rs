@@ -1361,8 +1361,8 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Map(map)))
                     }
                     "min_by" => {
-                        if arr.is_empty() { return Ok(Some(DataType::Null)); }
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        if arr.is_empty() { return Ok(Some(DataType::Null)); }
                         let mut min = arr[0].clone();
                         for item in &arr[1..] {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1380,8 +1380,8 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(min))
                     }
                     "max_by" => {
-                        if arr.is_empty() { return Ok(Some(DataType::Null)); }
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        if arr.is_empty() { return Ok(Some(DataType::Null)); }
                         let mut max = arr[0].clone();
                         for item in &arr[1..] {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
