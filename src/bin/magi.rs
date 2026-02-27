@@ -5107,6 +5107,58 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
+            // WebSocket operations
+            // ================================================================
+            OperationType::WsConnect => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let (socket, _resp) = tungstenite::connect(url)
+                    .map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?;
+                let id = conn_id("ws");
+                conn_store(&id, Mutex::new(socket));
+                Ok(DataType::String(id))
+            }
+            OperationType::WsSend => {
+                let cid = get_string(inputs, "conn_id")?;
+                let message = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let msg = match &message {
+                    DataType::Bytes(b) => tungstenite::Message::Binary(b.clone().into()),
+                    other => tungstenite::Message::Text(other.to_string().into()),
+                };
+                type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+                conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
+                    let ws = mtx.get_mut().unwrap();
+                    ws.send(msg).map_err(|e| EvalError::InvalidInput(format!("ws_send: {}", e)))?;
+                    Ok(DataType::Null)
+                })
+            }
+            OperationType::WsReceive => {
+                let cid = get_string(inputs, "conn_id")?;
+                type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+                conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
+                    let ws = mtx.get_mut().unwrap();
+                    let msg = ws.read().map_err(|e| EvalError::InvalidInput(format!("ws_receive: {}", e)))?;
+                    match msg {
+                        tungstenite::Message::Text(t) => Ok(DataType::String(t.to_string())),
+                        tungstenite::Message::Binary(b) => Ok(DataType::Bytes(b.to_vec())),
+                        tungstenite::Message::Close(_) => Ok(DataType::Null),
+                        _ => Ok(DataType::Null),
+                    }
+                })
+            }
+            OperationType::WsClose => {
+                let cid = get_string(inputs, "conn_id")?;
+                type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+                let _ = conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
+                    let ws = mtx.get_mut().unwrap();
+                    let _ = ws.close(None);
+                    Ok(())
+                });
+                conn_remove(cid)?;
+                Ok(DataType::Null)
+            }
+
+            // ================================================================
             // Remaining operations
             // ================================================================
             other => Err(EvalError::InvalidInput(format!(

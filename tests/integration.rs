@@ -14556,3 +14556,19 @@ fn test_udp_sendto_loopback() {
     assert!(result.contains("ok"));
 }
 
+// -------------------------------------------------------
+// WebSocket operations
+// -------------------------------------------------------
+
+#[test]
+fn test_ws_connect_invalid() {
+    let result = run_eval_unique(r#"ws_connect("not-a-url")"#, "ws_connect_invalid");
+    assert!(result.contains("Error") || result.contains("error"));
+}
+
+#[test]
+fn test_ws_close_nonexistent() {
+    let result = run_eval_unique(r#"ws_close("fake-id")"#, "ws_close_nonexist");
+    assert!(result.contains("not found") || result.contains("Error"));
+}
+
