@@ -996,26 +996,8 @@ impl TypeChecker {
             if arm.guard.is_some() {
                 continue; // guarded arms don't guarantee coverage
             }
-            if let Pattern::EnumPattern { enum_name: en, variant, .. } = &arm.pattern {
-                match enum_name {
-                    None => { enum_name = Some(en); }
-                    Some(existing) if existing != en.as_str() => return false, // mixed enums
-                    _ => {}
-                }
-                covered.insert(variant.as_str());
-            }
-            // Or patterns can also contribute
-            if let Pattern::Or(alternatives) = &arm.pattern {
-                for alt in alternatives {
-                    if let Pattern::EnumPattern { enum_name: en, variant, .. } = alt {
-                        match enum_name {
-                            None => { enum_name = Some(en); }
-                            Some(existing) if existing != en.as_str() => return false,
-                            _ => {}
-                        }
-                        covered.insert(variant.as_str());
-                    }
-                }
+            if !Self::collect_enum_variants(&arm.pattern, &mut enum_name, &mut covered) {
+                return false; // mixed enums
             }
         }
         // Look up the enum definition
@@ -1025,6 +1007,34 @@ impl TypeChecker {
             }
         }
         false
+    }
+
+    /// Recursively collect enum variants from a pattern (handles nested Or patterns).
+    fn collect_enum_variants<'a>(
+        pattern: &'a Pattern,
+        enum_name: &mut Option<&'a str>,
+        covered: &mut std::collections::HashSet<&'a str>,
+    ) -> bool {
+        match pattern {
+            Pattern::EnumPattern { enum_name: en, variant, .. } => {
+                match *enum_name {
+                    None => { *enum_name = Some(en); }
+                    Some(existing) if existing != en.as_str() => return false,
+                    _ => {}
+                }
+                covered.insert(variant.as_str());
+                true
+            }
+            Pattern::Or(alternatives) => {
+                for alt in alternatives {
+                    if !Self::collect_enum_variants(alt, enum_name, covered) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
     }
 
     /// Check if match arms exhaustively cover boolean values (true and false).
@@ -2761,6 +2771,9 @@ fn expr_contains_break(expr: &Expression) -> bool {
             false
         }
         ExpressionKind::Block(block) => block_contains_break(block),
+        ExpressionKind::Match { arms, .. } => {
+            arms.iter().any(|arm| block_contains_break(&arm.body))
+        }
         // Don't recurse into loop expressions — their breaks are for the inner loop.
         ExpressionKind::Loop(_) => false,
         _ => false,

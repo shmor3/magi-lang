@@ -1661,8 +1661,12 @@ impl<'a> Interpreter<'a> {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => {
-                    if !n.is_finite() { Ok(Some(DataType::Null)) }
-                    else { Ok(Some(DataType::Int64(*n as i64))) }
+                    let v = *n as f64;
+                    if v.is_finite() && v >= i64::MIN as f64 && v < i64::MAX as f64 {
+                        Ok(Some(DataType::Int64(*n as i64)))
+                    } else {
+                        Ok(Some(DataType::Null))
+                    }
                 }
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }

@@ -6702,3 +6702,65 @@ fn test_closure_with_default_param_override() {
         DataType::Int64(25)
     );
 }
+
+// Round 54 tests
+
+#[test]
+fn test_while_true_break_in_match_no_w105() {
+    // expr_contains_break must handle Match expressions
+    let codes = typecheck_warnings(r#"
+let mut x = 0
+while true {
+    x = x + 1
+    match x {
+        5 => { break }
+        _ => {}
+    }
+}
+"#);
+    assert!(!codes.contains(&"W105".to_string()),
+        "Should not warn W105 when break is inside match arm, got {:?}", codes);
+}
+
+#[test]
+fn test_match_rest_pattern_len() {
+    // Verifies StubEvaluator correctly handles "array" port name for len()
+    assert_eq!(
+        run(r#"
+match [1, 2, 3, 4, 5] {
+    [first, ...rest] => first + rest.len(),
+    _ => 0,
+}
+"#),
+        DataType::Int64(5)
+    );
+}
+
+#[test]
+fn test_array_method_in_expression() {
+    // Array .len() + arithmetic should work correctly with evaluator port names
+    assert_eq!(
+        run(r#"
+let arr = [10, 20, 30]
+100 + arr.len()
+"#),
+        DataType::Int64(103)
+    );
+}
+
+#[test]
+fn test_enum_exhaustive_or_pattern() {
+    // Nested Or patterns should contribute to enum exhaustiveness
+    let codes = typecheck_warnings(r#"
+enum Color { Red, Green, Blue }
+fn show(c) {
+    match c {
+        Color::Red | Color::Green => "warm",
+        Color::Blue => "cool",
+    }
+}
+show(Color::Red)
+"#);
+    assert!(!codes.contains(&"W203".to_string()),
+        "Or-pattern with all enum variants covered should not warn W203, got {:?}", codes);
+}
