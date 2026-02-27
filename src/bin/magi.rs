@@ -3163,20 +3163,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextCamelCase => {
                 match &input {
                     DataType::String(s) => {
-                        let parts: Vec<&str> = s.split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()).collect();
-                        let mut result = String::new();
-                        for (i, part) in parts.iter().enumerate() {
-                            if i == 0 {
-                                result.push_str(&part.to_lowercase());
-                            } else {
-                                let mut chars = part.chars();
-                                if let Some(first) = chars.next() {
-                                    result.push(first.to_uppercase().next().unwrap_or(first));
-                                    result.extend(chars.flat_map(|c| c.to_lowercase()));
-                                }
-                            }
-                        }
-                        Ok(DataType::String(result))
+                        use heck::ToLowerCamelCase;
+                        Ok(DataType::String(s.to_lower_camel_case()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3184,9 +3172,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSnakeCase => {
                 match &input {
                     DataType::String(s) => {
-                        let parts: Vec<&str> = s.split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()).collect();
-                        let result: Vec<String> = parts.iter().map(|p| p.to_lowercase()).collect();
-                        Ok(DataType::String(result.join("_")))
+                        use heck::ToSnakeCase;
+                        Ok(DataType::String(s.to_snake_case()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3194,18 +3181,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextTitleCase => {
                 match &input {
                     DataType::String(s) => {
-                        let result: String = s.split_whitespace().map(|word| {
-                            let mut chars = word.chars();
-                            match chars.next() {
-                                Some(first) => {
-                                    let upper: String = first.to_uppercase().collect();
-                                    let rest: String = chars.collect();
-                                    format!("{}{}", upper, rest)
-                                }
-                                None => String::new(),
-                            }
-                        }).collect::<Vec<_>>().join(" ");
-                        Ok(DataType::String(result))
+                        use heck::ToTitleCase;
+                        Ok(DataType::String(s.to_title_case()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3214,21 +3191,7 @@ impl OperationEvaluator for FullEvaluator {
                 match &input {
                     DataType::String(s) => {
                         let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80) as usize;
-                        let mut result = String::new();
-                        let mut col = 0;
-                        for word in s.split_whitespace() {
-                            if col > 0 && col + word.len() + 1 > width {
-                                result.push('\n');
-                                col = 0;
-                            }
-                            if col > 0 {
-                                result.push(' ');
-                                col += 1;
-                            }
-                            result.push_str(word);
-                            col += word.len();
-                        }
-                        Ok(DataType::String(result))
+                        Ok(DataType::String(textwrap::fill(s, width)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3267,12 +3230,12 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlUnescape => {
                 match &input {
                     DataType::String(s) => {
-                        let unescaped = s.replace("&amp;", "&")
-                            .replace("&lt;", "<")
+                        let unescaped = s.replace("&lt;", "<")
                             .replace("&gt;", ">")
                             .replace("&quot;", "\"")
                             .replace("&#39;", "'")
-                            .replace("&#x27;", "'");
+                            .replace("&#x27;", "'")
+                            .replace("&amp;", "&");
                         Ok(DataType::String(unescaped))
                     }
                     _ => Ok(DataType::Null),
@@ -3704,14 +3667,15 @@ impl OperationEvaluator for FullEvaluator {
                                 }
                             }
                             OperationType::StatsMode => {
-                                let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+                                use ordered_float::OrderedFloat;
+                                let mut counts: std::collections::HashMap<OrderedFloat<f64>, usize> = std::collections::HashMap::new();
                                 for n in &nums {
-                                    *counts.entry(n.to_bits()).or_insert(0) += 1;
+                                    *counts.entry(OrderedFloat(*n)).or_insert(0) += 1;
                                 }
                                 let max_count = counts.values().max().copied().unwrap_or(0);
                                 let mode = counts.into_iter()
                                     .find(|(_, c)| *c == max_count)
-                                    .map(|(bits, _)| f64::from_bits(bits))
+                                    .map(|(of, _)| of.into_inner())
                                     .unwrap_or(f64::NAN);
                                 Ok(DataType::Float64(mode))
                             }
@@ -3964,11 +3928,17 @@ impl OperationEvaluator for FullEvaluator {
                         let lines: Vec<&str> = s.lines().collect();
                         let min_indent = lines.iter()
                             .filter(|l| !l.trim().is_empty())
-                            .map(|l| l.len() - l.trim_start().len())
+                            .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
                             .min()
                             .unwrap_or(0);
                         let result: String = lines.iter()
-                            .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l.trim() })
+                            .map(|l| {
+                                let skip: usize = l.chars().take(min_indent)
+                                    .take_while(|c| c.is_whitespace())
+                                    .map(|c| c.len_utf8())
+                                    .sum();
+                                &l[skip..]
+                            })
                             .collect::<Vec<_>>()
                             .join("\n");
                         Ok(DataType::String(result))
