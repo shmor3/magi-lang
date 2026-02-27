@@ -272,7 +272,21 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Ok(DataType::Null),
             },
             OperationType::ArrayContains => match (&array, &value) {
-                (DataType::Array(arr), val) => Ok(DataType::Bool(arr.contains(val))),
+                (DataType::Array(arr), val) => {
+                    let found = arr.iter().any(|item| {
+                        if item == val { return true; }
+                        // Cross-type numeric equality
+                        match (promote_numeric(item), promote_numeric(val)) {
+                            (Some(av), Some(bv)) => {
+                                let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                                let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                                fa == fb
+                            }
+                            _ => false,
+                        }
+                    });
+                    Ok(DataType::Bool(found))
+                }
                 _ => Ok(DataType::Bool(false)),
             },
             OperationType::ArrayJoin => match &array {
@@ -531,7 +545,18 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Array(arr) => {
                     let mut seen = Vec::new();
                     for item in arr {
-                        if !seen.contains(item) {
+                        let already = seen.iter().any(|s: &DataType| {
+                            if s == item { return true; }
+                            match (promote_numeric(s), promote_numeric(item)) {
+                                (Some(av), Some(bv)) => {
+                                    let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                                    let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                                    fa == fb
+                                }
+                                _ => false,
+                            }
+                        });
+                        if !already {
                             seen.push(item.clone());
                         }
                     }
@@ -921,7 +946,10 @@ impl OperationEvaluator for FullEvaluator {
                         return Err(EvalError::InvalidInput(format!("range would produce more than {} elements", MAX_ARRAY_ELEMENTS)));
                     }
                     result.push(DataType::Int64(i));
-                    i += step;
+                    i = match i.checked_add(step) {
+                        Some(v) => v,
+                        None => break,
+                    };
                 }
                 Ok(DataType::Array(result))
             },
@@ -1023,10 +1051,11 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::BytesSlice => {
                 match &input {
                     DataType::Bytes(b) => {
-                        let start = inputs.get("start").and_then(|v| v.to_i64()).unwrap_or(0) as usize;
-                        let end = inputs.get("end").and_then(|v| v.to_i64()).unwrap_or(b.len() as i64) as usize;
-                        let start = start.min(b.len());
-                        let end = end.min(b.len());
+                        let len = b.len() as i64;
+                        let raw_start = inputs.get("input_1").or(inputs.get("start")).and_then(|v| v.to_i64()).unwrap_or(0);
+                        let raw_end = inputs.get("input_2").or(inputs.get("end")).and_then(|v| v.to_i64()).unwrap_or(len);
+                        let start = if raw_start < 0 { (len + raw_start).max(0) as usize } else { (raw_start as usize).min(b.len()) };
+                        let end = if raw_end < 0 { (len + raw_end).max(0) as usize } else { (raw_end as usize).min(b.len()) };
                         if start > end {
                             Ok(DataType::Bytes(vec![]))
                         } else {
@@ -1052,6 +1081,9 @@ impl OperationEvaluator for FullEvaluator {
                 let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
                 match (&input, &search) {
                     (DataType::Bytes(haystack), DataType::Bytes(needle)) => {
+                        if needle.is_empty() {
+                            return Ok(DataType::Bool(true));
+                        }
                         let found = haystack.windows(needle.len()).any(|w| w == needle.as_slice());
                         Ok(DataType::Bool(found))
                     }

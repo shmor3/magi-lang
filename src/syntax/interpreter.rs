@@ -4038,7 +4038,8 @@ impl<'a> Interpreter<'a> {
                     | InterpError::ResourceLimit { span, .. }
                     | InterpError::ThrownError { span, .. }
                     | InterpError::InvalidPlaceholder { span }
-                    | InterpError::InvalidPipeStage { span } => (span.start_line, span.start_col),
+                    | InterpError::InvalidPipeStage { span }
+                    | InterpError::AssertionFailed { span, .. } => (span.start_line, span.start_col),
                     _ => (0, 0),
                 };
                 if let Some(ref debug) = self.debug {

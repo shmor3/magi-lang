@@ -184,32 +184,7 @@ impl<'a> LintContext<'a> {
                 }
             }
             StatementKind::ForLoop { pattern, iterable, body } => {
-                match pattern {
-                    ForPattern::Single(name) => {
-                        if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
-                            self.emit(d);
-                        }
-                    }
-                    ForPattern::ArrayDestructure(elements) => {
-                        for elem in elements {
-                            let name = match elem {
-                                DestructureElement::Name(n) => n,
-                                DestructureElement::Rest(n) => n,
-                            };
-                            if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
-                                self.emit(d);
-                            }
-                        }
-                    }
-                    ForPattern::MapDestructure(entries) => {
-                        for (key, alias) in entries {
-                            let name = alias.as_deref().unwrap_or(key.as_str());
-                            if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
-                                self.emit(d);
-                            }
-                        }
-                    }
-                }
+                self.check_for_pattern(pattern, stmt.span);
                 if let Some(d) = rules::check_empty_block(body, "for-loop", stmt.span) {
                     self.emit(d);
                 }
@@ -243,10 +218,15 @@ impl<'a> LintContext<'a> {
             }
             StatementKind::TryCatch {
                 try_block,
+                catch_var,
                 catch_block,
                 finally_block,
-                ..
             } => {
+                if let Some(var) = catch_var {
+                    if let Some(d) = rules::check_naming_snake_case(var, stmt.span) {
+                        self.emit(d);
+                    }
+                }
                 self.check_block(try_block);
                 // Don't emit W206 for empty catch blocks — intentional error suppression is idiomatic
                 self.check_block(catch_block);
@@ -286,6 +266,35 @@ impl<'a> LintContext<'a> {
 
         if let Some(tail) = &block.tail_expr {
             self.check_expression(tail);
+        }
+    }
+
+    fn check_for_pattern(&mut self, pattern: &ForPattern, span: Span) {
+        match pattern {
+            ForPattern::Single(name) => {
+                if let Some(d) = rules::check_naming_snake_case(name, span) {
+                    self.emit(d);
+                }
+            }
+            ForPattern::ArrayDestructure(elements) => {
+                for elem in elements {
+                    let name = match elem {
+                        DestructureElement::Name(n) => n,
+                        DestructureElement::Rest(n) => n,
+                    };
+                    if let Some(d) = rules::check_naming_snake_case(name, span) {
+                        self.emit(d);
+                    }
+                }
+            }
+            ForPattern::MapDestructure(entries) => {
+                for (key, alias) in entries {
+                    let name = alias.as_deref().unwrap_or(key.as_str());
+                    if let Some(d) = rules::check_naming_snake_case(name, span) {
+                        self.emit(d);
+                    }
+                }
+            }
         }
     }
 
@@ -390,10 +399,15 @@ impl<'a> LintContext<'a> {
             }
             ExpressionKind::TryCatchExpr {
                 try_block,
+                catch_var,
                 catch_block,
                 finally_block,
-                ..
             } => {
+                if let Some(var) = catch_var {
+                    if let Some(d) = rules::check_naming_snake_case(var, expr.span) {
+                        self.emit(d);
+                    }
+                }
                 self.check_block(try_block);
                 self.check_block(catch_block);
                 if let Some(finally) = finally_block {
@@ -402,10 +416,11 @@ impl<'a> LintContext<'a> {
             }
             ExpressionKind::ListComprehension {
                 expr: inner,
+                pattern,
                 iterable,
                 condition,
-                ..
             } => {
+                self.check_for_pattern(pattern, expr.span);
                 self.check_expression(inner);
                 self.check_expression(iterable);
                 if let Some(cond) = condition {
@@ -415,10 +430,11 @@ impl<'a> LintContext<'a> {
             ExpressionKind::MapComprehension {
                 key_expr,
                 value_expr,
+                pattern,
                 iterable,
                 condition,
-                ..
             } => {
+                self.check_for_pattern(pattern, expr.span);
                 self.check_expression(key_expr);
                 self.check_expression(value_expr);
                 self.check_expression(iterable);
@@ -661,4 +677,105 @@ fn foo(x) {
 "#);
         assert!(!codes.contains(&"W202".to_string()), "should not warn when only one branch returns: {:?}", codes);
     }
+
+    // ── W202: dead code after terminating match/loop/try-catch ──
+
+    #[test]
+    fn test_w202_dead_code_after_terminating_match() {
+        let codes = lint_codes(r#"
+fn foo(x) {
+    match x {
+        1 => { return 1; }
+        _ => { return 0; }
+    }
+    let y = 3;
+}
+"#);
+        assert!(codes.contains(&"W202".to_string()),
+            "expected W202 for dead code after all-arms-return match, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w202_no_dead_code_match_partial_return() {
+        // Only one arm returns — code after is reachable
+        let codes = lint_codes(r#"
+fn foo(x) {
+    match x {
+        1 => { return 1; }
+        _ => { let z = 0; }
+    }
+    let y = 3;
+}
+"#);
+        assert!(!codes.contains(&"W202".to_string()),
+            "should not warn when only one match arm returns: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w202_dead_code_after_loop() {
+        let codes = lint_codes(r#"
+fn foo() {
+    loop { return 1; }
+    let x = 2;
+}
+"#);
+        assert!(codes.contains(&"W202".to_string()),
+            "expected W202 for dead code after loop-with-return, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w202_dead_code_after_try_catch_both_return() {
+        let codes = lint_codes(r#"
+fn foo() {
+    try { return 1; } catch e { return 2; }
+    let x = 3;
+}
+"#);
+        assert!(codes.contains(&"W202".to_string()),
+            "expected W202 for dead code after try-catch-both-return, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w202_no_dead_code_try_catch_one_return() {
+        // Only try block returns — code after is reachable
+        let codes = lint_codes(r#"
+fn foo() {
+    try { return 1; } catch e { let x = 2; }
+    let y = 3;
+}
+"#);
+        assert!(!codes.contains(&"W202".to_string()),
+            "should not warn when only try block returns: {:?}", codes);
+    }
+
+    // ── W200: comprehension pattern and catch variable naming ──
+
+    #[test]
+    fn test_w200_comprehension_pattern() {
+        let codes = lint_codes("let items = [1, 2, 3];\nlet result = [x for myItem in items];");
+        assert!(codes.contains(&"W200".to_string()),
+            "expected W200 for non-snake_case comprehension var, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w200_map_comprehension_pattern() {
+        let codes = lint_codes("let items = [1, 2, 3];\nlet result = {\"k\": v for myItem in items};");
+        assert!(codes.contains(&"W200".to_string()),
+            "expected W200 for non-snake_case map comprehension var, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w200_catch_var_naming() {
+        let codes = lint_codes("try { 1 } catch myError { 2 }");
+        assert!(codes.contains(&"W200".to_string()),
+            "expected W200 for non-snake_case catch var, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w200_catch_var_snake_case_ok() {
+        let codes = lint_codes("try { 1 } catch my_error { 2 }");
+        assert!(!codes.contains(&"W200".to_string()),
+            "should not warn on snake_case catch var: {:?}", codes);
+    }
+
 }

@@ -116,6 +116,12 @@ pub fn check_dead_code_in_block(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                     terminated = true;
                 }
             }
+            // A try/catch where both blocks terminate is a terminator.
+            StatementKind::TryCatch { try_block, catch_block, .. } => {
+                if is_terminating_block(try_block) && is_terminating_block(catch_block) {
+                    terminated = true;
+                }
+            }
             _ => {}
         }
     }
@@ -223,6 +229,19 @@ fn is_terminating_expr(expr: &Expression) -> bool {
             is_terminating_block(then_block) && is_terminating_block(else_block)
         }
         ExpressionKind::Block(block) => is_terminating_block(block),
+        // A match where every arm terminates is itself terminating,
+        // but only if there's a catch-all (wildcard/variable) to guarantee coverage.
+        ExpressionKind::Match { arms, .. } => {
+            let has_catch_all = arms.iter().any(|a| a.guard.is_none() && is_catch_all_pattern(&a.pattern));
+            has_catch_all && arms.iter().all(|a| is_terminating_block(&a.body))
+        }
+        // A loop always either runs forever or exits via break/return/throw,
+        // so code after it is unreachable if the loop body terminates unconditionally.
+        ExpressionKind::Loop(block) => is_terminating_block(block),
+        // A try/catch expression where both blocks terminate is a terminator.
+        ExpressionKind::TryCatchExpr { try_block, catch_block, .. } => {
+            is_terminating_block(try_block) && is_terminating_block(catch_block)
+        }
         _ => false,
     }
 }
