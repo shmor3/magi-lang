@@ -299,6 +299,10 @@ mod tests {
         let v = Version::parse("0.2.0-beta.1").unwrap();
         assert_eq!(v.tuple(), (0, 2, 0));
         assert_eq!(v.pre_release(), Some("beta.1".to_string()));
+
+        // v-prefix support
+        let v = Version::parse("v1.2.3").unwrap();
+        assert_eq!(v.tuple(), (1, 2, 3));
     }
 
     #[test]
@@ -317,6 +321,15 @@ mod tests {
         assert!(
             Version::new(1, 0, 0).with_pre_release("alpha")
                 < Version::new(1, 0, 0)
+        );
+        // Semver numeric pre-release ordering.
+        assert!(
+            Version::new(1, 0, 0).with_pre_release("alpha.2")
+                > Version::new(1, 0, 0).with_pre_release("alpha.1")
+        );
+        assert!(
+            Version::new(1, 0, 0).with_pre_release("beta")
+                > Version::new(1, 0, 0).with_pre_release("alpha")
         );
     }
 
