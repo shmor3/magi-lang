@@ -5159,6 +5159,66 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
+            // SSE (Server-Sent Events) operations
+            // ================================================================
+            OperationType::SseConnect => {
+                let url = get_string(inputs, "url")?;
+                validate_url(url)?;
+                let resp = ureq::get(url)
+                    .header("Accept", "text/event-stream")
+                    .call()
+                    .map_err(|e| EvalError::InvalidInput(format!("sse_connect: {}", e)))?;
+                let reader = resp.into_body().into_reader();
+                let buffered: Box<dyn std::io::BufRead + Send> = Box::new(std::io::BufReader::new(reader));
+                let id = conn_id("sse");
+                conn_store(&id, Mutex::new(buffered));
+                Ok(DataType::String(id))
+            }
+            OperationType::SseReadEvent => {
+                let cid = get_string(inputs, "conn_id")?;
+                conn_with::<Mutex<Box<dyn std::io::BufRead + Send>>, _>(cid, |mtx| {
+                    let reader = mtx.get_mut().unwrap();
+                    let mut event_type = String::new();
+                    let mut data_lines = Vec::new();
+                    let mut event_id = String::new();
+                    loop {
+                        let mut line = String::new();
+                        use std::io::BufRead;
+                        let n = reader.read_line(&mut line)
+                            .map_err(|e| EvalError::InvalidInput(format!("sse_read_event: {}", e)))?;
+                        if n == 0 { return Ok(DataType::Null); }
+                        let trimmed = line.trim_end();
+                        if trimmed.is_empty() {
+                            if !data_lines.is_empty() {
+                                let mut m = std::collections::BTreeMap::new();
+                                if !event_type.is_empty() {
+                                    m.insert("event".into(), DataType::String(event_type));
+                                }
+                                m.insert("data".into(), DataType::String(data_lines.join("\n")));
+                                if !event_id.is_empty() {
+                                    m.insert("id".into(), DataType::String(event_id));
+                                }
+                                return Ok(DataType::Map(m));
+                            }
+                            continue;
+                        }
+                        if let Some(rest) = trimmed.strip_prefix("data:") {
+                            data_lines.push(rest.trim_start().to_string());
+                        } else if let Some(rest) = trimmed.strip_prefix("event:") {
+                            event_type = rest.trim_start().to_string();
+                        } else if let Some(rest) = trimmed.strip_prefix("id:") {
+                            event_id = rest.trim_start().to_string();
+                        }
+                    }
+                })
+            }
+            OperationType::SseClose => {
+                let cid = get_string(inputs, "conn_id")?;
+                conn_remove(cid)?;
+                Ok(DataType::Null)
+            }
+
+            // ================================================================
             // Remaining operations
             // ================================================================
             other => Err(EvalError::InvalidInput(format!(

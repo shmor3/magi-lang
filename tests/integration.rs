@@ -14572,3 +14572,13 @@ fn test_ws_close_nonexistent() {
     assert!(result.contains("not found") || result.contains("Error"));
 }
 
+// -------------------------------------------------------
+// SSE operations
+// -------------------------------------------------------
+
+#[test]
+fn test_sse_connect_invalid() {
+    let result = run_eval_unique(r#"sse_connect("not-a-url")"#, "sse_connect_invalid");
+    assert!(result.contains("Error") || result.contains("error"));
+}
+
