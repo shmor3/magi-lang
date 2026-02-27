@@ -1263,6 +1263,154 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
+            // Inverse trigonometric
+            OperationType::Asin => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).asin())),
+                Some(Err(f)) => Ok(DataType::Float64(f.asin())),
+                None => Ok(DataType::Null),
+            },
+            OperationType::Acos => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).acos())),
+                Some(Err(f)) => Ok(DataType::Float64(f.acos())),
+                None => Ok(DataType::Null),
+            },
+            OperationType::Atan => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).atan())),
+                Some(Err(f)) => Ok(DataType::Float64(f.atan())),
+                None => Ok(DataType::Null),
+            },
+            OperationType::Atan2 => {
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(av), Some(bv)) => {
+                        let y = match av { Ok(i) => i as f64, Err(f) => f };
+                        let x = match bv { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Float64(y.atan2(x)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+
+            // Hyperbolic
+            OperationType::Sinh => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).sinh())),
+                Some(Err(f)) => Ok(DataType::Float64(f.sinh())),
+                None => Ok(DataType::Null),
+            },
+            OperationType::Cosh => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).cosh())),
+                Some(Err(f)) => Ok(DataType::Float64(f.cosh())),
+                None => Ok(DataType::Null),
+            },
+            OperationType::Tanh => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).tanh())),
+                Some(Err(f)) => Ok(DataType::Float64(f.tanh())),
+                None => Ok(DataType::Null),
+            },
+
+            // Arbitrary base logarithm: log(value, base) = ln(value) / ln(base)
+            OperationType::Log => {
+                let base_val = inputs.get("base").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
+                match (promote_numeric(&input), promote_numeric(&base_val)) {
+                    (Some(vv), Some(bv)) => {
+                        let val = match vv { Ok(i) => i as f64, Err(f) => f };
+                        let base = match bv { Ok(i) => i as f64, Err(f) => f };
+                        if base <= 0.0 || base == 1.0 {
+                            Ok(DataType::Float64(f64::NAN))
+                        } else {
+                            Ok(DataType::Float64(val.ln() / base.ln()))
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+
+            // Angle conversion
+            OperationType::ToRadians => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_radians())),
+                Some(Err(f)) => Ok(DataType::Float64(f.to_radians())),
+                None => Ok(DataType::Null),
+            },
+            OperationType::ToDegrees => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_degrees())),
+                Some(Err(f)) => Ok(DataType::Float64(f.to_degrees())),
+                None => Ok(DataType::Null),
+            },
+
+            // Linear interpolation: lerp(a, b, t) = a + (b - a) * t
+            OperationType::Lerp => {
+                let t_val = inputs.get("t").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
+                match (promote_numeric(&a), promote_numeric(&b), promote_numeric(&t_val)) {
+                    (Some(av), Some(bv), Some(tv)) => {
+                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                        let ft = match tv { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Float64(fa + (fb - fa) * ft))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+
+            // Approximate equality: approx_eq(a, b) with optional epsilon
+            OperationType::ApproxEq => {
+                let epsilon = inputs.get("epsilon").or(inputs.get("input_2"))
+                    .and_then(|v| match promote_numeric(v) {
+                        Some(Ok(i)) => Some(i as f64),
+                        Some(Err(f)) => Some(f),
+                        None => None,
+                    })
+                    .unwrap_or(1e-10);
+                match (promote_numeric(&a), promote_numeric(&b)) {
+                    (Some(av), Some(bv)) => {
+                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
+                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+                        Ok(DataType::Bool((fa - fb).abs() <= epsilon))
+                    }
+                    _ => Ok(DataType::Bool(false)),
+                }
+            }
+
+            // Greatest common divisor (Euclidean algorithm)
+            OperationType::Gcd => {
+                match (a.to_i64(), b.to_i64()) {
+                    (Some(mut x), Some(mut y)) => {
+                        x = x.abs();
+                        y = y.abs();
+                        while y != 0 {
+                            let t = y;
+                            y = x % y;
+                            x = t;
+                        }
+                        Ok(DataType::Int64(x))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+
+            // Least common multiple: lcm(a, b) = |a * b| / gcd(a, b)
+            OperationType::Lcm => {
+                match (a.to_i64(), b.to_i64()) {
+                    (Some(x), Some(y)) => {
+                        if x == 0 || y == 0 {
+                            return Ok(DataType::Int64(0));
+                        }
+                        let mut gx = x.abs();
+                        let mut gy = y.abs();
+                        while gy != 0 {
+                            let t = gy;
+                            gy = gx % gy;
+                            gx = t;
+                        }
+                        // gx is now gcd
+                        // lcm = |x| / gcd * |y| to avoid overflow
+                        match (x.abs() / gx).checked_mul(y.abs()) {
+                            Some(v) => Ok(DataType::Int64(v)),
+                            None => Err(EvalError::InvalidInput("integer overflow in lcm".to_string())),
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            }
+
             other => Err(EvalError::InvalidInput(format!(
                 "operation '{:?}' is not implemented in the standalone evaluator",
                 other,
