@@ -884,7 +884,7 @@ impl<'a> Formatter<'a> {
             self.write(name);
             self.write(": ");
             self.fmt_expression(val);
-            if i < kwargs.len() - 1 {
+            if args.len() + i < total - 1 {
                 self.write(", ");
             }
         }

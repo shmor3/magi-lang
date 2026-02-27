@@ -103,6 +103,13 @@ pub fn check_dead_code_in_block(stmts: &[Statement]) -> Vec<AstDiagnostic> {
             | StatementKind::Throw(_) => {
                 terminated = true;
             }
+            // An expression-statement that is an if/else where both branches
+            // terminate is also a terminator.
+            StatementKind::ExprStatement(expr) => {
+                if is_terminating_expr(expr) {
+                    terminated = true;
+                }
+            }
             _ => {}
         }
     }
@@ -201,6 +208,40 @@ pub fn check_duplicate_imports(stmts: &[Statement]) -> Vec<AstDiagnostic> {
     }
 
     diagnostics
+}
+
+/// Returns true if an expression always terminates (return/break/continue/throw in all paths).
+fn is_terminating_expr(expr: &Expression) -> bool {
+    match &expr.kind {
+        ExpressionKind::IfElse { then_block, else_block: Some(else_block), .. } => {
+            is_terminating_block(then_block) && is_terminating_block(else_block)
+        }
+        ExpressionKind::Block(block) => is_terminating_block(block),
+        _ => false,
+    }
+}
+
+/// Returns true if a block always terminates.
+fn is_terminating_block(block: &Block) -> bool {
+    for stmt in &block.statements {
+        match &stmt.kind {
+            StatementKind::Return(_)
+            | StatementKind::Break(_)
+            | StatementKind::Continue
+            | StatementKind::Throw(_) => return true,
+            StatementKind::ExprStatement(expr) => {
+                if is_terminating_expr(expr) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Check tail expression
+    if let Some(tail) = &block.tail_expr {
+        return is_terminating_expr(tail);
+    }
+    false
 }
 
 /// Returns true if a pattern is a catch-all (matches everything).

@@ -148,6 +148,13 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "log10" => Some("Returns the base-10 logarithm."),
         "exp" => Some("Returns e raised to a power."),
         "output" => Some("Outputs a value as the program result."),
+        "is_null" => Some("Returns true if the value is null."),
+        "is_string" => Some("Returns true if the value is a string."),
+        "is_number" => Some("Returns true if the value is a number (int or float)."),
+        "is_array" => Some("Returns true if the value is an array."),
+        "is_map" => Some("Returns true if the value is a map."),
+        "is_bool" => Some("Returns true if the value is a boolean."),
+        "is_bytes" => Some("Returns true if the value is a bytes value."),
         _ => None,
     }
 }

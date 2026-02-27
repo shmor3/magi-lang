@@ -18,6 +18,7 @@ const BUILTINS: &[&str] = &[
     "parse_int", "parse_float",
     "abs", "round", "floor", "ceil", "sqrt", "pow", "min", "max", "clamp",
     "sin", "cos", "tan", "ln", "log2", "log10", "exp",
+    "is_null", "is_string", "is_number", "is_array", "is_map", "is_bool", "is_bytes",
     "output",
 ];
 

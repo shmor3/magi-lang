@@ -632,4 +632,28 @@ mod tests {
         let codes: Vec<String> = result.diagnostics.iter().filter_map(|d| d.code.clone()).collect();
         assert!(!codes.contains(&"W200".to_string()), "W200 should be disabled: {:?}", codes);
     }
+
+    // W202: dead code after terminating if/else
+    #[test]
+    fn test_w202_dead_code_after_terminating_if_else() {
+        let codes = lint_codes(r#"
+fn foo(x) {
+    if x > 0 { return 1; } else { return 2; }
+    let y = 3;
+}
+"#);
+        assert!(codes.contains(&"W202".to_string()), "expected W202 for dead code after terminating if/else, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w202_no_dead_code_if_else_one_branch() {
+        // Only one branch terminates — the code after is reachable
+        let codes = lint_codes(r#"
+fn foo(x) {
+    if x > 0 { return 1; } else { let z = 2; }
+    let y = 3;
+}
+"#);
+        assert!(!codes.contains(&"W202".to_string()), "should not warn when only one branch returns: {:?}", codes);
+    }
 }
