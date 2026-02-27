@@ -12906,3 +12906,229 @@ fn test_hof_group_by_numeric_keys() {
         _ => panic!("expected Map, got {:?}", result),
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+// Unicode audit: comprehensive Unicode handling tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_unicode_string_cjk_roundtrip() {
+    // CJK characters in string literals should survive the full pipeline
+    assert_eq!(
+        run(r#""日本語テスト""#),
+        DataType::String("日本語テスト".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_emoji_roundtrip() {
+    assert_eq!(
+        run(r#""hello 😀🎉🚀 world""#),
+        DataType::String("hello 😀🎉🚀 world".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_arabic_roundtrip() {
+    assert_eq!(
+        run(r#""مرحبا بالعالم""#),
+        DataType::String("مرحبا بالعالم".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_korean_roundtrip() {
+    assert_eq!(
+        run(r#""한국어 테스트""#),
+        DataType::String("한국어 테스트".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_greek_roundtrip() {
+    assert_eq!(
+        run(r#""Ελληνικά""#),
+        DataType::String("Ελληνικά".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_escape_emoji_in_expression() {
+    // Use \u{1F600} in a string and check the result
+    assert_eq!(
+        run(r#"let s = "\u{1F600}"; s.len()"#),
+        DataType::Int64(1) // One character
+    );
+}
+
+#[test]
+fn test_unicode_escape_accented_in_expression() {
+    assert_eq!(
+        run(r#""\u{00E9}""#),
+        DataType::String("é".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_concatenation() {
+    // Concatenating Unicode strings
+    assert_eq!(
+        run(r#""日本" + "語""#),
+        DataType::String("日本語".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_methods_on_cjk() {
+    // len() should return character count, not byte count
+    assert_eq!(run(r#""日本語".len()"#), DataType::Int64(3));
+    assert_eq!(run(r#""日本語".reverse()"#), DataType::String("語本日".to_string()));
+    assert_eq!(run(r#""日本語".contains("本")"#), DataType::Bool(true));
+    assert_eq!(run(r#""日本語".starts_with("日")"#), DataType::Bool(true));
+    assert_eq!(run(r#""日本語".ends_with("語")"#), DataType::Bool(true));
+}
+
+#[test]
+fn test_unicode_string_chars_cjk() {
+    let result = run(r#""日本語".chars()"#);
+    assert_eq!(
+        result,
+        DataType::Array(vec![
+            DataType::String("日".to_string()),
+            DataType::String("本".to_string()),
+            DataType::String("語".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_unicode_string_in_array() {
+    let result = run(r#"["hello", "日本語", "🎉"]"#);
+    assert_eq!(
+        result,
+        DataType::Array(vec![
+            DataType::String("hello".to_string()),
+            DataType::String("日本語".to_string()),
+            DataType::String("🎉".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn test_unicode_string_in_map_value() {
+    let result = run(r#"{"greeting": "こんにちは"}"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("greeting"), Some(&DataType::String("こんにちは".to_string())));
+        }
+        _ => panic!("expected Map, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_unicode_string_comparison() {
+    assert_eq!(run(r#""café" == "café""#), DataType::Bool(true));
+    assert_eq!(run(r#""café" == "cafe""#), DataType::Bool(false));
+}
+
+#[test]
+fn test_unicode_in_line_comment_before_code() {
+    // Unicode in a line comment should not affect subsequent code
+    let result = run("// 日本語コメント 🎉\n42");
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_unicode_in_block_comment_before_code() {
+    // Unicode in a block comment should not affect subsequent code
+    let result = run("/* 日本語コメント 🎉 */42");
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_unicode_fstring_with_cjk() {
+    let result = run(r#"
+        let name = "世界";
+        f"こんにちは {name} さん"
+    "#);
+    assert_eq!(result, DataType::String("こんにちは 世界 さん".to_string()));
+}
+
+#[test]
+fn test_unicode_raw_string_preserves_content() {
+    assert_eq!(
+        run(r#"r"日本語\nテスト""#),
+        DataType::String("日本語\\nテスト".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_empty() {
+    assert_eq!(run(r#""""#), DataType::String("".to_string()));
+}
+
+#[test]
+fn test_unicode_string_single_emoji() {
+    assert_eq!(run(r#""🎉""#), DataType::String("🎉".to_string()));
+}
+
+#[test]
+fn test_unicode_string_slice_cjk() {
+    // Slicing CJK characters should work by char index
+    assert_eq!(
+        run(r#""日本語テスト"[1..4]"#),
+        DataType::String("本語テ".to_string())
+    );
+}
+
+#[test]
+fn test_unicode_string_index_of_emoji() {
+    assert_eq!(
+        run(r#""hello 🎉 world".index_of("🎉")"#),
+        DataType::Int64(6)
+    );
+}
+
+#[test]
+fn test_unicode_match_on_string() {
+    let result = run(r#"
+        let s = "café";
+        match s {
+            "café" => "french",
+            "cafe" => "english",
+            _ => "other"
+        }
+    "#);
+    assert_eq!(result, DataType::String("french".to_string()));
+}
+
+#[test]
+fn test_unicode_type_checker_no_false_positives() {
+    // Type checker should not produce false positives on Unicode strings
+    let program = parse_v2(r#"
+        let s: string = "日本語";
+        let t: string = "café";
+        let u = s + t;
+        output u;
+    "#).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let errors: Vec<_> = analysis.diagnostics.iter()
+        .filter(|d| d.severity == magi_lang::syntax::type_checker::DiagnosticSeverity::Error)
+        .collect();
+    assert!(errors.is_empty(), "No type errors expected for Unicode strings: {:?}", errors);
+}
+
+#[test]
+fn test_unicode_position_tracking_block_comment() {
+    // After a block comment with Unicode, subsequent tokens should have
+    // correct column positions (characters, not bytes)
+    use magi_lang::syntax::lexer::tokenize;
+    let tokens = tokenize("/* 日 */x").unwrap();
+    // '日' is 1 char (3 bytes). Comment: / * space 日 space * / = 7 chars
+    // Then 'x' should be at column 8
+    let x_tok = tokens.iter().find(|t| t.text == "x").unwrap();
+    assert_eq!(x_tok.span.start_col, 8,
+        "After '/* 日 */' (7 chars), x should be at col 8, got col {}",
+        x_tok.span.start_col);
+}

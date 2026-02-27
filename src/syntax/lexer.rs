@@ -330,9 +330,11 @@ impl<'a> Lexer<'a> {
             }
 
             // Skip line comments
+            // Use advance_char() so multi-byte UTF-8 in comments
+            // increments col by 1 per character, not per byte.
             if self.peek() == Some(b'/') && self.peek_at(1) == Some(b'/') {
-                while let Some(ch) = self.advance() {
-                    if ch == b'\n' {
+                while let Some(ch) = self.advance_char() {
+                    if ch == '\n' {
                         break;
                     }
                 }
@@ -347,7 +349,9 @@ impl<'a> Lexer<'a> {
                 self.advance(); // consume *
                 let mut depth: u32 = 1;
                 while depth > 0 {
-                    match self.advance() {
+                    // Use advance_char() so multi-byte UTF-8 in comments
+                    // increments col by 1 per character, not per byte.
+                    match self.advance_char() {
                         None => {
                             return Err(SyntaxError {
                                 line: comment_line as usize,
@@ -355,11 +359,11 @@ impl<'a> Lexer<'a> {
                                 message: "Unterminated block comment".to_string(),
                             });
                         }
-                        Some(b'/') if self.peek() == Some(b'*') => {
+                        Some('/') if self.peek() == Some(b'*') => {
                             self.advance();
                             depth += 1;
                         }
-                        Some(b'*') if self.peek() == Some(b'/') => {
+                        Some('*') if self.peek() == Some(b'/') => {
                             self.advance();
                             depth -= 1;
                         }
@@ -1818,5 +1822,415 @@ mod tests {
         assert_eq!(tokens[1].text, "my test");
         assert_eq!(tokens[2].kind, TokenKind::LBrace);
         assert_eq!(tokens[3].kind, TokenKind::RBrace);
+    }
+
+    // =========================================================================
+    // Unicode handling tests
+    // =========================================================================
+
+    // --- Unicode in strings ---
+
+    #[test]
+    fn test_string_unicode_latin_accented() {
+        let tokens = tokenize(r#""café résumé naïve""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "café résumé naïve");
+    }
+
+    #[test]
+    fn test_string_unicode_cjk() {
+        let tokens = tokenize(r#""日本語テスト""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "日本語テスト");
+    }
+
+    #[test]
+    fn test_string_unicode_korean() {
+        let tokens = tokenize(r#""한국어""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "한국어");
+    }
+
+    #[test]
+    fn test_string_unicode_arabic() {
+        let tokens = tokenize(r#""مرحبا""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "مرحبا");
+    }
+
+    #[test]
+    fn test_string_unicode_emoji() {
+        let tokens = tokenize(r#""hello 😀🎉🚀 world""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "hello 😀🎉🚀 world");
+    }
+
+    #[test]
+    fn test_string_unicode_emoji_sequence() {
+        // Family emoji with ZWJ sequences (multi-codepoint grapheme cluster)
+        let tokens = tokenize("\"👨\u{200D}👩\u{200D}👧\u{200D}👦\"").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "👨\u{200D}👩\u{200D}👧\u{200D}👦");
+    }
+
+    #[test]
+    fn test_string_unicode_mixed_scripts() {
+        let tokens = tokenize(r#""English 日本語 العربية Ελληνικά""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "English 日本語 العربية Ελληνικά");
+    }
+
+    // --- Unicode escape sequences ---
+
+    #[test]
+    fn test_unicode_escape_bmp() {
+        // \u{00E9} = é
+        let tokens = tokenize(r#""\u{00E9}""#).unwrap();
+        assert_eq!(tokens[0].text, "é");
+    }
+
+    #[test]
+    fn test_unicode_escape_emoji() {
+        // \u{1F600} = 😀
+        let tokens = tokenize(r#""\u{1F600}""#).unwrap();
+        assert_eq!(tokens[0].text, "😀");
+    }
+
+    #[test]
+    fn test_unicode_escape_supplementary_plane() {
+        // \u{1F680} = 🚀
+        let tokens = tokenize(r#""\u{1F680}""#).unwrap();
+        assert_eq!(tokens[0].text, "🚀");
+    }
+
+    #[test]
+    fn test_unicode_escape_null_char() {
+        let tokens = tokenize(r#""\u{0000}""#).unwrap();
+        assert_eq!(tokens[0].text, "\0");
+    }
+
+    #[test]
+    fn test_unicode_escape_max_bmp() {
+        // \u{FFFF} is a valid code point
+        let tokens = tokenize(r#""\u{FFFF}""#).unwrap();
+        assert_eq!(tokens[0].text, "\u{FFFF}");
+    }
+
+    #[test]
+    fn test_unicode_escape_max_valid() {
+        // \u{10FFFF} is the highest valid Unicode code point
+        let tokens = tokenize(r#""\u{10FFFF}""#).unwrap();
+        assert_eq!(tokens[0].text, "\u{10FFFF}");
+    }
+
+    #[test]
+    fn test_unicode_escape_invalid_code_point() {
+        // \u{D800} is a surrogate — not a valid scalar value
+        let err = tokenize(r#""\u{D800}""#).unwrap_err();
+        assert!(err.message.contains("Invalid unicode code point"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_escape_too_large() {
+        // \u{110000} is above the max Unicode code point
+        let err = tokenize(r#""\u{110000}""#).unwrap_err();
+        assert!(err.message.contains("Invalid unicode code point"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_escape_empty() {
+        let err = tokenize(r#""\u{}""#).unwrap_err();
+        assert!(err.message.contains("Empty unicode escape"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_escape_no_braces() {
+        let err = tokenize(r#""\u0041""#).unwrap_err();
+        assert!(err.message.contains("Expected '{'"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_hex_escape() {
+        // \x41 = 'A'
+        let tokens = tokenize(r#""\x41""#).unwrap();
+        assert_eq!(tokens[0].text, "A");
+    }
+
+    #[test]
+    fn test_hex_escape_non_ascii() {
+        // \xFF = 0xFF as char (Latin small letter y with diaeresis)
+        let tokens = tokenize(r#""\xFF""#).unwrap();
+        assert_eq!(tokens[0].text, "\u{00FF}");
+    }
+
+    // --- Raw strings with Unicode ---
+
+    #[test]
+    fn test_raw_string_unicode() {
+        let tokens = tokenize(r#"r"日本語テスト""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "日本語テスト");
+    }
+
+    #[test]
+    fn test_raw_string_preserves_backslash_with_unicode() {
+        let tokens = tokenize(r#"r"café\nbar""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        // Raw string should preserve the backslash literally
+        assert_eq!(tokens[0].text, "café\\nbar");
+    }
+
+    #[test]
+    fn test_raw_string_emoji() {
+        let tokens = tokenize(r#"r"🎉🎊🎈""#).unwrap();
+        assert_eq!(tokens[0].text, "🎉🎊🎈");
+    }
+
+    // --- Triple-quoted strings with Unicode ---
+
+    #[test]
+    fn test_triple_string_unicode() {
+        let tokens = tokenize(r#""""日本語
+한국어
+العربية""""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert!(tokens[0].text.contains("日本語"));
+        assert!(tokens[0].text.contains("한국어"));
+        assert!(tokens[0].text.contains("العربية"));
+    }
+
+    // --- F-strings with Unicode ---
+
+    #[test]
+    fn test_fstring_unicode_content() {
+        let tokens = tokenize(r#"f"こんにちは {name} さん""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::FStringStart);
+        assert!(tokens[0].text.contains("こんにちは"));
+        assert!(tokens[0].text.contains("さん"));
+    }
+
+    #[test]
+    fn test_fstring_unicode_interpolation_text() {
+        let tokens = tokenize(r#"f"résultat: {x}""#).unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::FStringStart);
+        assert!(tokens[0].text.contains("résultat"));
+    }
+
+    // --- Unicode identifiers (NOT supported — should produce clear errors) ---
+
+    #[test]
+    fn test_unicode_identifier_rejected_accented() {
+        // 'café' should lex 'caf' as ident then error on 'é'
+        let err = tokenize("café").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+        assert!(err.message.contains('é'), "should show the Unicode char: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_identifier_rejected_cjk() {
+        let err = tokenize("日本語").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+        assert!(err.message.contains('日'), "should show the Unicode char: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_identifier_rejected_emoji_start() {
+        let err = tokenize("🚀var").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+    }
+
+    // --- Unicode in comments ---
+
+    #[test]
+    fn test_line_comment_unicode() {
+        // Unicode in line comments should be skipped without error
+        let tokens = tokenize("let x = 1; // これはコメントです 日本語 🎉\nlet y = 2;").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert!(kinds.contains(&&TokenKind::Let));
+        // Should have two let statements
+        assert_eq!(tokens.iter().filter(|t| t.kind == TokenKind::Let).count(), 2);
+    }
+
+    #[test]
+    fn test_block_comment_unicode() {
+        // Unicode in block comments should be skipped without error
+        let tokens = tokenize("let x = /* 日本語コメント 🎉 */ 42;").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Ident);
+        assert_eq!(tokens[2].kind, TokenKind::Eq);
+        assert_eq!(tokens[3].kind, TokenKind::IntLiteral);
+        assert_eq!(tokens[3].text, "42");
+    }
+
+    #[test]
+    fn test_block_comment_unicode_nested() {
+        let tokens = tokenize("let x = /* outer 日本語 /* inner 한국어 */ end */ 99;").unwrap();
+        assert_eq!(tokens[3].kind, TokenKind::IntLiteral);
+        assert_eq!(tokens[3].text, "99");
+    }
+
+    // --- Position tracking with multi-byte characters ---
+
+    #[test]
+    fn test_position_after_unicode_string() {
+        // "café" is 4 chars, 6 bytes (é is 2 bytes). The string token spans
+        // from col 1 to some end col. The next token 'x' should be at the
+        // correct column.
+        let tokens = tokenize(r#""café" + x"#).unwrap();
+        // "café" is the string token
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        // The '+' should follow
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        // 'x' should be an identifier
+        assert_eq!(tokens[2].kind, TokenKind::Ident);
+        assert_eq!(tokens[2].text, "x");
+    }
+
+    #[test]
+    fn test_position_after_block_comment_with_unicode() {
+        // After a block comment containing Unicode, the column of the next
+        // token should count characters, not bytes.
+        let tokens = tokenize("/* 日 */x").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Ident);
+        assert_eq!(tokens[0].text, "x");
+        // '日' is 1 character (3 bytes). Block comment: /* 日 */ = 8 chars
+        // (/, *, space, 日, space, *, /) = 7 characters, then 'x' at col 8
+        assert_eq!(tokens[0].span.start_col, 8,
+            "After '/* 日 */' (7 chars), x should be at col 8");
+    }
+
+    #[test]
+    fn test_position_line_comment_unicode_eof() {
+        // Line comment with Unicode at EOF (no trailing newline)
+        // Should not panic or produce incorrect results
+        let tokens = tokenize("let x = 1 // 日本語");
+        assert!(tokens.is_ok());
+        let tokens = tokens.unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+    }
+
+    #[test]
+    fn test_position_string_unicode_column() {
+        // String containing multi-byte chars: column tracking inside strings
+        // uses advance_char() so each char counts as 1 column
+        let tokens = tokenize(r#""日本語" + y"#).unwrap();
+        let y_tok = &tokens[2]; // 'y' token
+        assert_eq!(y_tok.kind, TokenKind::Ident);
+        assert_eq!(y_tok.text, "y");
+        // String "日本語" = 5 chars (quote + 3 chars + quote) at cols 1-5
+        // Then ' + y' at col 7, 9, ...
+        // Actually: " at col 1, 日 col 2, 本 col 3, 語 col 4, " col 5
+        // space col 6, + col 7, space col 8, y col 9
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn test_empty_source() {
+        let tokens = tokenize("").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_null_byte_in_string() {
+        // \0 escape in string
+        let tokens = tokenize(r#""\0""#).unwrap();
+        assert_eq!(tokens[0].text, "\0");
+    }
+
+    #[test]
+    fn test_bom_at_start() {
+        // UTF-8 BOM (U+FEFF) at start of file — should be treated as unexpected char
+        // since BOM is not whitespace in our lexer
+        let source = "\u{FEFF}let x = 1;";
+        let err = tokenize(source);
+        // BOM is a non-ASCII character, so it will be rejected
+        assert!(err.is_err(), "BOM should be rejected as unexpected character");
+    }
+
+    #[test]
+    fn test_replacement_char_in_string() {
+        // U+FFFD replacement character in a string literal
+        let tokens = tokenize("\"hello\u{FFFD}world\"").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "hello\u{FFFD}world");
+    }
+
+    #[test]
+    fn test_string_with_zero_width_chars() {
+        // Zero-width space (U+200B) and zero-width joiner (U+200D)
+        let tokens = tokenize("\"a\u{200B}b\u{200D}c\"").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert_eq!(tokens[0].text, "a\u{200B}b\u{200D}c");
+    }
+
+    #[test]
+    fn test_string_with_right_to_left_mark() {
+        // Right-to-left mark (U+200F) in string
+        let tokens = tokenize("\"hello\u{200F}world\"").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+        assert!(tokens[0].text.contains('\u{200F}'));
+    }
+
+    // --- Unicode mathematical operators (NOT supported) ---
+
+    #[test]
+    fn test_unicode_operator_division_rejected() {
+        let err = tokenize("x ÷ y").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_operator_multiply_rejected() {
+        let err = tokenize("x × y").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_operator_not_equal_rejected() {
+        let err = tokenize("x ≠ y").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_operator_le_rejected() {
+        let err = tokenize("x ≤ y").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_unicode_operator_ge_rejected() {
+        let err = tokenize("x ≥ y").unwrap_err();
+        assert!(err.message.contains("Unexpected character"), "got: {}", err.message);
+    }
+
+    // --- Whitespace-only and comment-only edge cases ---
+
+    #[test]
+    fn test_only_whitespace() {
+        let tokens = tokenize("   \t\n\r\n  ").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_only_block_comment() {
+        let tokens = tokenize("/* comment */").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_unterminated_block_comment_with_unicode() {
+        let err = tokenize("/* 日本語テスト").unwrap_err();
+        assert!(err.message.contains("Unterminated block comment"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn test_string_with_all_escape_types() {
+        // Test all supported escape sequences in one string
+        let tokens = tokenize(r#""\n\t\r\\\"\0\x41\u{0042}""#).unwrap();
+        assert_eq!(tokens[0].text, "\n\t\r\\\"\0AB");
     }
 }
