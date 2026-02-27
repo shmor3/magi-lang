@@ -1167,8 +1167,8 @@ fn test_undefined_variable_error() {
 fn test_assert_failure() {
     let err = run_err("assert(false)");
     match err {
-        InterpError::ThrownError { .. } => {}
-        _ => panic!("expected ThrownError (assertion), got: {:?}", err),
+        InterpError::AssertionFailed { .. } => {}
+        _ => panic!("expected AssertionFailed, got: {:?}", err),
     }
 }
 
@@ -1186,8 +1186,8 @@ fn test_assert_eq_success() {
 fn test_assert_eq_failure() {
     let err = run_err("assert_eq(1, 2)");
     match err {
-        InterpError::ThrownError { .. } => {}
-        _ => panic!("expected ThrownError (assert_eq), got: {:?}", err),
+        InterpError::AssertionFailed { .. } => {}
+        _ => panic!("expected AssertionFailed, got: {:?}", err),
     }
 }
 
@@ -7327,4 +7327,60 @@ fn test_not_operator_truthiness() {
     assert_eq!(run("!null"), DataType::Bool(true));
     assert_eq!(run(r#"!"""#), DataType::Bool(true));
     assert_eq!(run(r#"!"hello""#), DataType::Bool(false));
+}
+
+#[test]
+fn test_try_block_scope_isolation() {
+    // Variables defined inside try block should not leak to outer scope
+    let err = run_err(r#"
+        try {
+            let inner_var = 42
+        } catch e {}
+        inner_var
+    "#);
+    match err {
+        InterpError::UndefinedVariable { name, .. } => {
+            assert_eq!(name, "inner_var");
+        }
+        _ => panic!("expected UndefinedVariable, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_try_expr_scope_isolation() {
+    // Expression-level try/catch should also isolate scope
+    let err = run_err(r#"
+        let result = try {
+            let inner = 99
+            inner
+        } catch e { 0 }
+        inner
+    "#);
+    match err {
+        InterpError::UndefinedVariable { name, .. } => {
+            assert_eq!(name, "inner");
+        }
+        _ => panic!("expected UndefinedVariable, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_assertion_error_code() {
+    // assert failures should show E402, not E403
+    let err = run_err("assert(false)");
+    let msg = format!("{}", err);
+    assert!(msg.contains("[E402]"), "expected E402 in: {}", msg);
+}
+
+#[test]
+fn test_arity_mismatch_range() {
+    // Functions with default params should show range in error
+    let err = run_err(r#"
+        fn greet(name, greeting = "Hello") {
+            f"{greeting}, {name}!"
+        }
+        greet()
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("1-2"), "expected '1-2' in arity message: {}", msg);
 }

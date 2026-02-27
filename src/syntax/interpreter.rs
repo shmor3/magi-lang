@@ -975,7 +975,12 @@ impl<'a> Interpreter<'a> {
                 catch_block,
                 finally_block,
             } => {
+                // Scope-isolate the try block so variables don't leak
+                self.symbols.push(HashMap::new());
+                self.heap.push_scope();
                 let try_result = self.exec_block(try_block);
+                self.heap.pop_scope();
+                self.symbols.pop();
                 let result = match try_result {
                     Ok(val) => Ok(val),
                     Err(ref e) if is_control_flow(e) => {
@@ -1205,7 +1210,7 @@ impl<'a> Interpreter<'a> {
             DataType::Array(arr) => {
                 match method {
                     "map" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1214,7 +1219,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "filter" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1226,7 +1231,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "reduce" => {
-                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "reduce".to_string(), expected: 2, actual: args.len(), span }); }
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "reduce".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                         let mut acc = self.eval_expr(&args[0])?;
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1235,7 +1240,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(acc))
                     }
                     "find" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
@@ -1246,7 +1251,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Null))
                     }
                     "find_index" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find_index".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find_index".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for (i, item) in arr.iter().enumerate() {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
@@ -1257,7 +1262,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Null))
                     }
                     "any" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "any".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "any".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
@@ -1268,7 +1273,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Bool(false)))
                     }
                     "all" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "all".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "all".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let matches = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
@@ -1279,7 +1284,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Bool(true)))
                     }
                     "flat_map" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "flat_map".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "flat_map".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1300,7 +1305,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "each" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "each".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "each".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
@@ -1308,7 +1313,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Null))
                     }
                     "sort_by" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sort_by".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sort_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut sorted = arr.clone();
                         let max_comparisons = MAX_LOOP_ITERATIONS * 10; // 100,000 comparisons
                         let mut comparison_count = 0usize;
@@ -1342,7 +1347,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(sorted)))
                     }
                     "group_by" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "group_by".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "group_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut groups: std::collections::BTreeMap<String, Vec<DataType>> = std::collections::BTreeMap::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1357,7 +1362,7 @@ impl<'a> Interpreter<'a> {
                     }
                     "min_by" => {
                         if arr.is_empty() { return Ok(Some(DataType::Null)); }
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min_by".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut min = arr[0].clone();
                         for item in &arr[1..] {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1376,7 +1381,7 @@ impl<'a> Interpreter<'a> {
                     }
                     "max_by" => {
                         if arr.is_empty() { return Ok(Some(DataType::Null)); }
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max_by".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut max = arr[0].clone();
                         for item in &arr[1..] {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1394,7 +1399,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(max))
                     }
                     "take_while" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "take_while".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "take_while".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = Vec::new();
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1405,7 +1410,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "skip_while" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "skip_while".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "skip_while".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut skipping = true;
                         let mut result = Vec::new();
                         for item in arr {
@@ -1420,7 +1425,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "partition" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "partition".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "partition".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut trues = Vec::new();
                         let mut falses = Vec::new();
                         for item in arr {
@@ -1438,7 +1443,7 @@ impl<'a> Interpreter<'a> {
                         ])))
                     }
                     "scan" => {
-                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "scan".to_string(), expected: 2, actual: args.len(), span }); }
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "scan".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                         let mut acc = self.eval_expr(&args[0])?;
                         let mut result = Vec::new();
                         for item in arr {
@@ -1455,7 +1460,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "zip" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "zip".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "zip".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let other = self.eval_expr(&args[0])?;
                         let other_arr = match other {
                             DataType::Array(a) => a,
@@ -1473,7 +1478,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Array(result)))
                     }
                     "chunk" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "chunk".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "chunk".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let size_val = self.eval_expr(&args[0])?;
                         let size = size_val.to_i64().unwrap_or(1).max(1) as usize;
                         let result: Vec<DataType> = arr.chunks(size)
@@ -1487,7 +1492,7 @@ impl<'a> Interpreter<'a> {
             DataType::Map(map) => {
                 match method {
                     "filter_entries" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter_entries".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter_entries".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1499,7 +1504,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Map(result)))
                     }
                     "map_values" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_values".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_values".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1509,7 +1514,7 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::Map(result)))
                     }
                     "map_keys" => {
-                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_keys".to_string(), expected: 1, actual: 0, span }); }
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_keys".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut result = std::collections::BTreeMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -1545,7 +1550,7 @@ impl<'a> Interpreter<'a> {
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n))),
                 "pow" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     if exp < 0 {
                         // Negative exponents on integers would produce fractions; return 0
@@ -1563,14 +1568,14 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "min" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().or_else(|| arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Int64((*n).min(other))))
                 }
                 "max" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().or_else(|| arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
@@ -1578,7 +1583,7 @@ impl<'a> Interpreter<'a> {
                 }
                 "sign" => Ok(Some(DataType::Int64(n.signum()))),
                 "clamp" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
                     let min_val = lo_arg.to_i64().or_else(|| lo_arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
@@ -1610,19 +1615,19 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "pow" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
                     Ok(Some(DataType::Float64(n.powf(exp))))
                 }
                 "min" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_f64()
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Float64(n.min(other))))
                 }
                 "max" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_f64()
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
@@ -1636,7 +1641,7 @@ impl<'a> Interpreter<'a> {
                 "cos" => Ok(Some(DataType::Float64(n.cos()))),
                 "tan" => Ok(Some(DataType::Float64(n.tan()))),
                 "clamp" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
                     let min_val = lo_arg.to_f64()
@@ -1671,26 +1676,26 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "pow" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
                     Ok(Some(DataType::Float64((*n as f64).powf(exp))))
                 }
                 "min" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_f64()
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Float32((*n as f64).min(other) as f32)))
                 }
                 "max" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_f64()
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
                     Ok(Some(DataType::Float32((*n as f64).max(other) as f32)))
                 }
                 "clamp" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
                     let min_val = lo_arg.to_f64()
@@ -1720,7 +1725,7 @@ impl<'a> Interpreter<'a> {
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
                 "pow" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     if exp < 0 {
                         if *n == 1 { Ok(Some(DataType::Int32(1))) }
@@ -1736,21 +1741,21 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "min" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().or_else(|| arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Int32((*n as i64).min(other) as i32)))
                 }
                 "max" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().or_else(|| arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
                         .ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
                     Ok(Some(DataType::Int32((*n as i64).max(other) as i32)))
                 }
                 "clamp" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
                     let min_val = lo_arg.to_i64().or_else(|| lo_arg.to_f64().and_then(|f| if f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 { Some(f as i64) } else { None }))
@@ -1769,7 +1774,7 @@ impl<'a> Interpreter<'a> {
                 "abs" => Ok(Some(DataType::Uint32(*n))),
                 "sign" => Ok(Some(DataType::Int64(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     if exp < 0 { Ok(Some(DataType::Uint32(0))) }
                     else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
@@ -1781,19 +1786,19 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "min" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Uint32((*n as i64).min(other).max(0) as u32)))
                 }
                 "max" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
                     Ok(Some(DataType::Uint32((*n as i64).max(other).max(0) as u32)))
                 }
                 "clamp" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
                     let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
@@ -1816,7 +1821,7 @@ impl<'a> Interpreter<'a> {
                 "abs" => Ok(Some(DataType::Uint64(*n))),
                 "sign" => Ok(Some(DataType::Int64(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     if exp < 0 { Ok(Some(DataType::Uint64(0))) }
                     else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
@@ -1828,19 +1833,19 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "min" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
                     Ok(Some(DataType::Uint64((*n as i64).min(other).max(0) as u64)))
                 }
                 "max" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
                     Ok(Some(DataType::Uint64((*n as i64).max(other).max(0) as u64)))
                 }
                 "clamp" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
                     let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
@@ -1879,7 +1884,7 @@ impl<'a> Interpreter<'a> {
                 }
                 "to_string" => Ok(Some(DataType::String(s.clone()))),
                 "split" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let sep_val = self.eval_expr(&args[0])?;
                     let sep = match sep_val {
                         DataType::String(sep) => sep,
@@ -1895,7 +1900,7 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::Array(parts)))
                 }
                 "replace" => {
-                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "replace".to_string(), expected: 2, actual: args.len(), span }); }
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "replace".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace pattern".to_string(), span }) };
                     let to = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace replacement".to_string(), span }) };
                     if from.is_empty() {
@@ -1914,22 +1919,22 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::String(s.replace(&from, &to))))
                 }
                 "contains" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
                     Ok(Some(DataType::Bool(s.contains(&needle))))
                 }
                 "starts_with" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "starts_with".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "starts_with".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let prefix = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
                     Ok(Some(DataType::Bool(s.starts_with(&prefix))))
                 }
                 "ends_with" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ends_with".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ends_with".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let suffix = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
                     Ok(Some(DataType::Bool(s.ends_with(&suffix))))
                 }
                 "index_of" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "index_of".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "index_of".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Int64(-1))) };
                     Ok(Some(match s.find(&needle) {
                         Some(byte_idx) => DataType::Int64(s[..byte_idx].chars().count() as i64),
@@ -1937,7 +1942,7 @@ impl<'a> Interpreter<'a> {
                     }))
                 }
                 "repeat" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "repeat".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "repeat".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_REPEAT_LEN: usize = 10_000_000;
                     if n > 0 && s.len().saturating_mul(n) > MAX_REPEAT_LEN {
@@ -1951,7 +1956,7 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::String(s.repeat(n))))
                 }
                 "char_at" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_at".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_at".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let idx = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
                     if idx < 0 {
                         Ok(Some(DataType::Null))
@@ -1960,7 +1965,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 "pad_start" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
@@ -1977,7 +1982,7 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::String(format!("{}{}", padding, s))))
                 }
                 "pad_end" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
@@ -1994,7 +1999,7 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::String(format!("{}{}", s, padding))))
                 }
                 "substring" | "slice" => {
-                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: 1, actual: 0, span }); }
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let char_len = s.chars().count() as i64;
                     let raw_start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
                     let raw_end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(char_len) } else { char_len };
@@ -2177,9 +2182,16 @@ impl<'a> Interpreter<'a> {
         let required = func.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
         let max_positional = if has_rest { usize::MAX } else { func.params.len() };
         if args.len() < required || args.len() > max_positional {
+            let expected = if has_rest {
+                format!("at least {}", required)
+            } else if required == func.params.len() {
+                format!("{}", required)
+            } else {
+                format!("{}-{}", required, func.params.len())
+            };
             return Err(InterpError::ArityMismatch {
                 name: name.to_string(),
-                expected: func.params.len(),
+                expected,
                 actual: args.len(),
                 span: call_span,
             });
@@ -2524,7 +2536,7 @@ impl<'a> Interpreter<'a> {
                             };
                             return Ok(DataType::Int64(length));
                         }
-                        return Err(InterpError::ArityMismatch { name: "len".to_string(), expected: 1, actual: 0, span: expr.span });
+                        return Err(InterpError::ArityMismatch { name: "len".to_string(), expected: "1".to_string(), actual: 0, span: expr.span });
                     }
                     "assert" => {
                         if let Some(arg) = args.first() {
@@ -2538,8 +2550,8 @@ impl<'a> Interpreter<'a> {
                                     } else {
                                         "Assertion failed".to_string()
                                     };
-                                    return Err(InterpError::ThrownError {
-                                        value: DataType::String(msg),
+                                    return Err(InterpError::AssertionFailed {
+                                        message: msg,
                                         span: expr.span,
                                     });
                                 }
@@ -2559,7 +2571,7 @@ impl<'a> Interpreter<'a> {
                         if args.len() < 2 {
                             return Err(InterpError::ArityMismatch {
                                 name: "assert_eq".to_string(),
-                                expected: 2,
+                                expected: "2".to_string(),
                                 actual: args.len(),
                                 span: expr.span,
                             });
@@ -2579,8 +2591,8 @@ impl<'a> Interpreter<'a> {
                                 datatype_to_display(&right)
                             )
                         };
-                        return Err(InterpError::ThrownError {
-                            value: DataType::String(msg),
+                        return Err(InterpError::AssertionFailed {
+                            message: msg,
                             span: expr.span,
                         });
                     }
@@ -2588,7 +2600,7 @@ impl<'a> Interpreter<'a> {
                         if args.len() < 2 {
                             return Err(InterpError::ArityMismatch {
                                 name: "assert_ne".to_string(),
-                                expected: 2,
+                                expected: "2".to_string(),
                                 actual: args.len(),
                                 span: expr.span,
                             });
@@ -2607,8 +2619,8 @@ impl<'a> Interpreter<'a> {
                                 datatype_to_display(&left)
                             )
                         };
-                        return Err(InterpError::ThrownError {
-                            value: DataType::String(msg),
+                        return Err(InterpError::AssertionFailed {
+                            message: msg,
                             span: expr.span,
                         });
                     }
@@ -2616,7 +2628,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() {
                             return Err(InterpError::ArityMismatch {
                                 name: "assert_throws".to_string(),
-                                expected: 1,
+                                expected: "1".to_string(),
                                 actual: 0,
                                 span: expr.span,
                             });
@@ -2638,8 +2650,8 @@ impl<'a> Interpreter<'a> {
                                     "Assertion failed: expected '{}' to throw, but it returned successfully",
                                     target_fn
                                 );
-                                return Err(InterpError::ThrownError {
-                                    value: DataType::String(msg),
+                                return Err(InterpError::AssertionFailed {
+                                    message: msg,
                                     span: expr.span,
                                 });
                             }
@@ -3278,7 +3290,7 @@ impl<'a> Interpreter<'a> {
                 if args.len() != variant_def.fields.len() {
                     return Err(InterpError::ArityMismatch {
                         name: format!("{}::{}", enum_name, variant),
-                        expected: variant_def.fields.len(),
+                        expected: variant_def.fields.len().to_string(),
                         actual: args.len(),
                         span: expr.span,
                     });
@@ -3413,7 +3425,12 @@ impl<'a> Interpreter<'a> {
                 catch_block,
                 finally_block,
             } => {
+                // Scope-isolate the try block so variables don't leak
+                self.symbols.push(HashMap::new());
+                self.heap.push_scope();
                 let try_result = self.exec_block(try_block);
+                self.heap.pop_scope();
+                self.symbols.pop();
                 let result = match try_result {
                     Ok(val) => Ok(val),
                     Err(ref e) if is_control_flow(e) => {
@@ -4954,7 +4971,7 @@ pub enum InterpError {
     },
     ArityMismatch {
         name: String,
-        expected: usize,
+        expected: String,
         actual: usize,
         span: Span,
     },
@@ -4991,6 +5008,11 @@ pub enum InterpError {
     /// User-thrown error via `throw expr;`
     ThrownError {
         value: DataType,
+        span: Span,
+    },
+    /// Assertion failure via `assert()`, `assert_eq()`, or `assert_ne()`
+    AssertionFailed {
+        message: String,
         span: Span,
     },
 }
@@ -5086,7 +5108,7 @@ impl std::fmt::Display for InterpError {
             } => {
                 write!(
                     f,
-                    "{} [E405]: Function '{}' expects {} arguments, got {}",
+                    "{} [E405]: Function '{}' expects {} argument(s), got {}",
                     span, name, expected, actual
                 )
             }
@@ -5110,6 +5132,9 @@ impl std::fmt::Display for InterpError {
             }
             InterpError::ThrownError { value, span } => {
                 write!(f, "{} [E403]: Uncaught error: {}", span, datatype_to_display(value))
+            }
+            InterpError::AssertionFailed { message, span } => {
+                write!(f, "{} [E402]: {}", span, message)
             }
         }
     }

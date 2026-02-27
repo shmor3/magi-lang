@@ -59,6 +59,7 @@ struct FunctionSig {
     has_rest: bool,
     return_type: ChannelType,
     def_line: u32,
+    def_col: u32,
     used: bool,
 }
 
@@ -100,8 +101,10 @@ struct TypeChecker {
     /// Scope stack — innermost scope is last.
     env: Vec<HashMap<String, VarInfo>>,
     diagnostics: Vec<AstDiagnostic>,
-    /// Known plugin imports.
+    /// Known plugin imports with their source locations.
     imports: HashSet<String>,
+    /// Import source locations: import_id → (line, col).
+    import_locations: HashMap<String, (u32, u32)>,
     /// Subset of `imports` that have actually been referenced.
     used_imports: HashSet<String>,
     /// User-defined function signatures.
@@ -126,6 +129,7 @@ impl TypeChecker {
             env: vec![HashMap::new()], // start with one global scope
             diagnostics: Vec::new(),
             imports: imports.clone(),
+            import_locations: HashMap::new(),
             used_imports: HashSet::new(),
             function_sigs: HashMap::new(),
             enum_variants: HashMap::new(),
@@ -342,6 +346,7 @@ impl TypeChecker {
                         has_rest,
                         return_type,
                         def_line: stmt.span.start_line,
+                        def_col: stmt.span.start_col,
                         used: false,
                     },
                 );
@@ -359,9 +364,10 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // import "plugin-id";
             // -----------------------------------------------------------------
-            StatementKind::Import(_id) => {
-                // Imports are already recorded in the `imports` set passed at
-                // construction — nothing to type-check here.
+            StatementKind::Import(id) => {
+                // Record import location for unused import diagnostics.
+                self.import_locations.entry(id.clone())
+                    .or_insert((stmt.span.start_line, stmt.span.start_col));
             }
 
             // -----------------------------------------------------------------
@@ -1423,7 +1429,7 @@ impl TypeChecker {
                     format!("Unknown operation '{}'", name),
                     DiagnosticSeverity::Error,
                     super::errors::ErrorCode::E201,
-                    self.suggest_variable(name).map(|s| format!("Did you mean '{}'?", s)),
+                    self.suggest_variable(name),
                 );
                 ChannelType::Null
             }
@@ -2570,7 +2576,7 @@ impl TypeChecker {
                 let code = super::errors::ErrorCode::W103;
                 self.diagnostics.push(AstDiagnostic {
                     line: sig.def_line,
-                    column: 1,
+                    column: sig.def_col,
                     message: format!("Unused function '{}'", name),
                     severity: DiagnosticSeverity::Warning,
                     code: Some(code.to_string()),
@@ -2584,9 +2590,10 @@ impl TypeChecker {
         for import_id in &self.imports {
             if !self.used_imports.contains(import_id) {
                 let code = super::errors::ErrorCode::W101;
+                let (line, col) = self.import_locations.get(import_id).copied().unwrap_or((1, 1));
                 self.diagnostics.push(AstDiagnostic {
-                    line: 0,
-                    column: 0,
+                    line,
+                    column: col,
                     message: format!("Unused import '{}'", import_id),
                     severity: DiagnosticSeverity::Warning,
                     code: Some(code.to_string()),

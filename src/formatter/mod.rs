@@ -892,15 +892,22 @@ impl<'a> Formatter<'a> {
 
     fn fmt_literal(&mut self, lit: &Literal) {
         match lit {
-            Literal::Int64(n) => self.write(&n.to_string()),
+            Literal::Int64(n) => {
+                if *n == i64::MIN {
+                    // i64::MIN cannot be parsed as a negated literal (9223372036854775808 overflows i64)
+                    self.write("(-9223372036854775807 - 1)");
+                } else {
+                    self.write(&n.to_string());
+                }
+            }
             Literal::Float64(f) => {
                 if f.is_nan() {
-                    self.write("(0.0 / 0.0)");
+                    self.write("0.0 / 0.0");
                 } else if f.is_infinite() {
                     if *f > 0.0 {
-                        self.write("(1.0 / 0.0)");
+                        self.write("1.0 / 0.0");
                     } else {
-                        self.write("(-1.0 / 0.0)");
+                        self.write("-1.0 / 0.0");
                     }
                 } else {
                     let s = f.to_string();
