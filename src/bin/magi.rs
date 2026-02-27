@@ -46,24 +46,39 @@ impl OperationEvaluator for FullEvaluator {
                 if let (DataType::String(x), DataType::String(y)) = (&a, &b) {
                     return Ok(DataType::String(format!("{}{}", x, y)));
                 }
-                num_binop(&a, &b, |x, y| x + y, |x, y| x + y)
+                num_binop(&a, &b, i64::checked_add, |x, y| x + y)
             }
-            OperationType::Subtract => num_binop(&a, &b, |x, y| x - y, |x, y| x - y),
-            OperationType::Multiply => num_binop(&a, &b, |x, y| x * y, |x, y| x * y),
+            OperationType::Subtract => num_binop(&a, &b, i64::checked_sub, |x, y| x - y),
+            OperationType::Multiply => num_binop(&a, &b, i64::checked_mul, |x, y| x * y),
             OperationType::Divide => {
                 match (&a, &b) {
                     (DataType::Int64(x), DataType::Int64(y)) => {
                         if *y == 0 { return Err(EvalError::DivisionByZero); }
-                        Ok(DataType::Int64(x / y))
+                        match x.checked_div(*y) {
+                            Some(v) => Ok(DataType::Int64(v)),
+                            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                        }
                     }
-                    _ => num_binop(&a, &b, |x, y| x / y, |x, y| x / y),
+                    (DataType::Float64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
+                    (DataType::Int64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
+                    (DataType::Float64(_), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
+                    (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x / y)),
+                    (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 / y)),
+                    (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x / *y as f64)),
+                    _ => Ok(DataType::Null),
                 }
             }
             OperationType::Modulo => match (&a, &b) {
                 (DataType::Int64(x), DataType::Int64(y)) => {
                     if *y == 0 { return Err(EvalError::DivisionByZero); }
-                    Ok(DataType::Int64(x % y))
+                    match x.checked_rem(*y) {
+                        Some(v) => Ok(DataType::Int64(v)),
+                        None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                    }
                 }
+                (DataType::Float64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
+                (DataType::Int64(_), DataType::Float64(y)) if *y == 0.0 => Err(EvalError::DivisionByZero),
+                (DataType::Float64(_), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x % y)),
                 (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 % y)),
                 (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x % *y as f64)),
@@ -92,7 +107,10 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Ok(DataType::Bool(true)),
             },
             OperationType::Negate => match &input {
-                DataType::Int64(x) => Ok(DataType::Int64(-x)),
+                DataType::Int64(x) => match x.checked_neg() {
+                    Some(v) => Ok(DataType::Int64(v)),
+                    None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                },
                 DataType::Float64(x) => Ok(DataType::Float64(-x)),
                 _ => Ok(DataType::Null),
             },
@@ -191,6 +209,9 @@ impl OperationEvaluator for FullEvaluator {
                 let delim = inputs.get("delimiter").cloned().unwrap_or(DataType::Null);
                 match (&input, &delim) {
                     (DataType::String(s), DataType::String(sep)) => {
+                        if sep.is_empty() {
+                            return Err(EvalError::InvalidInput("split delimiter must not be empty".to_string()));
+                        }
                         let parts: Vec<DataType> = s.split(sep.as_str()).take(MAX_ARRAY_ELEMENTS + 1).map(|p| DataType::String(p.to_string())).collect();
                         if parts.len() > MAX_ARRAY_ELEMENTS {
                             return Err(EvalError::InvalidInput(format!("split result exceeds {} element limit", MAX_ARRAY_ELEMENTS)));
@@ -258,7 +279,38 @@ impl OperationEvaluator for FullEvaluator {
                     _ => Ok(DataType::Bool(false)),
                 }
             },
-            OperationType::Substring => Ok(DataType::String(String::new())),
+            OperationType::Substring => {
+                // "hello".substring(start, end) — character-based indices
+                // input_1 = start index, input_2 = optional end index
+                let start_val = inputs.get("input_1").or(inputs.get("start")).cloned().unwrap_or(DataType::Int64(0));
+                let end_val = inputs.get("input_2").or(inputs.get("end")).cloned();
+                match &input {
+                    DataType::String(s) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let len = chars.len() as i64;
+                        let start = match &start_val {
+                            DataType::Int64(n) => {
+                                let n = *n;
+                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                            }
+                            _ => 0,
+                        };
+                        let end = match &end_val {
+                            Some(DataType::Int64(n)) => {
+                                let n = *n;
+                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
+                            }
+                            _ => chars.len(),
+                        };
+                        if start >= end {
+                            Ok(DataType::String(String::new()))
+                        } else {
+                            Ok(DataType::String(chars[start..end].iter().collect()))
+                        }
+                    }
+                    _ => Ok(DataType::String(String::new())),
+                }
+            }
             OperationType::IndexOf => {
                 let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
                 match (&input, &search) {
@@ -326,8 +378,8 @@ impl OperationEvaluator for FullEvaluator {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match (&array, &index) {
                     (DataType::Array(arr), DataType::Int64(i)) => {
-                        let idx = *i as usize;
-                        Ok(arr.get(idx).cloned().unwrap_or(DataType::Null))
+                        if *i < 0 { return Ok(DataType::Null); }
+                        Ok(arr.get(*i as usize).cloned().unwrap_or(DataType::Null))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -336,8 +388,9 @@ impl OperationEvaluator for FullEvaluator {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match (&array, &index) {
                     (DataType::Array(arr), DataType::Int64(i)) => {
-                        let mut new_arr = arr.clone();
+                        if *i < 0 { return Ok(DataType::Array(arr.clone())); }
                         let idx = *i as usize;
+                        let mut new_arr = arr.clone();
                         if idx < new_arr.len() {
                             new_arr[idx] = value.clone();
                         }
@@ -513,11 +566,14 @@ impl OperationEvaluator for FullEvaluator {
 
 fn num_binop(
     a: &DataType, b: &DataType,
-    int_op: fn(i64, i64) -> i64,
+    int_op: fn(i64, i64) -> Option<i64>,
     float_op: fn(f64, f64) -> f64,
 ) -> Result<DataType, EvalError> {
     match (a, b) {
-        (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(int_op(*x, *y))),
+        (DataType::Int64(x), DataType::Int64(y)) => match int_op(*x, *y) {
+            Some(v) => Ok(DataType::Int64(v)),
+            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+        },
         (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x, *y))),
         (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x as f64, *y))),
         (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(float_op(*x, *y as f64))),
@@ -665,7 +721,10 @@ fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage
 
     let table: toml::Table = match toml_str.parse() {
         Ok(t) => t,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {}", toml_path.display(), e);
+            return Vec::new();
+        }
     };
 
     let deps = match table.get("dependencies").and_then(|d| d.as_table()) {
@@ -679,6 +738,12 @@ fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage
             Some(p) => p,
             None => continue,
         };
+
+        // Security: reject absolute paths and paths with suspicious components
+        if std::path::Path::new(rel_path).is_absolute() {
+            eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
+            continue;
+        }
 
         let dep_dir = dir.join(rel_path);
         let source_path = dep_dir.join("source.magi");
@@ -713,7 +778,10 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
 
     let table: toml::Table = match toml_str.parse() {
         Ok(t) => t,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {}", toml_path.display(), e);
+            return Vec::new();
+        }
     };
 
     let deps = match table.get("dependencies").and_then(|d| d.as_table()) {
@@ -727,6 +795,12 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
             Some(p) => p,
             None => continue,
         };
+
+        // Security: reject absolute paths
+        if std::path::Path::new(rel_path).is_absolute() {
+            eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
+            continue;
+        }
 
         let dep_dir = dir.join(rel_path);
         let source_path = dep_dir.join("source.magi");
@@ -999,78 +1073,97 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
         4 => {
             // String: payload is memory offset.
             let offset = payload as usize;
-            if offset + 4 <= data.len() {
-                let len = u32::from_le_bytes([
-                    data[offset], data[offset + 1],
-                    data[offset + 2], data[offset + 3],
-                ]) as usize;
-                if offset + 4 + len <= data.len() {
-                    String::from_utf8_lossy(&data[offset + 4..offset + 4 + len]).to_string()
-                } else {
-                    format!("<string@{}>", offset)
+            if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+                return format!("<string@{}>", offset);
+            }
+            let len = u32::from_le_bytes([
+                data[offset], data[offset + 1],
+                data[offset + 2], data[offset + 3],
+            ]) as usize;
+            match offset.checked_add(4).and_then(|o| o.checked_add(len)) {
+                Some(end) if end <= data.len() => {
+                    String::from_utf8_lossy(&data[offset + 4..end]).to_string()
                 }
-            } else {
-                format!("<string@{}>", offset)
+                _ => format!("<string@{}>", offset),
             }
         }
         5 => {
             // Array: payload is memory offset.
             // Layout: [i32 length][i32 capacity][i64 elem0][i64 elem1]...
+            const MAX_DISPLAY_ELEMENTS: usize = 10_000;
             let ptr = payload as usize;
-            if ptr + 4 <= data.len() {
-                let len = u32::from_le_bytes([
-                    data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
-                ]) as usize;
-                let mut parts = Vec::with_capacity(len);
-                for i in 0..len {
-                    let elem_offset = ptr + 8 + i * 8;
-                    if elem_offset + 8 <= data.len() {
-                        let elem = i64::from_le_bytes([
-                            data[elem_offset], data[elem_offset + 1],
-                            data[elem_offset + 2], data[elem_offset + 3],
-                            data[elem_offset + 4], data[elem_offset + 5],
-                            data[elem_offset + 6], data[elem_offset + 7],
-                        ]);
-                        parts.push(format_tagged_value(elem, data));
-                    }
-                }
-                format!("[{}]", parts.join(", "))
-            } else {
-                format!("<array@{}>", ptr)
+            if ptr.checked_add(4).map_or(true, |end| end > data.len()) {
+                return format!("<array@{}>", ptr);
             }
+            let raw_len = u32::from_le_bytes([
+                data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
+            ]) as usize;
+            let len = raw_len.min(MAX_DISPLAY_ELEMENTS);
+            let mut parts = Vec::with_capacity(len);
+            for i in 0..len {
+                let elem_offset = match (i.checked_mul(8)).and_then(|o| ptr.checked_add(8)?.checked_add(o)) {
+                    Some(o) => o,
+                    None => break,
+                };
+                if elem_offset.checked_add(8).map_or(true, |end| end > data.len()) {
+                    break;
+                }
+                let elem = i64::from_le_bytes([
+                    data[elem_offset], data[elem_offset + 1],
+                    data[elem_offset + 2], data[elem_offset + 3],
+                    data[elem_offset + 4], data[elem_offset + 5],
+                    data[elem_offset + 6], data[elem_offset + 7],
+                ]);
+                parts.push(format_tagged_value(elem, data));
+            }
+            if raw_len > MAX_DISPLAY_ELEMENTS {
+                parts.push(format!("...({} more)", raw_len - MAX_DISPLAY_ELEMENTS));
+            }
+            format!("[{}]", parts.join(", "))
         }
         6 => {
             // Map: payload is memory offset.
             // Layout: [i32 count][i32 capacity][i64 key0][i64 val0]...
+            const MAX_DISPLAY_ENTRIES: usize = 10_000;
             let ptr = payload as usize;
-            if ptr + 4 <= data.len() {
-                let count = u32::from_le_bytes([
-                    data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
-                ]) as usize;
-                let mut parts = Vec::with_capacity(count);
-                for i in 0..count {
-                    let key_offset = ptr + 8 + i * 16;
-                    let val_offset = key_offset + 8;
-                    if val_offset + 8 <= data.len() {
-                        let key = i64::from_le_bytes([
-                            data[key_offset], data[key_offset + 1],
-                            data[key_offset + 2], data[key_offset + 3],
-                            data[key_offset + 4], data[key_offset + 5],
-                            data[key_offset + 6], data[key_offset + 7],
-                        ]);
-                        let value = i64::from_le_bytes([
-                            data[val_offset], data[val_offset + 1],
-                            data[val_offset + 2], data[val_offset + 3],
-                            data[val_offset + 4], data[val_offset + 5],
-                            data[val_offset + 6], data[val_offset + 7],
-                        ]);
-                        parts.push(format!("{}: {}", format_tagged_value(key, data), format_tagged_value(value, data)));
-                    }
-                }
-                format!("{{{}}}", parts.join(", "))
-            } else {
-                format!("<map@{}>", ptr)
+            if ptr.checked_add(4).map_or(true, |end| end > data.len()) {
+                return format!("<map@{}>", ptr);
             }
+            let raw_count = u32::from_le_bytes([
+                data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
+            ]) as usize;
+            let count = raw_count.min(MAX_DISPLAY_ENTRIES);
+            let mut parts = Vec::with_capacity(count);
+            for i in 0..count {
+                let key_offset = match (i.checked_mul(16)).and_then(|o| ptr.checked_add(8)?.checked_add(o)) {
+                    Some(o) => o,
+                    None => break,
+                };
+                let val_offset = match key_offset.checked_add(8) {
+                    Some(o) => o,
+                    None => break,
+                };
+                if val_offset.checked_add(8).map_or(true, |end| end > data.len()) {
+                    break;
+                }
+                let key = i64::from_le_bytes([
+                    data[key_offset], data[key_offset + 1],
+                    data[key_offset + 2], data[key_offset + 3],
+                    data[key_offset + 4], data[key_offset + 5],
+                    data[key_offset + 6], data[key_offset + 7],
+                ]);
+                let value = i64::from_le_bytes([
+                    data[val_offset], data[val_offset + 1],
+                    data[val_offset + 2], data[val_offset + 3],
+                    data[val_offset + 4], data[val_offset + 5],
+                    data[val_offset + 6], data[val_offset + 7],
+                ]);
+                parts.push(format!("{}: {}", format_tagged_value(key, data), format_tagged_value(value, data)));
+            }
+            if raw_count > MAX_DISPLAY_ENTRIES {
+                parts.push(format!("...({} more)", raw_count - MAX_DISPLAY_ENTRIES));
+            }
+            format!("{{{}}}", parts.join(", "))
         }
         _ => format!("<tagged:{}:{}>", tag, payload),
     }
@@ -1166,7 +1259,10 @@ fn cmd_run_wasm(path: &str) {
             }
 
             // Update heap pointer.
-            let new_ptr = ptr + total as u32;
+            let new_ptr = match ptr.checked_add(total as u32) {
+                Some(v) => v,
+                None => return 0,
+            };
             let _ = heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32));
 
             // Return tagged string: (STRING_TAG << 56) | offset

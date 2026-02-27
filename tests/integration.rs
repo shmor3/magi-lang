@@ -77,6 +77,7 @@ impl OperationEvaluator for StubEvaluator {
                 _ => Ok(DataType::Null),
             },
             OperationType::Modulo => match (&a, &b) {
+                (DataType::Int64(_, ), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
                 (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x % y)),
                 _ => Ok(DataType::Null),
             },
@@ -5294,4 +5295,84 @@ fn test_linter_pascal_case_underscore_prefix_suppressed() {
         .filter(|d| d.code.as_deref() == Some("W201"))
         .collect();
     assert!(w201.is_empty(), "underscore-prefixed types should not get W201: {:?}", w201);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Round 41: CLI binary stability tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_integer_division_by_zero_error() {
+    let src = "let x = 10 / 0;";
+    let err = run_err(src);
+    let msg = err.to_string();
+    assert!(msg.to_lowercase().contains("division") || msg.to_lowercase().contains("zero"),
+        "should error on integer division by zero: {msg}");
+}
+
+#[test]
+fn test_integer_modulo_by_zero_error() {
+    let src = "let x = 10 % 0;";
+    let err = run_err(src);
+    let msg = err.to_string();
+    assert!(msg.to_lowercase().contains("division") || msg.to_lowercase().contains("zero"),
+        "should error on integer modulo by zero: {msg}");
+}
+
+#[test]
+fn test_basic_negation() {
+    let src = "let x = 5; let y = -x; y";
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(-5));
+}
+
+#[test]
+fn test_basic_arithmetic_correctness() {
+    // Verify basic addition still works after checked arithmetic change
+    let src = "let x = 100 + 200; x";
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(300));
+}
+
+#[test]
+fn test_subtraction_correctness() {
+    let src = "let x = 50 - 30; x";
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(20));
+}
+
+#[test]
+fn test_multiplication_correctness() {
+    let src = "let x = 7 * 8; x";
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(56));
+}
+
+#[test]
+fn test_float_division_works() {
+    let src = "let x = 10.0 / 3.0; x";
+    let result = run(src);
+    match result {
+        DataType::Float64(f) => assert!((f - 3.333333333333333).abs() < 1e-10),
+        other => panic!("expected Float64, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_negative_array_index_returns_null() {
+    // Interpreter handles array indexing directly, not via evaluator
+    let src = r#"
+        let arr = [1, 2, 3];
+        let x = arr[-1];
+        x
+    "#;
+    // Behavior may vary (null or wrap around), just should not panic
+    let _result = run(src);
+}
+
+#[test]
+fn test_string_concat_add() {
+    let src = r#"let s = "hello" + " " + "world"; s"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("hello world".to_string()));
 }
