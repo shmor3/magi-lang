@@ -522,6 +522,15 @@ impl WasmCodegen {
                     WasmValType::I64,
                 )));
             }
+            Instruction::IfVoid => {
+                // Untag the condition: strip tag bits, keep payload.
+                f.instruction(&WasmInst::I64Const(0x00FFFFFFFFFFFFFF));
+                f.instruction(&WasmInst::I64And);
+                // Convert to i32 boolean for wasm if.
+                f.instruction(&WasmInst::I64Const(0));
+                f.instruction(&WasmInst::I64Ne);
+                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+            }
             Instruction::Else => {
                 f.instruction(&WasmInst::Else);
             }

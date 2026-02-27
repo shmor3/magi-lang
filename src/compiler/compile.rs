@@ -270,7 +270,7 @@ impl Compiler {
                         // BoolNot turns truthy→0, falsy→1 (tagged bool). If truthy (not-falsy), trap.
                         instructions.push(Instruction::LocalGet(0));
                         instructions.push(Instruction::BoolNot);
-                        instructions.push(Instruction::If);
+                        instructions.push(Instruction::IfVoid);
                         instructions.push(Instruction::Unreachable); // trap on assertion failure
                         instructions.push(Instruction::End);
                         instructions.push(Instruction::PushNull);
@@ -282,7 +282,7 @@ impl Compiler {
                         instructions.push(Instruction::LocalGet(1));
                         instructions.push(Instruction::I64Ne);
                         instructions.push(Instruction::TagBool);
-                        instructions.push(Instruction::If);
+                        instructions.push(Instruction::IfVoid);
                         instructions.push(Instruction::Unreachable); // trap on assertion failure
                         instructions.push(Instruction::End);
                         instructions.push(Instruction::PushNull);
@@ -602,30 +602,37 @@ impl Compiler {
                 // Short-circuit for && and ||.
                 match op {
                     BinOp::And => {
+                        // Short-circuit &&: result is left if falsy, else right.
+                        // Uses temp local for result to avoid block type issues.
                         self.compile_expr(left)?;
                         let temp = self.ensure_temp_local()?;
-                        self.emit(Instruction::Block);
-                        self.emit(Instruction::Block);
-                        // Duplicate & test: if falsy, skip right side.
-                        self.emit(Instruction::LocalTee(temp));
+                        self.emit(Instruction::LocalSet(temp));
+                        self.emit(Instruction::Block);  // outer
+                        self.emit(Instruction::Block);  // inner (short-circuit target)
+                        self.emit(Instruction::LocalGet(temp));
                         self.emit(Instruction::BoolNot);
-                        self.emit(Instruction::BrIf(0)); // branch to inner block end
-                        self.emit(Instruction::Drop); // drop left value
+                        self.emit(Instruction::BrIf(0)); // if falsy, skip right side
                         self.compile_expr(right)?;
+                        self.emit(Instruction::LocalSet(temp));
                         self.emit(Instruction::End); // inner block
                         self.emit(Instruction::End); // outer block
+                        self.emit(Instruction::LocalGet(temp));
                     }
                     BinOp::Or => {
+                        // Short-circuit ||: result is left if truthy, else right.
+                        // Uses temp local for result to avoid block type issues.
                         self.compile_expr(left)?;
                         let temp = self.ensure_temp_local()?;
-                        self.emit(Instruction::Block);
-                        self.emit(Instruction::Block);
-                        self.emit(Instruction::LocalTee(temp));
-                        self.emit(Instruction::BrIf(0)); // if truthy, skip right
-                        self.emit(Instruction::Drop); // drop left
+                        self.emit(Instruction::LocalSet(temp));
+                        self.emit(Instruction::Block);  // outer
+                        self.emit(Instruction::Block);  // inner (short-circuit target)
+                        self.emit(Instruction::LocalGet(temp));
+                        self.emit(Instruction::BrIf(0)); // if truthy, skip right side
                         self.compile_expr(right)?;
-                        self.emit(Instruction::End);
-                        self.emit(Instruction::End);
+                        self.emit(Instruction::LocalSet(temp));
+                        self.emit(Instruction::End); // inner block
+                        self.emit(Instruction::End); // outer block
+                        self.emit(Instruction::LocalGet(temp));
                     }
                     _ => {
                         self.compile_expr(left)?;
@@ -1564,7 +1571,7 @@ impl Compiler {
         if let Some(cond) = condition {
             self.compile_expr(cond)?;
             self.emit(Instruction::BoolNot);
-            self.emit(Instruction::If);
+            self.emit(Instruction::IfVoid);
             // Skip this element (untagged counter + 1).
             self.emit(Instruction::LocalGet(counter));
             self.emit(Instruction::PushI64(1));
@@ -1658,7 +1665,7 @@ impl Compiler {
         if let Some(cond) = condition {
             self.compile_expr(cond)?;
             self.emit(Instruction::BoolNot);
-            self.emit(Instruction::If);
+            self.emit(Instruction::IfVoid);
             self.emit(Instruction::LocalGet(counter));
             self.emit(Instruction::PushI64(1));
             self.emit(Instruction::UntagI64);

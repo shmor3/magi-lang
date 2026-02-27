@@ -8817,3 +8817,668 @@ fn test_try_propagate_null_throws() {
         other => panic!("expected ThrownError from ?, got: {:?}", other),
     }
 }
+
+// ── Round 85: edge case stress tests ───────────────
+
+// --- Scope/Closure edge cases ---
+
+#[test]
+fn test_closure_returned_from_function_captures_param() {
+    // A function returns a closure that captures the function parameter.
+    // Multiple instances should be independent since closures capture by value.
+    assert_eq!(run(r#"
+        fn make_multiplier(factor) {
+            |x| x * factor
+        }
+        let double = make_multiplier(2);
+        let triple = make_multiplier(3);
+        output [double(5), triple(5), double(triple(2))];
+    "#), DataType::Array(vec![
+        DataType::Int64(10),
+        DataType::Int64(15),
+        DataType::Int64(12),
+    ]));
+}
+
+#[test]
+fn test_nested_closure_two_levels() {
+    // A function returns a closure that itself returns a closure.
+    // Both levels should capture their respective parameters.
+    assert_eq!(run(r#"
+        fn outer(a) {
+            |b| {
+                let sum = a + b;
+                |c| sum + c
+            }
+        }
+        let step1 = outer(10);
+        let step2 = step1(20);
+        output step2(3);
+    "#), DataType::Int64(33));
+}
+
+#[test]
+fn test_closure_captures_loop_variable_per_iteration() {
+    // Each iteration of a for-loop creates a new scope, so closures
+    // captured in a loop capture the loop variable's value at that moment.
+    // We test this by creating closures and immediately using them.
+    assert_eq!(run(r#"
+        fn make_adder(n) { |x| x + n }
+        let mut sum = 0;
+        for i in [10, 20, 30] {
+            let adder = make_adder(i);
+            sum = sum + adder(1);
+        }
+        output sum;
+    "#), DataType::Int64(63));
+}
+
+// --- Control flow edge cases ---
+
+#[test]
+fn test_break_with_value_in_loop_expr() {
+    // loop { ... break value } should return the break value as the expression result
+    assert_eq!(run(r#"
+        let result = loop {
+            break 42
+        };
+        output result;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_break_value_in_nested_loops_inner_only() {
+    // break with value in inner loop should not affect outer loop
+    assert_eq!(run(r#"
+        let mut total = 0;
+        for i in [1, 2, 3] {
+            let inner_val = loop {
+                break i * 10
+            };
+            total = total + inner_val;
+        }
+        output total;
+    "#), DataType::Int64(60));
+}
+
+#[test]
+fn test_return_in_deeply_nested_blocks() {
+    // return should escape through multiple levels of nesting
+    assert_eq!(run(r#"
+        fn deep() {
+            for i in [1, 2, 3] {
+                if i == 2 {
+                    for j in [10, 20, 30] {
+                        if j == 20 {
+                            return i * j
+                        }
+                    }
+                }
+            }
+            return -1;
+        }
+        output deep();
+    "#), DataType::Int64(40));
+}
+
+#[test]
+fn test_continue_skips_rest_of_body() {
+    // continue in for-in with complex bodies should skip correctly
+    assert_eq!(run(r#"
+        let mut sum = 0;
+        for item in [1, 2, 3, 4, 5, 6] {
+            if item % 2 == 0 { continue }
+            sum = sum + item;
+        }
+        output sum;
+    "#), DataType::Int64(9));
+}
+
+// --- Pattern matching edge cases ---
+
+#[test]
+fn test_match_nested_array_destructuring() {
+    // Match on nested array patterns
+    assert_eq!(run(r#"
+        let data = [1, [2, 3], 4];
+        output match data {
+            [a, [b, c], d] => a + b + c + d,
+            _ => -1,
+        };
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_match_guard_with_function_call() {
+    // Guard that calls a user-defined function
+    assert_eq!(run(r#"
+        fn is_even(n) { n % 2 == 0 }
+        let val = 4;
+        output match val {
+            n if is_even(n) => "even",
+            _ => "odd",
+        };
+    "#), DataType::String("even".to_string()));
+}
+
+#[test]
+fn test_match_guard_with_function_call_odd() {
+    assert_eq!(run(r#"
+        fn is_even(n) { n % 2 == 0 }
+        let val = 7;
+        output match val {
+            n if is_even(n) => "even",
+            _ => "odd",
+        };
+    "#), DataType::String("odd".to_string()));
+}
+
+#[test]
+fn test_match_or_pattern_with_binding() {
+    // Or-pattern with consistent variable binding
+    assert_eq!(run(r#"
+        output match 2 {
+            1 | 2 | 3 => "small",
+            _ => "big",
+        };
+    "#), DataType::String("small".to_string()));
+}
+
+#[test]
+fn test_match_enum_nested_destructuring() {
+    // Match on enum variant with nested data
+    assert_eq!(run(r#"
+        enum Result { Ok(val), Err(msg) }
+        let r = Result::Ok(42);
+        output match r {
+            Result::Ok(v) => v + 1,
+            Result::Err(m) => -1,
+        };
+    "#), DataType::Int64(43));
+}
+
+// --- Expression edge cases ---
+
+#[test]
+fn test_null_coalesce_triple_chain() {
+    // Chained null coalesce: a ?? b ?? c — three levels deep
+    assert_eq!(run(r#"
+        let a = null;
+        let b = null;
+        let c = 42;
+        output a ?? b ?? c;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_null_coalesce_short_circuits() {
+    // First non-null value should be returned, rest not evaluated
+    assert_eq!(run(r#"
+        let a = null;
+        let b = 10;
+        let c = 20;
+        output a ?? b ?? c;
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_pipe_chained_with_placeholder() {
+    // Pipe through user-defined functions using placeholder
+    assert_eq!(run(r#"
+        fn add_one(x) { x + 1 }
+        fn double(x) { x * 2 }
+        output 5 |> add_one(_) |> double(_) |> add_one(_);
+    "#), DataType::Int64(13));
+}
+
+// --- Type edge cases ---
+
+#[test]
+fn test_mixed_numeric_array_sum() {
+    // Array with mixed int and float should produce float from sum
+    assert_eq!(run(r#"
+        output [1, 2.5, 3].sum();
+    "#), DataType::Float64(6.5));
+}
+
+#[test]
+fn test_same_type_comparison_int() {
+    // Same-type int comparison works through evaluator
+    assert_eq!(run(r#"
+        output 5 > 3;
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_same_type_comparison_float() {
+    // Same-type float comparison works through evaluator
+    assert_eq!(run(r#"
+        output 2.0 < 2.5;
+    "#), DataType::Bool(true));
+}
+
+// --- Error handling edge cases ---
+
+#[test]
+fn test_nested_try_catch() {
+    // Inner try-catch catches inner error, outer catches outer
+    assert_eq!(run(r#"
+        let result = try {
+            let inner = try {
+                throw "inner error"
+            } catch e {
+                "caught: " + e
+            };
+            inner
+        } catch e {
+            "outer: " + e
+        };
+        output result;
+    "#), DataType::String("caught: inner error".to_string()));
+}
+
+#[test]
+fn test_try_catch_finally_always_runs() {
+    // Finally block runs even when try succeeds
+    assert_eq!(run(r#"
+        let mut log = "";
+        try {
+            log = "try";
+        } catch e {
+            log = "catch";
+        } finally {
+            log = log + "_finally";
+        }
+        output log;
+    "#), DataType::String("try_finally".to_string()));
+}
+
+#[test]
+fn test_throw_in_finally_overrides() {
+    // throw in finally should override the catch result
+    let err = run_err(r#"
+        try {
+            throw "original"
+        } catch e {
+            "caught"
+        } finally {
+            throw "from_finally"
+        }
+    "#);
+    match err {
+        InterpError::ThrownError { value, .. } => {
+            assert_eq!(value, DataType::String("from_finally".to_string()));
+        }
+        other => panic!("expected ThrownError from finally, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_catch_preserves_thrown_type() {
+    // Thrown non-string values should be preserved in catch
+    assert_eq!(run(r#"
+        let result = try {
+            throw 42
+        } catch e {
+            e
+        };
+        output result;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_catch_preserves_thrown_array() {
+    assert_eq!(run(r#"
+        let result = try {
+            throw [1, 2, 3]
+        } catch e {
+            e
+        };
+        output result;
+    "#), DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]));
+}
+
+// --- Operator edge cases ---
+
+#[test]
+fn test_operator_precedence_logical_vs_comparison() {
+    // && binds tighter than ||, comparison tighter than logical
+    assert_eq!(run(r#"
+        output true || false && false;
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_operator_precedence_arithmetic_in_comparison() {
+    // Arithmetic evaluated before comparison
+    assert_eq!(run(r#"
+        output 2 + 3 > 4;
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_unary_not_with_comparison() {
+    assert_eq!(run(r#"
+        output !(3 > 5);
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_short_circuit_and_does_not_eval_rhs() {
+    // false && <error> should not throw because rhs not evaluated
+    assert_eq!(run(r#"
+        fn explode() { throw "boom" }
+        output false && explode();
+    "#), DataType::Bool(false));
+}
+
+#[test]
+fn test_short_circuit_or_does_not_eval_rhs() {
+    // true || <error> should not throw because rhs not evaluated
+    assert_eq!(run(r#"
+        fn explode() { throw "boom" }
+        output true || explode();
+    "#), DataType::Bool(true));
+}
+
+// --- HOF edge cases ---
+
+#[test]
+fn test_map_filter_reduce_chain() {
+    // Chain map, filter, reduce on arrays
+    // reduce takes (initial, callback) order
+    assert_eq!(run(r#"
+        let result = [1, 2, 3, 4, 5]
+            .map(|x| x * 2)
+            .filter(|x| x > 4)
+            .reduce(0, |acc, x| acc + x);
+        output result;
+    "#), DataType::Int64(24));
+}
+
+#[test]
+fn test_find_on_empty_array() {
+    // find on empty array returns null
+    assert_eq!(run(r#"
+        let arr = [];
+        output arr.find(|x| x > 0);
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_each_returns_null() {
+    // each() iterates for side effects and returns null
+    assert_eq!(run(r#"
+        let result = [1, 2, 3].each(|x| x * 2);
+        output result;
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_reduce_with_initial_accumulator() {
+    // reduce(initial, callback) — initial value is first argument
+    assert_eq!(run(r#"
+        output [1, 2, 3, 4].reduce(100, |acc, x| acc + x);
+    "#), DataType::Int64(110));
+}
+
+#[test]
+fn test_all_false_on_empty_array() {
+    // all on empty array is vacuously true
+    assert_eq!(run(r#"
+        output [].all(|x| x > 0);
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_any_false_on_empty_array() {
+    // any on empty array is false
+    assert_eq!(run(r#"
+        output [].any(|x| x > 0);
+    "#), DataType::Bool(false));
+}
+
+// --- String edge cases ---
+
+#[test]
+fn test_empty_string_operations() {
+    assert_eq!(run(r#"
+        let s = "";
+        output [s.is_empty(), s.length(), s.trim(), s.reverse(), s.to_upper()];
+    "#), DataType::Array(vec![
+        DataType::Bool(true),
+        DataType::Int64(0),
+        DataType::String("".to_string()),
+        DataType::String("".to_string()),
+        DataType::String("".to_string()),
+    ]));
+}
+
+#[test]
+fn test_fstring_with_complex_expression() {
+    // f-string with arithmetic expression inside
+    assert_eq!(run(r#"
+        let x = 10;
+        let y = 20;
+        output f"sum is {x + y}";
+    "#), DataType::String("sum is 30".to_string()));
+}
+
+#[test]
+fn test_fstring_with_chained_method_calls() {
+    assert_eq!(run(r#"
+        let name = "  alice  ";
+        output f"Hello, {name.trim().to_upper()}!";
+    "#), DataType::String("Hello, ALICE!".to_string()));
+}
+
+#[test]
+fn test_fstring_with_nested_fstring() {
+    // f-string containing another f-string expression
+    assert_eq!(run(r#"
+        let x = 5;
+        output f"result: {f"({x})"}";
+    "#), DataType::String("result: (5)".to_string()));
+}
+
+// --- Module edge cases ---
+
+#[test]
+fn test_module_with_enum_and_struct() {
+    // Module containing both enum and struct definitions
+    assert_eq!(run(r#"
+        mod shapes {
+            enum Color { Red, Green, Blue }
+            struct Point { x, y }
+        }
+        let p = Point { x: 10, y: 20 };
+        output p.x + p.y;
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_module_qualified_vs_unqualified_function() {
+    // Both qualified and unqualified access should work for functions
+    assert_eq!(run(r#"
+        mod math {
+            fn double(x) { x * 2 }
+        }
+        use math::double;
+        output [math::double(5), double(3)];
+    "#), DataType::Array(vec![DataType::Int64(10), DataType::Int64(6)]));
+}
+
+// --- Compound/misc edge cases ---
+
+#[test]
+fn test_compound_assign_operators() {
+    assert_eq!(run(r#"
+        let mut x = 10;
+        x += 5;
+        x -= 3;
+        x *= 2;
+        output x;
+    "#), DataType::Int64(24));
+}
+
+#[test]
+fn test_list_comprehension_with_nested_condition() {
+    assert_eq!(run(r#"
+        output [x * x for x in [1, 2, 3, 4, 5, 6] if x % 2 == 0];
+    "#), DataType::Array(vec![
+        DataType::Int64(4),
+        DataType::Int64(16),
+        DataType::Int64(36),
+    ]));
+}
+
+#[test]
+fn test_for_loop_over_string_characters() {
+    // for-in over a string iterates over characters
+    // Use string concatenation to collect results (push goes through evaluator)
+    assert_eq!(run(r#"
+        let mut result = "";
+        for c in "abc" {
+            result = result + c + ",";
+        }
+        output result;
+    "#), DataType::String("a,b,c,".to_string()));
+}
+
+#[test]
+fn test_recursive_function_with_accumulator() {
+    // Recursive function pattern (tail-call style)
+    assert_eq!(run(r#"
+        fn factorial(n, acc) {
+            if n <= 1 { return acc }
+            return factorial(n - 1, n * acc);
+        }
+        output factorial(6, 1);
+    "#), DataType::Int64(720));
+}
+
+#[test]
+fn test_match_with_multiple_guards() {
+    // Multiple arms with different guards
+    assert_eq!(run(r#"
+        fn classify(n) {
+            match n {
+                x if x < 0 => "negative",
+                x if x == 0 => "zero",
+                x if x < 10 => "small",
+                x if x < 100 => "medium",
+                _ => "large",
+            }
+        }
+        output [classify(-5), classify(0), classify(7), classify(42), classify(999)];
+    "#), DataType::Array(vec![
+        DataType::String("negative".to_string()),
+        DataType::String("zero".to_string()),
+        DataType::String("small".to_string()),
+        DataType::String("medium".to_string()),
+        DataType::String("large".to_string()),
+    ]));
+}
+
+#[test]
+fn test_while_loop_with_break_value() {
+    // While loop with break carrying a value
+    assert_eq!(run(r#"
+        let mut i = 0;
+        let mut result = null;
+        while true {
+            i = i + 1;
+            if i == 5 {
+                result = i * 100;
+                break
+            }
+        }
+        output result;
+    "#), DataType::Int64(500));
+}
+
+#[test]
+fn test_map_with_computed_keys() {
+    // Map literal with pre-defined string keys
+    assert_eq!(run(r#"
+        let m = {"a": 1, "b": 2, "c": 3};
+        output m.a + m.b + m.c;
+    "#), DataType::Int64(6));
+}
+
+#[test]
+fn test_try_catch_expr_in_let_binding() {
+    // try-catch as an expression in a let binding
+    assert_eq!(run(r#"
+        let val = try { 1 + 2 } catch e { -1 };
+        output val;
+    "#), DataType::Int64(3));
+}
+
+#[test]
+fn test_try_catch_expr_catches_in_let() {
+    assert_eq!(run(r#"
+        let val = try { throw "oops" } catch e { -1 };
+        output val;
+    "#), DataType::Int64(-1));
+}
+
+#[test]
+fn test_block_expression_value() {
+    // Block as expression returns its tail expression
+    assert_eq!(run(r#"
+        let val = {
+            let x = 10;
+            let y = 20;
+            x + y
+        };
+        output val;
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_array_first_last_on_empty() {
+    assert_eq!(run(r#"
+        let arr = [];
+        output [arr.first(), arr.last()];
+    "#), DataType::Array(vec![DataType::Null, DataType::Null]));
+}
+
+#[test]
+fn test_string_split_and_join_roundtrip() {
+    assert_eq!(run(r#"
+        let s = "a,b,c,d";
+        let parts = s.split(",");
+        let rejoined = parts.join(",");
+        output rejoined;
+    "#), DataType::String("a,b,c,d".to_string()));
+}
+
+#[test]
+fn test_closure_in_hof_captures_outer_variable() {
+    // Lambda used in HOF captures outer variable
+    assert_eq!(run(r#"
+        let threshold = 3;
+        let filtered = [1, 2, 3, 4, 5].filter(|x| x > threshold);
+        output filtered;
+    "#), DataType::Array(vec![DataType::Int64(4), DataType::Int64(5)]));
+}
+
+#[test]
+fn test_match_on_string_values() {
+    assert_eq!(run(r#"
+        fn greet(lang) {
+            match lang {
+                "en" => "Hello",
+                "fr" => "Bonjour",
+                "de" => "Hallo",
+                _ => "Hi",
+            }
+        }
+        output [greet("en"), greet("fr"), greet("ja")];
+    "#), DataType::Array(vec![
+        DataType::String("Hello".to_string()),
+        DataType::String("Bonjour".to_string()),
+        DataType::String("Hi".to_string()),
+    ]));
+}

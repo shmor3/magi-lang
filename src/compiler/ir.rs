@@ -202,8 +202,12 @@ pub enum Instruction {
     Loop,
     /// End of block/loop/if.
     End,
-    /// If-else. Pops condition from stack.
+    /// If-else (value-producing). Pops condition from stack.
+    /// Emits a WASM `if` block with `Result(I64)` — MUST have a matching `Else`.
     If,
+    /// If (void/statement context). Pops condition from stack.
+    /// Emits a WASM `if` block with `Empty` type — no value produced, `Else` optional.
+    IfVoid,
     /// Else branch.
     Else,
     /// Return from function.
