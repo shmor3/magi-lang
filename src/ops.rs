@@ -600,278 +600,279 @@ pub fn op_input_types(op: OperationType) -> Vec<(&'static str, ChannelType)> {
 }
 
 /// Returns the input port names for an operation.
-pub fn op_input_ports(op: OperationType) -> Vec<&'static str> {
+/// Returns a static slice to avoid heap allocation on every call.
+pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
     use OperationType::*;
     match op {
         // Binary: a, b
         Add | Subtract | Multiply | Divide | Modulo | Power | Min | Max | Equal | NotEqual
         | Greater | Less | GreaterEq | LessEq | And | Or | Xor | BitAnd | BitOr | BitXor
-        | BitShiftLeft | BitShiftRight | Concat => vec!["a", "b"],
+        | BitShiftLeft | BitShiftRight | Concat => &["a", "b"],
 
         // Unary: value (arithmetic/logic)
-        Sqrt | Negate | Abs | Round | Floor | Ceil | Not | BitNot => vec!["value"],
+        Sqrt | Negate | Abs | Round | Floor | Ceil | Not | BitNot => &["value"],
 
         // Unary: input (string + type conversion)
         Substring | Length | ToUpper | ToLower | Trim | TrimStart | TrimEnd | CharAt | PadStart
         | PadEnd | RegexMatch | StringReverse | StringRepeat | StringLines | StringWords
         | RegexExtract | ToString | ToInt64 | ToFloat64 | ToBool | ToBytes | FromBytes
-        | ParseJson | ToJson => vec!["input"],
+        | ParseJson | ToJson => &["input"],
 
         // String ops with specific ports
-        Split => vec!["input", "delimiter"],
-        Replace => vec!["input", "search", "replace"],
-        Contains => vec!["input", "search"],
-        StartsWith => vec!["input", "prefix"],
-        EndsWith => vec!["input", "suffix"],
-        IndexOf | StringCount => vec!["input", "search"],
-        RegexReplace => vec!["input", "replacement"],
-        StringJoin => vec!["array"],
-        StringTemplate => vec!["template", "values"],
+        Split => &["input", "delimiter"],
+        Replace => &["input", "search", "replace"],
+        Contains => &["input", "search"],
+        StartsWith => &["input", "prefix"],
+        EndsWith => &["input", "suffix"],
+        IndexOf | StringCount => &["input", "search"],
+        RegexReplace => &["input", "replacement"],
+        StringJoin => &["array"],
+        StringTemplate => &["template", "values"],
 
         // Control flow
-        IfElse => vec!["condition", "then", "else"],
-        Switch => vec!["value", "default"],
-        Coalesce => vec!["a", "b"],
-        TryCatch => vec!["input", "fallback"],
-        Error => vec!["message"],
+        IfElse => &["condition", "then", "else"],
+        Switch => &["value", "default"],
+        Coalesce => &["a", "b"],
+        TryCatch => &["input", "fallback"],
+        Error => &["message"],
 
         // Array
-        ArrayGet => vec!["array", "index"],
-        ArraySet => vec!["array", "index", "value"],
-        ArrayPush => vec!["array", "value"],
-        ArrayLength => vec!["array"],
-        ArraySlice => vec!["array"],
-        ArrayConcat => vec!["a", "b"],
-        ArrayContains => vec!["array", "value"],
+        ArrayGet => &["array", "index"],
+        ArraySet => &["array", "index", "value"],
+        ArrayPush => &["array", "value"],
+        ArrayLength => &["array"],
+        ArraySlice => &["array"],
+        ArrayConcat => &["a", "b"],
+        ArrayContains => &["array", "value"],
         ArrayReverse | ArrayFlatten | ArraySort | ArrayFilterNulls | ArrayPop | ArrayShift => {
-            vec!["array"]
+            &["array"]
         }
-        ArrayInsert => vec!["array", "index", "value"],
-        ArrayRemove => vec!["array", "index"],
-        ArrayFromMap => vec!["map"],
-        ArrayJoin => vec!["array"],
+        ArrayInsert => &["array", "index", "value"],
+        ArrayRemove => &["array", "index"],
+        ArrayFromMap => &["map"],
+        ArrayJoin => &["array"],
 
         // Map
-        MapGet => vec!["map", "key"],
-        MapSet => vec!["map", "key", "value"],
-        MapDelete => vec!["map", "key"],
-        MapHas => vec!["map", "key"],
-        MapKeys | MapValues | MapEntries | MapSize => vec!["map"],
-        MapMerge => vec!["a", "b"],
-        MapFromEntries => vec!["array"],
-        MapUpdate => vec!["map", "key"],
+        MapGet => &["map", "key"],
+        MapSet => &["map", "key", "value"],
+        MapDelete => &["map", "key"],
+        MapHas => &["map", "key"],
+        MapKeys | MapValues | MapEntries | MapSize => &["map"],
+        MapMerge => &["a", "b"],
+        MapFromEntries => &["array"],
+        MapUpdate => &["map", "key"],
 
         // Bytes
-        BytesLength => vec!["input"],
-        BytesSlice => vec!["input"],
-        BytesConcat => vec!["a", "b"],
-        BytesContains => vec!["input", "search"],
-        Base64Encode | Base64Decode => vec!["input"],
+        BytesLength => &["input"],
+        BytesSlice => &["input"],
+        BytesConcat => &["a", "b"],
+        BytesContains => &["input", "search"],
+        Base64Encode | Base64Decode => &["input"],
 
         // Iteration
-        Range => vec!["start", "end"],
-        Reduce => vec!["array", "initial"],
+        Range => &["start", "end"],
+        Reduce => &["array", "initial"],
 
         // JSON
-        JsonGet => vec!["value", "path"],
-        JsonSet => vec!["value", "path", "item"],
-        JsonDelete => vec!["value", "path"],
-        JsonFlatten => vec!["input"],
-        JsonMerge => vec!["a", "b"],
-        JsonType | JsonValidate | JsonPrettyPrint | JsonCompact => vec!["input"],
-        JsonQuery => vec!["value", "path"],
+        JsonGet => &["value", "path"],
+        JsonSet => &["value", "path", "item"],
+        JsonDelete => &["value", "path"],
+        JsonFlatten => &["input"],
+        JsonMerge => &["a", "b"],
+        JsonType | JsonValidate | JsonPrettyPrint | JsonCompact => &["input"],
+        JsonQuery => &["value", "path"],
 
         // DateTime
-        NowTimestamp => vec![],
-        FormatTimestamp => vec!["input"],
-        ParseTimestamp => vec!["input"],
-        TimestampAdd => vec!["input", "amount"],
-        TimestampDiff => vec!["a", "b"],
-        Sleep => vec!["duration"],
+        NowTimestamp => &[],
+        FormatTimestamp => &["input"],
+        ParseTimestamp => &["input"],
+        TimestampAdd => &["input", "amount"],
+        TimestampDiff => &["a", "b"],
+        Sleep => &["duration"],
 
         // Hash/Encode
-        HashSha256 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode | HexDecode => vec!["input"],
-        HexEncode => vec!["input"],
+        HashSha256 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode | HexDecode => &["input"],
+        HexEncode => &["input"],
 
         // String extended
-        StringFormat => vec!["template", "values"],
+        StringFormat => &["template", "values"],
 
         // Control Flow extended
-        Assert => vec!["condition", "message"],
-        DebugLog => vec!["input"],
+        Assert => &["condition", "message"],
+        DebugLog => &["input"],
 
         // Type Conversion extended
-        Typeof => vec!["input"],
-        Default => vec!["input", "fallback"],
+        Typeof => &["input"],
+        Default => &["input", "fallback"],
 
         // Array Higher-Order
         ArrayMap | ArrayFilter | ArrayFlatMap | ArrayFind | ArrayFindIndex | ArrayEvery
         | ArraySome | ArrayTakeWhile | ArraySkipWhile | ArrayGroupBy | ArraySortBy
-        | ArrayPartition => vec!["array"],
-        ArrayScan => vec!["array", "initial"],
-        ArrayZip => vec!["a", "b"],
-        ArrayEnumerate | ArrayUnique => vec!["array"],
-        ArrayTake | ArraySkip | ArrayChunk | ArrayWindow => vec!["array"],
+        | ArrayPartition => &["array"],
+        ArrayScan => &["array", "initial"],
+        ArrayZip => &["a", "b"],
+        ArrayEnumerate | ArrayUnique => &["array"],
+        ArrayTake | ArraySkip | ArrayChunk | ArrayWindow => &["array"],
 
         // Map Higher-Order
-        MapMapValues | MapFilterEntries => vec!["map"],
+        MapMapValues | MapFilterEntries => &["map"],
 
         // String
-        StringChars => vec!["input"],
+        StringChars => &["input"],
 
         // Math Aggregate
-        MathSum | MathProduct | MathAverage | MathMinOf | MathMaxOf | MathCount => vec!["array"],
+        MathSum | MathProduct | MathAverage | MathMinOf | MathMaxOf | MathCount => &["array"],
 
         // Type Checking
-        IsNull | IsString | IsNumber | IsArray | IsMap | IsBool | IsBytes => vec!["input"],
+        IsNull | IsString | IsNumber | IsArray | IsMap | IsBool | IsBytes => &["input"],
 
         // Math Extended
         Sin | Cos | Tan | Asin | Acos | Atan | Sinh | Cosh | Tanh | Ln | Log2 | Log10 | Exp
-        | ToRadians | ToDegrees | Sign | IsNan | IsInfinite | IsFinite => vec!["value"],
-        Log => vec!["value", "base"],
-        Atan2 | Gcd | Lcm | ApproxEq => vec!["a", "b"],
-        Clamp => vec!["value", "min", "max"],
-        Lerp => vec!["a", "b", "t"],
-        Remap => vec!["value", "in_min", "in_max", "out_min", "out_max"],
+        | ToRadians | ToDegrees | Sign | IsNan | IsInfinite | IsFinite => &["value"],
+        Log => &["value", "base"],
+        Atan2 | Gcd | Lcm | ApproxEq => &["a", "b"],
+        Clamp => &["value", "min", "max"],
+        Lerp => &["a", "b", "t"],
+        Remap => &["value", "in_min", "in_max", "out_min", "out_max"],
 
         // Random
-        RandomInt | RandomFloat | RandomBool | RandomBytes | RandomUuid | RandomString => vec![],
-        RandomRange => vec!["a", "b"],
-        RandomChoice | RandomShuffle | RandomSample => vec!["array"],
+        RandomInt | RandomFloat | RandomBool | RandomBytes | RandomUuid | RandomString => &[],
+        RandomRange => &["a", "b"],
+        RandomChoice | RandomShuffle | RandomSample => &["array"],
 
         // Filesystem
         FsRead | FsExists | FsList | FsMkdir | FsSize | FsIsFile | FsIsDir | FsRemove => {
-            vec!["path"]
+            &["path"]
         }
-        FsWrite | FsAppend => vec!["path", "content"],
-        FsCopy | FsMove => vec!["source", "destination"],
+        FsWrite | FsAppend => &["path", "content"],
+        FsCopy | FsMove => &["source", "destination"],
 
         // Environment
-        EnvGet | EnvHas => vec!["key"],
-        EnvKeys | OsName | OsArch | ProcessPid | CurrentDir => vec![],
+        EnvGet | EnvHas => &["key"],
+        EnvKeys | OsName | OsArch | ProcessPid | CurrentDir => &[],
 
         // Network
-        HttpGet | HttpDelete | HttpHead | HttpOptions => vec!["url"],
-        HttpPost | HttpPut | HttpPatch => vec!["url", "body"],
-        HttpRequest => vec!["method", "url", "body", "headers"],
-        UrlParse => vec!["input"],
-        UrlJoin => vec!["base", "path"],
+        HttpGet | HttpDelete | HttpHead | HttpOptions => &["url"],
+        HttpPost | HttpPut | HttpPatch => &["url", "body"],
+        HttpRequest => &["method", "url", "body", "headers"],
+        UrlParse => &["input"],
+        UrlJoin => &["base", "path"],
 
         // TCP
-        TcpConnect => vec!["host", "port"],
-        TcpWrite => vec!["conn_id", "data"],
-        TcpRead => vec!["conn_id"],
-        TcpClose => vec!["conn_id"],
-        TcpBind => vec!["address", "port"],
-        TcpAccept => vec!["listener_id"],
-        TcpServerClose => vec!["listener_id"],
+        TcpConnect => &["host", "port"],
+        TcpWrite => &["conn_id", "data"],
+        TcpRead => &["conn_id"],
+        TcpClose => &["conn_id"],
+        TcpBind => &["address", "port"],
+        TcpAccept => &["listener_id"],
+        TcpServerClose => &["listener_id"],
 
         // UDP
-        UdpBind => vec!["address", "port"],
-        UdpSendTo => vec!["socket_id", "data", "address", "port"],
-        UdpRecvFrom => vec!["socket_id"],
-        UdpClose => vec!["socket_id"],
+        UdpBind => &["address", "port"],
+        UdpSendTo => &["socket_id", "data", "address", "port"],
+        UdpRecvFrom => &["socket_id"],
+        UdpClose => &["socket_id"],
 
         // WebSocket
-        WsConnect => vec!["url"],
-        WsSend => vec!["conn_id", "message"],
-        WsReceive | WsClose => vec!["conn_id"],
+        WsConnect => &["url"],
+        WsSend => &["conn_id", "message"],
+        WsReceive | WsClose => &["conn_id"],
 
         // SSE
-        SseConnect => vec!["url"],
-        SseReadEvent | SseClose => vec!["conn_id"],
+        SseConnect => &["url"],
+        SseReadEvent | SseClose => &["conn_id"],
 
         // HTTP Server
-        HttpServerStart => vec!["address", "port"],
-        HttpServerReceive => vec!["server_id"],
-        HttpServerRespond => vec!["client_id", "status", "body"],
-        HttpServerStop => vec!["server_id"],
+        HttpServerStart => &["address", "port"],
+        HttpServerReceive => &["server_id"],
+        HttpServerRespond => &["client_id", "status", "body"],
+        HttpServerStop => &["server_id"],
 
         // Certificate
-        CertGenerate | CertSelfSigned => vec!["cn"],
-        CertParse | CertInfo | CertVerify => vec!["pem"],
-        KeyGenerate => vec![],
+        CertGenerate | CertSelfSigned => &["cn"],
+        CertParse | CertInfo | CertVerify => &["pem"],
+        KeyGenerate => &[],
 
         // Path
-        PathJoin => vec!["a", "b"],
+        PathJoin => &["a", "b"],
         PathBasename | PathDirname | PathExtension | PathStem | PathIsAbsolute | PathNormalize
-        | PathSplit | PathParent => vec!["input"],
-        PathWithExtension => vec!["input", "extension"],
+        | PathSplit | PathParent => &["input"],
+        PathWithExtension => &["input", "extension"],
 
         // YAML/TOML
         YamlParse | YamlStringify | YamlValidate | YamlToJson | YamlFromJson | TomlParse
-        | TomlStringify => vec!["input"],
-        YamlMerge => vec!["a", "b"],
+        | TomlStringify => &["input"],
+        YamlMerge => &["a", "b"],
 
         // CSV
-        CsvParse | CsvStringify | CsvHeaders | CsvParseRows => vec!["input"],
+        CsvParse | CsvStringify | CsvHeaders | CsvParseRows => &["input"],
 
         // Regex Extended
-        RegexSplit | RegexTest | RegexCaptures | RegexFindAll => vec!["input", "pattern"],
-        RegexEscape => vec!["input"],
+        RegexSplit | RegexTest | RegexCaptures | RegexFindAll => &["input", "pattern"],
+        RegexEscape => &["input"],
 
         // UUID
-        UuidV4 | UuidNil => vec![],
-        UuidParse | UuidIsValid => vec!["input"],
+        UuidV4 | UuidNil => &[],
+        UuidParse | UuidIsValid => &["input"],
 
         // Crypto Extended
-        HashSha512 | HashCrc32 => vec!["input"],
-        HmacSha256 => vec!["input", "key"],
-        ConstantTimeEq => vec!["a", "b"],
+        HashSha512 | HashCrc32 => &["input"],
+        HmacSha256 => &["input", "key"],
+        ConstantTimeEq => &["a", "b"],
 
         // Compress
-        CompressZstd | DecompressZstd | CompressLz4 | DecompressLz4 => vec!["input"],
+        CompressZstd | DecompressZstd | CompressLz4 | DecompressLz4 => &["input"],
 
         // Format
-        FmtNumber | FmtBytes | FmtDuration | FmtHex | FmtBinary | FmtPercent => vec!["value"],
+        FmtNumber | FmtBytes | FmtDuration | FmtHex | FmtBinary | FmtPercent => &["value"],
 
         // Convert Extended
-        ParseInt | ParseFloat => vec!["input"],
+        ParseInt | ParseFloat => &["input"],
 
         // Time Extended
-        Duration => vec![],
-        Elapsed => vec!["timestamp"],
-        TimeSleep => vec!["duration"],
-        AddDuration | SubDuration => vec!["timestamp", "duration"],
-        TimeDiff => vec!["a", "b"],
-        StartOf | EndOf => vec!["timestamp"],
+        Duration => &[],
+        Elapsed => &["timestamp"],
+        TimeSleep => &["duration"],
+        AddDuration | SubDuration => &["timestamp", "duration"],
+        TimeDiff => &["a", "b"],
+        StartOf | EndOf => &["timestamp"],
 
         // Stats
         StatsMean | StatsMedian | StatsMode | StatsVariance | StatsStdDev | StatsSum => {
-            vec!["array"]
+            &["array"]
         }
-        StatsMinBy | StatsMaxBy => vec!["array", "key"],
-        StatsPercentile => vec!["array", "percentile"],
-        StatsQuantile => vec!["array", "quantile"],
-        StatsCovariance | StatsCorrelation => vec!["a", "b"],
+        StatsMinBy | StatsMaxBy => &["array", "key"],
+        StatsPercentile => &["array", "percentile"],
+        StatsQuantile => &["array", "quantile"],
+        StatsCovariance | StatsCorrelation => &["a", "b"],
 
         // Text
         TextWrap | TextDedent | TextIndent | TextPadLeft | TextPadRight | TextTruncate
-        | TextSlug | TextCamelCase | TextSnakeCase | TextTitleCase => vec!["input"],
+        | TextSlug | TextCamelCase | TextSnakeCase | TextTitleCase => &["input"],
 
         // Encode Extended
-        HtmlEscape | HtmlUnescape | Base32Encode | Base32Decode => vec!["input"],
+        HtmlEscape | HtmlUnescape | Base32Encode | Base32Decode => &["input"],
 
         // Reflect
         ReflectTypeOf | ReflectTypeName | ReflectFields | ReflectCallable | ReflectArity
-        | ReflectInspect => vec!["input"],
-        ReflectIsType => vec!["input", "type_name"],
-        ReflectHasField => vec!["input", "field"],
+        | ReflectInspect => &["input"],
+        ReflectIsType => &["input", "type_name"],
+        ReflectHasField => &["input", "field"],
 
         // Collections
-        SetFrom | Counter | OrderedMap => vec!["array"],
-        SetUnion | SetIntersection | SetDifference | SetSymmetricDifference => vec!["a", "b"],
-        MostCommon => vec!["array"],
+        SetFrom | Counter | OrderedMap => &["array"],
+        SetUnion | SetIntersection | SetDifference | SetSymmetricDifference => &["a", "b"],
+        MostCommon => &["array"],
 
         // Sort
         SortAsc | SortDesc | StableSort | IsSorted | SortReverse | SortBy | SortByKey => {
-            vec!["array"]
+            &["array"]
         }
-        BinarySearch => vec!["array", "value"],
+        BinarySearch => &["array", "value"],
 
         // V2 Language Constructs
-        FunctionDef | FunctionCall => vec![],
-        AsyncSpawn | AsyncAwait => vec!["input"],
-        LoopGroup => vec![],
+        FunctionDef | FunctionCall => &[],
+        AsyncSpawn | AsyncAwait => &["input"],
+        LoopGroup => &[],
     }
 }

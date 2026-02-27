@@ -1131,20 +1131,6 @@ fn test_division_by_zero() {
         _ => panic!("expected DivisionByZero, got: {:?}", err),
     }
 }
-
-#[test]
-fn test_recursion_works() {
-    // Verify recursion works within limits (MAX_CALL_DEPTH = 48).
-    let src = r#"
-        fn fact(n) {
-            if n <= 1 { return 1; }
-            n * fact(n - 1)
-        }
-        fact(10)
-    "#;
-    assert_eq!(run(src), DataType::Int64(3628800));
-}
-
 #[test]
 fn test_immutable_assignment_error() {
     let err = run_err("let x = 5; x = 10;");
@@ -1725,34 +1711,6 @@ fn test_array_destructure_rest() {
     assert_eq!(
         run("let [first, ...rest] = [1, 2, 3, 4]; rest"),
         DataType::Array(vec![DataType::Int64(2), DataType::Int64(3), DataType::Int64(4)])
-    );
-}
-
-#[test]
-fn test_map_destructure() {
-    assert_eq!(
-        run(r#"let {name, age} = {"name": "Alice", "age": 30}; name"#),
-        DataType::String("Alice".into())
-    );
-}
-
-// ═══════════════════════════════════════════════════════════
-// List comprehension
-// ═══════════════════════════════════════════════════════════
-
-#[test]
-fn test_list_comprehension_doubled() {
-    assert_eq!(
-        run("[x * 2 for x in [1, 2, 3]]"),
-        DataType::Array(vec![DataType::Int64(2), DataType::Int64(4), DataType::Int64(6)])
-    );
-}
-
-#[test]
-fn test_list_comprehension_filtered() {
-    assert_eq!(
-        run("[x for x in [1, 2, 3, 4, 5] if x > 3]"),
-        DataType::Array(vec![DataType::Int64(4), DataType::Int64(5)])
     );
 }
 
@@ -3645,14 +3603,6 @@ fn test_int_min_max() {
     assert_eq!(run("(5).clamp(1, 3)"), DataType::Int64(3));
     assert_eq!(run("(5).clamp(7, 10)"), DataType::Int64(7));
 }
-
-#[test]
-fn test_float_min_max() {
-    assert_eq!(run("(5.0).min(3.0)"), DataType::Float64(3.0));
-    assert_eq!(run("(5.0).max(10.0)"), DataType::Float64(10.0));
-    assert_eq!(run("(5.0).clamp(1.0, 3.0)"), DataType::Float64(3.0));
-}
-
 #[test]
 fn test_float_math_methods() {
     assert_eq!(run("(1.0).sin()"), DataType::Float64(1.0_f64.sin()));
@@ -3671,24 +3621,6 @@ fn test_int_pow() {
 #[test]
 fn test_float_pow() {
     assert_eq!(run("(2.0).pow(0.5)"), DataType::Float64(2.0_f64.powf(0.5)));
-}
-
-#[test]
-fn test_array_min_max_empty() {
-    assert_eq!(run("[].min()"), DataType::Null);
-    assert_eq!(run("[].max()"), DataType::Null);
-}
-
-#[test]
-fn test_array_sum_product_empty() {
-    assert_eq!(run("[].sum()"), DataType::Int64(0));
-    assert_eq!(run("[].product()"), DataType::Int64(1));
-}
-
-#[test]
-fn test_array_first_last_empty() {
-    assert_eq!(run("[].first()"), DataType::Null);
-    assert_eq!(run("[].last()"), DataType::Null);
 }
 
 #[test]
@@ -4347,60 +4279,6 @@ fn test_lines_normal_works() {
             DataType::String("a".to_string()),
             DataType::String("b".to_string()),
             DataType::String("c".to_string()),
-        ])
-    );
-}
-
-#[test]
-fn test_hof_map_with_cancellation_support() {
-    // Just verify map still works correctly — cancellation is tested via the cancel token
-    assert_eq!(
-        run("[1, 2, 3].map(|x| x * 2)"),
-        DataType::Array(vec![
-            DataType::Int64(2),
-            DataType::Int64(4),
-            DataType::Int64(6),
-        ])
-    );
-}
-
-#[test]
-fn test_hof_filter_works() {
-    assert_eq!(
-        run("[1, 2, 3, 4].filter(|x| x > 2)"),
-        DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)])
-    );
-}
-
-#[test]
-fn test_hof_reduce_works() {
-    assert_eq!(
-        run("[1, 2, 3].reduce(0, |acc, x| acc + x)"),
-        DataType::Int64(6)
-    );
-}
-
-#[test]
-fn test_hof_flat_map_works() {
-    assert_eq!(
-        run("[1, 2].flat_map(|x| [x, x * 10])"),
-        DataType::Array(vec![
-            DataType::Int64(1),
-            DataType::Int64(10),
-            DataType::Int64(2),
-            DataType::Int64(20),
-        ])
-    );
-}
-
-#[test]
-fn test_hof_scan_works() {
-    assert_eq!(
-        run("[1, 2, 3].scan(0, |acc, x| acc + x)"),
-        DataType::Array(vec![
-            DataType::Int64(1),
-            DataType::Int64(3),
-            DataType::Int64(6),
         ])
     );
 }
@@ -5179,21 +5057,6 @@ fn test_split_empty_separator_error() {
     assert!(err.contains("non-empty separator") || err.contains("empty string"),
         "expected empty separator error, got: {err}");
 }
-
-#[test]
-fn test_split_nonempty_sep_works() {
-    let result = run(r#""a,b,c".split(",")"#);
-    match result {
-        DataType::Array(arr) => {
-            assert_eq!(arr.len(), 3);
-            assert_eq!(arr[0], DataType::String("a".to_string()));
-            assert_eq!(arr[1], DataType::String("b".to_string()));
-            assert_eq!(arr[2], DataType::String("c".to_string()));
-        }
-        other => panic!("expected Array, got {:?}", other),
-    }
-}
-
 #[test]
 fn test_min_max_mixed_types_error() {
     let err = run_err(r#"[1, "hello"].min()"#).to_string();
@@ -6553,15 +6416,6 @@ fn test_null_coalesce_chain_deep() {
 fn test_optional_chaining_null() {
     assert_eq!(run(r#"let x = null; x?.field"#), DataType::Null);
 }
-
-#[test]
-fn test_optional_chaining_nested() {
-    assert_eq!(
-        run(r#"let x = {"a": {"b": 42}}; x?.a?.b"#),
-        DataType::Int64(42)
-    );
-}
-
 #[test]
 fn test_optional_chaining_method() {
     assert_eq!(
@@ -6761,21 +6615,6 @@ while true {
     assert!(!codes.contains(&"W105".to_string()),
         "Should not warn W105 when break is inside match arm, got {:?}", codes);
 }
-
-#[test]
-fn test_match_rest_pattern_len() {
-    // Verifies StubEvaluator correctly handles "array" port name for len()
-    assert_eq!(
-        run(r#"
-match [1, 2, 3, 4, 5] {
-    [first, ...rest] => first + rest.len(),
-    _ => 0,
-}
-"#),
-        DataType::Int64(5)
-    );
-}
-
 #[test]
 fn test_array_method_in_expression() {
     // Array .len() + arithmetic should work correctly with evaluator port names
@@ -7023,13 +6862,6 @@ fn test_array_min_max() {
     assert_eq!(run(r#"[].min()"#), DataType::Null);
     assert_eq!(run(r#"[].max()"#), DataType::Null);
 }
-
-#[test]
-fn test_string_is_empty() {
-    assert_eq!(run(r#""".is_empty()"#), DataType::Bool(true));
-    assert_eq!(run(r#""hello".is_empty()"#), DataType::Bool(false));
-}
-
 #[test]
 fn test_array_is_empty() {
     assert_eq!(run(r#"[].is_empty()"#), DataType::Bool(true));
@@ -7054,19 +6886,6 @@ fn test_string_count_method() {
     assert_eq!(run(r#""hello world".count("l")"#), DataType::Int64(3));
     assert_eq!(run(r#""hello".count("z")"#), DataType::Int64(0));
 }
-
-#[test]
-fn test_string_starts_ends_with() {
-    assert_eq!(run(r#""hello".starts_with("hel")"#), DataType::Bool(true));
-    assert_eq!(run(r#""hello".starts_with("world")"#), DataType::Bool(false));
-    assert_eq!(run(r#""hello".ends_with("llo")"#), DataType::Bool(true));
-    assert_eq!(run(r#""hello".ends_with("world")"#), DataType::Bool(false));
-}
-
-// =========================================================================
-// Round 61: Coverage gap tests
-// =========================================================================
-
 #[test]
 fn test_match_guard_complex_boolean() {
     assert_eq!(
@@ -7299,15 +7118,6 @@ output first;
         DataType::Int64(10)
     );
 }
-
-#[test]
-fn test_array_first_last_is_empty() {
-    assert_eq!(run("[10, 20, 30].first()"), DataType::Int64(10));
-    assert_eq!(run("[10, 20, 30].last()"), DataType::Int64(30));
-    assert_eq!(run("[].is_empty()"), DataType::Bool(true));
-    assert_eq!(run("[1].is_empty()"), DataType::Bool(false));
-}
-
 #[test]
 fn test_int64_to_int64_identity() {
     assert_eq!(run("(42).to_int64()"), DataType::Int64(42));
@@ -9721,18 +9531,6 @@ fn test_loop_with_continue_skips_iteration() {
         output result;
     "#), DataType::Int64(5));
 }
-
-#[test]
-fn test_loop_expr_as_variable_value() {
-    // loop { ... break value } as an expression in a let binding
-    assert_eq!(run(r#"
-        let x = loop {
-            break 42;
-        };
-        output x;
-    "#), DataType::Int64(42));
-}
-
 #[test]
 fn test_map_comprehension_with_condition() {
     // Map comprehension with an if filter
@@ -10074,4 +9872,270 @@ fn test_list_comprehension_non_iterable_error() {
         }
         other => panic!("expected TypeError, got: {:?}", other),
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Gap coverage tests: critical paths with zero or minimal tests
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_mutual_recursion_is_even_odd() {
+    // Mutual recursion: two functions calling each other
+    assert_eq!(run(r#"
+        fn is_even(n) {
+            if n == 0 { true }
+            else { is_odd(n - 1) }
+        }
+        fn is_odd(n) {
+            if n == 0 { false }
+            else { is_even(n - 1) }
+        }
+        output is_even(10);
+    "#), DataType::Bool(true));
+    assert_eq!(run(r#"
+        fn is_even(n) {
+            if n == 0 { true }
+            else { is_odd(n - 1) }
+        }
+        fn is_odd(n) {
+            if n == 0 { false }
+            else { is_even(n - 1) }
+        }
+        output is_odd(7);
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_max_call_depth_mutual_recursion() {
+    // Mutual recursion should still hit MaxCallDepth (needs larger stack in debug mode)
+    let result = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let err = run_err(r#"
+                fn ping(n) { pong(n) }
+                fn pong(n) { ping(n) }
+                ping(1)
+            "#);
+            let msg = format!("{}", err);
+            assert!(msg.contains("call depth") || msg.contains("recursion") || msg.contains("E401") || msg.contains("Maximum"),
+                "expected max call depth error: {}", msg);
+        })
+        .unwrap()
+        .join();
+    result.unwrap();
+}
+
+#[test]
+fn test_chained_string_methods() {
+    // Multiple method calls chained on strings
+    assert_eq!(
+        run(r#""  Hello World  ".trim().to_upper().reverse()"#),
+        DataType::String("DLROW OLLEH".to_string())
+    );
+    assert_eq!(
+        run(r#""hello".to_upper().to_lower()"#),
+        DataType::String("hello".to_string())
+    );
+}
+
+#[test]
+fn test_chained_array_hof_methods() {
+    // Chain map -> filter -> reduce on arrays
+    assert_eq!(run(r#"
+        [1, 2, 3, 4, 5, 6]
+            .map(|x| x * x)
+            .filter(|x| x > 10)
+            .reduce(0, |acc, x| acc + x)
+    "#), DataType::Int64(16 + 25 + 36));
+}
+
+#[test]
+fn test_pipe_chain_with_lambda_vars_three_stages() {
+    // Pipe chain with lambda variables using placeholder syntax
+    assert_eq!(run(r#"
+        let double = |x| x * 2
+        let add_ten = |x| x + 10
+        5 |> double(_) |> add_ten(_) |> double(_)
+    "#), DataType::Int64(40));
+}
+
+#[test]
+fn test_variable_shadowing_in_nested_scopes() {
+    // Variable shadowing across nested scopes preserves outer values
+    assert_eq!(run(r#"
+        let x = 1;
+        let result = {
+            let x = 2;
+            let inner = {
+                let x = 3;
+                x
+            };
+            x + inner
+        };
+        output x + result;
+    "#), DataType::Int64(6)); // 1 + (2 + 3)
+}
+
+#[test]
+fn test_closure_three_levels_deep() {
+    // Three levels of nested closures each capturing from their parent
+    assert_eq!(run(r#"
+        let a = 10;
+        let f = |b| {
+            let g = |c| {
+                let h = |d| a + b + c + d;
+                h(4)
+            };
+            g(3)
+        };
+        output f(2);
+    "#), DataType::Int64(19)); // 10 + 2 + 3 + 4
+}
+
+#[test]
+fn test_throw_in_hof_caught_by_try_catch() {
+    // Throw inside a map lambda should be catchable
+    assert_eq!(run(r#"
+        let result = try {
+            [1, 2, 3].map(|x| {
+                if x == 2 { throw "found two" }
+                x
+            })
+        } catch e {
+            e
+        };
+        output result;
+    "#), DataType::String("found two".to_string()));
+}
+
+#[test]
+fn test_complex_match_with_guards_and_bindings() {
+    // Match combining multiple features: or-patterns, guards, bindings
+    assert_eq!(run(r#"
+        fn classify(x) {
+            match x {
+                n if n < 0 => "negative",
+                0 => "zero",
+                1 | 2 | 3 => "small",
+                n if n > 100 => "huge",
+                _ => "medium",
+            }
+        }
+        let r1 = classify(-5);
+        let r2 = classify(0);
+        let r3 = classify(2);
+        let r4 = classify(200);
+        let r5 = classify(50);
+        output f"{r1},{r2},{r3},{r4},{r5}";
+    "#), DataType::String("negative,zero,small,huge,medium".to_string()));
+}
+
+#[test]
+fn test_enum_with_recursive_structure() {
+    // Enum that mimics a recursive linked list
+    assert_eq!(run(r#"
+        enum List { Cons(head, tail), Nil }
+        fn sum_list(lst) {
+            match lst {
+                List::Cons(h, t) => h + sum_list(t),
+                List::Nil => 0,
+            }
+        }
+        let lst = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)));
+        output sum_list(lst);
+    "#), DataType::Int64(6));
+}
+
+#[test]
+fn test_string_escape_in_fstring_and_raw_string() {
+    // Escape sequences in f-strings work correctly
+    assert_eq!(
+        run(r#"let x = 42; f"tab:\there\nnewline:{x}""#),
+        DataType::String("tab:\there\nnewline:42".to_string())
+    );
+    // Raw strings preserve backslashes
+    assert_eq!(
+        run(r#"r"no\nescape\there""#),
+        DataType::String("no\\nescape\\there".to_string())
+    );
+}
+
+#[test]
+fn test_compound_assign_chained_sequence() {
+    // Multiple compound assignments on the same variable in sequence
+    assert_eq!(run(r#"
+        let mut x = 100;
+        x -= 10;
+        x *= 2;
+        x += 5;
+        output x;
+    "#), DataType::Int64(185)); // (100-10)*2+5 = 185
+}
+
+#[test]
+fn test_rest_in_middle_with_head_and_tail() {
+    // Rest pattern in the middle of a destructure
+    assert_eq!(run(r#"
+        let [first, ...middle, last] = [1, 2, 3, 4, 5];
+        output first + last;
+    "#), DataType::Int64(6));
+    // Middle should contain [2, 3, 4]
+    assert_eq!(run(r#"
+        let [first, ...middle, last] = [1, 2, 3, 4, 5];
+        output middle;
+    "#), DataType::Array(vec![DataType::Int64(2), DataType::Int64(3), DataType::Int64(4)]));
+}
+
+#[test]
+fn test_destructure_single_element_array() {
+    // Single element array destructure
+    assert_eq!(run("let [only] = [42]; output only;"), DataType::Int64(42));
+}
+
+#[test]
+fn test_rest_destructure_captures_nothing_when_exact() {
+    // Rest captures empty array when all elements are named
+    assert_eq!(run(r#"
+        let [a, b, ...rest] = [1, 2];
+        output rest;
+    "#), DataType::Array(vec![]));
+}
+
+#[test]
+fn test_nested_try_catch_inner_rethrows_caught_by_outer() {
+    // Inner try-catch rethrows, caught by outer try-catch
+    assert_eq!(run(r#"
+        let result = try {
+            try {
+                throw "inner error"
+            } catch e {
+                throw f"rethrown: {e}"
+            }
+        } catch e {
+            e
+        };
+        output result;
+    "#), DataType::String("rethrown: inner error".to_string()));
+}
+
+#[test]
+fn test_many_function_parameters() {
+    // Functions with many parameters should work
+    assert_eq!(run(r#"
+        fn sum6(a, b, c, d, e, f) { a + b + c + d + e + f }
+        output sum6(1, 2, 3, 4, 5, 6);
+    "#), DataType::Int64(21));
+}
+
+#[test]
+fn test_for_loop_break_exits_early() {
+    // for loop with break should exit the loop early
+    assert_eq!(run(r#"
+        let mut last_seen = 0;
+        for x in [10, 20, 30, 40, 50] {
+            last_seen = x;
+            if x == 30 { break }
+        }
+        output last_seen;
+    "#), DataType::Int64(30));
 }

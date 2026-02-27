@@ -117,8 +117,10 @@ struct TypeChecker {
     function_depth: usize,
     /// Declared return type of the current function (for return statement validation).
     current_return_type: ChannelType,
-    /// Known enum definitions: enum_name → list of variant names.
-    enum_variants: HashMap<String, Vec<String>>,
+    /// Known enum definitions: enum_name → list of (variant_name, field_count).
+    enum_variants: HashMap<String, Vec<(String, usize)>>,
+    /// Known struct definitions: struct_name → list of field names.
+    struct_defs: HashMap<String, Vec<String>>,
     /// Tracks seen `use` import paths for duplicate detection.
     seen_imports: HashSet<String>,
     /// Names brought into scope by `use` statements (suppresses E201).
@@ -135,6 +137,7 @@ impl TypeChecker {
             used_imports: HashSet::new(),
             function_sigs: HashMap::new(),
             enum_variants: HashMap::new(),
+            struct_defs: HashMap::new(),
             seen_imports: HashSet::new(),
             use_aliases: HashSet::new(),
             pipe_depth: 0,
@@ -320,11 +323,15 @@ impl TypeChecker {
     // =========================================================================
 
     fn check_program(&mut self, program: &Program) {
-        // Pass 1: collect function signatures and enum definitions
+        // Pass 1: collect function signatures, enum definitions, and struct definitions
         for stmt in &program.statements {
             if let StatementKind::EnumDef { name, variants } = &stmt.kind {
-                let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                self.enum_variants.insert(name.clone(), variant_names);
+                let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
+                self.enum_variants.insert(name.clone(), variant_info);
+            }
+            if let StatementKind::StructDef { name, fields } = &stmt.kind {
+                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                self.struct_defs.insert(name.clone(), field_names);
             }
             if let StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) =
                 &stmt.kind
@@ -1055,11 +1062,12 @@ impl TypeChecker {
             }
 
             StatementKind::EnumDef { name, variants } => {
-                let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                self.enum_variants.insert(name.clone(), variant_names);
+                let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
+                self.enum_variants.insert(name.clone(), variant_info);
             }
-            StatementKind::StructDef { .. } => {
-                // Struct definitions are valid at any scope
+            StatementKind::StructDef { name, fields } => {
+                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                self.struct_defs.insert(name.clone(), field_names);
             }
         }
     }
@@ -1082,7 +1090,7 @@ impl TypeChecker {
         // Look up the enum definition
         if let Some(name) = enum_name {
             if let Some(variants) = self.enum_variants.get(name) {
-                return variants.iter().all(|v| covered.contains(v.as_str()));
+                return variants.iter().all(|(v, _)| covered.contains(v.as_str()));
             }
         }
         false
@@ -2159,9 +2167,25 @@ impl TypeChecker {
             }
 
             ExpressionKind::EnumConstruct { enum_name, variant, args } => {
-                // Validate enum variant exists
+                // Validate enum variant exists and check arity
                 if let Some(variants) = self.enum_variants.get(enum_name.as_str()) {
-                    if !variants.iter().any(|v| v == variant) {
+                    if let Some((_, expected_fields)) = variants.iter().find(|(v, _)| v == variant) {
+                        // Variant exists — check argument count
+                        if args.len() != *expected_fields {
+                            self.emit_coded(
+                                expr.span.start_line,
+                                expr.span.start_col,
+                                format!(
+                                    "enum variant '{}::{}' expects {} arguments, got {}",
+                                    enum_name, variant, expected_fields, args.len()
+                                ),
+                                DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E405,
+                                None,
+                            );
+                        }
+                    } else {
+                        let variant_names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
                         let code = super::errors::ErrorCode::E202;
                         self.diagnostics.push(AstDiagnostic {
                             line: expr.span.start_line,
@@ -2170,12 +2194,12 @@ impl TypeChecker {
                                 "enum '{}' has no variant '{}' (available: {})",
                                 enum_name,
                                 variant,
-                                variants.join(", ")
+                                variant_names.join(", ")
                             ),
                             severity: DiagnosticSeverity::Error,
                             code: Some(code.to_string()),
                             help: Some(code.help().to_string()),
-                            suggestion: super::errors::suggest_name(variant, &variants.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+                            suggestion: super::errors::suggest_name(variant, &variant_names),
                         });
                     }
                 }
@@ -2202,6 +2226,44 @@ impl TypeChecker {
                         });
                     }
                     self.infer_expr(field_expr);
+                }
+                // Validate fields against struct definition
+                if let Some(def_fields) = self.struct_defs.get(name.as_str()).cloned() {
+                    let provided: HashSet<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+                    let defined: HashSet<&str> = def_fields.iter().map(|f| f.as_str()).collect();
+                    // Check for unknown fields
+                    for (field_name, _) in fields {
+                        if !defined.contains(field_name.as_str()) {
+                            let suggestion = super::errors::suggest_name(field_name, &def_fields.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                            self.emit_coded(
+                                expr.span.start_line,
+                                expr.span.start_col,
+                                format!(
+                                    "struct '{}' has no field '{}'",
+                                    name, field_name,
+                                ),
+                                DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E202,
+                                suggestion,
+                            );
+                        }
+                    }
+                    // Check for missing fields
+                    for def_field in &def_fields {
+                        if !provided.contains(def_field.as_str()) {
+                            self.emit_coded(
+                                expr.span.start_line,
+                                expr.span.start_col,
+                                format!(
+                                    "missing field '{}' in struct '{}' constructor",
+                                    def_field, name,
+                                ),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E100,
+                                None,
+                            );
+                        }
+                    }
                 }
                 ChannelType::Map
             }
@@ -2279,13 +2341,55 @@ impl TypeChecker {
                     );
                 }
             }
-            Pattern::EnumPattern { bindings, .. } => {
+            Pattern::EnumPattern { enum_name, variant, bindings } => {
+                // Validate variant exists and check binding count
+                if let Some(variants) = self.enum_variants.get(enum_name.as_str()) {
+                    if let Some((_, expected_fields)) = variants.iter().find(|(v, _)| v == variant) {
+                        if bindings.len() != *expected_fields {
+                            self.emit_coded(
+                                span.start_line,
+                                span.start_col,
+                                format!(
+                                    "enum pattern '{}::{}' expects {} bindings, got {}",
+                                    enum_name, variant, expected_fields, bindings.len()
+                                ),
+                                DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E405,
+                                None,
+                            );
+                        }
+                    } else {
+                        let variant_names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+                        self.emit_coded(
+                            span.start_line,
+                            span.start_col,
+                            format!(
+                                "enum '{}' has no variant '{}'",
+                                enum_name, variant,
+                            ),
+                            DiagnosticSeverity::Error,
+                            super::errors::ErrorCode::E202,
+                            super::errors::suggest_name(variant, &variant_names),
+                        );
+                    }
+                }
                 for sub in bindings {
                     self.bind_pattern_vars(sub, ChannelType::Null, span);
                 }
             }
-            Pattern::TypePattern { name, .. } => {
-                self.define_var(name, ChannelType::Null, false, span.start_line, span.start_col);
+            Pattern::TypePattern { name, type_name } => {
+                let ct = ChannelType::parse(type_name).unwrap_or(ChannelType::Null);
+                if ChannelType::parse(type_name).is_none() {
+                    self.emit_coded(
+                        span.start_line,
+                        span.start_col,
+                        format!("Unknown type '{}' in type pattern", type_name),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E100,
+                        None,
+                    );
+                }
+                self.define_var(name, ct, false, span.start_line, span.start_col);
             }
             Pattern::RangePattern { start, end, .. } => {
                 // No variables to bind, but walk the bound expressions for type checking
@@ -2338,9 +2442,10 @@ impl TypeChecker {
                     self.bind_pattern_vars_collecting(sub, ChannelType::Null, span, bound);
                 }
             }
-            Pattern::TypePattern { name, .. } => {
+            Pattern::TypePattern { name, type_name } => {
                 if bound.insert(name.clone()) {
-                    self.define_var(name, ChannelType::Null, false, span.start_line, span.start_col);
+                    let ct = ChannelType::parse(type_name).unwrap_or(ChannelType::Null);
+                    self.define_var(name, ct, false, span.start_line, span.start_col);
                 }
             }
             Pattern::RangePattern { start, end, .. } => {
@@ -4914,6 +5019,141 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let warns = warnings(&a);
         let unknown = warns.iter().filter(|d| d.message.contains("Unknown method")).collect::<Vec<_>>();
         assert!(unknown.is_empty(), "Expected no E202 for known array methods, got: {:?}", unknown);
+    }
+
+    // =========================================================================
+    // Enum variant arity validation
+    // =========================================================================
+
+    #[test]
+    fn test_enum_construct_arity_ok() {
+        let a = check(r#"
+            enum Result { Ok(value), Err(msg) }
+            let x = Result::Ok(42);
+            output x;
+        "#);
+        let errs = errors(&a);
+        assert!(errs.is_empty(), "Expected no errors for correct arity, got: {:?}", errs);
+    }
+
+    #[test]
+    fn test_enum_construct_arity_too_many() {
+        let a = check(r#"
+            enum Result { Ok(value), Err(msg) }
+            let x = Result::Ok(1, 2);
+            output x;
+        "#);
+        let errs = errors(&a);
+        assert!(
+            errs.iter().any(|d| d.message.contains("expects 1 arguments, got 2")),
+            "Expected arity error, got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn test_enum_construct_arity_too_few() {
+        let a = check(r#"
+            enum Result { Ok(value), Err(msg) }
+            let x = Result::Ok();
+            output x;
+        "#);
+        let errs = errors(&a);
+        assert!(
+            errs.iter().any(|d| d.message.contains("expects 1 arguments, got 0")),
+            "Expected arity error, got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn test_enum_construct_unit_variant_no_args() {
+        let a = check(r#"
+            enum Color { Red, Green, Blue }
+            let x = Color::Red();
+            output x;
+        "#);
+        // Unit variant has 0 fields, calling with 0 args is OK
+        let errs = errors(&a);
+        assert!(errs.is_empty(), "Expected no errors for unit variant with no args, got: {:?}", errs);
+    }
+
+    #[test]
+    fn test_enum_pattern_unknown_variant() {
+        let a = check(r#"
+            enum Color { Red, Green, Blue }
+            let c = Color::Red();
+            let name = match c {
+                Color::Red => "red",
+                Color::Yellow => "yellow",
+                _ => "other",
+            };
+            output name;
+        "#);
+        let errs = errors(&a);
+        assert!(
+            errs.iter().any(|d| d.message.contains("has no variant 'Yellow'")),
+            "Expected unknown variant error, got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn test_enum_pattern_arity_mismatch() {
+        let a = check(r#"
+            enum Result { Ok(value), Err(msg) }
+            let r = Result::Ok(42);
+            let v = match r {
+                Result::Ok(a, b) => a,
+                _ => 0,
+            };
+            output v;
+        "#);
+        let errs = errors(&a);
+        assert!(
+            errs.iter().any(|d| d.message.contains("expects 1 bindings, got 2")),
+            "Expected binding count error, got: {:?}", errs
+        );
+    }
+
+    // =========================================================================
+    // Struct field validation
+    // =========================================================================
+
+    #[test]
+    fn test_struct_construct_valid() {
+        let a = check(r#"
+            struct Point { x: float64, y: float64 }
+            let p = Point { x: 1.0, y: 2.0 };
+            output p;
+        "#);
+        let errs = errors(&a);
+        assert!(errs.is_empty(), "Expected no errors for valid struct, got: {:?}", errs);
+    }
+
+    #[test]
+    fn test_struct_construct_unknown_field() {
+        let a = check(r#"
+            struct Point { x: float64, y: float64 }
+            let p = Point { x: 1.0, z: 3.0 };
+            output p;
+        "#);
+        let errs = errors(&a);
+        assert!(
+            errs.iter().any(|d| d.message.contains("has no field 'z'")),
+            "Expected unknown field error, got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn test_struct_construct_missing_field() {
+        let a = check(r#"
+            struct Point { x: float64, y: float64 }
+            let p = Point { x: 1.0 };
+            output p;
+        "#);
+        let warns = warnings(&a);
+        assert!(
+            warns.iter().any(|d| d.message.contains("missing field 'y'")),
+            "Expected missing field warning, got: {:?}", warns
+        );
     }
 
 }

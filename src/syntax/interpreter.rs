@@ -13,6 +13,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Static empty HashMap used as a default config parameter to avoid
+/// allocating a new HashMap on every evaluator call.
+static EMPTY_CONFIG: std::sync::LazyLock<HashMap<String, DataType>> =
+    std::sync::LazyLock::new(HashMap::new);
+
 /// Maximum iterations for while loops to prevent infinite loops.
 const MAX_LOOP_ITERATIONS: usize = 10_000;
 
@@ -958,12 +963,14 @@ impl<'a> Interpreter<'a> {
                     }
                 })?;
                 let input_ports = op_input_ports(op_type);
-                let inputs: HashMap<String, DataType> = input_ports.first()
-                    .map(|p| (p.to_string(), current))
-                    .into_iter()
-                    .chain(input_ports.get(1).map(|p| (p.to_string(), rhs)))
-                    .collect();
-                let result = self.evaluator.eval_operation(op_type, &inputs, &HashMap::new()).map_err(|e| {
+                let mut inputs = HashMap::with_capacity(2);
+                if let Some(p) = input_ports.first() {
+                    inputs.insert(p.to_string(), current);
+                }
+                if let Some(p) = input_ports.get(1) {
+                    inputs.insert(p.to_string(), rhs);
+                }
+                let result = self.evaluator.eval_operation(op_type, &inputs, &EMPTY_CONFIG).map_err(|e| {
                     InterpError::EvalError {
                         error: e,
                         span: stmt.span,
@@ -2504,13 +2511,15 @@ impl<'a> Interpreter<'a> {
                 })?;
 
                 let input_ports = op_input_ports(op_type);
-                let inputs: HashMap<String, DataType> = input_ports.first()
-                    .map(|p| (p.to_string(), lhs))
-                    .into_iter()
-                    .chain(input_ports.get(1).map(|p| (p.to_string(), rhs)))
-                    .collect();
+                let mut inputs = HashMap::with_capacity(2);
+                if let Some(p) = input_ports.first() {
+                    inputs.insert(p.to_string(), lhs);
+                }
+                if let Some(p) = input_ports.get(1) {
+                    inputs.insert(p.to_string(), rhs);
+                }
 
-                self.evaluator.eval_operation(op_type, &inputs, &HashMap::new()).map_err(|e| {
+                self.evaluator.eval_operation(op_type, &inputs, &EMPTY_CONFIG).map_err(|e| {
                     InterpError::EvalError {
                         error: e,
                         span: expr.span,
@@ -2551,7 +2560,7 @@ impl<'a> Interpreter<'a> {
 
                 let inputs = HashMap::from([("value".to_string(), val)]);
 
-                self.evaluator.eval_operation(op_type, &inputs, &HashMap::new()).map_err(|e| {
+                self.evaluator.eval_operation(op_type, &inputs, &EMPTY_CONFIG).map_err(|e| {
                     InterpError::EvalError {
                         error: e,
                         span: expr.span,
@@ -2877,7 +2886,7 @@ impl<'a> Interpreter<'a> {
                     ("index".to_string(), idx),
                 ]);
 
-                self.evaluator.eval_operation(OperationType::ArrayGet, &inputs, &HashMap::new()).map_err(|e| {
+                self.evaluator.eval_operation(OperationType::ArrayGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
                     InterpError::EvalError {
                         error: e,
                         span: expr.span,
@@ -2898,7 +2907,7 @@ impl<'a> Interpreter<'a> {
                     ("key".to_string(), DataType::String(field.clone())),
                 ]);
 
-                self.evaluator.eval_operation(OperationType::MapGet, &inputs, &HashMap::new()).map_err(|e| {
+                self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
                     InterpError::EvalError {
                         error: e,
                         span: expr.span,
@@ -2986,7 +2995,7 @@ impl<'a> Interpreter<'a> {
                             ("start".to_string(), start_val),
                             ("end".to_string(), end_val),
                         ]);
-                        self.evaluator.eval_operation(OperationType::Range, &inputs, &HashMap::new()).map_err(|e| {
+                        self.evaluator.eval_operation(OperationType::Range, &inputs, &EMPTY_CONFIG).map_err(|e| {
                             InterpError::EvalError {
                                 error: e,
                                 span: expr.span,
@@ -3032,22 +3041,19 @@ impl<'a> Interpreter<'a> {
                         }
                     })?;
                 let input_ports = op_input_ports(op_type);
-                let inputs: HashMap<String, DataType> = input_ports.first()
-                    .map(|p| (p.to_string(), obj))
-                    .into_iter()
-                    .chain(args.iter().enumerate()
-                        .map(|(i, arg)| {
-                            let val = self.eval_expr(arg)?;
-                            let port = if i + 1 < input_ports.len() {
-                                input_ports[i + 1].to_string()
-                            } else {
-                                format!("input_{}", i + 1)
-                            };
-                            Ok((port, val))
-                        })
-                        .collect::<Result<Vec<_>, InterpError>>()?
-                    )
-                    .collect();
+                let mut inputs = HashMap::with_capacity(args.len() + 1);
+                if let Some(p) = input_ports.first() {
+                    inputs.insert(p.to_string(), obj);
+                }
+                for (i, arg) in args.iter().enumerate() {
+                    let val = self.eval_expr(arg)?;
+                    let port = if i + 1 < input_ports.len() {
+                        input_ports[i + 1].to_string()
+                    } else {
+                        format!("input_{}", i + 1)
+                    };
+                    inputs.insert(port, val);
+                }
                 let config: HashMap<String, DataType> = kwargs.iter()
                     .map(|(key, val_expr)| Ok((key.clone(), self.eval_expr(val_expr)?)))
                     .collect::<Result<_, InterpError>>()?;
@@ -3177,7 +3183,7 @@ impl<'a> Interpreter<'a> {
                         ("map".to_string(), obj),
                         ("key".to_string(), DataType::String(field.clone())),
                     ]);
-                    self.evaluator.eval_operation(OperationType::MapGet, &inputs, &HashMap::new()).map_err(|e| {
+                    self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
                         InterpError::EvalError {
                             error: e,
                             span: expr.span,
