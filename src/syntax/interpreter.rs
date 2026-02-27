@@ -1734,9 +1734,10 @@ impl<'a> Interpreter<'a> {
                 "to_string" => Ok(Some(DataType::String(s.clone()))),
                 "split" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split".to_string(), expected: 1, actual: 0, span }); }
-                    let sep = match self.eval_expr(&args[0])? {
+                    let sep_val = self.eval_expr(&args[0])?;
+                    let sep = match sep_val {
                         DataType::String(sep) => sep,
-                        _ => return Err(InterpError::TypeError { expected: "String".to_string(), actual: "non-string".to_string(), context: "split separator".to_string(), span }),
+                        other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: datatype_type_name(&other).to_string(), context: "split separator".to_string(), span }),
                     };
                     if sep.is_empty() {
                         return Err(InterpError::TypeError { expected: "non-empty separator".to_string(), actual: "empty string".to_string(), context: "split separator".to_string(), span });
@@ -2978,6 +2979,14 @@ impl<'a> Interpreter<'a> {
                     self.symbols.pop();
                     if let Some(val) = iter_result? {
                         result.push(val);
+                        if result.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::TypeError {
+                                expected: format!("list comprehension result at most {} elements", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{}", result.len()),
+                                context: "list comprehension".to_string(),
+                                span: expr.span,
+                            });
+                        }
                     }
                 }
                 Ok(DataType::Array(result))
@@ -3238,7 +3247,20 @@ impl<'a> Interpreter<'a> {
                 let try_result = self.exec_block(try_block);
                 let result = match try_result {
                     Ok(val) => Ok(val),
-                    Err(ref e) if is_control_flow(e) => try_result,
+                    Err(ref e) if is_control_flow(e) => {
+                        // Execute finally even on control flow (return/break/continue)
+                        if let Some(finally) = finally_block {
+                            self.symbols.push(HashMap::new());
+                            self.heap.push_scope();
+                            let finally_result = self.exec_block(finally);
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            if finally_result.is_err() {
+                                return finally_result;
+                            }
+                        }
+                        return try_result;
+                    }
                     Err(e) => {
                         let catch_value = match e {
                             InterpError::ThrownError { value, .. } => value,
@@ -3258,7 +3280,11 @@ impl<'a> Interpreter<'a> {
                 };
                 // Execute finally block if present (always runs, can override result)
                 if let Some(finally) = finally_block {
+                    self.symbols.push(HashMap::new());
+                    self.heap.push_scope();
                     let finally_result = self.exec_block(finally);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
                     if finally_result.is_err() {
                         return finally_result;
                     }

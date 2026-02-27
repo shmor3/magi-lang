@@ -44,6 +44,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Add => {
                 // String concatenation for Add only
                 if let (DataType::String(x), DataType::String(y)) = (&a, &b) {
+                    let result_len = x.len().saturating_add(y.len());
+                    if result_len > MAX_STRING_OUTPUT {
+                        return Err(EvalError::InvalidInput(format!("string concatenation would produce {} bytes (max {})", result_len, MAX_STRING_OUTPUT)));
+                    }
                     return Ok(DataType::String(format!("{}{}", x, y)));
                 }
                 num_binop(&a, &b, i64::checked_add, |x, y| x + y)
@@ -116,9 +120,16 @@ impl OperationEvaluator for FullEvaluator {
             },
 
             // String
-            OperationType::Concat => match (&a, &b) {
-                (DataType::String(x), DataType::String(y)) => Ok(DataType::String(format!("{}{}", x, y))),
-                _ => Ok(DataType::String(format!("{}{}", a.to_string_lossy(), b.to_string_lossy()))),
+            OperationType::Concat => {
+                let (xs, ys) = match (&a, &b) {
+                    (DataType::String(x), DataType::String(y)) => (x.as_str().to_string(), y.as_str().to_string()),
+                    _ => (a.to_string_lossy(), b.to_string_lossy()),
+                };
+                let result_len = xs.len().saturating_add(ys.len());
+                if result_len > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!("concat would produce {} bytes (max {})", result_len, MAX_STRING_OUTPUT)));
+                }
+                Ok(DataType::String(format!("{}{}", xs, ys)))
             },
             OperationType::ToString => Ok(DataType::String(input.to_string_lossy())),
 
@@ -157,6 +168,9 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::ArrayPush => {
                 let mut arr = match &array { DataType::Array(a) => a.clone(), _ => vec![] };
+                if arr.len() >= MAX_ARRAY_ELEMENTS {
+                    return Err(EvalError::InvalidInput(format!("array push would exceed {} elements", MAX_ARRAY_ELEMENTS)));
+                }
                 arr.push(value.clone());
                 Ok(DataType::Array(arr))
             }
@@ -408,6 +422,9 @@ impl OperationEvaluator for FullEvaluator {
                         } else {
                             flat.push(item.clone());
                         }
+                        if flat.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("flatten would exceed {} elements", MAX_ARRAY_ELEMENTS)));
+                        }
                     }
                     Ok(DataType::Array(flat))
                 }
@@ -415,6 +432,10 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::ArrayConcat => match (&a, &b) {
                 (DataType::Array(a), DataType::Array(b)) => {
+                    let total = a.len().saturating_add(b.len());
+                    if total > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!("array concat would produce {} elements (max {})", total, MAX_ARRAY_ELEMENTS)));
+                    }
                     let mut result = a.clone();
                     result.extend(b.clone());
                     Ok(DataType::Array(result))
@@ -501,17 +522,29 @@ impl OperationEvaluator for FullEvaluator {
                 match (a, b) {
                     (DataType::Int64(base), DataType::Int64(exp)) => {
                         if *exp < 0 {
-                            Ok(DataType::Float64((*base as f64).powi(*exp as i32)))
+                            if *exp < i32::MIN as i64 || *exp > i32::MAX as i64 {
+                                Ok(DataType::Float64(0.0)) // exponent out of i32 range
+                            } else {
+                                Ok(DataType::Float64((*base as f64).powi(*exp as i32)))
+                            }
+                        } else if *exp > u32::MAX as i64 {
+                            Ok(DataType::Null) // exponent too large
                         } else {
                             match base.checked_pow(*exp as u32) {
                                 Some(v) => Ok(DataType::Int64(v)),
-                                None => Ok(DataType::Float64((*base as f64).powi(*exp as i32))),
+                                None => Ok(DataType::Float64((*base as f64).powf(*exp as f64))),
                             }
                         }
                     }
                     (DataType::Float64(base), DataType::Float64(exp)) => Ok(DataType::Float64(base.powf(*exp))),
                     (DataType::Int64(base), DataType::Float64(exp)) => Ok(DataType::Float64((*base as f64).powf(*exp))),
-                    (DataType::Float64(base), DataType::Int64(exp)) => Ok(DataType::Float64(base.powi(*exp as i32))),
+                    (DataType::Float64(base), DataType::Int64(exp)) => {
+                        if *exp < i32::MIN as i64 || *exp > i32::MAX as i64 {
+                            Ok(DataType::Float64(base.powf(*exp as f64)))
+                        } else {
+                            Ok(DataType::Float64(base.powi(*exp as i32)))
+                        }
+                    }
                     _ => Ok(DataType::Null),
                 }
             },

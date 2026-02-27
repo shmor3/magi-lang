@@ -1640,6 +1640,28 @@ impl TypeChecker {
                         .as_deref()
                         .and_then(ChannelType::parse)
                         .unwrap_or(ChannelType::Null);
+                    // Type-check default param expression if present
+                    if let Some(default_expr) = &param.default {
+                        let default_type = self.infer_expr(default_expr);
+                        if ct != ChannelType::Null
+                            && default_type != ChannelType::Null
+                            && !default_type.is_compatible_with(&ct)
+                        {
+                            let code = super::errors::ErrorCode::W106;
+                            self.diagnostics.push(AstDiagnostic {
+                                line: default_expr.span.start_line,
+                                column: default_expr.span.start_col,
+                                message: format!(
+                                    "default value type '{}' doesn't match parameter type '{}'",
+                                    default_type, ct
+                                ),
+                                severity: DiagnosticSeverity::Warning,
+                                code: Some(code.to_string()),
+                                help: Some(code.help().to_string()),
+                                suggestion: None,
+                            });
+                        }
+                    }
                     self.define_var(
                         &param.name,
                         ct,
