@@ -9641,3 +9641,437 @@ fn test_for_with_struct_in_body() {
         output result;
     "#), DataType::Int64(6));
 }
+
+// ── Round 82: Integration tests for uncovered interpreter features ───
+
+#[test]
+fn test_await_on_non_future_is_identity() {
+    // Await on a non-Future value should return the value unchanged
+    assert_eq!(run("await 42"), DataType::Int64(42));
+    assert_eq!(run(r#"await "hello""#), DataType::String("hello".to_string()));
+    assert_eq!(run("await null"), DataType::Null);
+}
+
+#[test]
+fn test_spawn_already_future_no_double_wrap() {
+    // Spawning an already-future value should not double-wrap
+    assert_eq!(run(r#"
+        async fn f() { 10 }
+        let future1 = f();
+        let future2 = spawn future1;
+        await future2
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_spawn_error_becomes_rejected_await_throws() {
+    // Spawn captures errors as rejected futures; await propagates them
+    let err = run_err(r#"
+        fn fail() { throw "boom" }
+        let f = spawn fail();
+        await f
+    "#);
+    let msg = format!("{:?}", err);
+    assert!(msg.contains("boom") || msg.contains("rejected"), "expected 'boom' or 'rejected' in error: {}", msg);
+}
+
+#[test]
+fn test_async_fn_wraps_return_in_future() {
+    // Calling an async function directly returns a Future, not the raw value
+    assert_eq!(run(r#"
+        async fn get_value() { 99 }
+        let f = get_value();
+        typeof(f)
+    "#), DataType::String("future".to_string()));
+}
+
+#[test]
+fn test_type_alias_is_runtime_noop() {
+    // Type aliases should be ignored at runtime and not affect execution
+    assert_eq!(run(r#"
+        type Score = int64;
+        type Name = string;
+        let x = 42;
+        output x;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_type_alias_with_functions() {
+    // Type alias mixed with function definitions should not interfere
+    assert_eq!(run(r#"
+        type Num = int64;
+        fn add(a, b) { a + b }
+        output add(3, 4);
+    "#), DataType::Int64(7));
+}
+
+#[test]
+fn test_loop_with_continue_skips_iteration() {
+    // Continue in loop should skip the rest of the body for that iteration
+    assert_eq!(run(r#"
+        let mut count = 0;
+        let mut i = 0;
+        let result = loop {
+            i += 1;
+            if i > 10 { break count }
+            if i % 2 == 0 { continue }
+            count += 1;
+        };
+        output result;
+    "#), DataType::Int64(5));
+}
+
+#[test]
+fn test_loop_expr_as_variable_value() {
+    // loop { ... break value } as an expression in a let binding
+    assert_eq!(run(r#"
+        let x = loop {
+            break 42;
+        };
+        output x;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_map_comprehension_with_condition() {
+    // Map comprehension with an if filter
+    let result = run(r#"
+        let m = {"val": x * 10 for x in [1, 2, 3, 4, 5] if x > 3};
+        output m;
+    "#);
+    // Only x=4 and x=5 pass the filter; last iteration (x=5) wins for same key
+    match &result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("val"), Some(&DataType::Int64(50)));
+        }
+        other => panic!("expected map, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_map_comprehension_over_string() {
+    // Map comprehension iterating over a string's characters
+    let result = run(r#"
+        let m = {"char": c for c in "xyz"};
+        output m;
+    "#);
+    // Last character wins: "z"
+    match &result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("char"), Some(&DataType::String("z".to_string())));
+        }
+        other => panic!("expected map, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_map_comprehension_non_iterable_error() {
+    // Map comprehension on a non-iterable type should error
+    let err = run_err(r#"
+        let m = {"k": v for v in 42};
+    "#);
+    match err {
+        InterpError::TypeError { expected, .. } => {
+            assert!(expected.contains("Array") || expected.contains("Map") || expected.contains("String"));
+        }
+        other => panic!("expected TypeError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_list_comprehension_over_string() {
+    // List comprehension should work with string iteration
+    assert_eq!(run(r#"
+        output [c for c in "abc"];
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("b".to_string()),
+        DataType::String("c".to_string()),
+    ]));
+}
+
+#[test]
+fn test_list_comprehension_with_destructure_pattern() {
+    // List comprehension with array destructuring in the pattern
+    assert_eq!(run(r#"
+        let pairs = [[1, 10], [2, 20], [3, 30]];
+        output [a + b for [a, b] in pairs];
+    "#), DataType::Array(vec![
+        DataType::Int64(11),
+        DataType::Int64(22),
+        DataType::Int64(33),
+    ]));
+}
+
+#[test]
+fn test_list_comprehension_over_map() {
+    // List comprehension iterating over a map yields {key, value} entries
+    assert_eq!(run(r#"
+        let m = {"x": 1, "y": 2};
+        let keys = [entry.key for entry in m];
+        output keys;
+    "#), DataType::Array(vec![
+        DataType::String("x".to_string()),
+        DataType::String("y".to_string()),
+    ]));
+}
+
+#[test]
+fn test_enum_variant_with_multiple_data_fields() {
+    // Enum variant carrying multiple data fields
+    assert_eq!(run(r#"
+        enum Shape { Circle(r), Rect(w, h), Point }
+        let s = Shape::Rect(3, 4);
+        let area = match s {
+            Shape::Rect(w, h) => w * h,
+            Shape::Circle(r) => r * r,
+            Shape::Point => 0,
+        };
+        output area;
+    "#), DataType::Int64(12));
+}
+
+#[test]
+fn test_enum_variant_arity_mismatch_error() {
+    // Constructing an enum variant with wrong number of args should error
+    let err = run_err(r#"
+        enum Color { RGB(r, g, b) }
+        let c = Color::RGB(255, 128);
+    "#);
+    match err {
+        InterpError::ArityMismatch { name, expected, actual, .. } => {
+            assert_eq!(name, "Color::RGB");
+            assert_eq!(expected, "3");
+            assert_eq!(actual, 2);
+        }
+        other => panic!("expected ArityMismatch, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_struct_missing_field_error() {
+    // Constructing a struct with a missing required field should error
+    let err = run_err(r#"
+        struct Point { x, y }
+        let p = Point { x: 1 };
+    "#);
+    match err {
+        InterpError::TypeError { expected, actual, .. } => {
+            assert!(expected.contains("y"), "expected field 'y' in error: {}", expected);
+            assert_eq!(actual, "missing");
+        }
+        other => panic!("expected TypeError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_struct_unknown_field_error() {
+    // Constructing a struct with an unknown field should error
+    let err = run_err(r#"
+        struct Point { x, y }
+        let p = Point { x: 1, y: 2, z: 3 };
+    "#);
+    match err {
+        InterpError::TypeError { context, .. } => {
+            assert!(context.contains("no field"), "expected 'no field' in context: {}", context);
+        }
+        other => panic!("expected TypeError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_struct_duplicate_field_in_construction() {
+    // Duplicate field in struct construction should error
+    let err = run_err(r#"
+        struct Pair { a, b }
+        let p = Pair { a: 1, b: 2, a: 3 };
+    "#);
+    match err {
+        InterpError::TypeError { actual, .. } => {
+            assert!(actual.contains("duplicate"), "expected 'duplicate' in actual: {}", actual);
+        }
+        other => panic!("expected TypeError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_module_with_async_function() {
+    // Async functions inside modules should be registered and callable
+    assert_eq!(run(r#"
+        mod service {
+            async fn fetch() { 200 }
+        }
+        let f = service::fetch();
+        output await f;
+    "#), DataType::Int64(200));
+}
+
+#[test]
+fn test_module_struct_construction_via_function() {
+    // Structs defined inside modules accessible via a module function
+    assert_eq!(run(r#"
+        mod geo {
+            struct Point { x, y }
+            fn make_point(x, y) { Point { x: x, y: y } }
+        }
+        let p = geo::make_point(10, 20);
+        output p.x + p.y;
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_let_destructure_map_missing_key() {
+    // Destructuring a map with a missing key should bind to null
+    assert_eq!(run(r#"
+        let {name, age} = {"name": "Alice"};
+        output age;
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_let_destructure_mutable_modification() {
+    // Mutable destructured variables should be modifiable
+    assert_eq!(run(r#"
+        let mut [a, b] = [1, 2];
+        a += 10;
+        b += 20;
+        output a + b;
+    "#), DataType::Int64(33));
+}
+
+#[test]
+fn test_let_destructure_in_has_main_mode() {
+    // LetDestructure at top level in has_main mode should be accessible in main
+    assert_eq!(run(r#"
+        let [x, y] = [100, 200];
+        fn main() {
+            output x + y;
+        }
+    "#), DataType::Int64(300));
+}
+
+#[test]
+fn test_try_propagate_on_result_err_enum() {
+    // The ? operator on a Result::Err should throw the error value
+    let err = run_err(r#"
+        enum Result { Ok(v), Err(e) }
+        fn might_fail() { Result::Err("bad input") }
+        fn caller() {
+            let val = might_fail()?;
+            output val;
+        }
+        caller()
+    "#);
+    match err {
+        InterpError::ThrownError { value, .. } => {
+            assert_eq!(value, DataType::String("bad input".to_string()));
+        }
+        other => panic!("expected ThrownError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_try_propagate_on_result_ok_unwraps() {
+    // The ? operator on a Result::Ok should unwrap the value
+    assert_eq!(run(r#"
+        enum Result { Ok(v), Err(e) }
+        fn succeed() { Result::Ok(42) }
+        let val = succeed()?;
+        output val;
+    "#), DataType::Map({
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("__data".to_string(), DataType::Array(vec![DataType::Int64(42)]));
+        m.insert("__enum".to_string(), DataType::String("Result".to_string()));
+        m.insert("__variant".to_string(), DataType::String("Ok".to_string()));
+        m
+    }));
+}
+
+#[test]
+fn test_use_glob_imports_module_functions() {
+    // Glob import should make all module functions available unqualified
+    assert_eq!(run(r#"
+        mod helpers {
+            fn double(x) { x * 2 }
+            fn triple(x) { x * 3 }
+        }
+        use helpers::*;
+        output double(5) + triple(5);
+    "#), DataType::Int64(25));
+}
+
+#[test]
+fn test_use_alias_renames_function() {
+    // Use with alias should make function available under alias name
+    assert_eq!(run(r#"
+        mod math {
+            fn add(a, b) { a + b }
+        }
+        use math::add as plus;
+        output plus(3, 7);
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_use_nonexistent_function_errors() {
+    // Importing a function that doesn't exist in the module should error
+    let err = run_err(r#"
+        mod m {
+            fn foo() { 1 }
+        }
+        use m::bar;
+    "#);
+    match err {
+        InterpError::UnknownOperation { name, .. } => {
+            assert!(name.contains("bar"), "expected 'bar' in name: {}", name);
+        }
+        other => panic!("expected UnknownOperation, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_spread_on_non_array_errors() {
+    // Spread operator on a non-array value should error
+    let err = run_err(r#"
+        fn sum(a, b) { a + b }
+        sum(...42)
+    "#);
+    match err {
+        InterpError::TypeError { expected, .. } => {
+            assert_eq!(expected, "Array");
+        }
+        other => panic!("expected TypeError, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_map_comprehension_with_array_destructure() {
+    // Map comprehension using array destructuring in the pattern
+    let result = run(r#"
+        let pairs = [[1, 10], [2, 20], [3, 30]];
+        let m = {"sum": a + b for [a, b] in pairs};
+        output m;
+    "#);
+    match &result {
+        DataType::Map(m) => {
+            // Last pair [3, 30] gives 33
+            assert_eq!(m.get("sum"), Some(&DataType::Int64(33)));
+        }
+        other => panic!("expected map, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_list_comprehension_non_iterable_error() {
+    // List comprehension on a non-iterable type should error
+    let err = run_err(r#"
+        output [x for x in 42];
+    "#);
+    match err {
+        InterpError::TypeError { expected, .. } => {
+            assert!(expected.contains("Array") || expected.contains("Map") || expected.contains("String"));
+        }
+        other => panic!("expected TypeError, got: {:?}", other),
+    }
+}

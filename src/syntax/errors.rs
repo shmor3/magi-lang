@@ -201,14 +201,14 @@ impl ErrorCode {
             ErrorCode::E102 => "The `for..in` loop requires an iterable (array, map, or string). Use `range(start, end)` for numeric loops, or ensure the value is iterable.",
             ErrorCode::E103 => "The operation received an argument of the wrong type. Check the operation's expected input types.",
             ErrorCode::E104 => "Division or modulo by zero is undefined. Check that your divisor is not zero before the operation.",
-            ErrorCode::E105 => "Array indices must be non-negative integers. Use `len(arr) - 1` to access the last element.",
+            ErrorCode::E105 => "Array indices must be non-negative integers. Use `len(arr) - 1` to access the last element, or use slice syntax `arr[-1..]` for negative offsets.",
             ErrorCode::E106 => "Attempted to index into an empty array literal. Ensure the array has elements before indexing.",
             ErrorCode::E107 => "Map literals cannot have duplicate keys. Remove or rename the duplicate key.",
 
             // Name resolution
             ErrorCode::E200 => "The variable has not been declared in this scope. Declare it with `let name = value;` before using it.",
             ErrorCode::E201 => "The function has not been defined. Check spelling and ensure the function is defined before it is called.",
-            ErrorCode::E202 => "The operation name is not recognized. Check spelling or use `use std::module::*` to import standard library functions.",
+            ErrorCode::E202 => "The operation or method name is not recognized. Check spelling, verify the method exists on the receiver type, or use `use std::module::*` to import standard library functions.",
             ErrorCode::E203 => "The module does not exist. Available standard library modules: math, cmp, logic, bits, str, convert, array, map, bytes, json, time, hash, io, control, rand, fs, env, net, tcp, udp, ws, sse, http_server, path, yaml, csv, toml, regex, uuid, crypto, compress, fmt, stats, text, encode, reflect, collections, sort, cert.",
             ErrorCode::E204 => "The item was not found in the specified module. Check the module's available exports.",
 

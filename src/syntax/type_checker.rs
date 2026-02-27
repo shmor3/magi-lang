@@ -237,6 +237,13 @@ impl TypeChecker {
         super::errors::suggest_name(name, &refs)
     }
 
+    /// Suggest a function name using Levenshtein distance.
+    fn suggest_function(&self, name: &str) -> Option<String> {
+        let names: Vec<String> = self.function_sigs.keys().cloned().collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        super::errors::suggest_name(name, &refs)
+    }
+
     /// Define a variable in the current (innermost) scope.
     fn define_var(&mut self, name: &str, ct: ChannelType, mutable: bool, line: u32, col: u32) {
         if is_reserved_keyword(name) {
@@ -1479,10 +1486,10 @@ impl TypeChecker {
                 self.emit_coded(
                     expr.span.start_line,
                     expr.span.start_col,
-                    format!("Unknown operation '{}'", name),
+                    format!("Undefined function or operation '{}'", name),
                     DiagnosticSeverity::Error,
                     super::errors::ErrorCode::E201,
-                    self.suggest_variable(name),
+                    self.suggest_function(name),
                 );
                 ChannelType::Null
             }
@@ -1817,13 +1824,15 @@ impl TypeChecker {
 
                 // Unknown method — warn (but suppress if receiver type is unknown/Null)
                 if obj_ty != ChannelType::Null {
+                    let available = available_methods_for_channel_type(obj_ty);
+                    let suggestion = super::errors::suggest_name(method, &available);
                     self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
                         format!("Unknown method '{}' on type '{}'", method, obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::E201,
-                        None,
+                        super::errors::ErrorCode::E202,
+                        suggestion,
                     );
                 }
                 ChannelType::Null
@@ -2955,6 +2964,51 @@ fn expr_contains_break(expr: &Expression) -> bool {
     }
 }
 
+/// Return available method names for a given ChannelType (for "did you mean?" suggestions).
+fn available_methods_for_channel_type(obj_type: ChannelType) -> Vec<&'static str> {
+    let mut methods: Vec<&'static str> = Vec::new();
+    match obj_type {
+        ChannelType::Array => {
+            methods.extend_from_slice(&["first", "last", "is_empty", "sum", "product", "min", "max", "join"]);
+            methods.extend_from_slice(&["map", "filter", "reduce", "find", "find_index", "any", "all",
+                "flat_map", "each", "sort_by", "group_by", "min_by", "max_by",
+                "take_while", "skip_while", "partition", "scan", "enumerate", "zip", "chunk"]);
+            methods.extend_from_slice(&["push", "pop", "shift", "len", "length", "get", "set",
+                "slice", "contains", "sort", "reverse", "flatten", "concat",
+                "unique", "insert", "remove", "filter_nulls"]);
+        }
+        ChannelType::String => {
+            methods.extend_from_slice(&["is_empty", "is_numeric", "is_alphabetic", "to_int", "to_float",
+                "len", "length", "trim", "trim_start", "trim_end", "to_upper", "to_uppercase",
+                "to_lower", "to_lowercase", "reverse", "chars", "lines", "pad_start", "pad_end",
+                "char_at", "repeat", "substring", "slice", "index_of",
+                "split", "contains", "replace", "starts_with", "ends_with",
+                "words", "count"]);
+        }
+        ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => {
+            methods.extend_from_slice(&["abs", "sign", "to_float64", "pow", "min", "max", "clamp"]);
+        }
+        ChannelType::Float64 | ChannelType::Float32 => {
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
+                "sign", "to_int64", "pow", "min", "max", "clamp",
+                "ln", "log2", "log10", "sin", "cos", "tan"]);
+        }
+        ChannelType::Map => {
+            methods.extend_from_slice(&["get", "set", "delete", "has", "keys", "values", "entries",
+                "merge", "len", "length", "size",
+                "filter_entries", "map_values", "map_keys"]);
+        }
+        ChannelType::Bytes => {
+            methods.extend_from_slice(&["len", "length", "slice", "concat", "contains",
+                "base64_encode", "base64_decode"]);
+        }
+        _ => {}
+    }
+    // Generic methods available on all types
+    methods.extend_from_slice(&["to_string", "to_int64", "to_float64", "to_bool", "to_json", "typeof"]);
+    methods
+}
+
 /// Resolve a method name on a given type to an OperationType name.
 /// Returns None if the method is unknown for that type.
 fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
@@ -3446,7 +3500,7 @@ output r;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Unknown operation 'foobar'")));
+            .any(|d| d.message.contains("Undefined function or operation 'foobar'")));
     }
 
     #[test]
@@ -3725,7 +3779,7 @@ output r;"#,
     fn test_fn_unknown_still_errors() {
         let a = check("let r = totally_unknown(42);");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Unknown operation")));
+        assert!(e.iter().any(|d| d.message.contains("Undefined function or operation")));
     }
 
     #[test]
@@ -4859,7 +4913,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         "#);
         let warns = warnings(&a);
         let unknown = warns.iter().filter(|d| d.message.contains("Unknown method")).collect::<Vec<_>>();
-        assert!(unknown.is_empty(), "Expected no E201 for known array methods, got: {:?}", unknown);
+        assert!(unknown.is_empty(), "Expected no E202 for known array methods, got: {:?}", unknown);
     }
 
 }

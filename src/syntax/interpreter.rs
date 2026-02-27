@@ -2970,9 +2970,9 @@ impl<'a> Interpreter<'a> {
                         const MAX_RANGE_SIZE: i64 = 10_000_000;
                         let range_size = end_v.saturating_sub(*a);
                         if range_size > MAX_RANGE_SIZE {
-                            return Err(InterpError::TypeError {
-                                expected: format!("range size at most {}", MAX_RANGE_SIZE),
-                                actual: format!("range size {}", range_size),
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} elements", MAX_RANGE_SIZE),
+                                actual: format!("{} elements", range_size),
                                 context: "range creation".to_string(),
                                 span: expr.span,
                             });
@@ -3965,10 +3965,10 @@ impl<'a> Interpreter<'a> {
 
         // Circular import detection
         if self.importing_packages.contains(package_id) {
-            return Err(InterpError::TypeError {
-                expected: "non-circular import".to_string(),
-                actual: format!("circular import of pkg::{}", package_id),
-                context: "package import".to_string(),
+            return Err(InterpError::EvalError {
+                error: EvalError::InvalidInput(
+                    format!("circular import detected: pkg::{} is already being imported", package_id),
+                ),
                 span,
             });
         }
@@ -4846,12 +4846,26 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
             methods.extend_from_slice(&["split", "contains", "replace", "starts_with", "ends_with",
                 "words", "count"]);
         }
-        DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => {
-            methods.extend_from_slice(&["abs", "sign", "to_float64", "to_int32", "to_uint32", "to_uint64", "pow", "min", "max", "clamp"]);
+        DataType::Int64(_) => {
+            methods.extend_from_slice(&["abs", "sign", "pow", "min", "max", "clamp"]);
         }
-        DataType::Float64(_) | DataType::Float32(_) => {
+        DataType::Int32(_) => {
+            methods.extend_from_slice(&["abs", "sign", "to_int32", "pow", "min", "max", "clamp"]);
+        }
+        DataType::Uint32(_) => {
+            methods.extend_from_slice(&["abs", "sign", "to_uint32", "pow", "min", "max", "clamp"]);
+        }
+        DataType::Uint64(_) => {
+            methods.extend_from_slice(&["abs", "sign", "to_uint64", "pow", "min", "max", "clamp"]);
+        }
+        DataType::Float64(_) => {
             methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
-                "sign", "to_int64", "to_float32", "pow", "min", "max", "clamp",
+                "sign", "pow", "min", "max", "clamp",
+                "ln", "log2", "log10", "sin", "cos", "tan"]);
+        }
+        DataType::Float32(_) => {
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
+                "sign", "to_float32", "pow", "min", "max", "clamp",
                 "ln", "log2", "log10", "sin", "cos", "tan"]);
         }
         DataType::Map(_) => {

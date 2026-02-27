@@ -144,6 +144,18 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
         });
     }
 
+    // Check if it's a known method name
+    if let Some(desc) = method_description(&word) {
+        let info = format!("```magi\n.{}(...)\n```\n{}", word, desc);
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: info,
+            }),
+            range: None,
+        });
+    }
+
     // Check if it's a keyword
     if is_keyword(&word) {
         let info = format!("`{}` — MAGI keyword", word);
@@ -201,6 +213,95 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "is_map" => Some("Returns true if the value is a map."),
         "is_bool" => Some("Returns true if the value is a boolean."),
         "is_bytes" => Some("Returns true if the value is a bytes value."),
+        _ => None,
+    }
+}
+
+fn method_description(name: &str) -> Option<&'static str> {
+    match name {
+        // Array methods
+        "push" => Some("Appends an element to the array and returns the new array."),
+        "pop" => Some("Removes and returns the last element of the array."),
+        "shift" => Some("Removes and returns the first element of the array."),
+        "insert" => Some("Inserts an element at the given index."),
+        "remove" => Some("Removes the element at the given index and returns the array."),
+        "get" => Some("Returns the element at the given index."),
+        "set" => Some("Sets the element at the given index and returns the array."),
+        "map" => Some("Transforms each element using a function. Returns a new array."),
+        "filter" => Some("Filters elements by a predicate function. Returns a new array."),
+        "reduce" => Some("Reduces the array to a single value using an accumulator function."),
+        "find" => Some("Returns the first element matching the predicate, or null."),
+        "find_index" => Some("Returns the index of the first matching element, or null."),
+        "any" => Some("Returns true if any element matches the predicate."),
+        "all" => Some("Returns true if all elements match the predicate."),
+        "each" => Some("Iterates over each element (for side effects). Returns null."),
+        "sort" => Some("Returns a sorted copy of the array."),
+        "sort_by" => Some("Sorts by a comparator function (a, b) -> number."),
+        "reverse" => Some("Returns a reversed copy."),
+        "contains" => Some("Checks if the collection contains a value."),
+        "join" => Some("Joins array elements into a string with a separator."),
+        "slice" => Some("Returns a sub-array or substring by index range."),
+        "concat" => Some("Concatenates two arrays or byte sequences."),
+        "flatten" => Some("Flattens nested arrays one level deep."),
+        "unique" => Some("Returns the array with duplicate elements removed."),
+        "first" => Some("Returns the first element, or null if empty."),
+        "last" => Some("Returns the last element, or null if empty."),
+        "is_empty" => Some("Returns true if the collection is empty."),
+        "sum" => Some("Returns the sum of all numeric elements."),
+        "product" => Some("Returns the product of all numeric elements."),
+        "flat_map" => Some("Maps each element and flattens the results."),
+        "enumerate" => Some("Returns [index, value] pairs."),
+        "chunk" => Some("Splits the array into chunks of n elements."),
+        "zip" => Some("Zips two arrays into pairs."),
+        "group_by" => Some("Groups elements by a key function. Returns a map."),
+        "min_by" => Some("Finds the minimum element using a comparator."),
+        "max_by" => Some("Finds the maximum element using a comparator."),
+        "take_while" => Some("Takes elements while the predicate is true."),
+        "skip_while" => Some("Skips elements while the predicate is true."),
+        "partition" => Some("Splits into [matches, non-matches]."),
+        "scan" => Some("Like reduce, but returns all intermediate accumulator values."),
+        "filter_nulls" => Some("Removes null elements from the array."),
+        // String methods
+        "split" => Some("Splits the string by a delimiter. Returns an array."),
+        "replace" => Some("Replaces all occurrences of a substring."),
+        "trim" => Some("Removes leading and trailing whitespace."),
+        "trim_start" => Some("Removes leading whitespace."),
+        "trim_end" => Some("Removes trailing whitespace."),
+        "to_uppercase" | "to_upper" => Some("Converts the string to uppercase."),
+        "to_lowercase" | "to_lower" => Some("Converts the string to lowercase."),
+        "starts_with" => Some("Returns true if the string starts with the given prefix."),
+        "ends_with" => Some("Returns true if the string ends with the given suffix."),
+        "index_of" => Some("Returns the character index of the first occurrence, or -1."),
+        "chars" => Some("Returns an array of individual characters."),
+        "lines" => Some("Splits the string into lines. Returns an array."),
+        "words" => Some("Splits the string into words. Returns an array."),
+        "repeat" => Some("Repeats the string n times."),
+        "count" => Some("Counts occurrences of a substring."),
+        "pad_start" => Some("Pads the start of the string to a given width."),
+        "pad_end" => Some("Pads the end of the string to a given width."),
+        "char_at" => Some("Returns the character at the given index, or null."),
+        "substring" => Some("Returns a substring by start and end index."),
+        "is_numeric" => Some("Returns true if the string is a valid number."),
+        "is_alphabetic" => Some("Returns true if all characters are alphabetic."),
+        "to_int" => Some("Parses the string as an integer. Returns null on failure."),
+        "to_float" => Some("Parses the string as a float. Returns null on failure."),
+        // Map methods
+        "has" => Some("Returns true if the map contains the given key."),
+        "delete" => Some("Removes a key from the map. Returns the updated map."),
+        "keys" => Some("Returns an array of all keys in the map."),
+        "values" => Some("Returns an array of all values in the map."),
+        "entries" => Some("Returns an array of [key, value] pairs."),
+        "merge" => Some("Merges another map into this one. Returns the merged map."),
+        "filter_entries" => Some("Filters map entries by a predicate (key, value) -> bool."),
+        "map_values" => Some("Transforms map values with a function. Returns a new map."),
+        "map_keys" => Some("Transforms map keys with a function. Returns a new map."),
+        // Bytes methods
+        "base64_encode" => Some("Encodes bytes as a base64 string."),
+        "base64_decode" => Some("Decodes a base64 string to bytes."),
+        // Numeric methods
+        "sign" => Some("Returns the sign of the number (-1, 0, or 1)."),
+        "is_nan" => Some("Returns true if the value is NaN."),
+        "is_infinite" => Some("Returns true if the value is infinite."),
         _ => None,
     }
 }
