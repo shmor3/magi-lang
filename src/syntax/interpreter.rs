@@ -1836,22 +1836,25 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
-                    Ok(Some(DataType::Uint64((*n as i64).min(other).max(0) as u64)))
+                    let val = (*n as i128).min(other as i128).max(0) as u64;
+                    Ok(Some(DataType::Uint64(val)))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
-                    Ok(Some(DataType::Uint64((*n as i64).max(other).max(0) as u64)))
+                    let val = (*n as i128).max(other as i128).max(0) as u64;
+                    Ok(Some(DataType::Uint64(val)))
                 }
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
-                    let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
-                    let max_val = hi_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })? as i128;
+                    let max_val = hi_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })? as i128;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
-                    Ok(Some(DataType::Uint64((*n as i64).max(lo).min(hi).max(0) as u64)))
+                    let val = (*n as i128).max(lo).min(hi).max(0) as u64;
+                    Ok(Some(DataType::Uint64(val)))
                 }
                 _ => Ok(None),
             },
