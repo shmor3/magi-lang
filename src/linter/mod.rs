@@ -615,6 +615,12 @@ mod tests {
         assert!(!codes.contains(&"W208".to_string()), "should not warn: {:?}", codes);
     }
 
+    #[test]
+    fn test_w208_duplicate_use() {
+        let codes = lint_codes("use std::math;\nuse std::math;");
+        assert!(codes.contains(&"W208".to_string()), "expected W208 for duplicate use, got {:?}", codes);
+    }
+
     // Config: disabled rules
     #[test]
     fn test_disabled_rule() {

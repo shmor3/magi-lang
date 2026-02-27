@@ -179,7 +179,12 @@ pub fn check_duplicate_imports(stmts: &[Statement]) -> Vec<AstDiagnostic> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in stmts {
-        if let StatementKind::Import(path) = &stmt.kind {
+        let path: Option<String> = match &stmt.kind {
+            StatementKind::Import(path) => Some(path.clone()),
+            StatementKind::Use { path, .. } => Some(path.join("::")),
+            _ => None,
+        };
+        if let Some(path) = path {
             if !seen.insert(path.clone()) {
                 let code = ErrorCode::W208;
                 diagnostics.push(AstDiagnostic {
