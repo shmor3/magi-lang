@@ -248,6 +248,11 @@ impl<'a> LintContext<'a> {
                     self.check_block(fb);
                 }
             }
+            StatementKind::TypeAlias { name, .. } => {
+                if let Some(d) = rules::check_naming_pascal_case(name, stmt.span) {
+                    self.emit(d);
+                }
+            }
             StatementKind::ConstDef { name, value, .. } => {
                 if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
                     self.emit(d);

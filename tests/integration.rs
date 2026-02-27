@@ -6410,9 +6410,9 @@ while true {
 }
 
 #[test]
-fn test_method_call_on_array_first() {
-    let result = run(r#"[1, 2, 3].first()"#);
-    assert_eq!(result, DataType::Int64(1));
+fn test_method_call_on_array_first_last() {
+    assert_eq!(run(r#"[1, 2, 3].first()"#), DataType::Int64(1));
+    assert_eq!(run(r#"[1, 2, 3].last()"#), DataType::Int64(3));
 }
 
 #[test]
@@ -6434,4 +6434,38 @@ fn test_int_abs_and_sign() {
     assert_eq!(run(r#"(-5).sign()"#), DataType::Int64(-1));
     assert_eq!(run(r#"(0).sign()"#), DataType::Int64(0));
     assert_eq!(run(r#"(5).sign()"#), DataType::Int64(1));
+}
+
+// ── Round 52: CLI evaluator, type checker, linter, LSP fixes ──
+
+#[test]
+fn test_or_pattern_binds_all_alternatives() {
+    // Variables from all Or-pattern alternatives should be accessible
+    let result = run(r#"
+let x = 42
+match x {
+    1 | n => n,
+}
+"#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_linter_type_alias_pascal_case() {
+    use magi_lang::linter;
+    let program = parse_v2("type my_type = int64;").unwrap();
+    let config = linter::LintConfig { disabled_rules: vec![] };
+    let result = linter::lint(&program, &config);
+    assert!(result.diagnostics.iter().any(|d| d.code.as_deref() == Some("W201")),
+        "expected W201 for non-PascalCase type alias");
+}
+
+#[test]
+fn test_linter_type_alias_pascal_case_ok() {
+    use magi_lang::linter;
+    let program = parse_v2("type MyType = int64;").unwrap();
+    let config = linter::LintConfig { disabled_rules: vec![] };
+    let result = linter::lint(&program, &config);
+    assert!(!result.diagnostics.iter().any(|d| d.code.as_deref() == Some("W201")),
+        "should not warn W201 for PascalCase type alias");
 }

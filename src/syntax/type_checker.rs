@@ -1518,7 +1518,6 @@ impl TypeChecker {
                 let obj_ty = self.infer_expr(object);
                 if obj_ty != ChannelType::Map
                     && obj_ty != ChannelType::String
-                    && obj_ty != ChannelType::Array
                     && obj_ty != ChannelType::Null
                 {
                     self.emit_coded(
@@ -2069,10 +2068,11 @@ impl TypeChecker {
                 }
             }
             Pattern::Or(alternatives) => {
-                // Bind vars from the first alternative only to avoid duplicate W102 warnings.
-                // All alternatives should bind the same names in valid code.
-                if let Some(first) = alternatives.first() {
-                    self.bind_pattern_vars(first, val_type, span);
+                // Collect all unique variable names from all alternatives,
+                // binding each only once to avoid duplicate W102 warnings.
+                let mut bound = std::collections::HashSet::new();
+                for alt in alternatives {
+                    self.bind_pattern_vars_collecting(alt, val_type, span, &mut bound);
                 }
             }
             Pattern::Rest(name) => {
@@ -2096,6 +2096,61 @@ impl TypeChecker {
             }
             Pattern::RangePattern { start, end, .. } => {
                 // No variables to bind, but walk the bound expressions for type checking
+                self.infer_expr(start);
+                self.infer_expr(end);
+            }
+        }
+    }
+
+    /// Like `bind_pattern_vars`, but tracks already-bound names to avoid duplicates
+    /// across Or-pattern alternatives.
+    fn bind_pattern_vars_collecting(
+        &mut self,
+        pattern: &Pattern,
+        val_type: ChannelType,
+        span: &Span,
+        bound: &mut std::collections::HashSet<String>,
+    ) {
+        match pattern {
+            Pattern::Literal(_) | Pattern::Wildcard => {}
+            Pattern::Variable(name) => {
+                if bound.insert(name.clone()) {
+                    self.define_var(name, val_type, false, span.start_line, span.start_col);
+                }
+            }
+            Pattern::Array(sub_patterns) => {
+                for sub in sub_patterns {
+                    self.bind_pattern_vars_collecting(sub, ChannelType::Null, span, bound);
+                }
+            }
+            Pattern::Map(entries) => {
+                for (_, sub_pattern) in entries {
+                    self.bind_pattern_vars_collecting(sub_pattern, ChannelType::Null, span, bound);
+                }
+            }
+            Pattern::Or(alternatives) => {
+                for alt in alternatives {
+                    self.bind_pattern_vars_collecting(alt, val_type, span, bound);
+                }
+            }
+            Pattern::Rest(name) => {
+                if let Some(name) = name {
+                    if bound.insert(name.clone()) {
+                        self.define_var(name, ChannelType::Array, false, span.start_line, span.start_col);
+                    }
+                }
+            }
+            Pattern::EnumPattern { bindings, .. } => {
+                for sub in bindings {
+                    self.bind_pattern_vars_collecting(sub, ChannelType::Null, span, bound);
+                }
+            }
+            Pattern::TypePattern { name, .. } => {
+                if bound.insert(name.clone()) {
+                    self.define_var(name, ChannelType::Null, false, span.start_line, span.start_col);
+                }
+            }
+            Pattern::RangePattern { start, end, .. } => {
                 self.infer_expr(start);
                 self.infer_expr(end);
             }

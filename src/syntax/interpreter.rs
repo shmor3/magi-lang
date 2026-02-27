@@ -1318,6 +1318,7 @@ impl<'a> Interpreter<'a> {
                             let key = sorted[i].clone();
                             let mut j = i;
                             while j > 0 {
+                                if self.is_cancelled() { return Err(InterpError::Cancelled); }
                                 comparison_count += 1;
                                 if comparison_count > max_comparisons {
                                     return Err(InterpError::MaxIterations { limit: max_comparisons, span });

@@ -679,6 +679,9 @@ impl OperationEvaluator for FullEvaluator {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match &array {
                     DataType::Array(arr) => {
+                        if arr.len() >= MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("array exceeds maximum size ({})", MAX_ARRAY_ELEMENTS)));
+                        }
                         let i = index.to_i64().unwrap_or(0);
                         let idx = if i < 0 { 0 } else { (i as usize).min(arr.len()) };
                         let mut new_arr = arr.clone();
@@ -695,7 +698,8 @@ impl OperationEvaluator for FullEvaluator {
                         let i = index.to_i64().unwrap_or(-1);
                         if i < 0 || i as usize >= arr.len() { return Ok(DataType::Null); }
                         let mut new_arr = arr.clone();
-                        Ok(new_arr.remove(i as usize))
+                        new_arr.remove(i as usize);
+                        Ok(DataType::Array(new_arr))
                     }
                     _ => Ok(DataType::Null),
                 }

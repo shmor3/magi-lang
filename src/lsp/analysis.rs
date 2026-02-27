@@ -265,10 +265,12 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
             };
             (char_col_to_utf16(src_line, col), char_col_to_utf16(src_line, end_char))
         } else {
-            (col, col + 1)
+            // Line not found in source — col is char-based, use as-is (no conversion possible)
+            (col, col.saturating_add(1))
         }
     } else {
-        (col, col + 1)
+        // No source available — col is char-based, use as-is
+        (col, col.saturating_add(1))
     };
 
     let severity = match d.severity {
