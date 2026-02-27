@@ -1289,8 +1289,8 @@ impl<'a> Interpreter<'a> {
                                 other => result.push(other),
                             }
                             if result.len() > MAX_ARRAY_ELEMENTS {
-                                return Err(InterpError::TypeError {
-                                    expected: format!("flat_map result at most {} elements", MAX_ARRAY_ELEMENTS),
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
                                     actual: format!("{} elements", result.len()),
                                     context: "flat_map".to_string(),
                                     span,

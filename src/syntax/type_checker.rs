@@ -1009,6 +1009,34 @@ impl TypeChecker {
         false
     }
 
+    /// Collect variable names bound by a pattern (for or-pattern validation).
+    fn collect_pattern_var_names(pattern: &Pattern) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        Self::collect_pattern_var_names_inner(pattern, &mut names);
+        names
+    }
+
+    fn collect_pattern_var_names_inner(pattern: &Pattern, names: &mut std::collections::BTreeSet<String>) {
+        match pattern {
+            Pattern::Variable(name) => { names.insert(name.clone()); }
+            Pattern::TypePattern { name, .. } => { names.insert(name.clone()); }
+            Pattern::Rest(Some(name)) => { names.insert(name.clone()); }
+            Pattern::Array(subs) => {
+                for sub in subs { Self::collect_pattern_var_names_inner(sub, names); }
+            }
+            Pattern::Map(entries) => {
+                for (_, sub) in entries { Self::collect_pattern_var_names_inner(sub, names); }
+            }
+            Pattern::Or(alts) => {
+                for alt in alts { Self::collect_pattern_var_names_inner(alt, names); }
+            }
+            Pattern::EnumPattern { bindings, .. } => {
+                for sub in bindings { Self::collect_pattern_var_names_inner(sub, names); }
+            }
+            Pattern::Literal(_) | Pattern::Wildcard | Pattern::Rest(None) | Pattern::RangePattern { .. } => {}
+        }
+    }
+
     /// Recursively collect enum variants from a pattern (handles nested Or patterns).
     fn collect_enum_variants<'a>(
         pattern: &'a Pattern,
@@ -2078,6 +2106,24 @@ impl TypeChecker {
                 }
             }
             Pattern::Or(alternatives) => {
+                // Validate that all alternatives bind the same set of variables.
+                if alternatives.len() >= 2 {
+                    let first_vars = Self::collect_pattern_var_names(&alternatives[0]);
+                    for alt in &alternatives[1..] {
+                        let alt_vars = Self::collect_pattern_var_names(alt);
+                        if first_vars != alt_vars {
+                            self.emit_coded(
+                                span.start_line,
+                                span.start_col,
+                                "Or-pattern alternatives bind different variables; all alternatives must bind the same names".to_string(),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::W106,
+                                None,
+                            );
+                            break;
+                        }
+                    }
+                }
                 // Collect all unique variable names from all alternatives,
                 // binding each only once to avoid duplicate W102 warnings.
                 let mut bound = std::collections::HashSet::new();
@@ -4231,6 +4277,42 @@ output r;"#,
         );
         let w = warnings(&a);
         assert!(w.iter().any(|d| d.message.contains("guard should be bool")));
+    }
+
+    #[test]
+    fn test_or_pattern_inconsistent_vars_warns() {
+        let a = check(
+            r#"let x = 5;
+let r = match x {
+    a | 2 => 0,
+    _ => 1,
+};
+output r;"#,
+        );
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("Or-pattern alternatives bind different variables")),
+            "expected warning for inconsistent or-pattern vars, got {:?}",
+            w.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_or_pattern_consistent_vars_no_warning() {
+        let a = check(
+            r#"let x = 5;
+let r = match x {
+    1 | 2 | 3 => 0,
+    _ => 1,
+};
+output r;"#,
+        );
+        let w = warnings(&a);
+        assert!(
+            !w.iter().any(|d| d.message.contains("Or-pattern alternatives")),
+            "no warning expected for consistent or-pattern, got {:?}",
+            w.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     // =========================================================================
