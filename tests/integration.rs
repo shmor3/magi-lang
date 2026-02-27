@@ -7893,3 +7893,71 @@ fn test_pad_start_with_two_args() {
 fn test_substring_with_two_args() {
     assert_eq!(run(r#"output "hello".substring(1, 4);"#), DataType::String("ell".to_string()));
 }
+
+// ── Round 78: linter, type checker, formatter fixes ──────
+
+#[test]
+fn test_linter_module_no_duplicate_diagnostics() {
+    use magi_lang::linter;
+    let src = r#"
+        mod utils {
+            fn badName() { 42 }
+        }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    // Should have exactly one W200 for badName, not two
+    let w200_count = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W200") && d.message.contains("badName"))
+        .count();
+    assert_eq!(w200_count, 1, "Expected 1 W200 diagnostic for badName, got {}. All diagnostics: {:?}",
+        w200_count, result.diagnostics);
+}
+
+#[test]
+fn test_linter_default_param_linted() {
+    use magi_lang::linter;
+    let src = r#"
+        fn foo(x = if true { 1 } else { 2 }) {
+            x
+        }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = linter::lint(&program, &linter::LintConfig::default());
+    // Should have W204 for constant condition `true` in default param
+    let w204_count = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W204"))
+        .count();
+    assert_eq!(w204_count, 1, "Expected 1 W204 diagnostic for constant condition in default param, got {}. All diagnostics: {:?}",
+        w204_count, result.diagnostics);
+}
+
+#[test]
+fn test_type_checker_shift_no_w110() {
+    let src = r#"
+        let mut arr = [1, 2, 3];
+        let first = arr.shift();
+        output first;
+    "#;
+    let program = parse_v2(src).unwrap();
+    let imports = std::collections::HashSet::new();
+    let result = check_types(&program, &imports);
+    let w110_count = result.diagnostics.iter()
+        .filter(|d| d.message.contains("W110"))
+        .count();
+    assert_eq!(w110_count, 0, "Expected no W110 for arr.shift(), got: {:?}",
+        result.diagnostics.iter().filter(|d| d.message.contains("W110")).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_formatter_fstring_sentinel_roundtrip() {
+    use magi_lang::formatter;
+    // f-string with escaped braces (the parser stores \{ as sentinel \u{FFF0})
+    let src = r#"output f"hello \{ world \}";"#;
+    let program = parse_v2(src).unwrap();
+    let formatted = formatter::format_program(&program, &formatter::FormatConfig::default());
+    // The formatted output should contain \{ and \}, not raw sentinel chars
+    assert!(!formatted.contains('\u{FFF0}'), "Formatted output should not contain sentinel chars");
+    assert!(!formatted.contains('\u{FFF1}'), "Formatted output should not contain sentinel chars");
+    assert!(formatted.contains("\\{"), "Formatted output should contain escaped braces: {}", formatted);
+}

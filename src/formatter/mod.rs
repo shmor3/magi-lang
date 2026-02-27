@@ -132,6 +132,7 @@ impl<'a> Formatter<'a> {
                     | StatementKind::ModuleDef { .. }
                     | StatementKind::TestDef { .. }
                     | StatementKind::ConstDef { .. }
+                    | StatementKind::TypeAlias { .. }
             );
 
             // Blank line before definitions (but not the very first statement)
@@ -692,9 +693,12 @@ impl<'a> Formatter<'a> {
                 for part in parts {
                     match part {
                         StringPart::Literal(s) => {
+                            // Convert sentinel chars back to escaped braces before escaping.
+                            // The lexer uses \u{FFF0}/\u{FFF1} as sentinels for \{/\} in f-strings.
+                            let s = s.replace('\u{FFF0}', "{").replace('\u{FFF1}', "}");
                             // Escape special characters in the literal.
                             // Braces must use \{ and \} to round-trip through the parser.
-                            let escaped = escape_string_contents(s);
+                            let escaped = escape_string_contents(&s);
                             let escaped = escaped.replace('{', "\\{").replace('}', "\\}");
                             self.write(&escaped);
                         }

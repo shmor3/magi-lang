@@ -137,6 +137,9 @@ impl<'a> LintContext<'a> {
                     if let Some(d) = rules::check_naming_snake_case(&param.name, param.span) {
                         self.emit(d);
                     }
+                    if let Some(ref default) = param.default {
+                        self.check_expression(default);
+                    }
                 }
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
@@ -150,6 +153,9 @@ impl<'a> LintContext<'a> {
                 for param in &fdef.params {
                     if let Some(d) = rules::check_naming_snake_case(&param.name, param.span) {
                         self.emit(d);
+                    }
+                    if let Some(ref default) = param.default {
+                        self.check_expression(default);
                     }
                 }
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
@@ -260,10 +266,6 @@ impl<'a> LintContext<'a> {
                 self.check_expression(value);
             }
             StatementKind::ModuleDef { body, .. } => {
-                // Walk module body for both lint checks and enum collection
-                for inner in &body.statements {
-                    self.check_statement(inner);
-                }
                 self.check_block(body);
             }
             StatementKind::TestDef { body, .. } => {
@@ -373,6 +375,9 @@ impl<'a> LintContext<'a> {
                 for param in params {
                     if let Some(d) = rules::check_naming_snake_case(&param.name, param.span) {
                         self.emit(d);
+                    }
+                    if let Some(ref default) = param.default {
+                        self.check_expression(default);
                     }
                 }
                 self.check_expression(body);

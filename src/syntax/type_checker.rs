@@ -1705,6 +1705,7 @@ impl TypeChecker {
                 const MUTATING_METHODS: &[&str] = &[
                     "push", "pop", "set", "remove", "insert", "clear",
                     "delete", "merge", "sort", "reverse", "extend",
+                    "shift", "filter_nulls",
                 ];
                 if MUTATING_METHODS.contains(&method.as_str()) {
                     if let ExpressionKind::Variable(ref var_name) = object.kind {
@@ -2976,6 +2977,8 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "slice" => Some("bytes_slice".into()),
             "concat" => Some("bytes_concat".into()),
             "contains" => Some("bytes_contains".into()),
+            "base64_encode" => Some("base64_encode".into()),
+            "base64_decode" => Some("base64_decode".into()),
             _ => None,
         },
         ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => match method {
@@ -2983,7 +2986,14 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             | "max" | "clamp" | "to_int32" | "to_uint32" | "to_uint64" => Some("numeric_method".into()),
             _ => None,
         },
-        ChannelType::Float64 | ChannelType::Float32 => match method {
+        ChannelType::Float64 => match method {
+            "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
+            | "to_int64" | "to_float64" | "pow" | "min" | "max" | "clamp" | "is_nan"
+            | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
+            | "tan" => Some("numeric_method".into()),
+            _ => None,
+        },
+        ChannelType::Float32 => match method {
             "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
             | "to_int64" | "to_float64" | "to_float32" | "pow" | "min" | "max" | "clamp" | "is_nan"
             | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
