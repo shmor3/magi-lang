@@ -30,6 +30,9 @@ impl OperationEvaluator for StubEvaluator {
         let input = inputs
             .get("input")
             .or_else(|| inputs.get("value"))
+            .or_else(|| inputs.get("array"))
+            .or_else(|| inputs.get("map"))
+            .or_else(|| inputs.get("string"))
             .cloned()
             .unwrap_or(DataType::Null);
 
@@ -6468,4 +6471,234 @@ fn test_linter_type_alias_pascal_case_ok() {
     let result = linter::lint(&program, &config);
     assert!(!result.diagnostics.iter().any(|d| d.code.as_deref() == Some("W201")),
         "should not warn W201 for PascalCase type alias");
+}
+
+// ── Round 53: expanded test coverage ──
+
+#[test]
+fn test_nested_fstring() {
+    assert_eq!(
+        run(r#"let x = 5; f"outer {f"inner {x}"}""#),
+        DataType::String("outer inner 5".to_string())
+    );
+}
+
+#[test]
+fn test_fstring_with_method_call() {
+    assert_eq!(
+        run(r#"let s = "hello"; f"upper: {s.to_upper()}""#),
+        DataType::String("upper: HELLO".to_string())
+    );
+}
+
+#[test]
+fn test_closure_captures_outer_scope() {
+    assert_eq!(
+        run(r#"
+let x = 10
+let f = |a| a + x
+f(5)
+"#),
+        DataType::Int64(15)
+    );
+}
+
+#[test]
+fn test_null_coalesce_chain_deep() {
+    assert_eq!(run(r#"null ?? null ?? 42"#), DataType::Int64(42));
+    assert_eq!(run(r#"1 ?? 2 ?? 3"#), DataType::Int64(1));
+}
+
+#[test]
+fn test_optional_chaining_null() {
+    assert_eq!(run(r#"let x = null; x?.field"#), DataType::Null);
+}
+
+#[test]
+fn test_optional_chaining_nested() {
+    assert_eq!(
+        run(r#"let x = {"a": {"b": 42}}; x?.a?.b"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_optional_chaining_method() {
+    assert_eq!(
+        run(r#"let x = "hello"; x?.to_upper()"#),
+        DataType::String("HELLO".to_string())
+    );
+}
+
+#[test]
+fn test_optional_chaining_method_on_null() {
+    assert_eq!(run(r#"let x = null; x?.to_upper()"#), DataType::Null);
+}
+
+#[test]
+fn test_compound_assign_all_ops() {
+    assert_eq!(run(r#"let mut x = 10; x += 5; x"#), DataType::Int64(15));
+    assert_eq!(run(r#"let mut x = 10; x -= 3; x"#), DataType::Int64(7));
+    assert_eq!(run(r#"let mut x = 10; x *= 2; x"#), DataType::Int64(20));
+    assert_eq!(run(r#"let mut x = 10; x /= 3; x"#), DataType::Int64(3));
+    assert_eq!(run(r#"let mut x = 10; x %= 3; x"#), DataType::Int64(1));
+}
+
+#[test]
+fn test_match_nested_array_pattern() {
+    assert_eq!(
+        run(r#"
+match [[1, 2], [3, 4]] {
+    [[a, b], [c, d]] => a + b + c + d,
+    _ => 0,
+}
+"#),
+        DataType::Int64(10)
+    );
+}
+
+#[test]
+fn test_comprehension_with_method() {
+    assert_eq!(
+        run(r#"
+let items = [1, 2, 3]
+let result = [x * x for x in items]
+result
+"#),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(4), DataType::Int64(9)])
+    );
+}
+
+#[test]
+fn test_spread_in_array() {
+    assert_eq!(
+        run(r#"
+let a = [1, 2, 3]
+let b = [0, ...a, 4]
+b
+"#),
+        DataType::Array(vec![
+            DataType::Int64(0),
+            DataType::Int64(1),
+            DataType::Int64(2),
+            DataType::Int64(3),
+            DataType::Int64(4),
+        ])
+    );
+}
+
+#[test]
+fn test_map_field_access_chain() {
+    assert_eq!(
+        run(r#"
+let a = {"x": {"y": 42}}
+a.x.y
+"#),
+        DataType::Int64(42)
+    );
+}
+
+#[test]
+fn test_match_rest_pattern() {
+    assert_eq!(
+        run(r#"
+match [1, 2, 3, 4, 5] {
+    [first, ...rest] => first + rest.len(),
+    _ => 0,
+}
+"#),
+        DataType::Int64(5)
+    );
+}
+
+#[test]
+fn test_match_rest_pattern_middle() {
+    assert_eq!(
+        run(r#"
+match [1, 2, 3, 4, 5] {
+    [first, ...middle, last] => first + last,
+    _ => 0,
+}
+"#),
+        DataType::Int64(6)
+    );
+}
+
+#[test]
+fn test_enum_pattern_in_match() {
+    assert_eq!(
+        run(r#"
+enum Shape { Circle(r), Square(s) }
+fn area(shape) {
+    match shape {
+        Shape::Circle(r) => r * r,
+        Shape::Square(s) => s * s,
+    }
+}
+let c = Shape::Circle(5)
+area(c)
+"#),
+        DataType::Int64(25)
+    );
+}
+
+#[test]
+fn test_loop_with_break_value() {
+    assert_eq!(
+        run(r#"
+let mut i = 0
+let result = loop {
+    i = i + 1
+    if i >= 5 {
+        break i * 10;
+    }
+}
+result
+"#),
+        DataType::Int64(50)
+    );
+}
+
+#[test]
+fn test_while_loop_value() {
+    assert_eq!(
+        run(r#"
+let mut sum = 0
+let mut i = 1
+while i <= 5 {
+    sum = sum + i
+    i = i + 1
+}
+sum
+"#),
+        DataType::Int64(15)
+    );
+}
+
+#[test]
+fn test_array_comprehension_with_filter() {
+    assert_eq!(
+        run(r#"
+let items = [1, 2, 3, 4, 5]
+let result = [x * x for x in items if x % 2 == 0]
+result
+"#),
+        DataType::Array(vec![DataType::Int64(4), DataType::Int64(16)])
+    );
+}
+
+#[test]
+fn test_closure_with_default_param() {
+    assert_eq!(
+        run(r#"let f = |x, y = 10| x + y; f(5)"#),
+        DataType::Int64(15)
+    );
+}
+
+#[test]
+fn test_closure_with_default_param_override() {
+    assert_eq!(
+        run(r#"let f = |x, y = 10| x + y; f(5, 20)"#),
+        DataType::Int64(25)
+    );
 }
