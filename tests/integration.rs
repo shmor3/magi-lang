@@ -67,7 +67,10 @@ impl OperationEvaluator for StubEvaluator {
                     if *y == 0 {
                         Err(EvalError::DivisionByZero)
                     } else {
-                        Ok(DataType::Int64(x / y))
+                        match x.checked_div(*y) {
+                            Some(v) => Ok(DataType::Int64(v)),
+                            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                        }
                     }
                 }
                 (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x / y)),
@@ -80,8 +83,13 @@ impl OperationEvaluator for StubEvaluator {
                 _ => Ok(DataType::Null),
             },
             OperationType::Modulo => match (&a, &b) {
-                (DataType::Int64(_, ), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x % y)),
+                (DataType::Int64(_), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
+                (DataType::Int64(x), DataType::Int64(y)) => {
+                    match x.checked_rem(*y) {
+                        Some(v) => Ok(DataType::Int64(v)),
+                        None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                    }
+                }
                 _ => Ok(DataType::Null),
             },
 

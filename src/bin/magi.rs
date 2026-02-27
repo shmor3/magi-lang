@@ -696,7 +696,7 @@ impl OperationEvaluator for FullEvaluator {
                 match &array {
                     DataType::Array(arr) => {
                         let i = index.to_i64().unwrap_or(-1);
-                        if i < 0 || i as usize >= arr.len() { return Ok(DataType::Null); }
+                        if i < 0 || i as usize >= arr.len() { return Ok(DataType::Array(arr.clone())); }
                         let mut new_arr = arr.clone();
                         new_arr.remove(i as usize);
                         Ok(DataType::Array(new_arr))
@@ -1251,6 +1251,16 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
         if std::path::Path::new(rel_path).is_absolute() {
             eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
             continue;
+        }
+
+        // Check if resolved path escapes the project root
+        let dep_resolved = dir.join(rel_path);
+        if let (Ok(project_canonical), Ok(dep_canonical)) = (dir.canonicalize(), dep_resolved.canonicalize()) {
+            let project_root = project_canonical.parent().unwrap_or(&project_canonical);
+            if !dep_canonical.starts_with(project_root) {
+                eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+                continue;
+            }
         }
 
         let dep_dir = dir.join(rel_path);
