@@ -5695,3 +5695,98 @@ fn test_slice_both_negative() {
         DataType::Int64(4),
     ]));
 }
+
+// ── Round 46: Type checker and parser correctness ──
+
+#[test]
+fn test_string_concat_type_inference() {
+    // String + String should not produce type checker warnings
+    let src = r#"
+    let a = "hello"
+    let b = " world"
+    let c = a + b
+    c
+    "#;
+    let warnings = typecheck_warnings(src);
+    assert!(warnings.is_empty(), "string concat should produce no warnings, got: {:?}", warnings);
+    assert_eq!(run(src), DataType::String("hello world".to_string()));
+}
+
+#[test]
+fn test_for_loop_over_string_no_warning() {
+    let src = r#"
+    let s = "abc"
+    let mut result = []
+    for ch in s {
+        result = result
+    }
+    result
+    "#;
+    let warnings = typecheck_warnings(src);
+    let e102: Vec<_> = warnings.iter().filter(|w| w.contains("iterable")).collect();
+    assert!(e102.is_empty(), "for-over-string should not warn about iterable type, got: {:?}", e102);
+}
+
+#[test]
+fn test_match_arm_throw() {
+    // throw should be allowed in match arm body without braces
+    let src = r#"
+    fn check(x) {
+        match x {
+            0 => throw "zero not allowed"
+            _ => x
+        }
+    }
+    check(5)
+    "#;
+    assert_eq!(run(src), DataType::Int64(5));
+}
+
+#[test]
+fn test_match_arm_return() {
+    let src = r#"
+    fn check(x) {
+        match x {
+            0 => return "zero"
+            _ => "other"
+        }
+    }
+    check(0)
+    "#;
+    assert_eq!(run(src), DataType::String("zero".to_string()));
+}
+
+#[test]
+fn test_float_range_pattern() {
+    let src = r#"
+    fn classify(x) {
+        match x {
+            0.0..1.0 => "small"
+            _ => "big"
+        }
+    }
+    classify(0.5)
+    "#;
+    assert_eq!(run(src), DataType::String("small".to_string()));
+}
+
+#[test]
+fn test_pub_type_accepted() {
+    let src = "pub type Num = int";
+    let result = parse_v2(src);
+    assert!(result.is_ok(), "pub type should be accepted");
+}
+
+#[test]
+fn test_pub_use_accepted() {
+    let src = "pub use std::math::sqrt";
+    let result = parse_v2(src);
+    assert!(result.is_ok(), "pub use should be accepted");
+}
+
+#[test]
+fn test_glob_import_alias_rejected() {
+    let src = "use std::math::* as m";
+    let result = parse_v2(src);
+    assert!(result.is_err(), "glob import with alias should be rejected");
+}

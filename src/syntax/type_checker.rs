@@ -442,12 +442,16 @@ impl TypeChecker {
                 body,
             } => {
                 let iter_type = self.infer_expr(iterable);
-                if iter_type != ChannelType::Array && iter_type != ChannelType::Null {
+                if iter_type != ChannelType::Array
+                    && iter_type != ChannelType::Map
+                    && iter_type != ChannelType::String
+                    && iter_type != ChannelType::Null
+                {
                     self.emit_coded(
                         iterable.span.start_line,
                         iterable.span.start_col,
                         format!(
-                            "For-loop iterable should be array, got {}",
+                            "For-loop iterable should be array, map, or string, got {}",
                             iter_type.as_str()
                         ),
                         DiagnosticSeverity::Warning,
@@ -1378,15 +1382,13 @@ impl TypeChecker {
                     ChannelType::Null
                 };
 
-                // Try to unify branches.
-                if then_ty == else_ty {
-                    then_ty
-                } else if then_ty == ChannelType::Null {
-                    else_ty
-                } else if else_ty == ChannelType::Null {
-                    then_ty
-                } else {
-                    // Branches disagree — warn and use Null.
+                // Unify branch types (supports numeric promotion).
+                let unified = unify_types(&[then_ty, else_ty]);
+                if unified == ChannelType::Null
+                    && then_ty != ChannelType::Null
+                    && else_ty != ChannelType::Null
+                    && then_ty != else_ty
+                {
                     self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
@@ -1399,8 +1401,8 @@ impl TypeChecker {
                         super::errors::ErrorCode::E100,
                         None,
                     );
-                    ChannelType::Null
                 }
+                unified
             }
 
             // -----------------------------------------------------------------
@@ -1482,11 +1484,14 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             ExpressionKind::FieldAccess { object, field: _ } => {
                 let obj_ty = self.infer_expr(object);
-                if obj_ty != ChannelType::Map && obj_ty != ChannelType::Null {
+                if obj_ty != ChannelType::Map
+                    && obj_ty != ChannelType::String
+                    && obj_ty != ChannelType::Null
+                {
                     self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
-                        format!("Field access requires map, got {}", obj_ty.as_str()),
+                        format!("Field access requires map or string, got {}", obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E100,
                         None,
@@ -1868,16 +1873,8 @@ impl TypeChecker {
                     self.infer_block(finally);
                 }
 
-                // Unify try/catch types
-                if try_ty == catch_ty {
-                    try_ty
-                } else if try_ty == ChannelType::Null {
-                    catch_ty
-                } else if catch_ty == ChannelType::Null {
-                    try_ty
-                } else {
-                    ChannelType::Null
-                }
+                // Unify try/catch types (supports numeric promotion).
+                unify_types(&[try_ty, catch_ty])
             }
 
             ExpressionKind::ListComprehension { expr: body, pattern, iterable, condition } => {
@@ -2111,6 +2108,11 @@ impl TypeChecker {
 
             // Arithmetic operators: use the operation's typing rules.
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                // String concatenation: Add with any String operand returns String.
+                if op == BinOp::Add && (left == ChannelType::String || right == ChannelType::String) {
+                    return ChannelType::String;
+                }
+
                 // Division always returns Float64.
                 if op == BinOp::Div {
                     return ChannelType::Float64;
@@ -4421,4 +4423,5 @@ test "reads outer" { let r = x + 1; output r; }"#,
             undef_errs
         );
     }
+
 }

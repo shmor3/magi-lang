@@ -4779,23 +4779,31 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
             }
         }
         Pattern::RangePattern { start, end, inclusive } => {
-            // Extract literal values from expressions for range comparison
-            let start_val = match &start.kind {
-                ExpressionKind::Literal(Literal::Int64(v)) => *v,
+            // Extract literal values from expressions for range comparison.
+            // Support both Int64 and Float64 range patterns.
+            let start_f = match &start.kind {
+                ExpressionKind::Literal(Literal::Int64(v)) => *v as f64,
+                ExpressionKind::Literal(Literal::Float64(v)) => *v,
                 _ => return None,
             };
-            let end_val = match &end.kind {
-                ExpressionKind::Literal(Literal::Int64(v)) => *v,
+            let end_f = match &end.kind {
+                ExpressionKind::Literal(Literal::Int64(v)) => *v as f64,
+                ExpressionKind::Literal(Literal::Float64(v)) => *v,
                 _ => return None,
             };
-            let val = match value {
-                DataType::Int64(v) => *v,
+            let val_f = match value {
+                DataType::Int64(v) => *v as f64,
+                DataType::Float64(v) => *v,
+                DataType::Float32(v) => *v as f64,
+                DataType::Int32(v) => *v as f64,
+                DataType::Uint32(v) => *v as f64,
+                DataType::Uint64(v) => *v as f64,
                 _ => return None,
             };
             let in_range = if *inclusive {
-                val >= start_val && val <= end_val
+                val_f >= start_f && val_f <= end_f
             } else {
-                val >= start_val && val < end_val
+                val_f >= start_f && val_f < end_f
             };
             if in_range { Some(vec![]) } else { None }
         }

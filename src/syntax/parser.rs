@@ -221,13 +221,14 @@ impl Parser {
                 self.advance(); // consume 'pub'
                 match self.peek_kind() {
                     TokenKind::Fn | TokenKind::Async | TokenKind::Mod
-                    | TokenKind::Enum | TokenKind::Struct | TokenKind::Const => {
+                    | TokenKind::Enum | TokenKind::Struct | TokenKind::Const
+                    | TokenKind::Type | TokenKind::Use => {
                         self.parse_statement()
                     }
                     _ => Err(SyntaxError {
                         line: start.start_line as usize,
                         column: start.start_col as usize,
-                        message: "'pub' can only be applied to fn, async fn, mod, enum, struct, or const definitions".to_string(),
+                        message: "'pub' can only be applied to fn, async fn, mod, enum, struct, const, type, or use definitions".to_string(),
                     }),
                 }
             }
@@ -616,6 +617,13 @@ impl Parser {
 
         // Optional alias: `use std::math::sqrt as s;`
         let alias = if self.eat(&TokenKind::As) {
+            if glob {
+                return Err(SyntaxError {
+                    line: start.start_line as usize,
+                    column: start.start_col as usize,
+                    message: "Glob import ('*') cannot have an alias".to_string(),
+                });
+            }
             let alias_tok = self.expect_identifier()?;
             Some(alias_tok.text)
         } else {
@@ -1803,9 +1811,21 @@ impl Parser {
 
             self.expect(&TokenKind::FatArrow)?;
 
-            // Arm body: either a block or a single expression
+            // Arm body: either a block, a statement keyword, or a single expression
             let body = if self.at(&TokenKind::LBrace) {
                 self.parse_block()?
+            } else if matches!(
+                self.peek_kind(),
+                TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Throw
+            ) {
+                // Statement keywords in match arm: wrap in a single-statement block
+                let stmt = self.parse_statement()?;
+                let span = stmt.span;
+                Block {
+                    statements: vec![stmt],
+                    tail_expr: None,
+                    span,
+                }
             } else {
                 let expr = self.parse_expression()?;
                 let span = expr.span;
@@ -1919,6 +1939,34 @@ impl Parser {
             TokenKind::FloatLiteral => {
                 self.advance();
                 let val: f64 = tok.text.parse().map_err(|_| self.error("Invalid float"))?;
+                let start_expr = Expression {
+                    kind: ExpressionKind::Literal(Literal::Float64(val)),
+                    span: tok.span,
+                };
+                // Float range pattern: 0.0..1.0 or 0.0..=1.0
+                if self.at(&TokenKind::DotDot) || self.at(&TokenKind::DotDotEq) {
+                    let inclusive = self.at(&TokenKind::DotDotEq);
+                    let end_pos = self.pos + 1;
+                    let end_tok_kind = if end_pos < self.tokens.len() {
+                        self.tokens[end_pos].kind.clone()
+                    } else {
+                        TokenKind::Eof
+                    };
+                    if end_tok_kind == TokenKind::FloatLiteral || end_tok_kind == TokenKind::IntLiteral {
+                        self.advance(); // consume `..` or `..=`
+                        let end_tok = self.peek().clone();
+                        self.advance();
+                        let end_val: f64 = end_tok.text.parse().map_err(|_| self.error("Invalid float"))?;
+                        return Ok(Pattern::RangePattern {
+                            start: Box::new(start_expr),
+                            end: Box::new(Expression {
+                                kind: ExpressionKind::Literal(Literal::Float64(end_val)),
+                                span: end_tok.span,
+                            }),
+                            inclusive,
+                        });
+                    }
+                }
                 Ok(Pattern::Literal(Literal::Float64(val)))
             }
             TokenKind::StringLiteral => {
