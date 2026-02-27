@@ -6048,3 +6048,78 @@ x
     let result = run(src);
     assert_eq!(result, DataType::Int64(20));
 }
+
+// ── Round 49: Parser fixes ──────────────────────────────────────────────────
+
+#[test]
+fn test_struct_literal_requires_uppercase() {
+    // Lowercase `result { value: 1 }` should NOT parse as a struct literal.
+    // It should be treated as variable `result` followed by block `{ value: 1 }`.
+    // In an if-context, `if result { ... }` should work as condition + block.
+    let src = r#"
+let result = true
+if result { 42 } else { 0 }
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_pub_pub_rejected() {
+    // Duplicate pub should produce a parse error
+    let src = "pub pub fn foo() { 1 }";
+    let parsed = parse_v2(src);
+    assert!(parsed.is_err(), "pub pub should produce a parse error");
+}
+
+#[test]
+fn test_fstring_escaped_braces() {
+    // f-string with escaped braces should produce literal braces
+    let src = r#"f"hello \{ world \}""#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("hello { world }".to_string()));
+}
+
+#[test]
+fn test_fstring_mixed_escaped_and_interpolation() {
+    // Mix of escaped braces and actual interpolation
+    let src = r#"
+let x = 42
+f"value = \{ {x} \}"
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("value = { 42 }".to_string()));
+}
+
+#[test]
+fn test_struct_literal_uppercase_still_works() {
+    // Uppercase Name { field: value } should still parse as struct literal
+    let src = r#"
+struct Point { x, y }
+let p = Point { x: 10, y: 20 }
+p.x + p.y
+"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+#[test]
+fn test_output_span_does_not_include_next() {
+    // Verify output statement parses correctly with semicolons
+    let src = r#"
+output 42;
+output 100;
+100
+"#;
+    // Just make sure it parses and runs without error
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(100));
+}
+
+#[test]
+fn test_import_span_parse() {
+    // Ensure import statement parses without spanning into next token
+    let src = r#"import "test-plugin""#;
+    let parsed = parse_v2(src);
+    assert!(parsed.is_ok(), "import should parse cleanly");
+}

@@ -971,10 +971,28 @@ impl<'a> Lexer<'a> {
                     }
                     value.push('}');
                 }
-                Some(b'\\') => {
+                Some(b'\\') if brace_depth == 0 => {
                     self.advance(); // consume backslash
-                    let ch = self.parse_escape_sequence()?;
-                    value.push(ch);
+                    // In f-strings outside interpolation, \{ and \} must not produce
+                    // literal braces (which would be confused with interpolation markers).
+                    // Use sentinel chars that the parser converts back.
+                    match self.peek() {
+                        Some(b'{') => { self.advance(); value.push('\u{FFF0}'); }
+                        Some(b'}') => { self.advance(); value.push('\u{FFF1}'); }
+                        _ => {
+                            let ch = self.parse_escape_sequence()?;
+                            value.push(ch);
+                        }
+                    }
+                }
+                Some(b'\\') => {
+                    // Inside interpolation: keep backslash escapes verbatim
+                    // so the inner tokenizer can process them.
+                    self.advance();
+                    value.push('\\');
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
                 }
                 Some(q @ b'"') | Some(q @ b'\'') if brace_depth > 0 => {
                     // Inside interpolation: skip over string literals so braces within

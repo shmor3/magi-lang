@@ -235,9 +235,16 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Array(arr) => {
                     let mut sorted = arr.clone();
                     sorted.sort_by(|a, b| {
+                        // Try numeric comparison first (handles cross-type: Int32, Int64, Float32, Float64, etc.)
+                        match (promote_numeric(a), promote_numeric(b)) {
+                            (Some(pa), Some(pb)) => {
+                                let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                                let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                                return fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal);
+                            }
+                            _ => {}
+                        }
                         match (a, b) {
-                            (DataType::Int64(x), DataType::Int64(y)) => x.cmp(y),
-                            (DataType::Float64(x), DataType::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                             (DataType::String(x), DataType::String(y)) => x.cmp(y),
                             _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
                         }
@@ -256,12 +263,16 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::ArrayJoin => match &array {
                 DataType::Array(arr) => {
+                    let sep = match inputs.get("delimiter").or(inputs.get("separator")).or(inputs.get("input_1")) {
+                        Some(DataType::String(s)) => s.clone(),
+                        _ => ",".to_string(),
+                    };
                     let s: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
-                    let estimated_len: usize = s.iter().map(|p| p.len()).sum::<usize>() + s.len().saturating_sub(1);
+                    let estimated_len: usize = s.iter().map(|p| p.len()).sum::<usize>() + s.len().saturating_sub(1) * sep.len();
                     if estimated_len > MAX_STRING_OUTPUT {
                         return Err(EvalError::InvalidInput(format!("join result exceeds {} byte limit", MAX_STRING_OUTPUT)));
                     }
-                    Ok(DataType::String(s.join(",")))
+                    Ok(DataType::String(s.join(&sep)))
                 }
                 _ => Ok(DataType::String(String::new())),
             },
@@ -354,19 +365,17 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let chars: Vec<char> = s.chars().collect();
                         let len = chars.len() as i64;
-                        let start = match &start_val {
-                            DataType::Int64(n) => {
-                                let n = *n;
+                        let start = match start_val.to_i64() {
+                            Some(n) => {
                                 if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
                             }
-                            _ => 0,
+                            None => 0,
                         };
-                        let end = match &end_val {
-                            Some(DataType::Int64(n)) => {
-                                let n = *n;
+                        let end = match end_val.as_ref().and_then(|v| v.to_i64()) {
+                            Some(n) => {
                                 if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
                             }
-                            _ => chars.len(),
+                            None => chars.len(),
                         };
                         if start >= end {
                             Ok(DataType::String(String::new()))
@@ -444,20 +453,22 @@ impl OperationEvaluator for FullEvaluator {
             // Array extras
             OperationType::ArrayGet => {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
-                match (&array, &index) {
-                    (DataType::Array(arr), DataType::Int64(i)) => {
-                        if *i < 0 { return Ok(DataType::Null); }
-                        Ok(arr.get(*i as usize).cloned().unwrap_or(DataType::Null))
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 { return Ok(DataType::Null); }
+                        Ok(arr.get(i as usize).cloned().unwrap_or(DataType::Null))
                     }
                     _ => Ok(DataType::Null),
                 }
             },
             OperationType::ArraySet => {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
-                match (&array, &index) {
-                    (DataType::Array(arr), DataType::Int64(i)) => {
-                        if *i < 0 { return Ok(DataType::Array(arr.clone())); }
-                        let idx = *i as usize;
+                match &array {
+                    DataType::Array(arr) => {
+                        let i = index.to_i64().unwrap_or(-1);
+                        if i < 0 { return Ok(DataType::Array(arr.clone())); }
+                        let idx = i as usize;
                         let mut new_arr = arr.clone();
                         if idx < new_arr.len() {
                             new_arr[idx] = value.clone();
@@ -518,6 +529,14 @@ impl OperationEvaluator for FullEvaluator {
             // Type conversions
             OperationType::ToInt64 => match &input {
                 DataType::Int64(_) => Ok(input.clone()),
+                DataType::Int32(n) => Ok(DataType::Int64(*n as i64)),
+                DataType::Uint32(n) => Ok(DataType::Int64(*n as i64)),
+                DataType::Uint64(n) => Ok(DataType::Int64(*n as i64)),
+                DataType::Float32(f) => {
+                    let f = *f as f64;
+                    if f.is_nan() || f.is_infinite() { Ok(DataType::Null) }
+                    else { Ok(DataType::Int64(f as i64)) }
+                }
                 DataType::Float64(f) => {
                     if f.is_nan() || f.is_infinite() {
                         Ok(DataType::Null)
@@ -532,7 +551,12 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ToFloat64 => match &input {
                 DataType::Float64(_) => Ok(input.clone()),
                 DataType::Int64(n) => Ok(DataType::Float64(*n as f64)),
+                DataType::Int32(n) => Ok(DataType::Float64(*n as f64)),
+                DataType::Uint32(n) => Ok(DataType::Float64(*n as f64)),
+                DataType::Uint64(n) => Ok(DataType::Float64(*n as f64)),
+                DataType::Float32(f) => Ok(DataType::Float64(*f as f64)),
                 DataType::String(s) => Ok(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null)),
+                DataType::Bool(b) => Ok(DataType::Float64(if *b { 1.0 } else { 0.0 })),
                 _ => Ok(DataType::Null),
             },
             OperationType::ToBool => match &input {
@@ -545,102 +569,105 @@ impl OperationEvaluator for FullEvaluator {
             },
 
             // Math
-            OperationType::Abs => match &input {
-                DataType::Int64(n) => Ok(match n.checked_abs() {
+            OperationType::Abs => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(match n.checked_abs() {
                     Some(v) => DataType::Int64(v),
                     None => DataType::Null, // i64::MIN overflow
                 }),
-                DataType::Float64(n) => Ok(DataType::Float64(n.abs())),
-                _ => Ok(DataType::Null),
+                Some(Err(f)) => Ok(DataType::Float64(f.abs())),
+                None => Ok(DataType::Null),
             },
             OperationType::Round => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.round())),
+                DataType::Float32(n) => Ok(DataType::Float64((*n as f64).round())),
                 other => Ok(other.clone()),
             },
             OperationType::Floor => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.floor())),
+                DataType::Float32(n) => Ok(DataType::Float64((*n as f64).floor())),
                 other => Ok(other.clone()),
             },
             OperationType::Ceil => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.ceil())),
+                DataType::Float32(n) => Ok(DataType::Float64((*n as f64).ceil())),
                 other => Ok(other.clone()),
             },
-            OperationType::Sqrt => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.sqrt())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).sqrt())),
-                _ => Ok(DataType::Null),
+            OperationType::Sqrt => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).sqrt())),
+                Some(Err(f)) => Ok(DataType::Float64(f.sqrt())),
+                None => Ok(DataType::Null),
             },
             OperationType::Power => {
                 let a = inputs.get("a").unwrap_or(&DataType::Null);
                 let b = inputs.get("b").unwrap_or(&DataType::Null);
-                match (a, b) {
-                    (DataType::Int64(base), DataType::Int64(exp)) => {
-                        if *exp < 0 {
-                            if *exp < i32::MIN as i64 || *exp > i32::MAX as i64 {
-                                Ok(DataType::Float64(0.0)) // exponent out of i32 range
+                match (promote_numeric(a), promote_numeric(b)) {
+                    (Some(Ok(base)), Some(Ok(exp))) => {
+                        if exp < 0 {
+                            if exp < i32::MIN as i64 || exp > i32::MAX as i64 {
+                                Ok(DataType::Float64(0.0))
                             } else {
-                                Ok(DataType::Float64((*base as f64).powi(*exp as i32)))
+                                Ok(DataType::Float64((base as f64).powi(exp as i32)))
                             }
-                        } else if *exp > u32::MAX as i64 {
-                            Ok(DataType::Null) // exponent too large
+                        } else if exp > u32::MAX as i64 {
+                            Ok(DataType::Null)
                         } else {
-                            match base.checked_pow(*exp as u32) {
+                            match base.checked_pow(exp as u32) {
                                 Some(v) => Ok(DataType::Int64(v)),
-                                None => Ok(DataType::Float64((*base as f64).powf(*exp as f64))),
+                                None => Ok(DataType::Float64((base as f64).powf(exp as f64))),
                             }
                         }
                     }
-                    (DataType::Float64(base), DataType::Float64(exp)) => Ok(DataType::Float64(base.powf(*exp))),
-                    (DataType::Int64(base), DataType::Float64(exp)) => Ok(DataType::Float64((*base as f64).powf(*exp))),
-                    (DataType::Float64(base), DataType::Int64(exp)) => {
-                        if *exp < i32::MIN as i64 || *exp > i32::MAX as i64 {
-                            Ok(DataType::Float64(base.powf(*exp as f64)))
+                    (Some(Ok(base)), Some(Err(exp))) => Ok(DataType::Float64((base as f64).powf(exp))),
+                    (Some(Err(base)), Some(Ok(exp))) => {
+                        if exp < i32::MIN as i64 || exp > i32::MAX as i64 {
+                            Ok(DataType::Float64(base.powf(exp as f64)))
                         } else {
-                            Ok(DataType::Float64(base.powi(*exp as i32)))
+                            Ok(DataType::Float64(base.powi(exp as i32)))
                         }
                     }
+                    (Some(Err(base)), Some(Err(exp))) => Ok(DataType::Float64(base.powf(exp))),
                     _ => Ok(DataType::Null),
                 }
             },
-            OperationType::Sin => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.sin())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).sin())),
-                _ => Ok(DataType::Null),
+            OperationType::Sin => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).sin())),
+                Some(Err(f)) => Ok(DataType::Float64(f.sin())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Cos => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.cos())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).cos())),
-                _ => Ok(DataType::Null),
+            OperationType::Cos => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).cos())),
+                Some(Err(f)) => Ok(DataType::Float64(f.cos())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Tan => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.tan())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).tan())),
-                _ => Ok(DataType::Null),
+            OperationType::Tan => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).tan())),
+                Some(Err(f)) => Ok(DataType::Float64(f.tan())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Ln => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.ln())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).ln())),
-                _ => Ok(DataType::Null),
+            OperationType::Ln => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).ln())),
+                Some(Err(f)) => Ok(DataType::Float64(f.ln())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Log2 => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.log2())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).log2())),
-                _ => Ok(DataType::Null),
+            OperationType::Log2 => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).log2())),
+                Some(Err(f)) => Ok(DataType::Float64(f.log2())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Log10 => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.log10())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).log10())),
-                _ => Ok(DataType::Null),
+            OperationType::Log10 => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).log10())),
+                Some(Err(f)) => Ok(DataType::Float64(f.log10())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Exp => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.exp())),
-                DataType::Int64(n) => Ok(DataType::Float64((*n as f64).exp())),
-                _ => Ok(DataType::Null),
+            OperationType::Exp => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Float64((n as f64).exp())),
+                Some(Err(f)) => Ok(DataType::Float64(f.exp())),
+                None => Ok(DataType::Null),
             },
-            OperationType::Sign => match &input {
-                DataType::Float64(n) => Ok(DataType::Float64(n.signum())),
-                DataType::Int64(n) => Ok(DataType::Int64(n.signum())),
-                _ => Ok(DataType::Null),
+            OperationType::Sign => match promote_numeric(&input) {
+                Some(Ok(n)) => Ok(DataType::Int64(n.signum())),
+                Some(Err(f)) => Ok(DataType::Float64(f.signum())),
+                None => Ok(DataType::Null),
             },
 
             other => Err(EvalError::InvalidInput(format!(
@@ -1190,7 +1217,17 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
             };
             format!("{}", n)
         }
-        3 => "<float64>".to_string(),
+        3 => {
+            // F64: payload is lower 56 bits of IEEE 754. Top 8 bits are lost.
+            // Reconstruct with zeroed top 8 bits (precision loss for negative/large floats).
+            let bits = payload & 0x00FFFFFFFFFFFFFF;
+            let f = f64::from_bits(bits as u64);
+            if f == (f as i64 as f64) && !f.is_nan() && f.abs() < 1e15 {
+                format!("{}.0", f as i64)  // show as integer-like if exact
+            } else {
+                format!("{}", f)
+            }
+        }
         4 => {
             // String: payload is memory offset.
             let offset = payload as usize;
@@ -1285,6 +1322,21 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
                 parts.push(format!("...({} more)", raw_count - MAX_DISPLAY_ENTRIES));
             }
             format!("{{{}}}", parts.join(", "))
+        }
+        7 => {
+            // I32: payload is a 32-bit signed integer (sign-extended in 56 bits)
+            let n = if payload & (1 << 31) != 0 {
+                (payload | !0xFFFFFFFF) as i32
+            } else {
+                payload as i32
+            };
+            format!("{}", n)
+        }
+        8 => {
+            // F32: payload is lower 32 bits of IEEE 754 f32
+            let bits = (payload & 0xFFFFFFFF) as u32;
+            let f = f32::from_bits(bits);
+            format!("{}", f)
         }
         _ => format!("<tagged:{}:{}>", tag, payload),
     }
@@ -1412,19 +1464,12 @@ fn cmd_run_wasm(path: &str) {
         Ok(result) => {
             if result != 0 {
                 let tag = (result >> 56) as u8;
-                let payload = result & 0x00FFFFFFFFFFFFFF;
-                match tag {
-                    0 => {} // null — no output
-                    1 => println!("Result: {}", payload != 0),
-                    2 => {
-                        let n = if payload & (1 << 55) != 0 {
-                            payload | !0x00FFFFFFFFFFFFFF
-                        } else {
-                            payload
-                        };
-                        println!("Result: {}", n);
-                    }
-                    _ => println!("Result: <tagged:{}:{}>", tag, payload),
+                if tag != 0 {
+                    // Use format_tagged_value which handles all tag types
+                    let mem = instance.get_memory(&mut store, "memory")
+                        .map(|m| m.data(&store).to_vec())
+                        .unwrap_or_default();
+                    println!("Result: {}", format_tagged_value(result, &mem));
                 }
             }
         }

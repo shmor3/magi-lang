@@ -225,6 +225,11 @@ impl Parser {
                     | TokenKind::Type | TokenKind::Use => {
                         self.parse_statement()
                     }
+                    TokenKind::Pub => Err(SyntaxError {
+                        line: start.start_line as usize,
+                        column: start.start_col as usize,
+                        message: "Duplicate 'pub' modifier".to_string(),
+                    }),
                     _ => Err(SyntaxError {
                         line: start.start_line as usize,
                         column: start.start_col as usize,
@@ -250,7 +255,7 @@ impl Parser {
                 message: "Import plugin ID cannot be empty".to_string(),
             });
         }
-        let end = self.peek().span;
+        let end = name_tok.span;
         self.eat(&TokenKind::Semicolon); // optional semicolon
         Ok(Statement {
             kind: StatementKind::Import(name_tok.text),
@@ -261,7 +266,7 @@ impl Parser {
     fn parse_output_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'output'
         let expr = self.parse_expression()?;
-        let end = self.peek().span;
+        let end = expr.span;
         self.eat(&TokenKind::Semicolon); // optional semicolon
         Ok(Statement {
             kind: StatementKind::Output(expr),
@@ -575,7 +580,7 @@ impl Parser {
     fn parse_throw_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'throw'
         let expr = self.parse_expression()?;
-        let end = self.peek().span;
+        let end = expr.span;
         self.eat(&TokenKind::Semicolon);
         Ok(Statement {
             kind: StatementKind::Throw(expr),
@@ -2172,6 +2177,16 @@ impl Parser {
         let mut chars = raw.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            if ch == '\u{FFF0}' {
+                // Escaped brace sentinel from lexer — literal '{'
+                current_lit.push('{');
+                continue;
+            }
+            if ch == '\u{FFF1}' {
+                // Escaped brace sentinel from lexer — literal '}'
+                current_lit.push('}');
+                continue;
+            }
             if ch == '{' {
                 // Start of expression interpolation
                 if !current_lit.is_empty() {
@@ -2372,8 +2387,10 @@ impl Parser {
         {
             return true;
         }
-        // Non-empty struct: Name { field: value }
-        if self.pos + 2 < self.tokens.len() {
+        // Non-empty struct: Name { field: value } — name must start with uppercase
+        if self.pos + 2 < self.tokens.len()
+            && name.starts_with(|c: char| c.is_uppercase())
+        {
             self.tokens[self.pos + 1].kind == TokenKind::Ident
                 && self.tokens[self.pos + 2].kind == TokenKind::Colon
         } else {

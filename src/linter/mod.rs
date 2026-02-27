@@ -255,15 +255,14 @@ impl<'a> LintContext<'a> {
                 self.check_expression(value);
             }
             StatementKind::ModuleDef { body, .. } => {
+                // Walk module body for both lint checks and enum collection
+                for inner in &body.statements {
+                    self.check_statement(inner);
+                }
                 self.check_block(body);
             }
             StatementKind::TestDef { body, .. } => {
                 self.check_block(body);
-            }
-            StatementKind::ModuleDef { body, .. } => {
-                for inner in &body.statements {
-                    self.check_statement(inner);
-                }
             }
             _ => {}
         }
