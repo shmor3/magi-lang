@@ -1683,8 +1683,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Gcd => {
                 match (a.to_i64(), b.to_i64()) {
                     (Some(mut x), Some(mut y)) => {
-                        x = x.abs();
-                        y = y.abs();
+                        x = x.checked_abs().unwrap_or(0);
+                        y = y.checked_abs().unwrap_or(0);
                         while y != 0 {
                             let t = y;
                             y = x % y;
@@ -1703,8 +1703,8 @@ impl OperationEvaluator for FullEvaluator {
                         if x == 0 || y == 0 {
                             return Ok(DataType::Int64(0));
                         }
-                        let mut gx = x.abs();
-                        let mut gy = y.abs();
+                        let mut gx = x.checked_abs().unwrap_or(0);
+                        let mut gy = y.checked_abs().unwrap_or(0);
                         while gy != 0 {
                             let t = gy;
                             gy = gx % gy;
@@ -1712,7 +1712,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         // gx is now gcd
                         // lcm = |x| / gcd * |y| to avoid overflow
-                        match (x.abs() / gx).checked_mul(y.abs()) {
+                        match (x.checked_abs().unwrap_or(0) / gx).checked_mul(y.checked_abs().unwrap_or(0)) {
                             Some(v) => Ok(DataType::Int64(v)),
                             None => Err(EvalError::InvalidInput("integer overflow in lcm".to_string())),
                         }
@@ -3872,7 +3872,7 @@ impl OperationEvaluator for FullEvaluator {
                 match input.to_i64() {
                     Some(ms) => {
                         let day_ms = 86400 * 1000i64;
-                        let day_start = (ms / day_ms) * day_ms;
+                        let day_start = ms.div_euclid(day_ms) * day_ms;
                         if matches!(op, OperationType::StartOf) {
                             Ok(DataType::Int64(day_start))
                         } else {
@@ -4097,7 +4097,13 @@ impl OperationEvaluator for FullEvaluator {
                         DataType::Int32(n) => toml::Value::Integer(*n as i64),
                         DataType::Int64(n) => toml::Value::Integer(*n),
                         DataType::Uint32(n) => toml::Value::Integer(*n as i64),
-                        DataType::Uint64(n) => toml::Value::Integer(*n as i64),
+                        DataType::Uint64(n) => {
+                            if *n > i64::MAX as u64 {
+                                toml::Value::String(n.to_string())
+                            } else {
+                                toml::Value::Integer(*n as i64)
+                            }
+                        }
                         DataType::Float32(f) => toml::Value::Float(*f as f64),
                         DataType::Float64(f) => toml::Value::Float(*f),
                         DataType::String(s) => toml::Value::String(s.clone()),
@@ -5157,7 +5163,13 @@ fn datatype_to_yaml_value(data: &DataType) -> serde_yaml::Value {
         DataType::Int64(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n)),
         DataType::Int32(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
         DataType::Uint32(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
-        DataType::Uint64(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
+        DataType::Uint64(n) => {
+            if *n > i64::MAX as u64 {
+                serde_yaml::Value::String(n.to_string())
+            } else {
+                serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64))
+            }
+        }
         DataType::Float64(f) => {
             if f.is_nan() || f.is_infinite() {
                 serde_yaml::Value::String(format!("{}", f))

@@ -1694,7 +1694,7 @@ impl<'a> Interpreter<'a> {
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n))),
                 "to_int64" => {
-                    if !n.is_finite() || *n > i64::MAX as f64 || *n < i64::MIN as f64 {
+                    if !n.is_finite() || *n >= i64::MAX as f64 || *n < i64::MIN as f64 {
                         Ok(Some(DataType::Null))
                     } else {
                         Ok(Some(DataType::Int64(*n as i64)))
