@@ -170,7 +170,7 @@ impl WasmCodegen {
                 &wasm_encoder::ConstExpr::i32_const(offset as i32),
                 buf.iter().copied(),
             );
-            offset += 4 + bytes.len() as u32;
+            offset = offset.saturating_add(4u32.saturating_add(bytes.len() as u32));
         }
         module.section(&data);
 
@@ -180,8 +180,7 @@ impl WasmCodegen {
     fn calc_string_data_size(&self, ir: &IrModule) -> u32 {
         ir.strings
             .iter()
-            .map(|s| 4 + s.len() as u32)
-            .sum()
+            .fold(0u32, |acc, s| acc.saturating_add(4u32.saturating_add(s.len() as u32)))
     }
 
     /// Count the max temp locals needed by scanning instructions.
@@ -861,7 +860,7 @@ impl WasmCodegen {
                     let t0 = temp_base;     // base_ptr
                     let t1 = temp_base + 1; // element temp
 
-                    let alloc_size = 8 + count * 16; // 16 bytes per entry (key + value)
+                    let alloc_size = 8u32.saturating_add(count.saturating_mul(16)); // 16 bytes per entry (key + value)
                     f.instruction(&WasmInst::GlobalGet(0));
                     f.instruction(&WasmInst::GlobalGet(0));
                     f.instruction(&WasmInst::I32Const(alloc_size as i32));

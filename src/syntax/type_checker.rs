@@ -1061,27 +1061,29 @@ impl TypeChecker {
                     );
                 }
                 // Validate that std module paths are known
-                if path.first().map(|s| s.as_str()) == Some("std") && path.len() >= 2 {
-                    let known_modules = [
-                        "math", "cmp", "logic", "bits", "str", "convert", "array", "map", "bytes",
-                        "json", "time", "hash", "io", "control", "rand", "fs", "env", "net", "tcp",
-                        "udp", "ws", "sse", "http_server", "path", "yaml", "csv", "toml", "regex",
-                        "uuid", "crypto", "compress", "fmt", "stats", "text", "encode", "reflect",
-                        "collections", "sort", "cert",
-                    ];
-                    if !known_modules.contains(&path[1].as_str()) {
-                        self.emit_coded(
-                            stmt.span.start_line,
-                            stmt.span.start_col,
-                            format!("Unknown standard library module 'std::{}'", path[1]),
-                            DiagnosticSeverity::Error,
-                            super::errors::ErrorCode::E203,
-                            None,
-                        );
-                    }
+                if path.first().map(|s| s.as_str()) == Some("std")
+                    && path.len() >= 2
+                    && !super::interpreter::STD_MODULE_NAMES.contains(&path[1].as_str())
+                {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        format!("Unknown standard library module 'std::{}'", path[1]),
+                        DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E203,
+                        None,
+                    );
                 }
                 // Register the imported name so it's recognized in call resolution
-                if !*glob {
+                if path.first().map(|s| s.as_str()) == Some("std") && path.len() >= 2
+                    && (*glob || path.len() == 2)
+                {
+                    // Glob import or module-level import (use std::math):
+                    // register all operations from the module
+                    for op_name in super::interpreter::std_module_ops(&path[1]) {
+                        self.use_aliases.insert(op_name.to_string());
+                    }
+                } else if !*glob {
                     if let Some(local_name) = alias.as_ref().or_else(|| path.last()) {
                         self.use_aliases.insert(local_name.clone());
                     }
@@ -1521,6 +1523,24 @@ impl TypeChecker {
                 // Is it a use-imported name?
                 if self.use_aliases.contains(name.as_str()) {
                     return ChannelType::Null;
+                }
+
+                // Is it an interpreter built-in function?
+                match name.as_str() {
+                    "len" => return ChannelType::Int64,
+                    "typeof" => return ChannelType::String,
+                    "println" | "print" | "debug_log" => {
+                        // These return the value passed to them (or Null if no args)
+                        if let Some(arg) = args.first() {
+                            return self.infer_expr(arg);
+                        }
+                        return ChannelType::Null;
+                    }
+                    "assert" | "assert_eq" | "assert_ne" | "assert_throws" => {
+                        for arg in args { self.infer_expr(arg); }
+                        return ChannelType::Null;
+                    }
+                    _ => {}
                 }
 
                 // Unknown function.

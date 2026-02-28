@@ -902,7 +902,7 @@ impl<'a> Formatter<'a> {
         let total = args.len() + kwargs.len();
         for (i, arg) in args.iter().enumerate() {
             self.fmt_expression(arg);
-            if i < total - 1 {
+            if i + 1 < total {
                 self.write(", ");
             }
         }
@@ -910,7 +910,7 @@ impl<'a> Formatter<'a> {
             self.write(name);
             self.write("=");
             self.fmt_expression(val);
-            if args.len() + i < total - 1 {
+            if args.len() + i + 1 < total {
                 self.write(", ");
             }
         }

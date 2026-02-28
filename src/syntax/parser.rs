@@ -187,10 +187,15 @@ impl Parser {
             Ok(self.advance().clone())
         } else {
             let tok = self.peek();
+            let text_hint = match tok.kind {
+                TokenKind::Ident | TokenKind::IntLiteral | TokenKind::FloatLiteral | TokenKind::StringLiteral =>
+                    format!(" `{}`", tok.text),
+                _ => String::new(),
+            };
             Err(SyntaxError {
                 line: tok.span.start_line as usize,
                 column: tok.span.start_col as usize,
-                message: format!("Expected '{}', got '{}'", kind, tok.kind),
+                message: format!("Expected '{}', got '{}'{}", kind, tok.kind, text_hint),
             })
         }
     }
@@ -1741,10 +1746,17 @@ impl Parser {
                 })
             }
 
-            _ => Err(self.error(&format!(
-                "Unexpected token '{}', expected expression",
-                tok.kind
-            ))),
+            _ => {
+                let text_hint = match tok.kind {
+                    TokenKind::Ident | TokenKind::IntLiteral | TokenKind::FloatLiteral | TokenKind::StringLiteral =>
+                        format!(" `{}`", tok.text),
+                    _ => String::new(),
+                };
+                Err(self.error(&format!(
+                    "Unexpected token '{}'{}, expected expression",
+                    tok.kind, text_hint
+                )))
+            }
         }
     }
 
@@ -2306,7 +2318,14 @@ impl Parser {
                     Err(self.error("Expected number after '-' in pattern"))
                 }
             }
-            _ => Err(self.error(&format!("Unexpected token '{}' in pattern", tok.kind))),
+            _ => {
+                let text_hint = match tok.kind {
+                    TokenKind::Ident | TokenKind::IntLiteral | TokenKind::FloatLiteral | TokenKind::StringLiteral =>
+                        format!(" `{}`", tok.text),
+                    _ => String::new(),
+                };
+                Err(self.error(&format!("Unexpected token '{}'{} in pattern", tok.kind, text_hint)))
+            }
         }
     }
 

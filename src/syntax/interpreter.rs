@@ -769,6 +769,15 @@ impl<'a> Interpreter<'a> {
                             .collect()
                     }
                     DataType::String(s) => {
+                        let char_count = s.chars().count();
+                        if char_count > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} chars", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{}", char_count),
+                                context: "for loop string iteration".to_string(),
+                                span: stmt.span,
+                            });
+                        }
                         s.chars()
                             .map(|c| DataType::String(c.to_string()))
                             .collect()
@@ -1222,8 +1231,8 @@ impl<'a> Interpreter<'a> {
             DataType::String(s) => s.chars().count() as i64,
             _ => 0,
         };
-        let s_raw = start.to_i64().unwrap_or(0);
-        let e_raw_i = end.to_i64().unwrap_or(len);
+        let s_raw = start.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(start).to_string(), context: "slice start".to_string(), span })?;
+        let e_raw_i = end.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(end).to_string(), context: "slice end".to_string(), span })?;
         // Wrap negative indices from end (Python-style)
         let s = if s_raw < 0 { (len + s_raw).max(0) as usize } else { s_raw as usize };
         let e_raw = if e_raw_i < 0 { (len + e_raw_i).max(0) as usize } else { e_raw_i as usize };
@@ -1663,7 +1672,8 @@ impl<'a> Interpreter<'a> {
                 "to_int64" => Ok(Some(DataType::Int64(*n))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    let arg = self.eval_expr(&args[0])?;
+                    let exp = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pow exponent".to_string(), span })?;
                     if exp < 0 {
                         // Negative exponents on integers: 0^-n is undefined, |n|>1 → 0
                         if *n == 0 { Ok(Some(DataType::Null)) }
@@ -1726,7 +1736,8 @@ impl<'a> Interpreter<'a> {
                 }
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                    let arg = self.eval_expr(&args[0])?;
+                    let exp = arg.to_f64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pow exponent".to_string(), span })?;
                     Ok(Some(DataType::Float64(n.powf(exp))))
                 }
                 "min" => {
@@ -1788,7 +1799,8 @@ impl<'a> Interpreter<'a> {
                 }
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                    let arg = self.eval_expr(&args[0])?;
+                    let exp = arg.to_f64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pow exponent".to_string(), span })?;
                     Ok(Some(DataType::Float32((*n as f64).powf(exp) as f32)))
                 }
                 "min" => {
@@ -1838,7 +1850,8 @@ impl<'a> Interpreter<'a> {
                 "to_int64" => Ok(Some(DataType::Int64(*n as i64))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    let arg = self.eval_expr(&args[0])?;
+                    let exp = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pow exponent".to_string(), span })?;
                     if exp < 0 {
                         if *n == 0 { Ok(Some(DataType::Null)) }
                         else if *n == 1 { Ok(Some(DataType::Int32(1))) }
@@ -1892,7 +1905,8 @@ impl<'a> Interpreter<'a> {
                 "sign" => Ok(Some(DataType::Uint32(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    let arg = self.eval_expr(&args[0])?;
+                    let exp = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pow exponent".to_string(), span })?;
                     if exp < 0 {
                         if *n == 0 { Ok(Some(DataType::Null)) }
                         else if *n == 1 { Ok(Some(DataType::Uint32(1))) }
@@ -1947,7 +1961,8 @@ impl<'a> Interpreter<'a> {
                 "sign" => Ok(Some(DataType::Uint64(if *n == 0 { 0 } else { 1 }))),
                 "pow" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    let arg = self.eval_expr(&args[0])?;
+                    let exp = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pow exponent".to_string(), span })?;
                     if exp < 0 {
                         if *n == 0 { Ok(Some(DataType::Null)) }
                         else if *n == 1 { Ok(Some(DataType::Uint64(1))) }
@@ -1965,14 +1980,14 @@ impl<'a> Interpreter<'a> {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = to_i128_numeric(&arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
-                    let val = (*n as i128).min(other).max(0) as u64;
+                    let val = (*n as i128).min(other).max(0).min(u64::MAX as i128) as u64;
                     Ok(Some(DataType::Uint64(val)))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
                     let other = to_i128_numeric(&arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
-                    let val = (*n as i128).max(other).max(0) as u64;
+                    let val = (*n as i128).max(other).max(0).min(u64::MAX as i128) as u64;
                     Ok(Some(DataType::Uint64(val)))
                 }
                 "clamp" => {
@@ -1982,7 +1997,7 @@ impl<'a> Interpreter<'a> {
                     let min_val = to_i128_numeric(&lo_arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
                     let max_val = to_i128_numeric(&hi_arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
-                    let val = (*n as i128).max(lo).min(hi).max(0) as u64;
+                    let val = (*n as i128).max(lo).min(hi).max(0).min(u64::MAX as i128) as u64;
                     Ok(Some(DataType::Uint64(val)))
                 }
                 _ => Ok(None),
@@ -2053,22 +2068,22 @@ impl<'a> Interpreter<'a> {
                 }
                 "contains" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
+                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: datatype_type_name(&other).to_string(), context: "contains argument".to_string(), span }) };
                     Ok(Some(DataType::Bool(s.contains(&needle))))
                 }
                 "starts_with" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "starts_with".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let prefix = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
+                    let prefix = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: datatype_type_name(&other).to_string(), context: "starts_with argument".to_string(), span }) };
                     Ok(Some(DataType::Bool(s.starts_with(&prefix))))
                 }
                 "ends_with" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ends_with".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let suffix = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Bool(false))) };
+                    let suffix = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: datatype_type_name(&other).to_string(), context: "ends_with argument".to_string(), span }) };
                     Ok(Some(DataType::Bool(s.ends_with(&suffix))))
                 }
                 "index_of" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "index_of".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(Some(DataType::Int64(-1))) };
+                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: datatype_type_name(&other).to_string(), context: "index_of argument".to_string(), span }) };
                     Ok(Some(match s.find(&needle) {
                         Some(byte_idx) => DataType::Int64(s[..byte_idx].chars().count() as i64),
                         None => DataType::Int64(-1),
@@ -2076,7 +2091,8 @@ impl<'a> Interpreter<'a> {
                 }
                 "repeat" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "repeat".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    let arg = self.eval_expr(&args[0])?;
+                    let n = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "repeat count".to_string(), span })?.max(0) as usize;
                     const MAX_REPEAT_LEN: usize = 10_000_000;
                     if n > 0 && s.len().saturating_mul(n) > MAX_REPEAT_LEN {
                         return Err(InterpError::ResourceLimit {
@@ -2090,7 +2106,8 @@ impl<'a> Interpreter<'a> {
                 }
                 "char_at" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_at".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                    let idx = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                    let arg = self.eval_expr(&args[0])?;
+                    let idx = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "char_at index".to_string(), span })?;
                     if idx < 0 {
                         Ok(Some(DataType::Null))
                     } else {
@@ -2099,7 +2116,8 @@ impl<'a> Interpreter<'a> {
                 }
                 "pad_start" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_start".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
-                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    let arg = self.eval_expr(&args[0])?;
+                    let width = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pad_start width".to_string(), span })?.max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
                         return Err(InterpError::ResourceLimit {
@@ -2125,7 +2143,8 @@ impl<'a> Interpreter<'a> {
                 }
                 "pad_end" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_end".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
-                    let width = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    let arg = self.eval_expr(&args[0])?;
+                    let width = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "pad_end width".to_string(), span })?.max(0) as usize;
                     const MAX_PAD_WIDTH: usize = 10_000_000;
                     if width > MAX_PAD_WIDTH {
                         return Err(InterpError::ResourceLimit {
@@ -2152,8 +2171,12 @@ impl<'a> Interpreter<'a> {
                 "substring" | "slice" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "substring".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
                     let char_len = s.chars().count() as i64;
-                    let raw_start = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
-                    let raw_end = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(char_len) } else { char_len };
+                    let start_arg = self.eval_expr(&args[0])?;
+                    let raw_start = start_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&start_arg).to_string(), context: "substring start".to_string(), span })?;
+                    let raw_end = if args.len() > 1 {
+                        let end_arg = self.eval_expr(&args[1])?;
+                        end_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&end_arg).to_string(), context: "substring end".to_string(), span })?
+                    } else { char_len };
                     // Support negative indices (count from end)
                     let start = if raw_start < 0 { (char_len + raw_start).max(0) as usize } else { (raw_start as usize).min(char_len as usize) };
                     let end = if raw_end < 0 { (char_len + raw_end).max(0) as usize } else { (raw_end as usize).min(char_len as usize) };
@@ -2194,17 +2217,18 @@ impl<'a> Interpreter<'a> {
                                 }
                             }
                             _ => {
+                                let val = item.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(item).to_string(), context: "sum element".to_string(), span })?;
                                 if !int_overflow {
-                                    match int_sum.checked_add(item.to_i64().unwrap_or(0)) {
+                                    match int_sum.checked_add(val) {
                                         Some(v) => int_sum = v,
                                         None => {
                                             has_float = true;
-                                            float_sum += int_sum as f64 + item.to_i64().unwrap_or(0) as f64;
+                                            float_sum += int_sum as f64 + val as f64;
                                             int_overflow = true;
                                         }
                                     }
                                 } else {
-                                    float_sum += item.to_i64().unwrap_or(0) as f64;
+                                    float_sum += val as f64;
                                 }
                             }
                         }
@@ -2239,17 +2263,18 @@ impl<'a> Interpreter<'a> {
                                 }
                             }
                             _ => {
+                                let val = item.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(item).to_string(), context: "product element".to_string(), span })?;
                                 if !int_overflow {
-                                    match int_prod.checked_mul(item.to_i64().unwrap_or(1)) {
+                                    match int_prod.checked_mul(val) {
                                         Some(v) => int_prod = v,
                                         None => {
                                             has_float = true;
-                                            float_prod *= int_prod as f64 * item.to_i64().unwrap_or(1) as f64;
+                                            float_prod *= int_prod as f64 * val as f64;
                                             int_overflow = true;
                                         }
                                     }
                                 } else {
-                                    float_prod *= item.to_i64().unwrap_or(1) as f64;
+                                    float_prod *= val as f64;
                                 }
                             }
                         }
@@ -3309,6 +3334,15 @@ impl<'a> Interpreter<'a> {
                             .collect()
                     }
                     DataType::String(s) => {
+                        let char_count = s.chars().count();
+                        if char_count > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} chars", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{}", char_count),
+                                context: "list comprehension string iteration".to_string(),
+                                span: iterable.span,
+                            });
+                        }
                         s.chars()
                             .map(|c| DataType::String(c.to_string()))
                             .collect()
@@ -3321,9 +3355,12 @@ impl<'a> Interpreter<'a> {
                     }),
                 };
                 let mut result = Vec::new();
-                for item in items {
+                for (iter_count, item) in items.into_iter().enumerate() {
                     if self.is_cancelled() {
                         return Err(InterpError::Cancelled);
+                    }
+                    if iter_count >= MAX_LOOP_ITERATIONS {
+                        return Err(InterpError::MaxIterations { limit: MAX_LOOP_ITERATIONS, span: expr.span });
                     }
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
@@ -3392,6 +3429,15 @@ impl<'a> Interpreter<'a> {
                             .collect()
                     }
                     DataType::String(s) => {
+                        let char_count = s.chars().count();
+                        if char_count > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} chars", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{}", char_count),
+                                context: "map comprehension string iteration".to_string(),
+                                span: iterable.span,
+                            });
+                        }
                         s.chars()
                             .map(|c| DataType::String(c.to_string()))
                             .collect()
@@ -3404,9 +3450,12 @@ impl<'a> Interpreter<'a> {
                     }),
                 };
                 let mut result = std::collections::BTreeMap::new();
-                for item in items {
+                for (iter_count, item) in items.into_iter().enumerate() {
                     if self.is_cancelled() {
                         return Err(InterpError::Cancelled);
+                    }
+                    if iter_count >= MAX_LOOP_ITERATIONS {
+                        return Err(InterpError::MaxIterations { limit: MAX_LOOP_ITERATIONS, span: expr.span });
                     }
                     self.symbols.push(HashMap::new());
                     self.heap.push_scope();
@@ -3965,48 +4014,7 @@ impl<'a> Interpreter<'a> {
         let module = path[1].as_str();
         let ops = std_module_ops(module);
         if ops.is_empty() {
-            let available_modules = [
-                "math",
-                "cmp",
-                "logic",
-                "bits",
-                "str",
-                "convert",
-                "array",
-                "map",
-                "bytes",
-                "json",
-                "time",
-                "hash",
-                "io",
-                "control",
-                "rand",
-                "fs",
-                "env",
-                "net",
-                "tcp",
-                "udp",
-                "ws",
-                "sse",
-                "http_server",
-                "path",
-                "yaml",
-                "csv",
-                "toml",
-                "regex",
-                "uuid",
-                "crypto",
-                "compress",
-                "fmt",
-                "stats",
-                "text",
-                "encode",
-                "reflect",
-                "collections",
-                "sort",
-                "cert",
-            ];
-            let suggestion = super::errors::suggest_name(module, &available_modules);
+            let suggestion = super::errors::suggest_name(module, STD_MODULE_NAMES);
             return Err(InterpError::UnknownOperation {
                 name: format!("std::{}", module),
                 span,
@@ -4363,6 +4371,16 @@ pub struct DebugState {
     /// Function call stack names for display.
     pub call_stack: Vec<String>,
 }
+
+/// All available standard library module names.
+pub const STD_MODULE_NAMES: &[&str] = &[
+    "math", "cmp", "logic", "bits", "str", "convert", "array", "map",
+    "bytes", "json", "time", "hash", "io", "control", "rand", "fs",
+    "env", "net", "tcp", "udp", "ws", "sse", "http_server", "path",
+    "yaml", "csv", "toml", "regex", "uuid", "crypto", "compress",
+    "fmt", "stats", "text", "encode", "reflect", "collections", "sort",
+    "cert",
+];
 
 /// Get the list of operation names in a standard library module.
 pub fn std_module_ops(module: &str) -> Vec<&'static str> {

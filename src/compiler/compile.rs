@@ -486,7 +486,7 @@ impl Compiler {
                     self.emit(Instruction::Drop);
                 }
                 if let Some(ctx) = self.loop_stack.last() {
-                    let label = self.block_depth - ctx.break_depth;
+                    let label = self.block_depth.saturating_sub(ctx.break_depth);
                     self.emit(Instruction::Br(label));
                 } else {
                     return Err(CompileError::at(
@@ -499,7 +499,7 @@ impl Compiler {
 
             StatementKind::Continue => {
                 if let Some(ctx) = self.loop_stack.last() {
-                    let label = self.block_depth - ctx.continue_depth;
+                    let label = self.block_depth.saturating_sub(ctx.continue_depth);
                     self.emit(Instruction::Br(label));
                 } else {
                     return Err(CompileError::at(
@@ -1222,7 +1222,7 @@ impl Compiler {
         self.emit(Instruction::LocalGet(len_local));
         self.emit(Instruction::I64Ge);
         // break out of the outer Block when iteration is complete.
-        let cond_break_offset = self.block_depth - break_depth;
+        let cond_break_offset = self.block_depth.saturating_sub(break_depth);
         self.emit(Instruction::BrIf(cond_break_offset));
 
         // Load current element. ArrayGet expects tagged index.
@@ -1299,7 +1299,7 @@ impl Compiler {
         self.emit(Instruction::LocalSet(counter_local));
 
         // Loop back.
-        let loop_back_offset = self.block_depth - continue_depth;
+        let loop_back_offset = self.block_depth.saturating_sub(continue_depth);
         self.emit(Instruction::Br(loop_back_offset)); // back to Loop
 
         self.emit(Instruction::End); // Loop end
@@ -1328,7 +1328,7 @@ impl Compiler {
         self.compile_expr(condition)?;
         self.emit(Instruction::BoolNot);
         // break if false: branch to the outer Block.
-        let cond_break_offset = self.block_depth - break_depth;
+        let cond_break_offset = self.block_depth.saturating_sub(break_depth);
         self.emit(Instruction::BrIf(cond_break_offset));
 
         // Body.
@@ -1341,7 +1341,7 @@ impl Compiler {
         self.fb()?.pop_scope();
 
         // continue: branch back to Loop.
-        let continue_offset = self.block_depth - continue_depth;
+        let continue_offset = self.block_depth.saturating_sub(continue_depth);
         self.emit(Instruction::Br(continue_offset));
         self.emit(Instruction::End); // Loop
         self.emit(Instruction::End); // Block
@@ -1364,7 +1364,7 @@ impl Compiler {
         self.compile_block(block)?;
         self.emit(Instruction::Drop);
 
-        let continue_offset = self.block_depth - continue_depth;
+        let continue_offset = self.block_depth.saturating_sub(continue_depth);
         self.emit(Instruction::Br(continue_offset));
         self.emit(Instruction::End);
         self.emit(Instruction::End);
