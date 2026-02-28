@@ -293,6 +293,14 @@ fn get_bind_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, E
     }
 }
 
+/// HTTP agent with sensible default timeouts.
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .new_agent()
+}
+
 /// Compile a user-supplied regex pattern with a size limit.
 fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
     regex::RegexBuilder::new(pat)
@@ -3785,7 +3793,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextIndent => {
                 match &input {
                     DataType::String(s) => {
-                        let indent = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(4) as usize;
+                        let indent = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(4).max(0) as usize;
                         let pad = " ".repeat(indent);
                         Ok(DataType::String(textwrap::indent(s, &pad).trim_end_matches('\n').to_string()))
                     }
@@ -3803,7 +3811,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextPadLeft => {
                 match &input {
                     DataType::String(s) => {
-                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(0) as usize;
+                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(0).max(0) as usize;
                         let char_count = s.chars().count();
                         if char_count >= width {
                             Ok(DataType::String(s.clone()))
@@ -3818,7 +3826,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextPadRight => {
                 match &input {
                     DataType::String(s) => {
-                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(0) as usize;
+                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(0).max(0) as usize;
                         let char_count = s.chars().count();
                         if char_count >= width {
                             Ok(DataType::String(s.clone()))
@@ -3880,7 +3888,11 @@ impl OperationEvaluator for FullEvaluator {
             }
             OperationType::TimeDiff => {
                 match (a.to_i64(), b.to_i64()) {
-                    (Some(t1), Some(t2)) => Ok(DataType::Int64((t1 - t2).abs())),
+                    (Some(t1), Some(t2)) => Ok(DataType::Int64(
+                        t1.checked_sub(t2)
+                            .and_then(|d| d.checked_abs())
+                            .unwrap_or(i64::MAX)
+                    )),
                     _ => Ok(DataType::Null),
                 }
             }
@@ -4328,7 +4340,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpGet => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let body: String = ureq::get(url)
+                let body: String = http_agent().get(url)
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_get: {}", e)))?
                     .into_body()
@@ -4341,7 +4353,7 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let body: String = ureq::post(url)
+                let body: String = http_agent().post(url)
                     .header("Content-Type", "application/json")
                     .send(payload.as_deref().unwrap_or("").as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("http_post: {}", e)))?
@@ -4355,7 +4367,7 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let body: String = ureq::put(url)
+                let body: String = http_agent().put(url)
                     .header("Content-Type", "application/json")
                     .send(payload.as_deref().unwrap_or("").as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("http_put: {}", e)))?
@@ -4368,7 +4380,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpDelete => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let body: String = ureq::delete(url)
+                let body: String = http_agent().delete(url)
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_delete: {}", e)))?
                     .into_body()
@@ -4389,9 +4401,9 @@ impl OperationEvaluator for FullEvaluator {
                     "POST" | "PUT" | "PATCH" => {
                         let req = headers.iter().flat_map(|h| h.iter()).fold(
                             match method_upper.as_str() {
-                                "POST" => ureq::post(url),
-                                "PUT" => ureq::put(url),
-                                _ => ureq::patch(url),
+                                "POST" => http_agent().post(url),
+                                "PUT" => http_agent().put(url),
+                                _ => http_agent().patch(url),
                             },
                             |r, (k, v)| r.header(k.as_str(), &v.to_string()),
                         );
@@ -4401,9 +4413,9 @@ impl OperationEvaluator for FullEvaluator {
                     "GET" | "DELETE" | "HEAD" => {
                         let req = headers.iter().flat_map(|h| h.iter()).fold(
                             match method_upper.as_str() {
-                                "DELETE" => ureq::delete(url),
-                                "HEAD" => ureq::head(url),
-                                _ => ureq::get(url),
+                                "DELETE" => http_agent().delete(url),
+                                "HEAD" => http_agent().head(url),
+                                _ => http_agent().get(url),
                             },
                             |r, (k, v)| r.header(k.as_str(), &v.to_string()),
                         );
@@ -4431,7 +4443,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpHead => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let resp = ureq::head(url)
+                let resp = http_agent().head(url)
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_head: {}", e)))?;
                 let status = resp.status().as_u16();
@@ -4456,7 +4468,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpOptions => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let agent = ureq::Agent::new_with_defaults();
+                let agent = http_agent();
                 let resp = agent
                     .options(url)
                     .call()
@@ -4489,7 +4501,7 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let body: String = ureq::patch(url)
+                let body: String = http_agent().patch(url)
                     .header("Content-Type", "application/json")
                     .send(payload.as_deref().unwrap_or("").as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("http_patch: {}", e)))?
@@ -4663,6 +4675,9 @@ impl OperationEvaluator for FullEvaluator {
                     std::time::Duration::from_millis(5000),
                 )
                 .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: {}", e)))?;
+                let timeout = Some(std::time::Duration::from_secs(30));
+                let _ = stream.set_read_timeout(timeout);
+                let _ = stream.set_write_timeout(timeout);
                 let id = conn_id("tcp");
                 conn_store(&id, Mutex::new(stream));
                 Ok(DataType::String(id))
@@ -4882,7 +4897,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::SseConnect => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let resp = ureq::get(url)
+                let resp = http_agent().get(url)
                     .header("Accept", "text/event-stream")
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("sse_connect: {}", e)))?;
@@ -4899,12 +4914,20 @@ impl OperationEvaluator for FullEvaluator {
                     let mut event_type = String::new();
                     let mut data_lines = Vec::new();
                     let mut event_id = String::new();
+                    const MAX_SSE_LINES: usize = 10_000;
+                    let mut line_count = 0usize;
                     loop {
                         let mut line = String::new();
                         use std::io::BufRead;
                         let n = reader.read_line(&mut line)
                             .map_err(|e| EvalError::InvalidInput(format!("sse_read_event: {}", e)))?;
                         if n == 0 { return Ok(DataType::Null); }
+                        line_count += 1;
+                        if line_count > MAX_SSE_LINES {
+                            return Err(EvalError::InvalidInput(
+                                "sse_read_event: event exceeds 10000 lines".to_string()
+                            ));
+                        }
                         let trimmed = line.trim_end();
                         if trimmed.is_empty() {
                             if !data_lines.is_empty() {
@@ -4967,12 +4990,20 @@ impl OperationEvaluator for FullEvaluator {
                 let path = parts.get(1).unwrap_or(&"/").to_string();
                 let mut headers = std::collections::BTreeMap::new();
                 let mut content_length: usize = 0;
+                const MAX_HEADERS: usize = 256;
+                let mut header_count = 0usize;
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line)
                         .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() { break; }
+                    header_count += 1;
+                    if header_count > MAX_HEADERS {
+                        return Err(EvalError::InvalidInput(
+                            "http_server_receive: too many headers (max 256)".to_string()
+                        ));
+                    }
                     if let Some((key, value)) = trimmed.split_once(':') {
                         let key = key.trim().to_lowercase();
                         let value = value.trim().to_string();
@@ -5054,7 +5085,7 @@ impl OperationEvaluator for FullEvaluator {
     }
 }
 
-/// Promote a DataType to either i64 or f64 for arithmetic.
+/// Check whether a DataType value is "truthy" (non-zero, non-empty, non-null, non-false).
 fn is_truthy(val: &DataType) -> bool {
     match val {
         DataType::Bool(b) => *b,
@@ -5771,6 +5802,15 @@ fn cmd_compile(path: &str) {
 
 /// Format a tagged WASM value into a human-readable string.
 fn format_tagged_value(val: i64, data: &[u8]) -> String {
+    format_tagged_value_depth(val, data, 0)
+}
+
+const MAX_TAGGED_DEPTH: usize = 32;
+
+fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
+    if depth >= MAX_TAGGED_DEPTH {
+        return "<...>".to_string();
+    }
     let tag = (val >> 56) as u8;
     let payload = val & 0x00FFFFFFFFFFFFFF;
     match tag {
@@ -5840,7 +5880,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
                     data[elem_offset + 4], data[elem_offset + 5],
                     data[elem_offset + 6], data[elem_offset + 7],
                 ]);
-                parts.push(format_tagged_value(elem, data));
+                parts.push(format_tagged_value_depth(elem, data, depth + 1));
             }
             if raw_len > MAX_DISPLAY_ELEMENTS {
                 parts.push(format!("...({} more)", raw_len - MAX_DISPLAY_ELEMENTS));
@@ -5884,7 +5924,7 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
                     data[val_offset + 4], data[val_offset + 5],
                     data[val_offset + 6], data[val_offset + 7],
                 ]);
-                parts.push(format!("{}: {}", format_tagged_value(key, data), format_tagged_value(value, data)));
+                parts.push(format!("{}: {}", format_tagged_value_depth(key, data, depth + 1), format_tagged_value_depth(value, data, depth + 1)));
             }
             if raw_count > MAX_DISPLAY_ENTRIES {
                 parts.push(format!("...({} more)", raw_count - MAX_DISPLAY_ENTRIES));
