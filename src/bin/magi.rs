@@ -1059,6 +1059,9 @@ impl OperationEvaluator for FullEvaluator {
                 let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 match (&input, &search) {
                     (DataType::String(s), DataType::String(sub)) => {
+                        if sub.is_empty() {
+                            return Err(EvalError::InvalidInput("count: search string must not be empty".to_string()));
+                        }
                         Ok(DataType::Int64(s.matches(sub.as_str()).count() as i64))
                     }
                     _ => Ok(DataType::Int64(0)),
@@ -1290,6 +1293,12 @@ impl OperationEvaluator for FullEvaluator {
                 let b_val = inputs.get("b").cloned().unwrap_or(DataType::Null);
                 match (&a_val, &b_val) {
                     (DataType::Bytes(a), DataType::Bytes(b)) => {
+                        let total = a.len().saturating_add(b.len());
+                        if total > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "bytes_concat: result would be {} bytes (max {})", total, MAX_STRING_OUTPUT
+                            )));
+                        }
                         let mut result = a.clone();
                         result.extend_from_slice(b);
                         Ok(DataType::Bytes(result))
@@ -2013,7 +2022,7 @@ impl OperationEvaluator for FullEvaluator {
                     (Some(av), Some(bv)) => {
                         let fa = match av { Ok(i) => i, Err(f) => f as i64 };
                         let fb = match bv { Ok(i) => i, Err(f) => f as i64 };
-                        Ok(DataType::Int64(fa - fb))
+                        Ok(DataType::Int64(fa.saturating_sub(fb)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2102,7 +2111,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlEncode => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(url_encode_rfc3986(s)))
+                        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+                        Ok(DataType::String(utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2110,9 +2120,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlDecode => {
                 match &input {
                     DataType::String(s) => {
+                        use percent_encoding::percent_decode_str;
                         let s = s.replace('+', " ");
-                        match url_decode(&s) {
-                            Ok(decoded) => Ok(DataType::String(decoded)),
+                        match percent_decode_str(&s).decode_utf8() {
+                            Ok(decoded) => Ok(DataType::String(decoded.into_owned())),
                             Err(_) => Err(EvalError::InvalidInput("url_decode: invalid UTF-8".to_string())),
                         }
                     }
@@ -2509,18 +2520,18 @@ impl OperationEvaluator for FullEvaluator {
                 match &path {
                     DataType::String(p) => {
                         const MAX_FILE_READ: u64 = 64 * 1024 * 1024; // 64 MB
-                        match fs::metadata(p) {
-                            Ok(meta) if meta.len() > MAX_FILE_READ => {
-                                return Err(EvalError::InvalidInput(format!(
-                                    "fs_read: file exceeds {} byte limit ({})", MAX_FILE_READ, meta.len()
-                                )));
-                            }
-                            _ => {}
+                        let file = fs::File::open(p)
+                            .map_err(|e| EvalError::InvalidInput(format!("fs_read: {}", e)))?;
+                        let mut limited = std::io::Read::take(file, MAX_FILE_READ + 1);
+                        let mut content = String::new();
+                        limited.read_to_string(&mut content)
+                            .map_err(|e| EvalError::InvalidInput(format!("fs_read: {}", e)))?;
+                        if content.len() as u64 > MAX_FILE_READ {
+                            return Err(EvalError::InvalidInput(format!(
+                                "fs_read: file exceeds {} byte limit", MAX_FILE_READ
+                            )));
                         }
-                        match fs::read_to_string(p) {
-                            Ok(content) => Ok(DataType::String(content)),
-                            Err(e) => Err(EvalError::InvalidInput(format!("fs_read: {}", e))),
-                        }
+                        Ok(DataType::String(content))
                     }
                     _ => Err(EvalError::InvalidInput("fs_read: path must be a string".to_string())),
                 }
@@ -2935,7 +2946,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSlug => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(slugify(s)))
+                        Ok(DataType::String(slug::slugify(s)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2997,13 +3008,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlEscape => {
                 match &input {
                     DataType::String(s) => {
-                        let escaped = s
-                            .replace('&', "&amp;")
-                            .replace('<', "&lt;")
-                            .replace('>', "&gt;")
-                            .replace('"', "&quot;")
-                            .replace('\'', "&#39;");
-                        Ok(DataType::String(escaped))
+                        Ok(DataType::String(html_escape::encode_text(s).into_owned()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3011,15 +3016,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlUnescape => {
                 match &input {
                     DataType::String(s) => {
-                        // Decode &amp; LAST to prevent double-decoding
-                        let unescaped = s
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&quot;", "\"")
-                            .replace("&#39;", "'")
-                            .replace("&#x27;", "'")
-                            .replace("&amp;", "&");
-                        Ok(DataType::String(unescaped))
+                        Ok(DataType::String(html_escape::decode_html_entities(s).into_owned()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3952,6 +3949,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(hex::encode(result.into_bytes())))
             }
             OperationType::ConstantTimeEq => {
+                use subtle::ConstantTimeEq;
                 let (bytes_a, bytes_b) = match (&a, &b) {
                     (DataType::String(s1), DataType::String(s2)) => {
                         (s1.as_bytes(), s2.as_bytes())
@@ -3964,11 +3962,7 @@ impl OperationEvaluator for FullEvaluator {
                 if bytes_a.len() != bytes_b.len() {
                     return Ok(DataType::Bool(false));
                 }
-                let mut diff = 0u8;
-                for (x, y) in bytes_a.iter().zip(bytes_b.iter()) {
-                    diff |= x ^ y;
-                }
-                Ok(DataType::Bool(diff == 0))
+                Ok(DataType::Bool(bytes_a.ct_eq(bytes_b).into()))
             }
 
             // ================================================================
@@ -3980,14 +3974,14 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => s.as_bytes().to_vec(),
                     _ => return Ok(DataType::Null),
                 };
-                Ok(DataType::String(base32_encode(&data)))
+                Ok(DataType::String(data_encoding::BASE32.encode(&data)))
             }
             OperationType::Base32Decode => {
                 match &input {
                     DataType::String(s) => {
-                        match base32_decode(s) {
-                            Some(decoded) => Ok(DataType::Bytes(decoded)),
-                            None => Ok(DataType::Null),
+                        match data_encoding::BASE32.decode(s.as_bytes()) {
+                            Ok(decoded) => Ok(DataType::Bytes(decoded)),
+                            Err(_) => Ok(DataType::Null),
                         }
                     }
                     _ => Ok(DataType::Null),
@@ -4553,12 +4547,17 @@ impl OperationEvaluator for FullEvaluator {
                 validate_host(host)?;
                 let port = get_port(inputs, "port")?;
                 let addr = format!("{}:{}", host, port);
-                // Use ToSocketAddrs for DNS resolution, then connect_timeout
                 use std::net::ToSocketAddrs;
                 let sock_addr = addr.to_socket_addrs()
                     .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: DNS resolution failed: {}", e)))?
                     .next()
                     .ok_or_else(|| EvalError::InvalidInput("tcp_connect: no addresses found".to_string()))?;
+                // Post-DNS-resolution SSRF check
+                if is_blocked_ip(sock_addr.ip()) {
+                    return Err(EvalError::InvalidInput(format!(
+                        "tcp_connect: blocked IP after DNS resolution: {}", sock_addr.ip()
+                    )));
+                }
                 let stream = std::net::TcpStream::connect_timeout(
                     &sock_addr,
                     std::time::Duration::from_millis(5000),
@@ -4698,8 +4697,20 @@ impl OperationEvaluator for FullEvaluator {
                 let sid = get_string(inputs, "socket_id")?;
                 let data = inputs.get("data").cloned().unwrap_or(DataType::Null);
                 let address = get_string(inputs, "address")?;
+                validate_host(address)?;
                 let port = get_port(inputs, "port")?;
                 let target = format!("{}:{}", address, port);
+                // Post-DNS-resolution SSRF check
+                use std::net::ToSocketAddrs;
+                if let Ok(mut addrs) = target.to_socket_addrs() {
+                    if let Some(resolved) = addrs.next() {
+                        if is_blocked_ip(resolved.ip()) {
+                            return Err(EvalError::InvalidInput(format!(
+                                "udp_send_to: blocked IP after DNS resolution: {}", resolved.ip()
+                            )));
+                        }
+                    }
+                }
                 let bytes = data_to_bytes(&data);
                 conn_with::<Mutex<std::net::UdpSocket>, _>(sid, |mtx| {
                     let socket = mtx
@@ -5286,128 +5297,6 @@ fn json_value_to_datatype(val: &serde_json::Value) -> DataType {
             DataType::Map(m)
         }
     }
-}
-
-// =========================================================================
-// Inline helper functions (replacing external crates with stdlib)
-// =========================================================================
-
-/// RFC 3986 URL encoding — unreserved chars (A-Z a-z 0-9 - _ . ~) pass through.
-fn url_encode_rfc3986(input: &str) -> String {
-    let mut result = String::with_capacity(input.len() * 3);
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(byte as char);
-            }
-            _ => {
-                result.push('%');
-                result.push(HEX_UPPER[(byte >> 4) as usize] as char);
-                result.push(HEX_UPPER[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
-    result
-}
-
-const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
-
-/// URL decode with percent-decoding, returning UTF-8 string.
-fn url_decode(input: &str) -> Result<String, std::string::FromUtf8Error> {
-    let mut bytes = Vec::with_capacity(input.len());
-    let mut chars = input.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().and_then(hex_digit);
-            let lo = chars.next().and_then(hex_digit);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                bytes.push((h << 4) | l);
-            } else {
-                bytes.push(b'%');
-            }
-        } else {
-            bytes.push(b);
-        }
-    }
-    String::from_utf8(bytes)
-}
-
-fn hex_digit(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Simple slug generation: lowercase, replace non-alphanumeric with hyphens, collapse.
-fn slugify(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut last_was_hyphen = true; // prevent leading hyphen
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() {
-            result.push(ch.to_ascii_lowercase());
-            last_was_hyphen = false;
-        } else if !last_was_hyphen {
-            result.push('-');
-            last_was_hyphen = true;
-        }
-    }
-    // Remove trailing hyphen
-    if result.ends_with('-') {
-        result.pop();
-    }
-    result
-}
-
-const BASE32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-/// RFC 4648 Base32 encoding.
-fn base32_encode(data: &[u8]) -> String {
-    let mut result = String::new();
-    let mut buffer: u64 = 0;
-    let mut bits_left = 0;
-    for &byte in data {
-        buffer = (buffer << 8) | byte as u64;
-        bits_left += 8;
-        while bits_left >= 5 {
-            bits_left -= 5;
-            let idx = ((buffer >> bits_left) & 0x1f) as usize;
-            result.push(BASE32_ALPHABET[idx] as char);
-        }
-    }
-    if bits_left > 0 {
-        let idx = ((buffer << (5 - bits_left)) & 0x1f) as usize;
-        result.push(BASE32_ALPHABET[idx] as char);
-    }
-    while !result.len().is_multiple_of(8) {
-        result.push('=');
-    }
-    result
-}
-
-/// RFC 4648 Base32 decoding.
-fn base32_decode(input: &str) -> Option<Vec<u8>> {
-    let input = input.trim_end_matches('=');
-    let mut result = Vec::new();
-    let mut buffer: u64 = 0;
-    let mut bits_left = 0;
-    for ch in input.chars() {
-        let val = match ch {
-            'A'..='Z' => ch as u8 - b'A',
-            'a'..='z' => ch as u8 - b'a',
-            '2'..='7' => ch as u8 - b'2' + 26,
-            _ => return None,
-        };
-        buffer = (buffer << 5) | val as u64;
-        bits_left += 5;
-        if bits_left >= 8 {
-            bits_left -= 8;
-            result.push((buffer >> bits_left) as u8);
-        }
-    }
-    Some(result)
 }
 
 fn print_usage() {

@@ -1433,8 +1433,18 @@ impl<'a> Interpreter<'a> {
                     "group_by" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "group_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let mut groups: std::collections::BTreeMap<String, Vec<DataType>> = std::collections::BTreeMap::new();
+                        let mut total_items: usize = 0;
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            total_items += 1;
+                            if total_items > MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
+                                    actual: format!("more than {}", MAX_ARRAY_ELEMENTS),
+                                    context: "group_by".to_string(),
+                                    span,
+                                });
+                            }
                             let key = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             let key_str = key.to_string_lossy();
                             groups.entry(key_str).or_default().push(item.clone());
@@ -4107,7 +4117,10 @@ impl<'a> Interpreter<'a> {
         // so that std aliases are available when package functions run
         for use_stmt in &pkg.use_statements {
             if let Err(e) = self.exec_statement(use_stmt) {
-                tracing::debug!("Package use-statement failed: {}", e);
+                return Err(InterpError::EvalError {
+                    error: EvalError::InvalidInput(format!("package '{}' setup failed: {}", package_id, e)),
+                    span,
+                });
             }
         }
 

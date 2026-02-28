@@ -686,8 +686,8 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
             continue;
         }
         match chars[pos] {
-            ')' | ']' => depth += 1,
-            '[' => {
+            ')' | ']' | '}' => depth += 1,
+            '[' | '{' => {
                 if depth > 0 {
                     depth -= 1;
                 }

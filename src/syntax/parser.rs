@@ -101,6 +101,7 @@ impl Parser {
                 Err(e) => {
                     self.errors.push(e);
                     self.synchronize();
+                    self.depth = 0; // Reset depth after error recovery to prevent leak
                 }
             }
         }

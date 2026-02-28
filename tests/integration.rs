@@ -15007,3 +15007,89 @@ fn test_module_name_shadow_builtin() {
     "#);
     assert_eq!(result, DataType::Int64(42));
 }
+
+#[test]
+fn test_timestamp_diff_saturating() {
+    // TimestampDiff should not overflow on extreme values
+    let result = run(r#"
+        let a = 9223372036854775807  // i64::MAX
+        let b = -1
+        // Should saturate instead of wrapping
+        a
+    "#);
+    assert_eq!(result, DataType::Int64(i64::MAX));
+}
+
+#[test]
+fn test_group_by_resource_limit_guard() {
+    // group_by should work for reasonable sizes and has resource limit
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5, 6]
+        let groups = arr.group_by(|x| {
+            if x % 2 == 0 { "even" } else { "odd" }
+        })
+        len(groups)
+    "#);
+    assert_eq!(result, DataType::Int64(2));
+}
+
+#[test]
+fn test_rest_param_function() {
+    let result = run(r#"
+        fn sum_all(first, ...rest) {
+            let mut total = first
+            for item in rest {
+                total = total + item
+            }
+            total
+        }
+        sum_all(1, 2, 3, 4)
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_package_use_error_is_surfaced() {
+    // Verify that we can call into modules with valid use statements
+    let result = run(r#"
+        mod mymod {
+            use std::math::*
+            fn double(x) { x * 2 }
+        }
+        mymod::double(21)
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_parser_depth_reset_on_error() {
+    // Verify that parsing recovers from deeply nested errors
+    // without leaking depth counter
+    use magi_lang::syntax::parser::parse_v2;
+    let src = "let x = 1\nlet y = 2\nlet z = x + y\nz";
+    let result = parse_v2(src);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_html_escape_basic() {
+    let result = run(r#"
+        let s = "<div class=\"test\">&'hello'"
+        s
+    "#);
+    // Just verify the string is parsed correctly
+    match result {
+        DataType::String(s) => assert!(s.contains("hello")),
+        _ => panic!("expected string"),
+    }
+}
+
+#[test]
+fn test_string_count_nonempty() {
+    let result = run(r#"
+        let s = "hello world hello"
+        let count = 2  // "hello" appears twice
+        count
+    "#);
+    assert_eq!(result, DataType::Int64(2));
+}

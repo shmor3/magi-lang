@@ -1426,7 +1426,9 @@ impl TypeChecker {
                     // Check arity (accounting for default parameters)
                     let max_args = if sig.has_rest { usize::MAX } else { sig.params.len() };
                     if arg_types.len() < sig.required_params || arg_types.len() > max_args {
-                        let arity_msg = if sig.required_params == sig.params.len() {
+                        let arity_msg = if sig.has_rest {
+                            format!("at least {}", sig.required_params)
+                        } else if sig.required_params == sig.params.len() {
                             format!("{}", sig.params.len())
                         } else {
                             format!("{}-{}", sig.required_params, sig.params.len())
@@ -1530,14 +1532,11 @@ impl TypeChecker {
                     "len" => return ChannelType::Int64,
                     "typeof" => return ChannelType::String,
                     "println" | "print" | "debug_log" => {
-                        // These return the value passed to them (or Null if no args)
-                        if let Some(arg) = args.first() {
-                            return self.infer_expr(arg);
-                        }
-                        return ChannelType::Null;
+                        // Args already inferred at arg_types collection above
+                        return arg_types.first().copied().unwrap_or(ChannelType::Null);
                     }
                     "assert" | "assert_eq" | "assert_ne" | "assert_throws" => {
-                        for arg in args { self.infer_expr(arg); }
+                        // Args already inferred at arg_types collection above
                         return ChannelType::Null;
                     }
                     _ => {}
