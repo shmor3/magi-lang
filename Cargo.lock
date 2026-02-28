@@ -1197,6 +1197,7 @@ dependencies = [
  "hex",
  "hmac",
  "html-escape",
+ "http",
  "lz4_flex",
  "md-5",
  "ordered-float",
