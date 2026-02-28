@@ -301,6 +301,21 @@ fn http_agent() -> ureq::Agent {
         .new_agent()
 }
 
+/// Read HTTP response body with a size limit.
+fn read_http_body(body: ureq::Body, context: &str) -> Result<String, EvalError> {
+    use std::io::Read;
+    let mut limited = body.into_reader().take((MAX_STRING_OUTPUT + 1) as u64);
+    let mut buf = String::new();
+    limited.read_to_string(&mut buf)
+        .map_err(|e| EvalError::InvalidInput(format!("{} read: {}", context, e)))?;
+    if buf.len() > MAX_STRING_OUTPUT {
+        return Err(EvalError::InvalidInput(format!(
+            "{}: response body exceeds {} byte limit", context, MAX_STRING_OUTPUT
+        )));
+    }
+    Ok(buf)
+}
+
 /// Compile a user-supplied regex pattern with a size limit.
 fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
     regex::RegexBuilder::new(pat)
@@ -389,73 +404,21 @@ impl OperationEvaluator for FullEvaluator {
                     if result_len > MAX_STRING_OUTPUT {
                         return Err(EvalError::InvalidInput(format!("string concatenation would produce {} bytes (max {})", result_len, MAX_STRING_OUTPUT)));
                     }
-                    return Ok(DataType::String(format!("{}{}", x, y)));
+                    let mut result = String::with_capacity(result_len);
+                    result.push_str(x);
+                    result.push_str(y);
+                    return Ok(DataType::String(result));
                 }
                 num_binop(&a, &b, i64::checked_add, |x, y| x + y)
             }
             OperationType::Subtract => num_binop(&a, &b, i64::checked_sub, |x, y| x - y),
             OperationType::Multiply => num_binop(&a, &b, i64::checked_mul, |x, y| x * y),
-            OperationType::Divide => {
-                match (promote_numeric(&a), promote_numeric(&b)) {
-                    (Some(Ok(x)), Some(Ok(y))) => {
-                        if y == 0 { return Err(EvalError::DivisionByZero); }
-                        match x.checked_div(y) {
-                            Some(v) => Ok(DataType::Int64(v)),
-                            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
-                        }
-                    }
-                    (Some(av), Some(bv)) => {
-                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                        if fb == 0.0 { return Err(EvalError::DivisionByZero); }
-                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                        Ok(DataType::Float64(fa / fb))
-                    }
-                    _ => Ok(DataType::Null),
-                }
-            }
-            OperationType::Modulo => {
-                match (promote_numeric(&a), promote_numeric(&b)) {
-                    (Some(Ok(x)), Some(Ok(y))) => {
-                        if y == 0 { return Err(EvalError::DivisionByZero); }
-                        match x.checked_rem(y) {
-                            Some(v) => Ok(DataType::Int64(v)),
-                            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
-                        }
-                    }
-                    (Some(av), Some(bv)) => {
-                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                        if fb == 0.0 { return Err(EvalError::DivisionByZero); }
-                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                        Ok(DataType::Float64(fa % fb))
-                    }
-                    _ => Ok(DataType::Null),
-                }
-            }
+            OperationType::Divide => num_div_op(&a, &b, i64::checked_div, |x, y| x / y),
+            OperationType::Modulo => num_div_op(&a, &b, i64::checked_rem, |x, y| x % y),
 
             // Comparison
-            OperationType::Equal => {
-                if a == b { return Ok(DataType::Bool(true)); }
-                // Cross-type numeric equality (e.g. Float32(1.0) == Float64(1.0))
-                match (promote_numeric(&a), promote_numeric(&b)) {
-                    (Some(av), Some(bv)) => {
-                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                        Ok(DataType::Bool(fa == fb))
-                    }
-                    _ => Ok(DataType::Bool(false)),
-                }
-            }
-            OperationType::NotEqual => {
-                if a == b { return Ok(DataType::Bool(false)); }
-                match (promote_numeric(&a), promote_numeric(&b)) {
-                    (Some(av), Some(bv)) => {
-                        let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                        let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                        Ok(DataType::Bool(fa != fb))
-                    }
-                    _ => Ok(DataType::Bool(true)),
-                }
-            }
+            OperationType::Equal => Ok(DataType::Bool(a == b || numeric_eq(&a, &b))),
+            OperationType::NotEqual => Ok(DataType::Bool(a != b && !numeric_eq(&a, &b))),
             OperationType::Greater => num_cmp(&a, &b, |x, y| x > y, |x, y| x > y, |x, y| x > y),
             OperationType::Less => num_cmp(&a, &b, |x, y| x < y, |x, y| x < y, |x, y| x < y),
             OperationType::GreaterEq => num_cmp(&a, &b, |x, y| x >= y, |x, y| x >= y, |x, y| x >= y),
@@ -472,19 +435,7 @@ impl OperationEvaluator for FullEvaluator {
                 let tb = is_truthy(&b);
                 Ok(DataType::Bool(ta || tb))
             },
-            OperationType::Not => {
-                let truthy = match &input {
-                    DataType::Bool(b) => *b,
-                    DataType::Int64(n) => *n != 0,
-                    DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
-                    DataType::String(s) => !s.is_empty(),
-                    DataType::Null => false,
-                    DataType::Array(a) => !a.is_empty(),
-                    DataType::Map(m) => !m.is_empty(),
-                    _ => true,
-                };
-                Ok(DataType::Bool(!truthy))
-            },
+            OperationType::Not => Ok(DataType::Bool(!is_truthy(&input))),
             OperationType::Negate => match &input {
                 DataType::Int64(x) => match x.checked_neg() {
                     Some(v) => Ok(DataType::Int64(v)),
@@ -509,7 +460,10 @@ impl OperationEvaluator for FullEvaluator {
                 if result_len > MAX_STRING_OUTPUT {
                     return Err(EvalError::InvalidInput(format!("concat would produce {} bytes (max {})", result_len, MAX_STRING_OUTPUT)));
                 }
-                Ok(DataType::String(format!("{}{}", xs, ys)))
+                let mut result = String::with_capacity(result_len);
+                result.push_str(&xs);
+                result.push_str(&ys);
+                Ok(DataType::String(result))
             },
             OperationType::ToString => Ok(DataType::String(input.to_string_lossy())),
 
@@ -592,7 +546,7 @@ impl OperationEvaluator for FullEvaluator {
                         if let (Some(pa), Some(pb)) = (promote_numeric(a), promote_numeric(b)) {
                             let fa = match pa { Ok(i) => i as f64, Err(f) => f };
                             let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                            return fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal);
+                            return fa.total_cmp(&fb);
                         }
                         match (a, b) {
                             (DataType::String(x), DataType::String(y)) => x.cmp(y),
@@ -609,19 +563,7 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::ArrayContains => match (&array, &value) {
                 (DataType::Array(arr), val) => {
-                    let found = arr.iter().any(|item| {
-                        if item == val { return true; }
-                        // Cross-type numeric equality
-                        match (promote_numeric(item), promote_numeric(val)) {
-                            (Some(av), Some(bv)) => {
-                                let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                                let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                                fa == fb
-                            }
-                            _ => false,
-                        }
-                    });
-                    Ok(DataType::Bool(found))
+                    Ok(DataType::Bool(arr.iter().any(|item| item == val || numeric_eq(item, val))))
                 }
                 _ => Ok(DataType::Bool(false)),
             },
@@ -827,7 +769,8 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Array(arr) => {
                         let i = index.to_i64().unwrap_or(-1);
                         if i < 0 { return Ok(DataType::Null); }
-                        Ok(arr.get(i as usize).cloned().unwrap_or(DataType::Null))
+                        let idx = usize::try_from(i).unwrap_or(usize::MAX);
+                        Ok(arr.get(idx).cloned().unwrap_or(DataType::Null))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -838,7 +781,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Array(arr) => {
                         let i = index.to_i64().unwrap_or(-1);
                         if i < 0 { return Ok(DataType::Array(arr.clone())); }
-                        let idx = i as usize;
+                        let idx = usize::try_from(i).unwrap_or(usize::MAX);
                         let mut new_arr = arr.clone();
                         if idx < new_arr.len() {
                             new_arr[idx] = value.clone();
@@ -881,18 +824,7 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Array(arr) => {
                     let mut seen = Vec::new();
                     for item in arr {
-                        let already = seen.iter().any(|s: &DataType| {
-                            if s == item { return true; }
-                            match (promote_numeric(s), promote_numeric(item)) {
-                                (Some(av), Some(bv)) => {
-                                    let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                                    let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                                    fa == fb
-                                }
-                                _ => false,
-                            }
-                        });
-                        if !already {
+                        if !seen.iter().any(|s: &DataType| s == item || numeric_eq(s, item)) {
                             seen.push(item.clone());
                         }
                     }
@@ -988,16 +920,7 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Float32(n) => Ok(DataType::Float32(n.ceil())),
                 other => Ok(other.clone()),
             },
-            OperationType::Sqrt => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.sqrt()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).sqrt())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.sqrt())),
-                    None => Ok(DataType::Null),
-                }
-            },
+            OperationType::Sqrt => eval_unary_float_op(&input, f32::sqrt, f64::sqrt),
             OperationType::Power => {
                 let a = inputs.get("a").unwrap_or(&DataType::Null);
                 let b = inputs.get("b").unwrap_or(&DataType::Null);
@@ -1026,76 +949,13 @@ impl OperationEvaluator for FullEvaluator {
                     _ => Ok(DataType::Null),
                 }
             },
-            OperationType::Sin => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.sin()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).sin())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.sin())),
-                    None => Ok(DataType::Null),
-                }
-            },
-            OperationType::Cos => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.cos()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).cos())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.cos())),
-                    None => Ok(DataType::Null),
-                }
-            },
-            OperationType::Tan => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.tan()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).tan())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.tan())),
-                    None => Ok(DataType::Null),
-                }
-            },
-            OperationType::Ln => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.ln()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).ln())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.ln())),
-                    None => Ok(DataType::Null),
-                }
-            },
-            OperationType::Log2 => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.log2()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).log2())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.log2())),
-                    None => Ok(DataType::Null),
-                }
-            },
-            OperationType::Log10 => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.log10()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).log10())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.log10())),
-                    None => Ok(DataType::Null),
-                }
-            },
-            OperationType::Exp => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.exp()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Float64((n as f64).exp())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.exp())),
-                    None => Ok(DataType::Null),
-                }
-            },
+            OperationType::Sin => eval_unary_float_op(&input, f32::sin, f64::sin),
+            OperationType::Cos => eval_unary_float_op(&input, f32::cos, f64::cos),
+            OperationType::Tan => eval_unary_float_op(&input, f32::tan, f64::tan),
+            OperationType::Ln => eval_unary_float_op(&input, f32::ln, f64::ln),
+            OperationType::Log2 => eval_unary_float_op(&input, f32::log2, f64::log2),
+            OperationType::Log10 => eval_unary_float_op(&input, f32::log10, f64::log10),
+            OperationType::Exp => eval_unary_float_op(&input, f32::exp, f64::exp),
             OperationType::Sign => {
                 if let DataType::Float32(n) = &input {
                     return Ok(DataType::Float32(n.signum()));
@@ -1120,7 +980,7 @@ impl OperationEvaluator for FullEvaluator {
                             return Err(EvalError::InvalidInput(format!("array exceeds maximum size ({})", MAX_ARRAY_ELEMENTS)));
                         }
                         let i = index.to_i64().unwrap_or(0);
-                        let idx = if i < 0 { 0 } else { (i as usize).min(arr.len()) };
+                        let idx = if i < 0 { 0 } else { usize::try_from(i).unwrap_or(usize::MAX).min(arr.len()) };
                         let mut new_arr = arr.clone();
                         new_arr.insert(idx, value.clone());
                         Ok(DataType::Array(new_arr))
@@ -1133,10 +993,15 @@ impl OperationEvaluator for FullEvaluator {
                 match &array {
                     DataType::Array(arr) => {
                         let i = index.to_i64().unwrap_or(-1);
-                        if i < 0 || i as usize >= arr.len() { return Ok(DataType::Array(arr.clone())); }
-                        let mut new_arr = arr.clone();
-                        new_arr.remove(i as usize);
-                        Ok(DataType::Array(new_arr))
+                        let idx = if i >= 0 { usize::try_from(i).ok() } else { None };
+                        match idx {
+                            Some(idx) if idx < arr.len() => {
+                                let mut new_arr = arr.clone();
+                                new_arr.remove(idx);
+                                Ok(DataType::Array(new_arr))
+                            }
+                            _ => Ok(DataType::Array(arr.clone())),
+                        }
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -1205,7 +1070,8 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let i = index.to_i64().unwrap_or(-1);
                         if i < 0 { return Ok(DataType::Null); }
-                        Ok(s.chars().nth(i as usize).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null))
+                        let idx = usize::try_from(i).unwrap_or(usize::MAX);
+                        Ok(s.chars().nth(idx).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -1290,6 +1156,9 @@ impl OperationEvaluator for FullEvaluator {
 
             // Min/Max
             OperationType::Min => {
+                if let (DataType::Float32(x), DataType::Float32(y)) = (&a, &b) {
+                    return Ok(DataType::Float32(x.min(*y)));
+                }
                 match (promote_numeric(&a), promote_numeric(&b)) {
                     (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.min(y))),
                     (Some(pa), Some(pb)) => {
@@ -1301,6 +1170,9 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
             OperationType::Max => {
+                if let (DataType::Float32(x), DataType::Float32(y)) = (&a, &b) {
+                    return Ok(DataType::Float32(x.max(*y)));
+                }
                 match (promote_numeric(&a), promote_numeric(&b)) {
                     (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.max(y))),
                     (Some(pa), Some(pb)) => {
@@ -1404,7 +1276,7 @@ impl OperationEvaluator for FullEvaluator {
                         let raw_end = inputs.get("input_2").or(inputs.get("end")).and_then(|v| v.to_i64()).unwrap_or(len);
                         let start = if raw_start < 0 { (len + raw_start).max(0) as usize } else { (raw_start as usize).min(b.len()) };
                         let end = if raw_end < 0 { (len + raw_end).max(0) as usize } else { (raw_end as usize).min(b.len()) };
-                        if start > end {
+                        if start >= end {
                             Ok(DataType::Bytes(vec![]))
                         } else {
                             Ok(DataType::Bytes(b[start..end].to_vec()))
@@ -2230,11 +2102,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlEncode => {
                 match &input {
                     DataType::String(s) => {
-                        use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
-                        // RFC 3986 unreserved characters: A-Z a-z 0-9 - _ . ~
-                        const RFC3986_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
-                            .remove(b'-').remove(b'_').remove(b'.').remove(b'~');
-                        Ok(DataType::String(utf8_percent_encode(s, RFC3986_ENCODE_SET).to_string()))
+                        Ok(DataType::String(url_encode_rfc3986(s)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -2242,10 +2110,9 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlDecode => {
                 match &input {
                     DataType::String(s) => {
-                        use percent_encoding::percent_decode_str;
                         let s = s.replace('+', " ");
-                        match percent_decode_str(&s).decode_utf8() {
-                            Ok(decoded) => Ok(DataType::String(decoded.into_owned())),
+                        match url_decode(&s) {
+                            Ok(decoded) => Ok(DataType::String(decoded)),
                             Err(_) => Err(EvalError::InvalidInput("url_decode: invalid UTF-8".to_string())),
                         }
                     }
@@ -2534,8 +2401,22 @@ impl OperationEvaluator for FullEvaluator {
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
                         match compile_regex(pat) {
-                            Ok(re) => match re.find(s) {
-                                Some(m) => Ok(DataType::String(m.as_str().to_string())),
+                            Ok(re) => match re.captures(s) {
+                                Some(caps) => {
+                                    if caps.len() > 1 {
+                                        // Has capture groups — return array of groups
+                                        let groups: Vec<DataType> = caps.iter().skip(1)
+                                            .map(|m| match m {
+                                                Some(m) => DataType::String(m.as_str().to_string()),
+                                                None => DataType::Null,
+                                            })
+                                            .collect();
+                                        Ok(DataType::Array(groups))
+                                    } else {
+                                        // No capture groups — return full match
+                                        Ok(DataType::String(caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()))
+                                    }
+                                }
                                 None => Ok(DataType::Null),
                             },
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_extract: {}", e))),
@@ -3054,7 +2935,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSlug => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(slug::slugify(s)))
+                        Ok(DataType::String(slugify(s)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3089,7 +2970,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextWrap => {
                 match &input {
                     DataType::String(s) => {
-                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80) as usize;
+                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80).max(0) as usize;
                         Ok(DataType::String(textwrap::fill(s, width)))
                     }
                     _ => Ok(DataType::Null),
@@ -3098,7 +2979,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextTruncate => {
                 match &input {
                     DataType::String(s) => {
-                        let max_len = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80) as usize;
+                        let max_len = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80).max(0) as usize;
                         if s.chars().count() <= max_len {
                             Ok(DataType::String(s.clone()))
                         } else {
@@ -3116,7 +2997,13 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlEscape => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(html_escape::encode_text(s).into_owned()))
+                        let escaped = s
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;")
+                            .replace('"', "&quot;")
+                            .replace('\'', "&#39;");
+                        Ok(DataType::String(escaped))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3124,7 +3011,15 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlUnescape => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(html_escape::decode_html_entities(s).into_owned()))
+                        // Decode &amp; LAST to prevent double-decoding
+                        let unescaped = s
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">")
+                            .replace("&quot;", "\"")
+                            .replace("&#39;", "'")
+                            .replace("&#x27;", "'")
+                            .replace("&amp;", "&");
+                        Ok(DataType::String(unescaped))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3196,7 +3091,7 @@ impl OperationEvaluator for FullEvaluator {
                 let switch_val = inputs.get("value").cloned().unwrap_or(DataType::Null);
                 let default_val = inputs.get("default").cloned().unwrap_or(DataType::Null);
                 // Check numbered cases: case_0, value_0, case_1, value_1, ...
-                for i in 0..100 {
+                for i in 0..1000 {
                     let case_key = format!("case_{}", i);
                     let value_key = format!("value_{}", i);
                     match (inputs.get(&case_key), inputs.get(&value_key)) {
@@ -3271,7 +3166,7 @@ impl OperationEvaluator for FullEvaluator {
                                 (Some(pa), Some(pb)) => {
                                     let fa = match pa { Ok(i) => i as f64, Err(f) => f };
                                     let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                                    fa.total_cmp(&fb)
                                 }
                                 _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
                             }
@@ -3290,7 +3185,7 @@ impl OperationEvaluator for FullEvaluator {
                                 (Some(pa), Some(pb)) => {
                                     let fa = match pa { Ok(i) => i as f64, Err(f) => f };
                                     let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+                                    fb.total_cmp(&fa)
                                 }
                                 _ => b.to_string_lossy().cmp(&a.to_string_lossy()),
                             }
@@ -3320,7 +3215,7 @@ impl OperationEvaluator for FullEvaluator {
                                 (Some(pa), Some(pb)) => {
                                     let fa = match pa { Ok(i) => i as f64, Err(f) => f };
                                     let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                                    fa.total_cmp(&fb)
                                 }
                                 _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
                             }
@@ -3359,7 +3254,7 @@ impl OperationEvaluator for FullEvaluator {
                                 (Some(av), Some(bv)) => {
                                     let fa = match av { Ok(i) => i as f64, Err(f) => f };
                                     let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                                    fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                                    fa.total_cmp(&fb)
                                 }
                                 _ => item.to_string_lossy().cmp(&target.to_string_lossy()),
                             }
@@ -3540,7 +3435,7 @@ impl OperationEvaluator for FullEvaluator {
                             }
                             OperationType::StatsMedian => {
                                 let mut sorted = nums.clone();
-                                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                sorted.sort_by(|a, b| a.total_cmp(b));
                                 let mid = sorted.len() / 2;
                                 if sorted.len().is_multiple_of(2) {
                                     Ok(DataType::Float64((sorted[mid - 1] + sorted[mid]) / 2.0))
@@ -3590,7 +3485,7 @@ impl OperationEvaluator for FullEvaluator {
                             }
                         }).collect();
                         if nums.is_empty() { return Ok(DataType::Null); }
-                        nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        nums.sort_by(|a, b| a.total_cmp(b));
                         let k = (pct / 100.0 * (nums.len() - 1) as f64).clamp(0.0, (nums.len() - 1) as f64);
                         let lower = k.floor() as usize;
                         let upper = k.ceil() as usize;
@@ -3613,7 +3508,7 @@ impl OperationEvaluator for FullEvaluator {
                             }
                         }).collect();
                         if nums.is_empty() { return Ok(DataType::Null); }
-                        nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        nums.sort_by(|a, b| a.total_cmp(b));
                         let k = (q * (nums.len() - 1) as f64).clamp(0.0, (nums.len() - 1) as f64);
                         let lower = k.floor() as usize;
                         let upper = k.ceil() as usize;
@@ -3917,7 +3812,7 @@ impl OperationEvaluator for FullEvaluator {
             // ================================================================
             OperationType::RandomBytes => {
                 let count = inputs.get("input_1").or(inputs.get("count"))
-                    .and_then(|v| v.to_i64()).unwrap_or(16) as usize;
+                    .and_then(|v| v.to_i64()).unwrap_or(16).max(0) as usize;
                 let count = count.min(1_000_000);
                 let mut bytes = vec![0u8; count];
                 rand::rng().fill(&mut bytes[..]);
@@ -3925,7 +3820,7 @@ impl OperationEvaluator for FullEvaluator {
             }
             OperationType::RandomString => {
                 let length = inputs.get("input_1").or(inputs.get("length"))
-                    .and_then(|v| v.to_i64()).unwrap_or(16) as usize;
+                    .and_then(|v| v.to_i64()).unwrap_or(16).max(0) as usize;
                 let length = length.min(MAX_STRING_OUTPUT);
                 let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
                 let mut rng = rand::rng();
@@ -3938,7 +3833,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::RandomSample => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 let count = inputs.get("input_1").or(inputs.get("count"))
-                    .and_then(|v| v.to_i64()).unwrap_or(1) as usize;
+                    .and_then(|v| v.to_i64()).unwrap_or(1).max(0) as usize;
                 match arr_val {
                     DataType::Array(mut arr) => {
                         use rand::seq::SliceRandom;
@@ -4057,16 +3952,23 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(hex::encode(result.into_bytes())))
             }
             OperationType::ConstantTimeEq => {
-                use subtle::ConstantTimeEq;
-                match (&a, &b) {
+                let (bytes_a, bytes_b) = match (&a, &b) {
                     (DataType::String(s1), DataType::String(s2)) => {
-                        Ok(DataType::Bool(s1.as_bytes().ct_eq(s2.as_bytes()).into()))
+                        (s1.as_bytes(), s2.as_bytes())
                     }
                     (DataType::Bytes(b1), DataType::Bytes(b2)) => {
-                        Ok(DataType::Bool(b1.ct_eq(b2).into()))
+                        (b1.as_slice(), b2.as_slice())
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => return Ok(DataType::Bool(false)),
+                };
+                if bytes_a.len() != bytes_b.len() {
+                    return Ok(DataType::Bool(false));
                 }
+                let mut diff = 0u8;
+                for (x, y) in bytes_a.iter().zip(bytes_b.iter()) {
+                    diff |= x ^ y;
+                }
+                Ok(DataType::Bool(diff == 0))
             }
 
             // ================================================================
@@ -4078,14 +3980,14 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => s.as_bytes().to_vec(),
                     _ => return Ok(DataType::Null),
                 };
-                Ok(DataType::String(data_encoding::BASE32.encode(&data)))
+                Ok(DataType::String(base32_encode(&data)))
             }
             OperationType::Base32Decode => {
                 match &input {
                     DataType::String(s) => {
-                        match data_encoding::BASE32.decode(s.as_bytes()) {
-                            Ok(decoded) => Ok(DataType::Bytes(decoded)),
-                            Err(_) => Ok(DataType::Null),
+                        match base32_decode(s) {
+                            Some(decoded) => Ok(DataType::Bytes(decoded)),
+                            None => Ok(DataType::Null),
                         }
                     }
                     _ => Ok(DataType::Null),
@@ -4340,12 +4242,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpGet => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let body: String = http_agent().get(url)
+                let resp = http_agent().get(url)
                     .call()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_get: {}", e)))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_get read: {}", e)))?;
+                    .map_err(|e| EvalError::InvalidInput(format!("http_get: {}", e)))?;
+                let body = read_http_body(resp.into_body(), "http_get")?;
                 Ok(DataType::String(body))
             }
 
@@ -4353,13 +4253,11 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let body: String = http_agent().post(url)
+                let resp = http_agent().post(url)
                     .header("Content-Type", "application/json")
                     .send(payload.as_deref().unwrap_or("").as_bytes())
-                    .map_err(|e| EvalError::InvalidInput(format!("http_post: {}", e)))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_post read: {}", e)))?;
+                    .map_err(|e| EvalError::InvalidInput(format!("http_post: {}", e)))?;
+                let body = read_http_body(resp.into_body(), "http_post")?;
                 Ok(DataType::String(body))
             }
 
@@ -4367,25 +4265,21 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let body: String = http_agent().put(url)
+                let resp = http_agent().put(url)
                     .header("Content-Type", "application/json")
                     .send(payload.as_deref().unwrap_or("").as_bytes())
-                    .map_err(|e| EvalError::InvalidInput(format!("http_put: {}", e)))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_put read: {}", e)))?;
+                    .map_err(|e| EvalError::InvalidInput(format!("http_put: {}", e)))?;
+                let body = read_http_body(resp.into_body(), "http_put")?;
                 Ok(DataType::String(body))
             }
 
             OperationType::HttpDelete => {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
-                let body: String = http_agent().delete(url)
+                let resp = http_agent().delete(url)
                     .call()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_delete: {}", e)))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_delete read: {}", e)))?;
+                    .map_err(|e| EvalError::InvalidInput(format!("http_delete: {}", e)))?;
+                let body = read_http_body(resp.into_body(), "http_delete")?;
                 Ok(DataType::String(body))
             }
 
@@ -4430,10 +4324,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                 };
                 let status = resp.status().as_u16();
-                let body: String = resp
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_request read: {}", e)))?;
+                let body = read_http_body(resp.into_body(), "http_request")?;
                 Ok(DataType::Map(std::collections::BTreeMap::from([
                     ("status".into(), DataType::Int64(status as i64)),
                     ("body".into(), DataType::String(body)),
@@ -4501,13 +4392,11 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let body: String = http_agent().patch(url)
+                let resp = http_agent().patch(url)
                     .header("Content-Type", "application/json")
                     .send(payload.as_deref().unwrap_or("").as_bytes())
-                    .map_err(|e| EvalError::InvalidInput(format!("http_patch: {}", e)))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| EvalError::InvalidInput(format!("http_patch read: {}", e)))?;
+                    .map_err(|e| EvalError::InvalidInput(format!("http_patch: {}", e)))?;
+                let body = read_http_body(resp.into_body(), "http_patch")?;
                 Ok(DataType::String(body))
             }
 
@@ -4706,12 +4595,24 @@ impl OperationEvaluator for FullEvaluator {
                     let stream = mtx
                         .get_mut()
                         .map_err(|_| EvalError::InvalidInput("tcp lock poisoned".into()))?;
-                    let mut buf = vec![0u8; 4096];
-                    let n = stream
-                        .read(&mut buf)
-                        .map_err(|e| EvalError::InvalidInput(format!("tcp_read: {}", e)))?;
-                    buf.truncate(n);
-                    Ok(DataType::Bytes(buf))
+                    const TCP_READ_LIMIT: usize = 64 * 1024 * 1024; // 64 MB
+                    let mut buf = vec![0u8; 65536];
+                    let mut result = Vec::new();
+                    loop {
+                        let n = stream
+                            .read(&mut buf)
+                            .map_err(|e| EvalError::InvalidInput(format!("tcp_read: {}", e)))?;
+                        if n == 0 { break; }
+                        result.extend_from_slice(&buf[..n]);
+                        if result.len() > TCP_READ_LIMIT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "tcp_read: data exceeds {} byte limit", TCP_READ_LIMIT
+                            )));
+                        }
+                        // If we got less than the buffer, no more data available yet
+                        if n < buf.len() { break; }
+                    }
+                    Ok(DataType::Bytes(result))
                 })
             }
             OperationType::TcpClose => {
@@ -4821,7 +4722,7 @@ impl OperationEvaluator for FullEvaluator {
                         .map_err(|e| {
                             EvalError::InvalidInput(format!("udp set_read_timeout: {}", e))
                         })?;
-                    let mut buf = vec![0u8; 4096];
+                    let mut buf = vec![0u8; 65535]; // Max UDP datagram size
                     let (n, addr) = socket.recv_from(&mut buf).map_err(|e| {
                         EvalError::InvalidInput(format!("udp_recv_from: {}", e))
                     })?;
@@ -4872,8 +4773,24 @@ impl OperationEvaluator for FullEvaluator {
                     let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
                     let msg = ws.read().map_err(|e| EvalError::InvalidInput(format!("ws_receive: {}", e)))?;
                     match msg {
-                        tungstenite::Message::Text(t) => Ok(DataType::String(t.to_string())),
-                        tungstenite::Message::Binary(b) => Ok(DataType::Bytes(b.to_vec())),
+                        tungstenite::Message::Text(t) => {
+                            let s = t.to_string();
+                            if s.len() > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "ws_receive: message exceeds {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
+                            Ok(DataType::String(s))
+                        }
+                        tungstenite::Message::Binary(b) => {
+                            let v = b.to_vec();
+                            if v.len() > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "ws_receive: message exceeds {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
+                            Ok(DataType::Bytes(v))
+                        }
                         tungstenite::Message::Close(_) => Ok(DataType::Null),
                         _ => Ok(DataType::Null),
                     }
@@ -4985,6 +4902,11 @@ impl OperationEvaluator for FullEvaluator {
                 let mut request_line = String::new();
                 reader.read_line(&mut request_line)
                     .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                if request_line.len() > 8192 {
+                    return Err(EvalError::InvalidInput(
+                        "http_server_receive: request line exceeds 8192 byte limit".to_string()
+                    ));
+                }
                 let parts: Vec<&str> = request_line.trim().splitn(3, ' ').collect();
                 let method = parts.first().unwrap_or(&"GET").to_string();
                 let path = parts.get(1).unwrap_or(&"/").to_string();
@@ -4992,10 +4914,16 @@ impl OperationEvaluator for FullEvaluator {
                 let mut content_length: usize = 0;
                 const MAX_HEADERS: usize = 256;
                 let mut header_count = 0usize;
+                const MAX_HEADER_LINE: usize = 8192;
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line)
                         .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                    if line.len() > MAX_HEADER_LINE {
+                        return Err(EvalError::InvalidInput(format!(
+                            "http_server_receive: header line exceeds {} byte limit", MAX_HEADER_LINE
+                        )));
+                    }
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() { break; }
                     header_count += 1;
@@ -5042,6 +4970,11 @@ impl OperationEvaluator for FullEvaluator {
                     Some(DataType::Int32(n)) => *n as i64,
                     _ => 200,
                 };
+                if !(100..=599).contains(&status) {
+                    return Err(EvalError::InvalidInput(format!(
+                        "http_server_respond: invalid status code {} (must be 100-599)", status
+                    )));
+                }
                 let body = inputs.get("body").map(|d| d.to_string()).unwrap_or_default();
                 let reason = http::StatusCode::from_u16(status as u16)
                     .ok()
@@ -5121,6 +5054,58 @@ fn toml_value_to_datatype(val: &toml::Value) -> DataType {
             DataType::Map(m)
         }
         toml::Value::Datetime(dt) => DataType::String(dt.to_string()),
+    }
+}
+
+/// Cross-type numeric equality (e.g. Float32(1.0) == Int64(1)).
+fn numeric_eq(a: &DataType, b: &DataType) -> bool {
+    match (promote_numeric(a), promote_numeric(b)) {
+        (Some(av), Some(bv)) => {
+            let fa = match av { Ok(i) => i as f64, Err(f) => f };
+            let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+            fa == fb
+        }
+        _ => false,
+    }
+}
+
+/// Division/modulo with zero check, integer overflow protection, and float promotion.
+fn num_div_op(
+    a: &DataType, b: &DataType,
+    int_op: fn(i64, i64) -> Option<i64>,
+    float_op: fn(f64, f64) -> f64,
+) -> Result<DataType, EvalError> {
+    match (promote_numeric(a), promote_numeric(b)) {
+        (Some(Ok(x)), Some(Ok(y))) => {
+            if y == 0 { return Err(EvalError::DivisionByZero); }
+            match int_op(x, y) {
+                Some(v) => Ok(DataType::Int64(v)),
+                None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+            }
+        }
+        (Some(av), Some(bv)) => {
+            let fb = match bv { Ok(i) => i as f64, Err(f) => f };
+            if fb == 0.0 { return Err(EvalError::DivisionByZero); }
+            let fa = match av { Ok(i) => i as f64, Err(f) => f };
+            Ok(DataType::Float64(float_op(fa, fb)))
+        }
+        _ => Ok(DataType::Null),
+    }
+}
+
+/// Apply a unary float operation, preserving Float32 type.
+fn eval_unary_float_op(
+    input: &DataType,
+    f32_op: fn(f32) -> f32,
+    f64_op: fn(f64) -> f64,
+) -> Result<DataType, EvalError> {
+    if let DataType::Float32(n) = input {
+        return Ok(DataType::Float32(f32_op(*n)));
+    }
+    match promote_numeric(input) {
+        Some(Ok(n)) => Ok(DataType::Float64(f64_op(n as f64))),
+        Some(Err(f)) => Ok(DataType::Float64(f64_op(f))),
+        None => Ok(DataType::Null),
     }
 }
 
@@ -5301,6 +5286,128 @@ fn json_value_to_datatype(val: &serde_json::Value) -> DataType {
             DataType::Map(m)
         }
     }
+}
+
+// =========================================================================
+// Inline helper functions (replacing external crates with stdlib)
+// =========================================================================
+
+/// RFC 3986 URL encoding — unreserved chars (A-Z a-z 0-9 - _ . ~) pass through.
+fn url_encode_rfc3986(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() * 3);
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                result.push('%');
+                result.push(HEX_UPPER[(byte >> 4) as usize] as char);
+                result.push(HEX_UPPER[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    result
+}
+
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
+/// URL decode with percent-decoding, returning UTF-8 string.
+fn url_decode(input: &str) -> Result<String, std::string::FromUtf8Error> {
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next().and_then(hex_digit);
+            let lo = chars.next().and_then(hex_digit);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                bytes.push((h << 4) | l);
+            } else {
+                bytes.push(b'%');
+            }
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes)
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Simple slug generation: lowercase, replace non-alphanumeric with hyphens, collapse.
+fn slugify(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut last_was_hyphen = true; // prevent leading hyphen
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch.to_ascii_lowercase());
+            last_was_hyphen = false;
+        } else if !last_was_hyphen {
+            result.push('-');
+            last_was_hyphen = true;
+        }
+    }
+    // Remove trailing hyphen
+    if result.ends_with('-') {
+        result.pop();
+    }
+    result
+}
+
+const BASE32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// RFC 4648 Base32 encoding.
+fn base32_encode(data: &[u8]) -> String {
+    let mut result = String::new();
+    let mut buffer: u64 = 0;
+    let mut bits_left = 0;
+    for &byte in data {
+        buffer = (buffer << 8) | byte as u64;
+        bits_left += 8;
+        while bits_left >= 5 {
+            bits_left -= 5;
+            let idx = ((buffer >> bits_left) & 0x1f) as usize;
+            result.push(BASE32_ALPHABET[idx] as char);
+        }
+    }
+    if bits_left > 0 {
+        let idx = ((buffer << (5 - bits_left)) & 0x1f) as usize;
+        result.push(BASE32_ALPHABET[idx] as char);
+    }
+    while !result.len().is_multiple_of(8) {
+        result.push('=');
+    }
+    result
+}
+
+/// RFC 4648 Base32 decoding.
+fn base32_decode(input: &str) -> Option<Vec<u8>> {
+    let input = input.trim_end_matches('=');
+    let mut result = Vec::new();
+    let mut buffer: u64 = 0;
+    let mut bits_left = 0;
+    for ch in input.chars() {
+        let val = match ch {
+            'A'..='Z' => ch as u8 - b'A',
+            'a'..='z' => ch as u8 - b'a',
+            '2'..='7' => ch as u8 - b'2' + 26,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | val as u64;
+        bits_left += 5;
+        if bits_left >= 8 {
+            bits_left -= 8;
+            result.push((buffer >> bits_left) as u8);
+        }
+    }
+    Some(result)
 }
 
 fn print_usage() {
@@ -5831,10 +5938,9 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
             if offset.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<string@{}>", offset);
             }
-            let len = u32::from_le_bytes([
-                data[offset], data[offset + 1],
-                data[offset + 2], data[offset + 3],
-            ]) as usize;
+            let len = u32::from_le_bytes(
+                data[offset..offset + 4].try_into().unwrap(),
+            ) as usize;
             match offset.checked_add(4).and_then(|o| o.checked_add(len)) {
                 Some(end) if end <= data.len() => {
                     String::from_utf8_lossy(&data[offset + 4..end]).to_string()
@@ -5850,9 +5956,9 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
             if ptr.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<array@{}>", ptr);
             }
-            let raw_len = u32::from_le_bytes([
-                data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
-            ]) as usize;
+            let raw_len = u32::from_le_bytes(
+                data[ptr..ptr + 4].try_into().unwrap(),
+            ) as usize;
             let len = raw_len.min(MAX_DISPLAY_ELEMENTS);
             let mut parts = Vec::with_capacity(len);
             for i in 0..len {
@@ -5863,12 +5969,9 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
                 if elem_offset.checked_add(8).is_none_or(|end| end > data.len()) {
                     break;
                 }
-                let elem = i64::from_le_bytes([
-                    data[elem_offset], data[elem_offset + 1],
-                    data[elem_offset + 2], data[elem_offset + 3],
-                    data[elem_offset + 4], data[elem_offset + 5],
-                    data[elem_offset + 6], data[elem_offset + 7],
-                ]);
+                let elem = i64::from_le_bytes(
+                    data[elem_offset..elem_offset + 8].try_into().unwrap(),
+                );
                 parts.push(format_tagged_value_depth(elem, data, depth + 1));
             }
             if raw_len > MAX_DISPLAY_ELEMENTS {
@@ -5884,9 +5987,9 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
             if ptr.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<map@{}>", ptr);
             }
-            let raw_count = u32::from_le_bytes([
-                data[ptr], data[ptr + 1], data[ptr + 2], data[ptr + 3],
-            ]) as usize;
+            let raw_count = u32::from_le_bytes(
+                data[ptr..ptr + 4].try_into().unwrap(),
+            ) as usize;
             let count = raw_count.min(MAX_DISPLAY_ENTRIES);
             let mut parts = Vec::with_capacity(count);
             for i in 0..count {
@@ -5901,18 +6004,12 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
                 if val_offset.checked_add(8).is_none_or(|end| end > data.len()) {
                     break;
                 }
-                let key = i64::from_le_bytes([
-                    data[key_offset], data[key_offset + 1],
-                    data[key_offset + 2], data[key_offset + 3],
-                    data[key_offset + 4], data[key_offset + 5],
-                    data[key_offset + 6], data[key_offset + 7],
-                ]);
-                let value = i64::from_le_bytes([
-                    data[val_offset], data[val_offset + 1],
-                    data[val_offset + 2], data[val_offset + 3],
-                    data[val_offset + 4], data[val_offset + 5],
-                    data[val_offset + 6], data[val_offset + 7],
-                ]);
+                let key = i64::from_le_bytes(
+                    data[key_offset..key_offset + 8].try_into().unwrap(),
+                );
+                let value = i64::from_le_bytes(
+                    data[val_offset..val_offset + 8].try_into().unwrap(),
+                );
                 parts.push(format!("{}: {}", format_tagged_value_depth(key, data, depth + 1), format_tagged_value_depth(value, data, depth + 1)));
             }
             if raw_count > MAX_DISPLAY_ENTRIES {

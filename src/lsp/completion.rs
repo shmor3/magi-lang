@@ -343,7 +343,7 @@ pub fn handle_completion(
             .unwrap_or_default();
         if !prefix.is_empty() {
             let prefix_lower = prefix.to_lowercase();
-            items.retain(|item| item.label.to_lowercase().contains(&prefix_lower));
+            items.retain(|item| item.label.to_lowercase().starts_with(&prefix_lower));
         }
 
         return CompletionResponse::Array(items);
@@ -472,7 +472,7 @@ pub fn handle_completion(
         let prefix_lower = prefix.to_lowercase();
         items.retain(|item| {
             let text = item.filter_text.as_ref().unwrap_or(&item.label);
-            text.to_lowercase().contains(&prefix_lower)
+            text.to_lowercase().starts_with(&prefix_lower)
         });
     }
 

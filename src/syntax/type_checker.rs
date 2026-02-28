@@ -1854,7 +1854,11 @@ impl TypeChecker {
                         "numeric_method" => match method.as_str() {
                             "to_string" => ChannelType::String,
                             "to_int64" => ChannelType::Int64,
+                            "to_int32" => ChannelType::Int32,
+                            "to_uint32" => ChannelType::Uint32,
+                            "to_uint64" => ChannelType::Uint64,
                             "to_float64" => ChannelType::Float64,
+                            "to_float32" => ChannelType::Float32,
                             "is_nan" | "is_infinite" => ChannelType::Bool,
                             _ => obj_ty, // abs, sign, pow, min, max, clamp preserve receiver type
                         },
@@ -2049,12 +2053,8 @@ impl TypeChecker {
             ExpressionKind::NullCoalesce { left, right } => {
                 let left_ty = self.infer_expr(left);
                 let right_ty = self.infer_expr(right);
-                // Result type: right side if left is null, otherwise left type
-                if left_ty == ChannelType::Null {
-                    right_ty
-                } else {
-                    left_ty
-                }
+                // Unify both branches — left may be null at runtime
+                unify_types(&[left_ty, right_ty])
             }
 
             // -----------------------------------------------------------------
@@ -3118,11 +3118,13 @@ fn available_methods_for_channel_type(obj_type: ChannelType) -> Vec<&'static str
                 "words", "count"]);
         }
         ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => {
-            methods.extend_from_slice(&["abs", "sign", "to_float64", "pow", "min", "max", "clamp"]);
+            methods.extend_from_slice(&["abs", "sign", "to_string", "to_int64", "to_float64",
+                "to_int32", "to_uint32", "to_uint64", "pow", "min", "max", "clamp"]);
         }
         ChannelType::Float64 | ChannelType::Float32 => {
             methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
-                "sign", "to_int64", "pow", "min", "max", "clamp",
+                "sign", "to_string", "to_int64", "to_float64", "to_float32",
+                "pow", "min", "max", "clamp",
                 "ln", "log2", "log10", "sin", "cos", "tan"]);
         }
         ChannelType::Map => {
