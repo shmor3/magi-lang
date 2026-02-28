@@ -293,6 +293,13 @@ fn get_bind_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, E
     }
 }
 
+/// Compile a user-supplied regex pattern with a size limit.
+fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(pat)
+        .size_limit(1 << 20)  // 1 MB compiled size limit
+        .build()
+}
+
 /// Extract a string reference from an input map.
 #[allow(dead_code)]
 fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'a str, EvalError> {
@@ -1457,13 +1464,16 @@ impl OperationEvaluator for FullEvaluator {
                 let min_val = inputs.get("min").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 let max_val = inputs.get("max").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
                 match (promote_numeric(&input), promote_numeric(&min_val), promote_numeric(&max_val)) {
+                    (Some(Ok(v)), Some(Ok(lo)), Some(Ok(hi))) => {
+                        Ok(DataType::Int64(v.max(lo).min(hi)))
+                    }
                     (Some(v), Some(lo), Some(hi)) => {
                         let fv = match v { Ok(i) => i as f64, Err(f) => f };
                         let flo = match lo { Ok(i) => i as f64, Err(f) => f };
                         let fhi = match hi { Ok(i) => i as f64, Err(f) => f };
                         let clamped = fv.max(flo).min(fhi);
-                        if v.is_ok() && lo.is_ok() && hi.is_ok() {
-                            Ok(DataType::Int64(clamped as i64))
+                        if matches!(&input, DataType::Float32(_)) {
+                            Ok(DataType::Float32(clamped as f32))
                         } else {
                             Ok(DataType::Float64(clamped))
                         }
@@ -2469,7 +2479,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("input_1").or(inputs.get("pattern")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => Ok(DataType::Bool(re.is_match(s))),
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_match: {}", e))),
                         }
@@ -2481,7 +2491,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => Ok(DataType::Bool(re.is_match(s))),
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_test: {}", e))),
                         }
@@ -2494,7 +2504,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern, &replacement) {
                     (DataType::String(s), DataType::String(pat), DataType::String(rep)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => {
                                 let result = re.replace_all(s, rep.as_str()).to_string();
                                 if result.len() > MAX_STRING_OUTPUT {
@@ -2514,7 +2524,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => match re.find(s) {
                                 Some(m) => Ok(DataType::String(m.as_str().to_string())),
                                 None => Ok(DataType::Null),
@@ -2529,7 +2539,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => {
                                 let parts: Vec<DataType> = re.split(s)
                                     .take(MAX_ARRAY_ELEMENTS + 1)
@@ -2558,7 +2568,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => match re.captures(s) {
                                 Some(caps) => {
                                     let groups: Vec<DataType> = caps.iter()
@@ -2581,7 +2591,7 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match regex::Regex::new(pat) {
+                        match compile_regex(pat) {
                             Ok(re) => {
                                 let matches: Vec<DataType> = re.find_iter(s)
                                     .take(MAX_ARRAY_ELEMENTS + 1)
@@ -2735,7 +2745,7 @@ impl OperationEvaluator for FullEvaluator {
                 match &path {
                     DataType::String(p) => {
                         match fs::metadata(p) {
-                            Ok(meta) => Ok(DataType::Int64(meta.len() as i64)),
+                            Ok(meta) => Ok(DataType::Int64(i64::try_from(meta.len()).unwrap_or(i64::MAX))),
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_size: {}", e))),
                         }
                     }
@@ -2748,7 +2758,7 @@ impl OperationEvaluator for FullEvaluator {
                 match (&source, &dest) {
                     (DataType::String(src), DataType::String(dst)) => {
                         match fs::copy(src, dst) {
-                            Ok(bytes) => Ok(DataType::Int64(bytes as i64)),
+                            Ok(bytes) => Ok(DataType::Int64(i64::try_from(bytes).unwrap_or(i64::MAX))),
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_copy: {}", e))),
                         }
                     }
@@ -3824,15 +3834,17 @@ impl OperationEvaluator for FullEvaluator {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() as i64;
+                    .as_millis();
+                let now = i64::try_from(now).unwrap_or(i64::MAX);
                 Ok(DataType::Int64(now))
             }
             OperationType::Elapsed => {
                 let timestamp = inputs.get("timestamp").cloned().unwrap_or(DataType::Null);
-                let now = std::time::SystemTime::now()
+                let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() as i64;
+                    .as_millis();
+                let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
                 match timestamp.to_i64() {
                     Some(ts) => Ok(DataType::Int64(now - ts)),
                     None => Ok(DataType::Null),
@@ -4993,10 +5005,19 @@ impl OperationEvaluator for FullEvaluator {
                 };
                 let body = inputs.get("body").map(|d| d.to_string()).unwrap_or_default();
                 let reason = match status {
-                    200 => "OK", 201 => "Created", 204 => "No Content",
-                    301 => "Moved Permanently", 302 => "Found",
+                    100 => "Continue", 101 => "Switching Protocols",
+                    200 => "OK", 201 => "Created", 202 => "Accepted",
+                    204 => "No Content", 206 => "Partial Content",
+                    301 => "Moved Permanently", 302 => "Found", 303 => "See Other",
+                    304 => "Not Modified", 307 => "Temporary Redirect", 308 => "Permanent Redirect",
                     400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-                    404 => "Not Found", 500 => "Internal Server Error", _ => "OK",
+                    404 => "Not Found", 405 => "Method Not Allowed", 408 => "Request Timeout",
+                    409 => "Conflict", 410 => "Gone", 413 => "Payload Too Large",
+                    415 => "Unsupported Media Type", 422 => "Unprocessable Entity",
+                    429 => "Too Many Requests",
+                    500 => "Internal Server Error", 501 => "Not Implemented",
+                    502 => "Bad Gateway", 503 => "Service Unavailable", 504 => "Gateway Timeout",
+                    _ => "Unknown",
                 };
                 let response = format!(
                     "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",

@@ -1105,7 +1105,7 @@ impl<'a> Interpreter<'a> {
                         .iter()
                         .filter(|(k, _)| k.starts_with(&prefix))
                         .map(|(k, v)| {
-                            let short_name = k[prefix.len()..].to_string();
+                            let short_name = k.strip_prefix(&*prefix).unwrap_or(k).to_string();
                             (short_name, v.clone())
                         })
                         .collect();
@@ -1118,7 +1118,7 @@ impl<'a> Interpreter<'a> {
                         .iter()
                         .filter(|(k, _)| k.starts_with(&prefix))
                         .map(|(k, v)| {
-                            let short_name = k[prefix.len()..].to_string();
+                            let short_name = k.strip_prefix(&*prefix).unwrap_or(k).to_string();
                             (short_name, v.clone())
                         })
                         .collect();
@@ -1131,7 +1131,7 @@ impl<'a> Interpreter<'a> {
                         .iter()
                         .filter(|(k, _)| k.starts_with(&prefix))
                         .map(|(k, v)| {
-                            let short_name = k[prefix.len()..].to_string();
+                            let short_name = k.strip_prefix(&*prefix).unwrap_or(k).to_string();
                             (short_name, v.clone())
                         })
                         .collect();
@@ -4754,6 +4754,11 @@ fn is_control_flow(err: &InterpError) -> bool {
 
 /// Convert a DataType to a human-readable display string (for interpolation/print).
 fn datatype_to_display(val: &DataType) -> String {
+    datatype_to_display_depth(val, 0)
+}
+
+fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
+    const MAX_DISPLAY_DEPTH: usize = 64;
     match val {
         DataType::Null => "null".to_string(),
         DataType::Bool(b) => b.to_string(),
@@ -4766,13 +4771,19 @@ fn datatype_to_display(val: &DataType) -> String {
         DataType::String(s) => s.clone(),
         DataType::Bytes(b) => format!("<bytes:{}>", b.len()),
         DataType::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(datatype_to_display).collect();
+            if depth >= MAX_DISPLAY_DEPTH {
+                return "[...]".to_string();
+            }
+            let items: Vec<String> = arr.iter().map(|v| datatype_to_display_depth(v, depth + 1)).collect();
             format!("[{}]", items.join(", "))
         }
         DataType::Map(map) => {
+            if depth >= MAX_DISPLAY_DEPTH {
+                return "{...}".to_string();
+            }
             let entries: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, datatype_to_display(v)))
+                .map(|(k, v)| format!("{}: {}", k, datatype_to_display_depth(v, depth + 1)))
                 .collect();
             format!("{{{}}}", entries.join(", "))
         }
