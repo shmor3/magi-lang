@@ -1797,11 +1797,11 @@ impl OperationEvaluator for FullEvaluator {
                         let mut result = tmpl.clone();
                         for (k, v) in vals {
                             result = result.replace(&format!("{{{}}}", k), &v.to_string_lossy());
-                        }
-                        if result.len() > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!(
-                                "string_template result exceeds {} byte limit", MAX_STRING_OUTPUT
-                            )));
+                            if result.len() > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "string_template result exceeds {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
                         }
                         Ok(DataType::String(result))
                     }
@@ -1820,11 +1820,11 @@ impl OperationEvaluator for FullEvaluator {
                         let mut result = tmpl.clone();
                         for (k, v) in vals {
                             result = result.replace(&format!("{{{}}}", k), &v.to_string_lossy());
-                        }
-                        if result.len() > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!(
-                                "string_format result exceeds {} byte limit", MAX_STRING_OUTPUT
-                            )));
+                            if result.len() > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "string_format result exceeds {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
                         }
                         Ok(DataType::String(result))
                     }
@@ -1832,11 +1832,11 @@ impl OperationEvaluator for FullEvaluator {
                         let mut result = tmpl.clone();
                         for (i, v) in vals.iter().enumerate() {
                             result = result.replace(&format!("{{{}}}", i), &v.to_string_lossy());
-                        }
-                        if result.len() > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!(
-                                "string_format result exceeds {} byte limit", MAX_STRING_OUTPUT
-                            )));
+                            if result.len() > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "string_format result exceeds {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
                         }
                         Ok(DataType::String(result))
                     }
@@ -2369,19 +2369,20 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::JsonFlatten => {
-                fn json_flatten(val: &DataType, prefix: &str, result: &mut std::collections::BTreeMap<String, DataType>) {
+                fn json_flatten(val: &DataType, prefix: &str, result: &mut std::collections::BTreeMap<String, DataType>, depth: usize) {
+                    if depth > 64 { return; }
                     match val {
                         DataType::Map(m) => {
                             for (k, v) in m {
                                 if k.starts_with("__") { continue; }
                                 let new_key = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) };
-                                json_flatten(v, &new_key, result);
+                                json_flatten(v, &new_key, result, depth + 1);
                             }
                         }
                         DataType::Array(arr) => {
                             for (i, v) in arr.iter().enumerate() {
                                 let new_key = if prefix.is_empty() { format!("{}", i) } else { format!("{}.{}", prefix, i) };
-                                json_flatten(v, &new_key, result);
+                                json_flatten(v, &new_key, result, depth + 1);
                             }
                         }
                         _ => {
@@ -2391,7 +2392,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                 }
                 let mut result = std::collections::BTreeMap::new();
-                json_flatten(&input, "", &mut result);
+                json_flatten(&input, "", &mut result, 0);
                 Ok(DataType::Map(result))
             }
             OperationType::JsonQuery => {
@@ -2618,6 +2619,15 @@ impl OperationEvaluator for FullEvaluator {
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match &path {
                     DataType::String(p) => {
+                        const MAX_FILE_READ: u64 = 64 * 1024 * 1024; // 64 MB
+                        match fs::metadata(p) {
+                            Ok(meta) if meta.len() > MAX_FILE_READ => {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "fs_read: file exceeds {} byte limit ({})", MAX_FILE_READ, meta.len()
+                                )));
+                            }
+                            _ => {}
+                        }
                         match fs::read_to_string(p) {
                             Ok(content) => Ok(DataType::String(content)),
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_read: {}", e))),
@@ -2900,12 +2910,18 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::PathNormalize => {
                 match &input {
                     DataType::String(p) => {
-                        // Simple normalization: remove . and .. components
+                        // Normalization: remove . and resolve .. (never pop past root)
                         let path = std::path::Path::new(p);
-                        let mut components = Vec::new();
+                        let mut components: Vec<std::path::Component> = Vec::new();
                         for comp in path.components() {
                             match comp {
-                                std::path::Component::ParentDir => { components.pop(); }
+                                std::path::Component::ParentDir => {
+                                    match components.last() {
+                                        Some(std::path::Component::Normal(_)) => { components.pop(); }
+                                        Some(std::path::Component::RootDir) | Some(std::path::Component::Prefix(_)) => {}
+                                        _ => components.push(comp),
+                                    }
+                                }
                                 std::path::Component::CurDir => {}
                                 other => components.push(other),
                             }
@@ -2983,14 +2999,19 @@ impl OperationEvaluator for FullEvaluator {
                 match value.to_i64() {
                     Some(n) => {
                         let abs = (n as f64).abs();
+                        let f = n as f64;
                         let result = if abs < 1024.0 {
                             format!("{} B", n)
-                        } else if abs < 1024.0 * 1024.0 {
-                            format!("{:.1} KB", n as f64 / 1024.0)
-                        } else if abs < 1024.0 * 1024.0 * 1024.0 {
-                            format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+                        } else if abs < 1024.0_f64.powi(2) {
+                            format!("{:.1} KiB", f / 1024.0)
+                        } else if abs < 1024.0_f64.powi(3) {
+                            format!("{:.1} MiB", f / 1024.0_f64.powi(2))
+                        } else if abs < 1024.0_f64.powi(4) {
+                            format!("{:.1} GiB", f / 1024.0_f64.powi(3))
+                        } else if abs < 1024.0_f64.powi(5) {
+                            format!("{:.1} TiB", f / 1024.0_f64.powi(4))
                         } else {
-                            format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
+                            format!("{:.1} PiB", f / 1024.0_f64.powi(5))
                         };
                         Ok(DataType::String(result))
                     }
@@ -3281,6 +3302,7 @@ impl OperationEvaluator for FullEvaluator {
                     _ => Ok(DataType::Null),
                 }
             }
+            // StableSort delegates to SortAsc (Rust's sort_by is already stable)
             OperationType::StableSort => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
@@ -3323,18 +3345,21 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match (&arr_val, &value) {
                     (DataType::Array(arr), target) => {
-                        let idx = arr.iter().position(|item| {
-                            if item == target { return true; }
+                        let result = arr.binary_search_by(|item| {
+                            if item == target { return std::cmp::Ordering::Equal; }
                             match (promote_numeric(item), promote_numeric(target)) {
                                 (Some(av), Some(bv)) => {
                                     let fa = match av { Ok(i) => i as f64, Err(f) => f };
                                     let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                                    fa == fb
+                                    fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
                                 }
-                                _ => false,
+                                _ => item.to_string_lossy().cmp(&target.to_string_lossy()),
                             }
                         });
-                        Ok(idx.map(|i| DataType::Int64(i as i64)).unwrap_or(DataType::Int64(-1)))
+                        match result {
+                            Ok(i) => Ok(DataType::Int64(i as i64)),
+                            Err(_) => Ok(DataType::Int64(-1)),
+                        }
                     }
                     _ => Ok(DataType::Int64(-1)),
                 }
@@ -3762,11 +3787,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let indent = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(4) as usize;
                         let pad = " ".repeat(indent);
-                        let result: String = s.lines()
-                            .map(|line| format!("{}{}", pad, line))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        Ok(DataType::String(result))
+                        Ok(DataType::String(textwrap::indent(s, &pad).trim_end_matches('\n').to_string()))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -3774,23 +3795,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextDedent => {
                 match &input {
                     DataType::String(s) => {
-                        let lines: Vec<&str> = s.lines().collect();
-                        let min_indent = lines.iter()
-                            .filter(|l| !l.trim().is_empty())
-                            .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
-                            .min()
-                            .unwrap_or(0);
-                        let result: String = lines.iter()
-                            .map(|l| {
-                                let skip: usize = l.chars().take(min_indent)
-                                    .take_while(|c| c.is_whitespace())
-                                    .map(|c| c.len_utf8())
-                                    .sum();
-                                &l[skip..]
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        Ok(DataType::String(result))
+                        Ok(DataType::String(textwrap::dedent(s)))
                     }
                     _ => Ok(DataType::Null),
                 }
@@ -4647,9 +4652,12 @@ impl OperationEvaluator for FullEvaluator {
                 validate_host(host)?;
                 let port = get_port(inputs, "port")?;
                 let addr = format!("{}:{}", host, port);
-                let sock_addr: std::net::SocketAddr = addr
-                    .parse()
-                    .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: invalid address: {}", e)))?;
+                // Use ToSocketAddrs for DNS resolution, then connect_timeout
+                use std::net::ToSocketAddrs;
+                let sock_addr = addr.to_socket_addrs()
+                    .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: DNS resolution failed: {}", e)))?
+                    .next()
+                    .ok_or_else(|| EvalError::InvalidInput("tcp_connect: no addresses found".to_string()))?;
                 let stream = std::net::TcpStream::connect_timeout(
                     &sock_addr,
                     std::time::Duration::from_millis(5000),

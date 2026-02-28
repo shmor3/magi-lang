@@ -127,7 +127,8 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
 
         // Math Extended
         Sin | Cos | Tan | Asin | Acos | Atan | Sinh | Cosh | Tanh | Ln | Log2 | Log10 | Exp
-        | ToRadians | ToDegrees | Sign => ChannelType::Float64,
+        | ToRadians | ToDegrees => ChannelType::Float64,
+        Sign => ChannelType::Null,
         Log | Atan2 | Lerp | Remap => ChannelType::Float64,
         Clamp => ChannelType::Null,
         Gcd | Lcm => ChannelType::Int64,

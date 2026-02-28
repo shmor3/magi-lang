@@ -154,10 +154,14 @@ impl DataType {
             DataType::Uint64(u) => *u != 0,
             DataType::Float32(f) => *f != 0.0 && !f.is_nan(),
             DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
-            DataType::String(s) => !matches!(
-                s.trim().to_lowercase().as_str(),
-                "" | "false" | "0" | "no" | "off"
-            ),
+            DataType::String(s) => {
+                let t = s.trim();
+                !(t.is_empty()
+                    || t.eq_ignore_ascii_case("false")
+                    || t == "0"
+                    || t.eq_ignore_ascii_case("no")
+                    || t.eq_ignore_ascii_case("off"))
+            }
             DataType::Null => false,
             DataType::Bytes(b) => !b.is_empty(),
             DataType::Array(a) => !a.is_empty(),

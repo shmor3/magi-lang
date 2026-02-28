@@ -1159,17 +1159,17 @@ impl<'a> Interpreter<'a> {
                         let module_prefix = format!("{}::", path[..path.len()-1].join("::"));
                         let mut available: Vec<String> = self.functions.keys()
                             .filter(|k| k.starts_with(&module_prefix))
-                            .map(|k| k[module_prefix.len()..].to_string())
+                            .map(|k| k.strip_prefix(&*module_prefix).unwrap_or(k).to_string())
                             .collect();
                         // Also include enum and struct names
                         for k in self.enum_defs.keys() {
                             if k.starts_with(&module_prefix) {
-                                available.push(k[module_prefix.len()..].to_string());
+                                available.push(k.strip_prefix(&*module_prefix).unwrap_or(k).to_string());
                             }
                         }
                         for k in self.struct_defs.keys() {
                             if k.starts_with(&module_prefix) {
-                                available.push(k[module_prefix.len()..].to_string());
+                                available.push(k.strip_prefix(&*module_prefix).unwrap_or(k).to_string());
                             }
                         }
                         let refs: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
@@ -1402,6 +1402,14 @@ impl<'a> Interpreter<'a> {
                                     context: "sort_by comparator must return a number".to_string(),
                                     span,
                                 })?;
+                                if cmp_val.is_nan() {
+                                    return Err(InterpError::TypeError {
+                                        expected: "finite number".to_string(),
+                                        actual: "NaN".to_string(),
+                                        context: "sort_by comparator returned NaN".to_string(),
+                                        span,
+                                    });
+                                }
                                 if cmp_val > 0.0 {
                                     sorted[j] = sorted[j - 1].clone();
                                     j -= 1;
@@ -1440,6 +1448,14 @@ impl<'a> Interpreter<'a> {
                                 context: "min_by comparator must return a number".to_string(),
                                 span,
                             })?;
+                            if cmp_val.is_nan() {
+                                return Err(InterpError::TypeError {
+                                    expected: "finite number".to_string(),
+                                    actual: "NaN".to_string(),
+                                    context: "min_by comparator returned NaN".to_string(),
+                                    span,
+                                });
+                            }
                             if cmp_val > 0.0 {
                                 min = item.clone();
                             }
@@ -1459,6 +1475,14 @@ impl<'a> Interpreter<'a> {
                                 context: "max_by comparator must return a number".to_string(),
                                 span,
                             })?;
+                            if cmp_val.is_nan() {
+                                return Err(InterpError::TypeError {
+                                    expected: "finite number".to_string(),
+                                    actual: "NaN".to_string(),
+                                    context: "max_by comparator returned NaN".to_string(),
+                                    span,
+                                });
+                            }
                             if cmp_val < 0.0 {
                                 max = item.clone();
                             }
@@ -2152,6 +2176,7 @@ impl<'a> Interpreter<'a> {
                     let mut float_sum: f64 = 0.0;
                     let mut int_overflow = false;
                     for item in arr {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
                         match item {
                             DataType::Float64(f) => { has_float = true; float_sum += f; }
                             DataType::Float32(f) => { has_float = true; float_sum += *f as f64; }
@@ -2196,6 +2221,7 @@ impl<'a> Interpreter<'a> {
                     let mut float_prod: f64 = 1.0;
                     let mut int_overflow = false;
                     for item in arr {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
                         match item {
                             DataType::Float64(f) => { has_float = true; float_prod *= f; }
                             DataType::Float32(f) => { has_float = true; float_prod *= *f as f64; }
@@ -2242,6 +2268,7 @@ impl<'a> Interpreter<'a> {
                     if arr.is_empty() { return Ok(Some(DataType::Null)); }
                     let mut min = arr[0].clone();
                     for item in &arr[1..] {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
                         let cmp = match (&min, item) {
                             (DataType::Int64(a), DataType::Int64(b)) => *a > *b,
                             // NaN handling: if current min is NaN, replace it; if item is NaN, skip it
@@ -2263,6 +2290,7 @@ impl<'a> Interpreter<'a> {
                     if arr.is_empty() { return Ok(Some(DataType::Null)); }
                     let mut max = arr[0].clone();
                     for item in &arr[1..] {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
                         let cmp = match (&max, item) {
                             (DataType::Int64(a), DataType::Int64(b)) => *a < *b,
                             // NaN handling: if current max is NaN, replace it; if item is NaN, skip it
