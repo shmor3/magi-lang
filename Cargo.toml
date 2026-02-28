@@ -44,6 +44,7 @@ strsim = "0.11"
 slug = "0.1"
 html-escape = "0.2"
 semver = "1"
+http = "1"
 
 [dev-dependencies]
 wasmparser = "0.245"

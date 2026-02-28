@@ -5043,21 +5043,10 @@ impl OperationEvaluator for FullEvaluator {
                     _ => 200,
                 };
                 let body = inputs.get("body").map(|d| d.to_string()).unwrap_or_default();
-                let reason = match status {
-                    100 => "Continue", 101 => "Switching Protocols",
-                    200 => "OK", 201 => "Created", 202 => "Accepted",
-                    204 => "No Content", 206 => "Partial Content",
-                    301 => "Moved Permanently", 302 => "Found", 303 => "See Other",
-                    304 => "Not Modified", 307 => "Temporary Redirect", 308 => "Permanent Redirect",
-                    400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-                    404 => "Not Found", 405 => "Method Not Allowed", 408 => "Request Timeout",
-                    409 => "Conflict", 410 => "Gone", 413 => "Payload Too Large",
-                    415 => "Unsupported Media Type", 422 => "Unprocessable Entity",
-                    429 => "Too Many Requests",
-                    500 => "Internal Server Error", 501 => "Not Implemented",
-                    502 => "Bad Gateway", 503 => "Service Unavailable", 504 => "Gateway Timeout",
-                    _ => "Unknown",
-                };
+                let reason = http::StatusCode::from_u16(status as u16)
+                    .ok()
+                    .and_then(|s| s.canonical_reason())
+                    .unwrap_or("Unknown");
                 let response = format!(
                     "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
                     status, reason, body.len(), body
