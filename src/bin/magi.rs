@@ -6008,7 +6008,7 @@ fn cmd_run_wasm(path: &str) {
                 format_tagged_value(val, data)
             };
             let bytes = formatted.as_bytes();
-            let total = 4 + bytes.len();
+            let total = 4usize.saturating_add(bytes.len());
 
             // Read current heap pointer from exported global.
             let ptr = match heap_global.get(&mut caller).i32() {
@@ -6020,7 +6020,7 @@ fn cmd_run_wasm(path: &str) {
             let str_offset = ptr as usize;
             {
                 let data = memory.data_mut(&mut caller);
-                if str_offset + 4 + bytes.len() > data.len() {
+                if str_offset.saturating_add(4).saturating_add(bytes.len()) > data.len() {
                     return 0; // out of memory
                 }
                 let len_bytes = (bytes.len() as u32).to_le_bytes();
