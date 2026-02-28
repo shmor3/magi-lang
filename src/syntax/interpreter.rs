@@ -163,7 +163,7 @@ impl Heap {
             addr
         } else {
             let addr = self.next_addr;
-            self.next_addr += size;
+            self.next_addr = self.next_addr.saturating_add(size);
             addr
         };
 
@@ -1909,25 +1909,25 @@ impl<'a> Interpreter<'a> {
                 "min" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
-                    let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
-                    let result = (*n as i64).min(other).max(0).min(u32::MAX as i64);
+                    let other = to_i128_numeric(&arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "min argument".to_string(), span })?;
+                    let result = (*n as i128).min(other).max(0).min(u32::MAX as i128);
                     Ok(Some(DataType::Uint32(result as u32)))
                 }
                 "max" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1".to_string(), actual: 0, span }); }
                     let arg = self.eval_expr(&args[0])?;
-                    let other = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
-                    let result = (*n as i64).max(other).max(0).min(u32::MAX as i64);
+                    let other = to_i128_numeric(&arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&arg).to_string(), context: "max argument".to_string(), span })?;
+                    let result = (*n as i128).max(other).max(0).min(u32::MAX as i128);
                     Ok(Some(DataType::Uint32(result as u32)))
                 }
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
                     let hi_arg = self.eval_expr(&args[1])?;
-                    let min_val = lo_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
-                    let max_val = hi_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
+                    let min_val = to_i128_numeric(&lo_arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&lo_arg).to_string(), context: "clamp min bound".to_string(), span })?;
+                    let max_val = to_i128_numeric(&hi_arg).ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: datatype_type_name(&hi_arg).to_string(), context: "clamp max bound".to_string(), span })?;
                     let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
-                    let result = (*n as i64).max(lo).min(hi).max(0).min(u32::MAX as i64);
+                    let result = (*n as i128).max(lo).min(hi).max(0).min(u32::MAX as i128);
                     Ok(Some(DataType::Uint32(result as u32)))
                 }
                 _ => Ok(None),
@@ -3160,7 +3160,7 @@ impl<'a> Interpreter<'a> {
 
             ExpressionKind::Lambda { params, body } => {
                 let name = format!("__lambda_{}", self.lambda_counter);
-                self.lambda_counter += 1;
+                self.lambda_counter = self.lambda_counter.saturating_add(1);
                 // Capture current scope variables (by value)
                 let captures: Vec<(String, DataType, bool)> = self.symbols.iter()
                     .flat_map(|scope| scope.iter())
@@ -4802,18 +4802,32 @@ fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
             if depth >= MAX_DISPLAY_DEPTH {
                 return "[...]".to_string();
             }
-            let items: Vec<String> = arr.iter().map(|v| datatype_to_display_depth(v, depth + 1)).collect();
-            format!("[{}]", items.join(", "))
+            const MAX_DISPLAY_ELEMENTS: usize = 1000;
+            let truncated = arr.len() > MAX_DISPLAY_ELEMENTS;
+            let items: Vec<String> = arr.iter().take(MAX_DISPLAY_ELEMENTS)
+                .map(|v| datatype_to_display_depth(v, depth + 1)).collect();
+            if truncated {
+                format!("[{}, ...({} more)]", items.join(", "), arr.len() - MAX_DISPLAY_ELEMENTS)
+            } else {
+                format!("[{}]", items.join(", "))
+            }
         }
         DataType::Map(map) => {
             if depth >= MAX_DISPLAY_DEPTH {
                 return "{...}".to_string();
             }
+            const MAX_DISPLAY_ENTRIES: usize = 1000;
+            let truncated = map.len() > MAX_DISPLAY_ENTRIES;
             let entries: Vec<String> = map
                 .iter()
+                .take(MAX_DISPLAY_ENTRIES)
                 .map(|(k, v)| format!("{}: {}", k, datatype_to_display_depth(v, depth + 1)))
                 .collect();
-            format!("{{{}}}", entries.join(", "))
+            if truncated {
+                format!("{{{}, ...({} more)}}", entries.join(", "), map.len() - MAX_DISPLAY_ENTRIES)
+            } else {
+                format!("{{{}}}", entries.join(", "))
+            }
         }
         DataType::Future(_) => "<future>".to_string(),
     }

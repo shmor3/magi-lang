@@ -223,7 +223,7 @@ impl LanguageServer for MagiLanguageServer {
         } else if lines.is_empty() {
             (0u32, 0u32)
         } else {
-            let last = lines.last().unwrap();
+            let last = lines.last().unwrap_or(&"");
             let utf16_len: u32 = last.chars().map(|c| c.len_utf16() as u32).sum();
             ((lines.len().saturating_sub(1)) as u32, utf16_len)
         };
