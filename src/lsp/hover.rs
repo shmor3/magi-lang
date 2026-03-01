@@ -61,9 +61,9 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
             info.push_str("mod ");
             info.push_str(&var.name);
         } else if let Some(ref ta) = var.type_annotation {
-            if ta.starts_with("import(") && ta.ends_with(')') && ta.len() > 8 {
+            if let Some(inner) = ta.strip_prefix("import(").and_then(|s| s.strip_suffix(')')) {
                 info.push_str("use ");
-                info.push_str(&ta[7..ta.len() - 1]);
+                info.push_str(inner);
             } else if ta.starts_with("import(") {
                 info.push_str("use ");
                 info.push_str(ta);
@@ -189,6 +189,7 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "to_string" => Some("Converts a value to its string representation."),
         "to_int64" => Some("Converts a value to a 64-bit integer."),
         "to_float64" => Some("Converts a value to a 64-bit float."),
+        "to_float32" => Some("Converts a value to a 32-bit float."),
         "to_bool" => Some("Converts a value to a boolean."),
         "to_json" => Some("Converts a value to a JSON string."),
         "parse_int" => Some("Parses a string as an integer."),
@@ -205,10 +206,17 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "sin" => Some("Returns the sine of an angle in radians."),
         "cos" => Some("Returns the cosine of an angle in radians."),
         "tan" => Some("Returns the tangent of an angle in radians."),
+        "asin" => Some("Returns the arcsine (inverse sine) in radians."),
+        "acos" => Some("Returns the arccosine (inverse cosine) in radians."),
+        "atan" => Some("Returns the arctangent (inverse tangent) in radians."),
+        "atan2" => Some("Returns the arctangent of y/x, using signs to determine the quadrant."),
+        "sinh" => Some("Returns the hyperbolic sine."),
+        "cosh" => Some("Returns the hyperbolic cosine."),
+        "tanh" => Some("Returns the hyperbolic tangent."),
         "ln" => Some("Returns the natural logarithm."),
         "log2" => Some("Returns the base-2 logarithm."),
         "log10" => Some("Returns the base-10 logarithm."),
-        "exp" => Some("Returns e raised to a power."),
+        "exp" => Some("Computes e^x (exponential function)"),
         "is_null" => Some("Returns true if the value is null."),
         "is_string" => Some("Returns true if the value is a string."),
         "is_number" => Some("Returns true if the value is a number (int or float)."),
@@ -216,20 +224,24 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         "is_map" => Some("Returns true if the value is a map."),
         "is_bool" => Some("Returns true if the value is a boolean."),
         "is_bytes" => Some("Returns true if the value is a bytes value."),
+        "is_finite" => Some("Returns true if the value is finite (not NaN or Infinity)."),
         _ => None,
     }
 }
 
 fn method_description(name: &str) -> Option<&'static str> {
     match name {
+        // Generic methods (aliases not covered by builtin_description)
+        "length" => Some("Returns the length (alias for `len`)."),
+        "size" => Some("Returns the number of entries in a map (alias for `len`)."),
         // Array methods
         "push" => Some("Appends an element to the array and returns the new array."),
         "pop" => Some("Removes and returns the last element of the array."),
         "shift" => Some("Removes and returns the first element of the array."),
         "insert" => Some("Inserts an element at the given index."),
         "remove" => Some("Removes the element at the given index and returns the array."),
-        "get" => Some("Returns the element at the given index."),
-        "set" => Some("Sets the element at the given index and returns the array."),
+        "get" => Some("Returns the element at an index (array) or the value for a key (map)."),
+        "set" => Some("Sets the element at an index (array) or a key-value pair (map). Returns the updated collection."),
         "map" => Some("Transforms each element using a function. Returns a new array."),
         "filter" => Some("Filters elements by a predicate function. Returns a new array."),
         "reduce" => Some("Reduces the array to a single value using an accumulator function."),
@@ -305,6 +317,7 @@ fn method_description(name: &str) -> Option<&'static str> {
         "sign" => Some("Returns the sign of the number (-1, 0, or 1)."),
         "is_nan" => Some("Returns true if the value is NaN."),
         "is_infinite" => Some("Returns true if the value is infinite."),
+        "is_finite" => Some("Returns true if the value is finite (not NaN or Infinity)."),
         _ => None,
     }
 }
@@ -527,6 +540,51 @@ mod tests {
         let hover = result.unwrap();
         if let HoverContents::Markup(content) = &hover.contents {
             assert!(content.value.contains("async fn fetch"));
+        }
+    }
+
+    #[test]
+    fn test_hover_method_length() {
+        // "length" is an alias method — should have hover description
+        let source = "let arr = [1, 2, 3];\narr.length()";
+        let (state, _) = analyze_document(source);
+        // Hover on "length" (line 1, col 4)
+        let params = make_hover_params(1, 4);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some(), "hovering on 'length' should show method description");
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("length"), "should mention 'length': {}", content.value);
+        }
+    }
+
+    #[test]
+    fn test_hover_method_size() {
+        // "size" is a map alias method — should have hover description
+        let source = "let m = { a: 1 };\nm.size()";
+        let (state, _) = analyze_document(source);
+        // Hover on "size" (line 1, col 2)
+        let params = make_hover_params(1, 2);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some(), "hovering on 'size' should show method description");
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("size"), "should mention 'size': {}", content.value);
+        }
+    }
+
+    #[test]
+    fn test_hover_method_get_description() {
+        // "get" works on both arrays and maps — description should reflect this
+        let source = "let arr = [1, 2, 3];\narr.get(0)";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(1, 4);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some());
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("index") || content.value.contains("key"),
+                "get description should mention index or key: {}", content.value);
         }
     }
 }

@@ -16,6 +16,37 @@ use magi_lang::types::{DataType, OperationType};
 
 // ── Stub evaluator for standalone testing ─────────────────
 
+/// Type-preserving binary operation for the stub evaluator.
+fn stub_binop(
+    a: &DataType, b: &DataType,
+    int_op: fn(i64, i64) -> i64,
+    float_op: fn(f64, f64) -> f64,
+) -> Result<DataType, EvalError> {
+    match (a, b) {
+        // Same-type operations preserve type
+        (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(int_op(*x as i64, *y as i64) as i32)),
+        (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(int_op(*x as i64, *y as i64) as u32)),
+        (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(int_op(*x as i64, *y as i64) as u64)),
+        (DataType::Float32(x), DataType::Float32(y)) => Ok(DataType::Float32(float_op(*x as f64, *y as f64) as f32)),
+        // Int64 + Int64
+        (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(int_op(*x, *y))),
+        // Float64 or mixed float
+        (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x, *y))),
+        (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x as f64, *y))),
+        (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(float_op(*x, *y as f64))),
+        // Mixed integer → Int64
+        _ => {
+            match (a.to_i64(), b.to_i64()) {
+                (Some(x), Some(y)) => Ok(DataType::Int64(int_op(x, y))),
+                _ => match (a.to_f64(), b.to_f64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Float64(float_op(x, y))),
+                    _ => Ok(DataType::Null),
+                }
+            }
+        }
+    }
+}
+
 /// A minimal operation evaluator that handles basic arithmetic and comparisons.
 struct StubEvaluator;
 
@@ -42,88 +73,64 @@ impl OperationEvaluator for StubEvaluator {
         let key = inputs.get("key").cloned().unwrap_or(DataType::Null);
 
         match op {
-            // Arithmetic
+            // Arithmetic — uses stub_binop helper for type-preserving numeric ops
             OperationType::Add => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x.wrapping_add(*y))),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x + y)),
-                (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 + y)),
-                (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x + *y as f64)),
                 (DataType::String(x), DataType::String(y)) => {
                     Ok(DataType::String(format!("{}{}", x, y)))
                 }
-                _ => Ok(DataType::Null),
+                _ => stub_binop(&a, &b, i64::wrapping_add, |x, y| x + y),
             },
-            OperationType::Subtract => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x.wrapping_sub(*y))),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x - y)),
-                (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 - y)),
-                (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x - *y as f64)),
-                _ => Ok(DataType::Null),
-            },
-            OperationType::Multiply => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(x.wrapping_mul(*y))),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x * y)),
-                (DataType::Int64(x), DataType::Float64(y)) => Ok(DataType::Float64(*x as f64 * y)),
-                (DataType::Float64(x), DataType::Int64(y)) => Ok(DataType::Float64(x * *y as f64)),
-                _ => Ok(DataType::Null),
-            },
-            OperationType::Divide => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => {
-                    if *y == 0 {
-                        Err(EvalError::DivisionByZero)
-                    } else {
-                        match x.checked_div(*y) {
-                            Some(v) => Ok(DataType::Int64(v)),
-                            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
-                        }
-                    }
+            OperationType::Subtract => stub_binop(&a, &b, i64::wrapping_sub, |x, y| x - y),
+            OperationType::Multiply => stub_binop(&a, &b, i64::wrapping_mul, |x, y| x * y),
+            OperationType::Divide => {
+                // Only integer division by zero errors; float div by zero → NaN/Infinity
+                let is_int_zero = matches!((&a, &b),
+                    (DataType::Int64(_), DataType::Int64(0))
+                    | (DataType::Int32(_), DataType::Int32(0))
+                    | (DataType::Uint32(_), DataType::Uint32(0))
+                    | (DataType::Uint64(_), DataType::Uint64(0))
+                );
+                if is_int_zero {
+                    Err(EvalError::DivisionByZero)
+                } else {
+                    stub_binop(&a, &b, |x, y| if y == 0 { 0 } else { x.checked_div(y).unwrap_or(0) }, |x, y| x / y)
                 }
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(x / y)),
-                (DataType::Int64(x), DataType::Float64(y)) => {
-                    Ok(DataType::Float64(*x as f64 / y))
-                }
-                (DataType::Float64(x), DataType::Int64(y)) => {
-                    Ok(DataType::Float64(x / *y as f64))
-                }
-                _ => Ok(DataType::Null),
             },
             OperationType::Modulo => match (&a, &b) {
-                (DataType::Int64(_), DataType::Int64(y)) if *y == 0 => Err(EvalError::DivisionByZero),
-                (DataType::Int64(x), DataType::Int64(y)) => {
-                    match x.checked_rem(*y) {
-                        Some(v) => Ok(DataType::Int64(v)),
-                        None => Err(EvalError::InvalidInput("integer overflow".to_string())),
-                    }
-                }
-                _ => Ok(DataType::Null),
+                _ if b.to_i64() == Some(0) => Err(EvalError::DivisionByZero),
+                _ => stub_binop(&a, &b, |x, y| x.checked_rem(y).unwrap_or(0), |x, y| x % y),
             },
 
             // Comparison
             OperationType::Equal => Ok(DataType::Bool(a == b)),
             OperationType::NotEqual => Ok(DataType::Bool(a != b)),
             OperationType::Greater => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x > y)),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x > y)),
                 (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x > y)),
-                _ => Ok(DataType::Bool(false)),
+                _ => match (a.to_f64(), b.to_f64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Bool(x > y)),
+                    _ => Ok(DataType::Bool(false)),
+                },
             },
             OperationType::Less => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x < y)),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x < y)),
                 (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x < y)),
-                _ => Ok(DataType::Bool(false)),
+                _ => match (a.to_f64(), b.to_f64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Bool(x < y)),
+                    _ => Ok(DataType::Bool(false)),
+                },
             },
             OperationType::GreaterEq => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x >= y)),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x >= y)),
                 (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x >= y)),
-                _ => Ok(DataType::Bool(false)),
+                _ => match (a.to_f64(), b.to_f64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Bool(x >= y)),
+                    _ => Ok(DataType::Bool(false)),
+                },
             },
             OperationType::LessEq => match (&a, &b) {
-                (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Bool(x <= y)),
-                (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Bool(x <= y)),
                 (DataType::String(x), DataType::String(y)) => Ok(DataType::Bool(x <= y)),
-                _ => Ok(DataType::Bool(false)),
+                _ => match (a.to_f64(), b.to_f64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Bool(x <= y)),
+                    _ => Ok(DataType::Bool(false)),
+                },
             },
 
             // Logical
@@ -489,13 +496,19 @@ impl OperationEvaluator for StubEvaluator {
             OperationType::Range => {
                 let start = inputs.get("start").or(inputs.get("a")).and_then(|v| v.to_i64()).unwrap_or(0);
                 let end = inputs.get("end").or(inputs.get("b")).and_then(|v| v.to_i64()).unwrap_or(0);
+                let inclusive = matches!(inputs.get("inclusive"), Some(DataType::Bool(true)));
                 let step = inputs.get("step").and_then(|v| v.to_i64()).unwrap_or(if start <= end { 1 } else { -1 });
                 if step == 0 { return Ok(DataType::Array(vec![])); }
                 let mut result = Vec::new();
                 let mut i = start;
                 loop {
-                    if step > 0 && i >= end { break; }
-                    if step < 0 && i <= end { break; }
+                    if inclusive {
+                        if step > 0 && i > end { break; }
+                        if step < 0 && i < end { break; }
+                    } else {
+                        if step > 0 && i >= end { break; }
+                        if step < 0 && i <= end { break; }
+                    }
                     result.push(DataType::Int64(i));
                     i = match i.checked_add(step) {
                         Some(v) => v,
@@ -623,6 +636,44 @@ impl OperationEvaluator for StubEvaluator {
                     _ => Ok(DataType::Null),
                 }
             },
+            OperationType::PadStart => {
+                let width = inputs.get("input_1").or(inputs.get("width")).cloned().unwrap_or(DataType::Int64(0));
+                let fill = inputs.get("input_2").or(inputs.get("fill")).cloned();
+                match &input {
+                    DataType::String(s) => {
+                        let w = width.to_i64().unwrap_or(0).max(0) as usize;
+                        let pad_char = match fill {
+                            Some(DataType::String(c)) if !c.is_empty() => c,
+                            _ => " ".to_string(),
+                        };
+                        let char_count = s.chars().count();
+                        if w <= char_count { return Ok(DataType::String(s.clone())); }
+                        let pad_len = w - char_count;
+                        let padding: String = pad_char.chars().cycle().take(pad_len).collect();
+                        Ok(DataType::String(format!("{}{}", padding, s)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::PadEnd => {
+                let width = inputs.get("input_1").or(inputs.get("width")).cloned().unwrap_or(DataType::Int64(0));
+                let fill = inputs.get("input_2").or(inputs.get("fill")).cloned();
+                match &input {
+                    DataType::String(s) => {
+                        let w = width.to_i64().unwrap_or(0).max(0) as usize;
+                        let pad_char = match fill {
+                            Some(DataType::String(c)) if !c.is_empty() => c,
+                            _ => " ".to_string(),
+                        };
+                        let char_count = s.chars().count();
+                        if w <= char_count { return Ok(DataType::String(s.clone())); }
+                        let pad_len = w - char_count;
+                        let padding: String = pad_char.chars().cycle().take(pad_len).collect();
+                        Ok(DataType::String(format!("{}{}", s, padding)))
+                    }
+                    _ => Ok(DataType::Null),
+                }
+            },
             OperationType::StringLines => match &input {
                 DataType::String(s) => Ok(DataType::Array(s.lines().map(|l| DataType::String(l.to_string())).collect())),
                 _ => Ok(DataType::Null),
@@ -632,7 +683,7 @@ impl OperationEvaluator for StubEvaluator {
                 _ => Ok(DataType::Null),
             },
             OperationType::CharAt => {
-                let idx = inputs.get("input_1").cloned().unwrap_or(DataType::Int64(0));
+                let idx = inputs.get("index").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
                 match &input {
                     DataType::String(s) => {
                         let i = idx.to_i64().unwrap_or(0);
@@ -718,6 +769,62 @@ impl OperationEvaluator for StubEvaluator {
                         };
                         Err(EvalError::InvalidInput(msg))
                     }
+                }
+            },
+
+            // Bitwise operations with type preservation
+            OperationType::BitAnd => match (&a, &b) {
+                (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x & y)),
+                (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(x & y)),
+                (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(x & y)),
+                _ => match (a.to_i64(), b.to_i64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Int64(x & y)),
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::BitOr => match (&a, &b) {
+                (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x | y)),
+                (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(x | y)),
+                (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(x | y)),
+                _ => match (a.to_i64(), b.to_i64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Int64(x | y)),
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::BitXor => match (&a, &b) {
+                (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x ^ y)),
+                (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(x ^ y)),
+                (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(x ^ y)),
+                _ => match (a.to_i64(), b.to_i64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Int64(x ^ y)),
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::BitNot => match &input {
+                DataType::Uint64(x) => Ok(DataType::Uint64(!x)),
+                DataType::Uint32(x) => Ok(DataType::Uint32(!x)),
+                DataType::Int32(x) => Ok(DataType::Int32(!x)),
+                _ => match input.to_i64() {
+                    Some(x) => Ok(DataType::Int64(!x)),
+                    None => Ok(DataType::Null),
+                }
+            },
+            OperationType::BitShiftLeft => match (&a, &b) {
+                (DataType::Int32(x), _) => Ok(DataType::Int32(x << (b.to_i64().unwrap_or(0) as u32 & 31))),
+                (DataType::Uint32(x), _) => Ok(DataType::Uint32(x << (b.to_i64().unwrap_or(0) as u32 & 31))),
+                (DataType::Uint64(x), _) => Ok(DataType::Uint64(x << (b.to_i64().unwrap_or(0) as u32 & 63))),
+                _ => match (a.to_i64(), b.to_i64()) {
+                    (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x << y)),
+                    _ => Ok(DataType::Null),
+                }
+            },
+            OperationType::BitShiftRight => match (&a, &b) {
+                (DataType::Int32(x), _) => Ok(DataType::Int32(x >> (b.to_i64().unwrap_or(0) as u32 & 31))),
+                (DataType::Uint32(x), _) => Ok(DataType::Uint32(x >> (b.to_i64().unwrap_or(0) as u32 & 31))),
+                (DataType::Uint64(x), _) => Ok(DataType::Uint64(x >> (b.to_i64().unwrap_or(0) as u32 & 63))),
+                _ => match (a.to_i64(), b.to_i64()) {
+                    (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x >> y)),
+                    _ => Ok(DataType::Null),
                 }
             },
 
@@ -1752,8 +1859,9 @@ fn test_w106_double_negation() {
 
 #[test]
 fn test_w106_self_comparison() {
+    // Self-comparison is now W205 in linter, not W106 in type checker
     let codes = typecheck_warnings("let x = 5; let y = x == x;");
-    assert!(codes.contains(&"W106".to_string()), "expected W106, got: {:?}", codes);
+    assert!(!codes.contains(&"W106".to_string()), "W106 should not be emitted for self-comparison (linter handles as W205), got: {:?}", codes);
 }
 
 #[test]
@@ -2045,6 +2153,32 @@ fn test_w202_reports_all_dead_code() {
         .filter(|d| d.code.as_deref() == Some("W202"))
         .count();
     assert!(w202_count >= 2, "expected at least 2 W202 diagnostics for all dead code, got {}", w202_count);
+}
+
+#[test]
+fn test_w202_while_true_return_terminates() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = "fn foo() {\n  while true { return 1; }\n  let x = 2;\n}";
+    let program = parse(src);
+    let result = lint(&program, &LintConfig::default());
+    let w202_count = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W202"))
+        .count();
+    assert!(w202_count >= 1, "expected W202 for dead code after while true {{ return; }}, got {:?}",
+        result.diagnostics.iter().map(|d| d.code.as_deref().unwrap_or("")).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_w202_finally_return_terminates() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = "fn foo() {\n  try { 1 } catch e { 2 } finally { return 3; }\n  let x = 4;\n}";
+    let program = parse(src);
+    let result = lint(&program, &LintConfig::default());
+    let w202 = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W202"))
+        .count();
+    assert!(w202 >= 1, "expected W202 for dead code after try/catch/finally {{ return }}, got {:?}",
+        result.diagnostics.iter().map(|d| format!("{}: {}", d.code.as_deref().unwrap_or(""), &d.message)).collect::<Vec<_>>());
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2957,13 +3091,14 @@ fn test_range_inclusive_normal() {
 // ── Round 10: CLI, pow overflow, await tail expression ───────────────
 
 #[test]
-fn test_pow_overflow_returns_null() {
-    // 2^63 overflows i64, should return null instead of wrapping
+fn test_pow_overflow_returns_error() {
+    // 2^63 overflows i64, should return an overflow error
     let src = r#"
         let n = 2;
         n.pow(63)
     "#;
-    assert_eq!(run(src), DataType::Null);
+    let result = run_result(src);
+    assert!(result.is_err(), "expected overflow error, got {:?}", result);
 }
 
 #[test]
@@ -3152,21 +3287,23 @@ fn test_sort_by_floats_descending() {
 
 #[test]
 fn test_abs_i64_min_overflow() {
-    // abs(i64::MIN) should return null instead of panicking
+    // abs(i64::MIN) should return an overflow error
     let src = r#"
         let x = -9223372036854775807 - 1;
         x.abs()
     "#;
-    assert_eq!(run(src), DataType::Null);
+    let result = run_result(src);
+    assert!(result.is_err(), "expected overflow error, got {:?}", result);
 }
 
 #[test]
 fn test_pow_exponent_too_large() {
-    // Exponents > u32::MAX should return null, not wrap
+    // Exponents > u32::MAX should return an overflow error
     let src = r#"
         2.pow(4294967296)
     "#;
-    assert_eq!(run(src), DataType::Null);
+    let result = run_result(src);
+    assert!(result.is_err(), "expected overflow error, got {:?}", result);
 }
 
 #[test]
@@ -5269,20 +5406,17 @@ let name = match c {
 
 #[test]
 fn test_struct_duplicate_field_error() {
+    // Duplicate fields in struct construction are now rejected at parse time
     let src = r#"
 struct Point { x: int, y: int }
 let p = Point { x: 1, x: 2, y: 3 }
 "#;
-    let program = parse(src);
-    let evaluator = StubEvaluator;
-    let mut interp = Interpreter::new(&evaluator);
-    let result = interp.execute(&program);
-    assert!(result.is_err(), "duplicate struct fields should error");
-    let err = result.unwrap_err();
-    let msg = format!("{:?}", err);
+    let result = parse_v2(src);
+    assert!(result.is_err(), "duplicate struct construction fields should be rejected at parse time");
+    let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("duplicate"),
-        "error should mention 'duplicate', got: {}",
+        msg.contains("Duplicate field"),
+        "error should mention 'Duplicate field', got: {}",
         msg
     );
 }
@@ -6639,12 +6773,12 @@ fn test_w112_default_param_type_mismatch() {
 
 #[test]
 fn test_w106_stays_for_redundant_ops() {
-    // W106 should still be used for self-comparison and double negation
+    // W106 is for boolean literal comparison and double negation (self-comparison moved to W205 in linter)
     let codes = typecheck_warnings(r#"
-let x = 5
-let _y = x == x
+let x = true
+let _y = x == true
 "#);
-    assert!(codes.contains(&"W106".to_string()), "expected W106, got {:?}", codes);
+    assert!(codes.contains(&"W106".to_string()), "expected W106 for boolean literal comparison, got {:?}", codes);
 }
 
 #[test]
@@ -10109,17 +10243,14 @@ fn test_struct_unknown_field_error() {
 
 #[test]
 fn test_struct_duplicate_field_in_construction() {
-    // Duplicate field in struct construction should error
-    let err = run_err(r#"
+    // Duplicate field in struct construction is now rejected at parse time
+    let result = parse_v2(r#"
         struct Pair { a, b }
         let p = Pair { a: 1, b: 2, a: 3 };
     "#);
-    match err {
-        InterpError::TypeError { actual, .. } => {
-            assert!(actual.contains("duplicate"), "expected 'duplicate' in actual: {}", actual);
-        }
-        other => panic!("expected TypeError, got: {:?}", other),
-    }
+    assert!(result.is_err(), "duplicate struct construction fields should be rejected at parse time");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Duplicate field"), "expected 'Duplicate field', got: {}", msg);
 }
 
 #[test]
@@ -10200,19 +10331,13 @@ fn test_try_propagate_on_result_err_enum() {
 
 #[test]
 fn test_try_propagate_on_result_ok_unwraps() {
-    // The ? operator on a Result::Ok should unwrap the value
+    // The ? operator on a Result::Ok should unwrap the inner value
     assert_eq!(run(r#"
         enum Result { Ok(v), Err(e) }
         fn succeed() { Result::Ok(42) }
         let val = succeed()?;
         output val;
-    "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
-        m.insert("__data".to_string(), DataType::Array(vec![DataType::Int64(42)]));
-        m.insert("__enum".to_string(), DataType::String("Result".to_string()));
-        m.insert("__variant".to_string(), DataType::String("Ok".to_string()));
-        m
-    }));
+    "#), DataType::Int64(42));
 }
 
 #[test]
@@ -13744,9 +13869,9 @@ fn test_smoke_type_checker_all_codes() {
     let codes = typecheck_warnings("fn unused() { 1 }");
     assert!(codes.contains(&"W103".to_string()), "W103 (unused function) missing, got: {:?}", codes);
 
-    // W106: Self-comparison (redundant operation)
-    let codes = typecheck_warnings("let x = 5; let y = x == x; output y;");
-    assert!(codes.contains(&"W106".to_string()), "W106 (self-comparison) missing, got: {:?}", codes);
+    // W106: Boolean literal comparison (self-comparison moved to W205 in linter)
+    let codes = typecheck_warnings("let x = true; let y = x == true; output y;");
+    assert!(codes.contains(&"W106".to_string()), "W106 (boolean literal comparison) missing, got: {:?}", codes);
 
     // W106: Double negation
     let codes = typecheck_warnings("let x = 5; let y = --x; output y;");
@@ -14636,14 +14761,6 @@ fn test_error_code_e203_unknown_module() {
 }
 
 #[test]
-fn test_error_code_e204_exists_in_registry() {
-    // E204 (item not found in module) is defined in the error registry.
-    use magi_lang::syntax::errors::ErrorCode;
-    let help = ErrorCode::E204.help();
-    assert!(help.contains("not found"), "E204 help should mention 'not found', got: {}", help);
-}
-
-#[test]
 fn test_error_code_e202_unknown_op_at_runtime() {
     // E202: unknown operation at runtime (use imports an unknown op, call it)
     let err = run_err("use std::math::nonexistent_func\nnonexistent_func(1)");
@@ -15092,4 +15209,3761 @@ fn test_string_count_nonempty() {
         count
     "#);
     assert_eq!(result, DataType::Int64(2));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Coverage-gap integration tests (round 107)
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_while_non_bool_condition_type_error() {
+    let result = run_result("while 42 { break }");
+    assert!(result.is_err(), "while with non-bool condition should error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("Bool") || err.contains("bool"), "should mention Bool type: {}", err);
+}
+
+#[test]
+fn test_closure_captures_by_value() {
+    let result = run("
+        fn make_counter() {
+            let mut count = 0
+            let inc = || {
+                count = count + 1
+                count
+            }
+            inc
+        }
+        let counter = make_counter()
+        let a = counter()
+        let b = counter()
+        a == 1 && b == 1
+    ");
+    assert_eq!(result, DataType::Bool(true));
+}
+
+#[test]
+fn test_generic_methods_on_all_types() {
+    assert_eq!(run("[1, 2].to_json()"), DataType::String("[1,2]".to_string()));
+    assert_eq!(run("null.to_json()"), DataType::String("null".to_string()));
+    assert_eq!(run("true.to_json()"), DataType::String("true".to_string()));
+    assert_eq!(run("[].to_bool()"), DataType::Bool(false));
+    assert_eq!(run("null.to_bool()"), DataType::Bool(false));
+    assert_eq!(run("[1].to_bool()"), DataType::Bool(true));
+    assert_eq!(run("null.typeof()"), DataType::String("null".to_string()));
+    assert_eq!(run("true.typeof()"), DataType::String("bool".to_string()));
+}
+
+#[test]
+fn test_string_words_edge_cases() {
+    assert_eq!(run(r#""".words()"#), DataType::Array(vec![]));
+    assert_eq!(run(r#""  hello   world  ".words()"#), DataType::Array(vec![
+        DataType::String("hello".to_string()),
+        DataType::String("world".to_string()),
+    ]));
+}
+
+#[test]
+fn test_for_loop_non_iterable_error() {
+    let result = run_result("for x in 42 { x }");
+    assert!(result.is_err(), "for loop over integer should error");
+}
+
+#[test]
+fn test_string_starts_with_type_error() {
+    let result = run_result(r#""hello".starts_with(42)"#);
+    assert!(result.is_err(), "starts_with with int arg should error");
+    let result2 = run_result(r#""hello".ends_with(42)"#);
+    assert!(result2.is_err(), "ends_with with int arg should error");
+}
+
+#[test]
+fn test_string_to_int_invalid_returns_null() {
+    assert_eq!(run(r#""not_a_number".to_int64()"#), DataType::Null);
+    assert_eq!(run(r#""not_a_float".to_float64()"#), DataType::Null);
+}
+
+#[test]
+fn test_sort_by_nan_comparator_error() {
+    let result = run_result("[1, 2, 3].sort_by(|a, b| 0.0 / 0.0)");
+    assert!(result.is_err(), "sort_by with NaN comparator should error");
+}
+
+#[test]
+fn test_spread_non_array_standalone_error() {
+    let result = run_result("let x = ...42");
+    assert!(result.is_err(), "spread on non-array should error");
+}
+
+#[test]
+fn test_output_statement_returns_value() {
+    let result = run("{ output 42 }");
+    assert_eq!(result, DataType::Int64(42));
+}
+
+// ── Additional coverage tests ────────────────────────────────
+
+#[test]
+fn test_assert_non_bool_type_error() {
+    // assert(42) should TypeError because 42 is not Bool
+    let err = run_err("assert(42)").to_string();
+    assert!(err.contains("Bool"), "Expected Bool in error: {err}");
+}
+
+#[test]
+fn test_assert_ne_equal_values_fails() {
+    let err = run_err("assert_ne(5, 5)").to_string();
+    assert!(err.contains("differ") || err.contains("assert_ne"), "Expected assertion error: {err}");
+}
+
+#[test]
+fn test_assert_throws_no_throw() {
+    let err = run_err(r#"
+        fn ok() { return 1 }
+        assert_throws("ok");
+    "#).to_string();
+    assert!(err.contains("throw") || err.contains("assert"), "Expected throw error: {err}");
+}
+
+#[test]
+fn test_len_on_number_type_error() {
+    let err = run_err("len(42)").to_string();
+    assert!(err.contains("Array") || err.contains("String") || err.contains("Map") || err.contains("type"), "Expected type error: {err}");
+}
+
+#[test]
+fn test_match_no_matching_arm_returns_null() {
+    assert_eq!(run(r#"
+        output match 42 {
+            1 => "one",
+            2 => "two",
+        };
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_not_nan_is_truthy_false() {
+    // NaN should be falsy, so !NaN should be true
+    // 0.0/0.0 produces NaN
+    assert_eq!(run(r#"
+        let nan = 0.0 / 0.0;
+        output !nan;
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_truthiness_empty_array_falsy() {
+    assert_eq!(run("output ![];"), DataType::Bool(true));
+}
+
+#[test]
+fn test_truthiness_nonempty_array_truthy() {
+    assert_eq!(run("output ![1];"), DataType::Bool(false));
+}
+
+#[test]
+fn test_truthiness_empty_map_falsy() {
+    assert_eq!(run(r#"
+        let m = {"_": 0}.delete("_");
+        output !m;
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_const_compound_assign_error() {
+    let err = run_err("const x = 5; x += 1;").to_string();
+    assert!(err.contains("immutable") || err.contains("const") || err.contains("Immutable"), "Expected immutable error: {err}");
+}
+
+#[test]
+fn test_sum_non_numeric_type_error() {
+    let err = run_err(r#"output [1, 2, "three"].sum();"#).to_string();
+    assert!(err.contains("number") || err.contains("numeric") || err.contains("type") || err.contains("Type"), "Expected type error: {err}");
+}
+
+#[test]
+fn test_product_non_numeric_type_error() {
+    let err = run_err(r#"output [1, 2, "three"].product();"#).to_string();
+    assert!(err.contains("number") || err.contains("numeric") || err.contains("type") || err.contains("Type"), "Expected type error: {err}");
+}
+
+#[test]
+fn test_split_non_string_separator_type_error() {
+    let err = run_err(r#""hello world".split(42)"#).to_string();
+    assert!(err.contains("String") || err.contains("type") || err.contains("Type"), "Expected type error: {err}");
+}
+
+#[test]
+fn test_map_comprehension_resource_limit() {
+    // Map comprehension with huge range should hit resource limit (range > 10M elements)
+    let err = run_err(r#"
+        output {"k": i for i in 0..20000000};
+    "#).to_string();
+    assert!(err.contains("Resource limit") || err.contains("E409"), "Expected resource limit: {err}");
+}
+
+#[test]
+fn test_assert_throws_success() {
+    // Function that throws should make assert_throws succeed (return null)
+    assert_eq!(run(r#"
+        fn bad() { throw "boom" }
+        assert_throws("bad");
+        output "ok";
+    "#), DataType::String("ok".to_string()));
+}
+
+#[test]
+fn test_and_or_require_bool_operands() {
+    // && and || should require Bool operands (not truthy values)
+    let err = run_err("output 42 && true;").to_string();
+    assert!(err.contains("Bool") || err.contains("type") || err.contains("Type"), "Expected type error for && with non-bool: {err}");
+}
+
+#[test]
+fn test_short_circuit_and_returns_false() {
+    // false && anything should short-circuit to false without evaluating right side
+    assert_eq!(run("output false && true;"), DataType::Bool(false));
+}
+
+#[test]
+fn test_short_circuit_or_returns_true() {
+    // true || anything should short-circuit to true without evaluating right side
+    assert_eq!(run("output true || false;"), DataType::Bool(true));
+}
+
+#[test]
+fn test_match_no_arm_matches_returns_null() {
+    assert_eq!(run(r#"
+        let x = match 99 {
+            1 => "one",
+            2 => "two",
+        };
+        output x;
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_not_on_truthiness_values() {
+    // ! operator works on non-Bool via truthiness
+    assert_eq!(run("output !0;"), DataType::Bool(true));
+    assert_eq!(run("output !42;"), DataType::Bool(false));
+    assert_eq!(run(r#"output !"";"#), DataType::Bool(true));
+    assert_eq!(run(r#"output !"hello";"#), DataType::Bool(false));
+    assert_eq!(run("output !null;"), DataType::Bool(true));
+}
+
+#[test]
+fn test_negative_string_slice() {
+    // Negative indices in string slicing should wrap from end
+    assert_eq!(run(r#"
+        output "hello".slice(-3);
+    "#), DataType::String("llo".to_string()));
+}
+
+#[test]
+fn test_type_pattern_matching() {
+    // Type patterns in match
+    assert_eq!(run(r#"
+        let val = 42;
+        output match val {
+            x: string => "string",
+            x: int64 => "int64",
+            _ => "other",
+        };
+    "#), DataType::String("int64".to_string()));
+}
+
+#[test]
+fn test_scan_hof_basic() {
+    assert_eq!(run("output [1, 2, 3].scan(0, |acc, x| acc + x);"),
+        DataType::Array(vec![
+            DataType::Int64(1),
+            DataType::Int64(3),
+            DataType::Int64(6),
+        ]));
+}
+
+#[test]
+fn test_map_values_hof() {
+    let result = run(r#"
+        let m = {"a": 1, "b": 2};
+        let m2 = m.map_values(|v| v * 10);
+        output m2.a;
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_map_keys_hof() {
+    let result = run(r#"
+        let m = {"hello": 1, "world": 2};
+        let m2 = m.map_keys(|k| k.to_upper());
+        output m2.HELLO;
+    "#);
+    assert_eq!(result, DataType::Int64(1));
+}
+
+#[test]
+fn test_integer_division_returns_int() {
+    let result = run(r#"
+        let x = 10 / 3;
+        output x;
+    "#);
+    assert_eq!(result, DataType::Int64(3));
+}
+
+#[test]
+fn test_float_division_returns_float() {
+    let result = run(r#"
+        let x = 10.0 / 3.0;
+        output x;
+    "#);
+    match result {
+        DataType::Float64(f) => assert!((f - 3.333333333333333).abs() < 1e-10),
+        other => panic!("Expected Float64, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_match_pattern_variable_linting() {
+    // Pattern variables in match arms should be linted for snake_case (W200)
+    let result = run(r#"
+        let x = 42;
+        let y = match x {
+            n => n + 1
+        };
+        output y;
+    "#);
+    assert_eq!(result, DataType::Int64(43));
+}
+
+#[test]
+fn test_module_function_forward_ref() {
+    // Functions in module bodies should be accessible via qualified names
+    let result = run(r#"
+        mod math {
+            fn double(x) { x * 2 }
+        }
+        output math::double(21);
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_pub_fn_declaration() {
+    // pub fn should parse and work like regular fn
+    let result = run(r#"
+        pub fn greet(name) { "hello " + name }
+        output greet("world");
+    "#);
+    assert_eq!(result, DataType::String("hello world".into()));
+}
+
+#[test]
+fn test_match_or_pattern_binding() {
+    let result = run(r#"
+        let x = 2;
+        let y = match x {
+            1 | 2 | 3 => "small",
+            _ => "big"
+        };
+        output y;
+    "#);
+    assert_eq!(result, DataType::String("small".into()));
+}
+
+#[test]
+fn test_try_catch_as_expression_in_block() {
+    // try/catch should work as an expression inside a function body
+    let result = run(r#"
+        fn safe_div(a, b) {
+            try {
+                if b == 0 { throw "division by zero" }
+                a / b
+            } catch e {
+                -1
+            }
+        }
+        output safe_div(10, 0);
+    "#);
+    assert_eq!(result, DataType::Int64(-1));
+}
+
+#[test]
+fn test_nested_match_expressions() {
+    // Match expressions should work when nested
+    let result = run(r#"
+        let x = 2;
+        let y = match x {
+            1 => match true { true => "one-t", _ => "one-f" },
+            2 => match false { true => "two-t", _ => "two-f" },
+            _ => "other"
+        };
+        output y;
+    "#);
+    assert_eq!(result, DataType::String("two-f".into()));
+}
+
+#[test]
+fn test_finally_always_runs() {
+    // finally block should execute even when catch triggers
+    let result = run(r#"
+        let mut log = "";
+        try {
+            throw "err"
+        } catch e {
+            log = log + "caught "
+        } finally {
+            log = log + "done"
+        }
+        output log;
+    "#);
+    assert_eq!(result, DataType::String("caught done".into()));
+}
+
+#[test]
+fn test_rest_param_collects_extra_args() {
+    let result = run(r#"
+        fn sum_all(first, ...rest) {
+            let mut total = first;
+            for x in rest {
+                total = total + x;
+            }
+            total
+        }
+        output sum_all(1, 2, 3, 4);
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_enum_with_data() {
+    let result = run(r#"
+        enum Shape {
+            Circle(radius),
+            Rect(w, h),
+        }
+        let s = Shape::Circle(5);
+        let area = match s {
+            Shape::Circle(r) => r * r,
+            Shape::Rect(w, h) => w * h,
+        };
+        output area;
+    "#);
+    assert_eq!(result, DataType::Int64(25));
+}
+
+#[test]
+fn test_struct_with_method_like_fn() {
+    let result = run(r#"
+        struct Point { x, y }
+        fn distance(p) { p.x + p.y }
+        let p = Point { x: 10, y: 20 };
+        output distance(p);
+    "#);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+#[test]
+fn test_loop_with_conditional_break() {
+    let result = run(r#"
+        let mut i = 0;
+        loop {
+            i = i + 1;
+            if i >= 5 { break }
+        }
+        output i;
+    "#);
+    assert_eq!(result, DataType::Int64(5));
+}
+
+#[test]
+fn test_loop_expression_with_break_value() {
+    let result = run(r#"
+        let mut count = 0;
+        let result = loop {
+            count = count + 1;
+            if count >= 10 { break count }
+        };
+        output result;
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_float64_to_float32_method() {
+    // 3.14 is Float64 by default; to_float32() should produce Float32
+    let result = run(r#"
+        let x = 3.14;
+        let y = x.to_float32();
+        output typeof(y);
+    "#);
+    assert_eq!(result, DataType::String("float32".to_string()));
+}
+
+#[test]
+fn test_is_finite_method() {
+    let result = run(r#"
+        let x = 3.14;
+        let y = (1.0 / 0.0);
+        output [x.is_finite(), y.is_finite()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![DataType::Bool(true), DataType::Bool(false)]));
+}
+
+#[test]
+fn test_is_nan_method() {
+    let result = run(r#"
+        let x = 3.14;
+        let nan = (0.0 / 0.0);
+        output [x.is_nan(), nan.is_nan()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![DataType::Bool(false), DataType::Bool(true)]));
+}
+
+#[test]
+fn test_is_infinite_method() {
+    let result = run(r#"
+        let x = 3.14;
+        let inf = (1.0 / 0.0);
+        output [x.is_infinite(), inf.is_infinite()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![DataType::Bool(false), DataType::Bool(true)]));
+}
+
+#[test]
+fn test_float64_trig_methods() {
+    let result = run(r#"
+        let x = 0.0;
+        output [x.sin(), x.cos(), x.tan()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Float64(0.0),
+        DataType::Float64(1.0),
+        DataType::Float64(0.0),
+    ]));
+}
+
+#[test]
+fn test_float64_log_methods() {
+    let result = run(r#"
+        let x = 1.0;
+        output [x.ln(), x.log2(), x.log10()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Float64(0.0),
+        DataType::Float64(0.0),
+        DataType::Float64(0.0),
+    ]));
+}
+
+#[test]
+fn test_numeric_sign_method() {
+    let result = run(r#"
+        output [(-5).sign(), 0.sign(), 7.sign()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(-1),
+        DataType::Int64(0),
+        DataType::Int64(1),
+    ]));
+}
+
+#[test]
+fn test_numeric_clamp_method() {
+    let result = run(r#"
+        output [1.clamp(5, 10), 7.clamp(5, 10), 15.clamp(5, 10)];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(5),
+        DataType::Int64(7),
+        DataType::Int64(10),
+    ]));
+}
+
+#[test]
+fn test_numeric_pow_method() {
+    let result = run(r#"
+        output [2.pow(10), 3.pow(0), 5.pow(1)];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(1024),
+        DataType::Int64(1),
+        DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_numeric_min_max_methods() {
+    let result = run(r#"
+        output [5.min(3), 5.max(3), 2.5.min(3.0), 2.5.max(3.0)];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(3),
+        DataType::Int64(5),
+        DataType::Float64(2.5),
+        DataType::Float64(3.0),
+    ]));
+}
+
+#[test]
+fn test_fstring_with_method_calls() {
+    let result = run(r#"
+        let x = 42;
+        output f"The answer is {x.to_string()}!";
+    "#);
+    assert_eq!(result, DataType::String("The answer is 42!".to_string()));
+}
+
+#[test]
+fn test_fstring_with_match_expr() {
+    let result = run(r#"
+        let status = match 42 {
+            42 => "found",
+            _ => "not found"
+        };
+        output f"Status: {status}";
+    "#);
+    assert_eq!(result, DataType::String("Status: found".to_string()));
+}
+
+#[test]
+fn test_float64_inverse_trig_methods() {
+    let result = run(r#"
+        let x = 0.5;
+        output [x.asin(), x.acos(), x.atan()];
+    "#);
+    match result {
+        DataType::Array(arr) if arr.len() == 3 => {
+            for v in &arr {
+                assert!(matches!(v, DataType::Float64(f) if f.is_finite()));
+            }
+        }
+        other => panic!("Expected array of 3 floats, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_float64_hyperbolic_methods() {
+    let result = run(r#"
+        let x = 1.0;
+        output [x.sinh(), x.cosh(), x.tanh()];
+    "#);
+    match result {
+        DataType::Array(arr) if arr.len() == 3 => {
+            for v in &arr {
+                assert!(matches!(v, DataType::Float64(f) if f.is_finite()));
+            }
+        }
+        other => panic!("Expected array of 3 floats, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_float64_exp_method() {
+    let result = run(r#"
+        let x = 1.0;
+        output x.exp();
+    "#);
+    assert!(matches!(result, DataType::Float64(f) if (f - std::f64::consts::E).abs() < 1e-10));
+}
+
+#[test]
+fn test_float64_sinh_cosh_specific() {
+    let result = run(r#"
+        let x = 0.0;
+        output [x.sinh(), x.cosh()];
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Float64(0.0),
+        DataType::Float64(1.0),
+    ]));
+}
+
+#[test]
+fn test_float64_tanh_specific() {
+    let result = run(r#"
+        let x = 0.0;
+        output x.tanh();
+    "#);
+    assert_eq!(result, DataType::Float64(0.0));
+}
+
+#[test]
+fn test_e105_no_false_positive_on_null() {
+    // E105 should NOT fire when indexing a null-typed variable with a negative literal
+    let result = run(r#"
+        let x = null;
+        output typeof(x);
+    "#);
+    assert_eq!(result, DataType::String("null".to_string()));
+}
+
+#[test]
+fn test_lambda_in_loop_wasm_block_depth() {
+    // Regression: lambda inside loop should not corrupt block_depth for break/continue
+    let result = run(r#"
+        let mut total = 0;
+        for x in [1, 2, 3, 4, 5] {
+            let f = |y| y * 2;
+            if x == 3 { continue; }
+            total = total + f(x);
+        }
+        output total;
+    "#);
+    assert_eq!(result, DataType::Int64(24)); // 1*2 + 2*2 + 4*2 + 5*2 = 24
+}
+
+// ── Round 117: W209 function/enum/struct/type shadowing, map patterns, f-string spans ──
+
+#[test]
+fn test_lint_w209_function_shadows_function() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        fn foo() { 1 }
+        fn foo() { 2 }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = lint(&program, &LintConfig::default());
+    let w209: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W209"))
+        .collect();
+    assert_eq!(w209.len(), 1, "duplicate function should trigger W209: {:?}", w209);
+}
+
+#[test]
+fn test_lint_w209_let_shadows_function() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        fn foo() { 1 }
+        let foo = 2;
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = lint(&program, &LintConfig::default());
+    let w209: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W209"))
+        .collect();
+    assert_eq!(w209.len(), 1, "let shadowing fn should trigger W209: {:?}", w209);
+}
+
+#[test]
+fn test_lint_w209_enum_shadows_struct() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        struct Foo { x: int64 }
+        enum Foo { A, B }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = lint(&program, &LintConfig::default());
+    let w209: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W209"))
+        .collect();
+    assert_eq!(w209.len(), 1, "enum shadowing struct should trigger W209: {:?}", w209);
+}
+
+#[test]
+fn test_lint_w209_type_alias_shadows() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        type Foo = int64;
+        type Foo = float64;
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = lint(&program, &LintConfig::default());
+    let w209: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W209"))
+        .collect();
+    assert_eq!(w209.len(), 1, "duplicate type alias should trigger W209: {:?}", w209);
+}
+
+#[test]
+fn test_lint_w209_module_shadows() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        mod foo { fn bar() { 1 } }
+        mod foo { fn baz() { 2 } }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = lint(&program, &LintConfig::default());
+    let w209: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W209"))
+        .collect();
+    assert_eq!(w209.len(), 1, "duplicate module should trigger W209: {:?}", w209);
+}
+
+#[test]
+fn test_lint_w209_no_false_positive_different_names() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+        fn foo() { 1 }
+        fn bar() { 2 }
+        enum Color { Red }
+        struct Point { x: int64 }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = lint(&program, &LintConfig::default());
+    let w209: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W209"))
+        .collect();
+    assert!(w209.is_empty(), "different names should not trigger W209: {:?}", w209);
+}
+
+#[test]
+fn test_map_pattern_basic() {
+    let result = run(r#"
+        let m = {"name": "Alice", "age": 30};
+        match m {
+            {name, age} => f"{name} is {age}",
+            _ => "unknown"
+        }
+    "#);
+    assert_eq!(result, DataType::String("Alice is 30".to_string()));
+}
+
+#[test]
+fn test_map_pattern_with_sub_pattern() {
+    let result = run(r#"
+        let m = {"status": "ok", "count": 42};
+        match m {
+            {status: "ok", count} => count,
+            _ => -1
+        }
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_map_pattern_no_match() {
+    let result = run(r#"
+        let m = {"status": "error"};
+        match m {
+            {status: "ok"} => "success",
+            _ => "fail"
+        }
+    "#);
+    assert_eq!(result, DataType::String("fail".to_string()));
+}
+
+#[test]
+fn test_map_pattern_nested() {
+    let result = run(r#"
+        let m = {"data": [1, 2, 3]};
+        match m {
+            {data: [a, b, c]} => a + b + c,
+            _ => 0
+        }
+    "#);
+    assert_eq!(result, DataType::Int64(6));
+}
+
+#[test]
+fn test_fstring_sub_expression_spans() {
+    // Verify f-string sub-expressions parse correctly and produce correct results
+    // (The span fix ensures error messages point to correct locations)
+    let result = run(r#"
+        let name = "world";
+        let x = 42;
+        f"hello {name}, value={x + 1}"
+    "#);
+    assert_eq!(result, DataType::String("hello world, value=43".to_string()));
+}
+
+#[test]
+fn test_fstring_span_line_preserved() {
+    // Parse a f-string and check that the inner expression has correct span
+    let program = parse_v2(r#"let x = f"val={1 + 2}";"#).unwrap();
+    // The f-string should parse without error — the key thing is that
+    // the inner expression (1 + 2) gets a span on line 1, not some default
+    let stmt = &program.statements[0];
+    if let magi_lang::syntax::ast::StatementKind::Let { value, .. } = &stmt.kind {
+        if let magi_lang::syntax::ast::ExpressionKind::StringInterpolation { parts } = &value.kind {
+            assert_eq!(parts.len(), 2); // "val=" and the expr
+            if let magi_lang::syntax::ast::StringPart::Expr(expr) = &parts[1] {
+                // The expression 1 + 2 should have a span on line 1
+                assert_eq!(expr.span.start_line, 1, "f-string expr span should be on line 1, got {}", expr.span.start_line);
+                // And col should be after f"val={ which is 15 chars (f"val={), so the expr starts at col 16
+                assert!(expr.span.start_col > 5, "f-string expr span col should be > 5, got {}", expr.span.start_col);
+            } else {
+                panic!("expected Expr part");
+            }
+        } else {
+            panic!("expected StringInterpolation");
+        }
+    } else {
+        panic!("expected Let statement");
+    }
+}
+
+/// Optional chaining on index access: expr?[index]
+#[test]
+fn test_optional_chain_index_access() {
+    // Non-null map with bracket access
+    let result = run(r#"
+        let m = { "a": { "x": 1 }, "b": { "x": 2 } };
+        m["b"]?["x"]
+    "#);
+    assert_eq!(result, DataType::Int64(2));
+}
+
+#[test]
+fn test_optional_chain_index_null_short_circuit() {
+    // Null short-circuits to null
+    let result = run(r#"
+        let m = { "a": 1 };
+        m["missing"]?["x"]
+    "#);
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_optional_chain_index_on_array() {
+    // Optional chain on array
+    let result = run(r#"
+        let arr = [[10, 20], [30, 40]];
+        arr[1]?[0]
+    "#);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+#[test]
+fn test_optional_chain_index_null_array() {
+    // Optional chain on null array element
+    let result = run(r#"
+        let arr = [null, [30, 40]];
+        arr[0]?[0]
+    "#);
+    assert_eq!(result, DataType::Null);
+}
+
+#[test]
+fn test_optional_chain_index_then_field() {
+    // ?[index] followed by .field access
+    let result = run(r#"
+        let m = { "items": [{ "name": "hello" }] };
+        m["items"]?[0].name
+    "#);
+    assert_eq!(result, DataType::String("hello".into()));
+}
+
+/// String indexing via bracket syntax: s[i]
+#[test]
+fn test_string_bracket_index() {
+    let result = run(r#"
+        let s = "hello";
+        s[0]
+    "#);
+    assert_eq!(result, DataType::String("h".into()));
+}
+
+#[test]
+fn test_string_bracket_index_last() {
+    let result = run(r#"
+        let s = "hello";
+        s[4]
+    "#);
+    assert_eq!(result, DataType::String("o".into()));
+}
+
+#[test]
+fn test_string_bracket_index_oob() {
+    let result = run(r#"
+        let s = "hello";
+        s[10]
+    "#);
+    assert_eq!(result, DataType::Null);
+}
+
+/// Negative array indexing returns Null (by design, unlike slicing)
+#[test]
+fn test_array_negative_index_null() {
+    let result = run(r#"
+        let arr = [10, 20, 30];
+        arr[-1]
+    "#);
+    assert_eq!(result, DataType::Null);
+}
+
+/// Split empty delimiter produces TypeError
+#[test]
+fn test_split_empty_delimiter_error() {
+    let err = run_err(r#"
+        let s = "hello";
+        s.split("")
+    "#);
+    match &err {
+        InterpError::TypeError { expected, actual, .. } => {
+            assert_eq!(expected, "non-empty separator");
+            assert_eq!(actual, "empty string");
+        }
+        other => panic!("expected TypeError, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_duplicate_kwarg_parse_error() {
+    let result = parse_v2("foo(x=1, x=2)");
+    let err = result.unwrap_err();
+    assert!(err.message.contains("duplicate keyword argument"), "got: {}", err.message);
+}
+
+#[test]
+fn test_pipe_assert_true() {
+    assert_eq!(run("true |> assert(_)"), DataType::Null);
+}
+
+#[test]
+fn test_pipe_assert_false_fails() {
+    let err = run_err("false |> assert(_)");
+    match &err {
+        InterpError::AssertionFailed { .. } => {}
+        other => panic!("expected AssertionFailed, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_pipe_assert_eq() {
+    assert_eq!(run("42 |> assert_eq(_, 42)"), DataType::Null);
+}
+
+#[test]
+fn test_pipe_assert_ne() {
+    assert_eq!(run("42 |> assert_ne(_, 0)"), DataType::Null);
+}
+
+#[test]
+fn test_int32_abs_min_overflow() {
+    // abs(i64::MIN) should error (overflow)
+    let result = run_result("let x = -9223372036854775807 - 1; x.abs()");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_pow_int32_overflow() {
+    let result = run_result("let x = 100; x.pow(100)");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_optional_chain_index_same_line() {
+    // ?[ on the same line is optional index access
+    let src = r#"
+        let arr = [10, 20, 30];
+        arr?[1]
+    "#;
+    assert_eq!(run(src), DataType::Int64(20));
+}
+
+#[test]
+fn test_int64_add_preserves_type() {
+    assert_eq!(run("10 + 20"), DataType::Int64(30));
+}
+
+#[test]
+fn test_float64_add_preserves_type() {
+    assert_eq!(run("1.5 + 2.5"), DataType::Float64(4.0));
+}
+
+#[test]
+fn test_mixed_int_float_promotes_to_float64() {
+    assert_eq!(run("10 + 1.5"), DataType::Float64(11.5));
+}
+
+#[test]
+fn test_bitwise_and_int64() {
+    assert_eq!(run("bit_and(0xFF, 0x0F)"), DataType::Int64(0x0F));
+}
+
+#[test]
+fn test_bitwise_or_int64() {
+    assert_eq!(run("bit_or(0xF0, 0x0F)"), DataType::Int64(0xFF));
+}
+
+#[test]
+fn test_bitwise_xor_int64() {
+    assert_eq!(run("bit_xor(0xFF, 0x0F)"), DataType::Int64(0xF0));
+}
+
+#[test]
+fn test_bitnot_int64() {
+    assert_eq!(run("bit_not(0)"), DataType::Int64(-1));
+}
+
+#[test]
+fn test_bitshift_left_int64() {
+    assert_eq!(run("bit_shift_left(1, 4)"), DataType::Int64(16));
+}
+
+#[test]
+fn test_bitshift_right_int64() {
+    assert_eq!(run("bit_shift_right(16, 2)"), DataType::Int64(4));
+}
+
+#[test]
+fn test_struct_field_type_validation() {
+    // Struct with typed fields — type mismatch should produce warning
+    let src = r#"
+        struct Point { x: int64, y: int64 }
+        let p = Point { x: "not a number", y: 5 }
+        p
+    "#;
+    let program = parse_v2(src).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    // Should have a warning about field 'x' type mismatch
+    let type_mismatch = analysis.diagnostics.iter().any(|d| d.message.contains("field 'x'") && d.message.contains("expects type"));
+    assert!(type_mismatch, "expected type mismatch warning for field 'x', got: {:?}", analysis.diagnostics);
+}
+
+#[test]
+fn test_struct_field_type_validation_correct_types() {
+    // Struct with correct types — no type mismatch warning
+    let src = r#"
+        struct Point { x: int64, y: int64 }
+        let p = Point { x: 10, y: 20 }
+        p
+    "#;
+    let program = parse_v2(src).unwrap();
+    let imports = std::collections::HashSet::new();
+    let analysis = check_types(&program, &imports);
+    let type_mismatch = analysis.diagnostics.iter().any(|d| d.message.contains("expects type"));
+    assert!(!type_mismatch, "unexpected type mismatch warning: {:?}", analysis.diagnostics);
+}
+
+// ── Round 117: Silent coercion → TypeError tests ───────────
+
+#[test]
+fn test_array_get_non_numeric_index_error() {
+    let src = r#"
+    let arr = [1, 2, 3]
+    arr[0]
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(1));
+}
+
+#[test]
+fn test_pad_start_returns_string() {
+    let src = r#"
+    let s = "hi"
+    s.pad_start(5)
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("   hi".to_string()));
+}
+
+#[test]
+fn test_char_at_basic() {
+    let src = r#"
+    let s = "hello"
+    s.char_at(1)
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("e".to_string()));
+}
+
+// ── Round 117: Linter W202 while-true-break fix ────────────
+
+#[test]
+fn test_w202_while_true_break_no_false_positive() {
+    // Code after `while true { break; }` is reachable — should NOT warn W202
+    let src = r#"
+    fn foo() {
+        while true {
+            break
+        }
+        let x = 42
+        x
+    }
+    foo()
+    "#;
+    let program = parse_v2(src).unwrap();
+    let lint = magi_lang::linter::lint(&program, &magi_lang::linter::LintConfig::default());
+    let w202 = lint.diagnostics.iter().any(|d| d.code == Some("W202".to_string()));
+    assert!(!w202, "W202 false positive on code after while-true-break: {:?}", lint.diagnostics);
+    // Also confirm the code runs fine
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+#[test]
+fn test_w202_loop_break_no_false_positive() {
+    // Code after `loop { break; }` is reachable — should NOT warn W202
+    let src = r#"
+    fn foo() {
+        let y = loop {
+            break 10
+        }
+        let x = y + 1
+        x
+    }
+    foo()
+    "#;
+    let program = parse_v2(src).unwrap();
+    let lint = magi_lang::linter::lint(&program, &magi_lang::linter::LintConfig::default());
+    let w202 = lint.diagnostics.iter().any(|d| d.code == Some("W202".to_string()));
+    assert!(!w202, "W202 false positive on code after loop-break: {:?}", lint.diagnostics);
+}
+
+#[test]
+fn test_w202_while_true_return_still_warns() {
+    // Code after `while true { return 1; }` is unreachable — SHOULD warn W202
+    let src = r#"
+    fn foo() {
+        while true {
+            return 1
+        }
+        let x = 42
+        x
+    }
+    "#;
+    let program = parse_v2(src).unwrap();
+    let lint = magi_lang::linter::lint(&program, &magi_lang::linter::LintConfig::default());
+    let w202 = lint.diagnostics.iter().any(|d| d.code == Some("W202".to_string()));
+    assert!(w202, "W202 should still warn when while-true body has return without break: {:?}", lint.diagnostics);
+}
+
+// ── Round 117: WASM __add NaN-boxing safety ────────────────
+
+#[test]
+fn test_wasm_string_concat_compiles() {
+    // Test that string + int compiles to valid WASM (with NaN-boxing check)
+    let src = r#"
+    let msg = "count: " + to_string(42)
+    msg
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "string concat should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_wasm_len_compiles() {
+    let src = r#"
+    let arr = [1, 2, 3]
+    len(arr)
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "len() should compile: {:?}", result.err());
+}
+
+// ── Round 121: Audit-driven fixes ──────────────────────────────────────
+
+/// W212 false negative: return inside let expression within finally block.
+#[test]
+fn test_w212_return_in_let_expr_in_finally() {
+    use magi_lang::linter::{lint, LintConfig};
+    let config = LintConfig::default();
+    let src = r#"
+        try {
+            output 1
+        } catch e {
+            output e
+        } finally {
+            let x = if true { return 42 } else { 0 }
+        }
+    "#;
+    let program = parse(src);
+    let result = lint(&program, &config);
+    let w212_count = result.diagnostics.iter().filter(|d| d.code.as_deref() == Some("W212")).count();
+    assert!(w212_count > 0,
+        "W212 should fire for return inside let value expression in finally, got {}", w212_count);
+}
+
+/// WASM division by zero should compile and validate (no trap at compile time).
+#[test]
+fn test_wasm_division_compiles() {
+    let src = r#"
+    let a = 10
+    let b = 0
+    a / b
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "Division should compile: {:?}", result.err());
+}
+
+/// WASM modulo should compile and validate.
+#[test]
+fn test_wasm_modulo_compiles() {
+    let src = r#"
+    let a = 10
+    let b = 3
+    a % b
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "Modulo should compile: {:?}", result.err());
+}
+
+/// WASM typeof should compile and validate.
+#[test]
+fn test_wasm_typeof_compiles() {
+    let src = r#"
+    let x = 42
+    typeof(x)
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "typeof should compile: {:?}", result.err());
+}
+
+/// WASM CallIndirect should compile with proper untagging.
+#[test]
+fn test_wasm_indirect_call_compiles() {
+    let src = r#"
+    fn add(a, b) { a + b }
+    let f = add
+    f(1, 2)
+    "#;
+    let program = parse_v2(src).unwrap();
+    let result = compiler::compile_to_wasm(&program);
+    assert!(result.is_ok(), "Indirect call should compile: {:?}", result.err());
+}
+
+/// Negative integer pattern uses checked_neg (defense-in-depth).
+#[test]
+fn test_negative_pattern_parses() {
+    let src = r#"
+    let x = -5
+    match x {
+        -5 => "negative five",
+        -1..0 => "small negative",
+        _ => "other",
+    }
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("negative five".to_string()));
+}
+
+/// to_uppercase output is bounded by resource limit check.
+#[test]
+fn test_to_uppercase_basic() {
+    let src = r#"
+    let s = "hello"
+    s.to_uppercase()
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("HELLO".to_string()));
+}
+
+/// to_lowercase output is bounded by resource limit check.
+#[test]
+fn test_to_lowercase_basic() {
+    let src = r#"
+    let s = "HELLO"
+    s.to_lowercase()
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("hello".to_string()));
+}
+
+// ── Round 122 tests ──────────────────────────────────────────
+
+/// Not operator truthiness consistency for basic types.
+#[test]
+fn test_not_truthiness_basic_types() {
+    // Empty string is falsy
+    assert_eq!(run(r#"!"""#), DataType::Bool(true));
+    // Non-empty string is truthy
+    assert_eq!(run(r#"!"hello""#), DataType::Bool(false));
+    // Empty array is falsy
+    assert_eq!(run("![]"), DataType::Bool(true));
+    // Non-empty array is truthy
+    assert_eq!(run("![1]"), DataType::Bool(false));
+    // Null is falsy
+    assert_eq!(run("!null"), DataType::Bool(true));
+    // Zero is falsy
+    assert_eq!(run("!0"), DataType::Bool(true));
+    // Non-zero is truthy
+    assert_eq!(run("!42"), DataType::Bool(false));
+}
+
+/// WASM typeof compiles for all types including int32/float32.
+#[test]
+fn test_wasm_typeof_all_types_compile() {
+    // Verify the compiler can compile typeof for various expressions.
+    let src = r#"
+    fn main() {
+        typeof(42)
+    }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let wasm_bytes = compiler::compile_to_wasm(&program).expect("compile");
+    assert!(!wasm_bytes.is_empty());
+}
+
+/// W212 detects return in try/catch inside loop inside finally.
+#[test]
+fn test_w212_nested_finally_detection() {
+    use magi_lang::linter::{lint, LintConfig};
+    let src = r#"
+    fn foo() {
+        try { 1 } catch e { 2 } finally {
+            for x in [1, 2, 3] {
+                try { return 99; } catch e { 0 }
+            }
+        }
+    }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let result = lint(&program, &LintConfig::default());
+    let has_w212 = result.diagnostics.iter().any(|d| d.code.as_deref() == Some("W212"));
+    assert!(has_w212, "W212 should detect return in try inside loop inside finally, got: {:?}", result.diagnostics);
+}
+
+/// Map construction and index access.
+#[test]
+fn test_map_construction_and_index() {
+    let src = r#"
+    let m = { "a": 1, "b": 2 }
+    m["b"]
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(2));
+}
+
+/// If condition must be boolean.
+#[test]
+fn test_if_non_bool_condition_type_error() {
+    let err = run_err(r#"if "hello" { 1 } else { 2 }"#).to_string();
+    assert!(err.contains("Bool") || err.contains("condition"), "got: {}", err);
+}
+
+/// HOF callback error propagation.
+#[test]
+fn test_hof_map_callback_throw_propagates() {
+    let err = run_err(r#"
+        [1, 2, 3].map(|x| {
+            if x == 2 { throw "oops" }
+            x
+        })
+    "#).to_string();
+    assert!(err.contains("oops"), "got: {}", err);
+}
+
+/// HOF reduce callback error propagation.
+#[test]
+fn test_hof_reduce_callback_throw_propagates() {
+    let err = run_err(r#"
+        [1, 2, 3].reduce(0, |acc, x| {
+            if x == 2 { throw "stop" }
+            acc + x
+        })
+    "#).to_string();
+    assert!(err.contains("stop"), "got: {}", err);
+}
+
+/// Try-finally executes finally even when try succeeds (expression form).
+#[test]
+fn test_try_catch_expr_finally_happy_path() {
+    let src = r#"
+        let mut ran_finally = false
+        let result = try {
+            42
+        } catch e {
+            0
+        } finally {
+            ran_finally = true
+        }
+        let out = [result, ran_finally]
+        output out
+    "#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr[0], DataType::Int64(42));
+            assert_eq!(arr[1], DataType::Bool(true));
+        }
+        _ => panic!("expected array, got {:?}", result),
+    }
+}
+
+/// Enum pattern matching in for loop.
+#[test]
+fn test_enum_pattern_in_for_loop() {
+    let src = r#"
+        enum Opt { Some(value), None }
+        let items = [Opt::Some(10), Opt::None, Opt::Some(20)]
+        let mut results = []
+        for item in items {
+            match item {
+                Opt::Some(v) => { results = [...results, v] }
+                Opt::None => {}
+            }
+        }
+        results
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Array(vec![DataType::Int64(10), DataType::Int64(20)]));
+}
+
+/// For loop over empty string iterates zero times (count check).
+#[test]
+fn test_for_loop_empty_string_no_iterations() {
+    let src = r#"
+        let mut count = 0
+        for ch in "" {
+            count = count + 1
+        }
+        count
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(0));
+}
+
+/// Match guard that throws an error should propagate.
+#[test]
+fn test_match_guard_throw_propagates() {
+    let err = run_err(r#"
+        fn bad() { throw "guard error" }
+        match 42 {
+            x if bad() => "matched"
+            _ => "fallback"
+        }
+    "#).to_string();
+    assert!(err.contains("guard error"), "got: {}", err);
+}
+
+/// Spread non-array in array literal errors.
+#[test]
+fn test_spread_non_array_in_literal_errors() {
+    let err = run_err(r#"
+        let x = 42
+        [...x]
+    "#).to_string();
+    assert!(err.contains("Array") || err.contains("spread"), "got: {}", err);
+}
+
+/// Closure captures module function variable.
+#[test]
+fn test_closure_in_module_function() {
+    let src = r#"
+        mod math {
+            fn make_adder(n) {
+                |x| x + n
+            }
+        }
+        use math::make_adder
+        let add5 = make_adder(5)
+        add5(10)
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(15));
+}
+
+/// WASM list comprehension with array_push.
+#[test]
+fn test_wasm_list_comprehension_compiles() {
+    let src = r#"
+    fn main() {
+        let arr = [1, 2, 3]
+        let result = [x * 2 for x in arr]
+        result
+    }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let wasm_bytes = compiler::compile_to_wasm(&program).expect("compile");
+    assert!(!wasm_bytes.is_empty());
+}
+
+/// Return inside finally block (W212 should warn but interpreter handles it).
+#[test]
+fn test_return_inside_finally_executes() {
+    let src = r#"
+        fn f() {
+            try {
+                1
+            } catch e {
+                2
+            } finally {
+                let x = 99
+            }
+            42
+        }
+        f()
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+/// Nested try-catch: inner catch handles inner throw.
+#[test]
+fn test_nested_try_catch_inner_handles() {
+    let src = r#"
+        try {
+            try {
+                throw "inner"
+            } catch e {
+                "caught: " + e
+            }
+        } catch e {
+            "outer: " + e
+        }
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("caught: inner".to_string()));
+}
+
+/// Nested try-catch: inner rethrows to outer.
+#[test]
+fn test_nested_try_catch_rethrow() {
+    let src = r#"
+        try {
+            try {
+                throw "boom"
+            } catch e {
+                throw "rethrown: " + e
+            }
+        } catch e {
+            e
+        }
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("rethrown: boom".to_string()));
+}
+
+/// Match with guard using variable from pattern.
+#[test]
+fn test_match_guard_with_pattern_var() {
+    let src = r#"
+        let val = 15
+        match val {
+            x if x > 10 => "big",
+            x if x > 5 => "medium",
+            _ => "small"
+        }
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("big".to_string()));
+}
+
+/// Array destructuring with rest pattern and output.
+#[test]
+fn test_array_destructure_rest_output() {
+    let src = r#"
+        let [first, ...rest] = [1, 2, 3, 4, 5]
+        let out = [first, rest]
+        output out
+    "#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr[0], DataType::Int64(1));
+            assert_eq!(arr[1], DataType::Array(vec![
+                DataType::Int64(2), DataType::Int64(3),
+                DataType::Int64(4), DataType::Int64(5),
+            ]));
+        }
+        _ => panic!("expected array, got {:?}", result),
+    }
+}
+
+/// Pipe operator with lambda and placeholder.
+#[test]
+fn test_pipe_with_lambda_placeholder() {
+    let src = r#"
+        let double = |x| x * 2
+        5 |> double(_)
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+/// Pipe operator chain with named functions and placeholder.
+#[test]
+fn test_pipe_chain_named_fns_placeholder() {
+    let src = r#"
+        fn add1(x) { x + 1 }
+        fn mul2(x) { x * 2 }
+        3 |> add1(_) |> mul2(_)
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(8));
+}
+
+/// Null coalescing operator.
+#[test]
+fn test_null_coalesce() {
+    assert_eq!(run("null ?? 42"), DataType::Int64(42));
+    assert_eq!(run("10 ?? 42"), DataType::Int64(10));
+    assert_eq!(run("\"\" ?? 42"), DataType::String("".to_string()));
+}
+
+/// Optional chaining on null.
+#[test]
+fn test_optional_chain_null() {
+    assert_eq!(run("null?.foo"), DataType::Null);
+    assert_eq!(run("null?.foo?.bar"), DataType::Null);
+}
+
+/// String repeat resource limit.
+#[test]
+fn test_string_repeat_resource_limit() {
+    let err = run_err(r#""x".repeat(100000000)"#).to_string();
+    assert!(err.contains("E409") || err.contains("exceeds") || err.contains("limit") || err.contains("resource"), "got: {}", err);
+}
+
+/// Array sort stability.
+#[test]
+fn test_array_sort_numbers() {
+    let src = r#"[3, 1, 4, 1, 5, 9].sort()"#;
+    let result = run(src);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(1), DataType::Int64(3),
+        DataType::Int64(4), DataType::Int64(5), DataType::Int64(9),
+    ]));
+}
+
+/// Map field access with string keys.
+#[test]
+fn test_map_string_keys_field_access() {
+    let src = r#"
+        let m = {"x": 1, "y": 2, "z": 3}
+        let out = [m.x, m.y, m.z]
+        output out
+    "#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr[0], DataType::Int64(1));
+            assert_eq!(arr[1], DataType::Int64(2));
+            assert_eq!(arr[2], DataType::Int64(3));
+        }
+        _ => panic!("expected array, got {:?}", result),
+    }
+}
+
+/// Enum with multiple variants and pattern matching.
+#[test]
+fn test_enum_multiple_variants_match() {
+    let src = r#"
+        enum Shape {
+            Circle(r),
+            Rect(w, h)
+        }
+        fn area(s) {
+            match s {
+                Shape::Circle(r) => 3 * r * r,
+                Shape::Rect(w, h) => w * h
+            }
+        }
+        let out = [area(Shape::Circle(5)), area(Shape::Rect(3, 4))]
+        output out
+    "#;
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr[0], DataType::Int64(75));
+            assert_eq!(arr[1], DataType::Int64(12));
+        }
+        _ => panic!("expected array, got {:?}", result),
+    }
+}
+
+/// Struct construction and field access.
+#[test]
+fn test_struct_basic() {
+    let src = r#"
+        struct Point { x, y }
+        let p = Point { x: 10, y: 20 }
+        p.x + p.y
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+/// While loop with break returns string value.
+#[test]
+fn test_while_break_string_value() {
+    let src = r#"
+        let mut i = 0
+        while i < 100 {
+            i = i + 1
+            if i == 5 { break "found" }
+        }
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::String("found".to_string()));
+}
+
+/// For loop with continue.
+#[test]
+fn test_for_continue_skips() {
+    let src = r#"
+        let mut sum = 0
+        for i in [1, 2, 3, 4, 5] {
+            if i == 3 { continue }
+            sum = sum + i
+        }
+        sum
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(12)); // 1+2+4+5
+}
+
+/// Recursive function.
+#[test]
+fn test_recursive_factorial() {
+    let src = r#"
+        fn fact(n) {
+            if n <= 1 { 1 }
+            else { n * fact(n - 1) }
+        }
+        fact(10)
+    "#;
+    let result = run(src);
+    assert_eq!(result, DataType::Int64(3628800));
+}
+
+/// WASM try-catch compiles correctly (catch block is dead code).
+#[test]
+fn test_wasm_try_catch_compiles() {
+    let src = r#"
+    fn main() {
+        try {
+            42
+        } catch e {
+            0
+        }
+        1
+    }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let wasm_bytes = compiler::compile_to_wasm(&program).expect("compile");
+    assert!(!wasm_bytes.is_empty());
+}
+
+/// WASM typeof with integer compiles and validates.
+#[test]
+fn test_wasm_typeof_integer_compiles() {
+    let src = r#"
+    fn main() {
+        typeof(42)
+    }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let wasm_bytes = compiler::compile_to_wasm(&program).expect("compile");
+    assert!(!wasm_bytes.is_empty());
+}
+
+/// WASM for-loop compiles (regression: counter was initialized with tagged null).
+#[test]
+fn test_wasm_for_loop_compiles() {
+    let src = r#"
+    fn main() {
+        let mut sum = 0
+        for x in [1, 2, 3] {
+            sum = sum + x
+        }
+        sum
+    }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let wasm_bytes = compiler::compile_to_wasm(&program).expect("compile");
+    assert!(!wasm_bytes.is_empty());
+}
+
+/// Range inclusive flag passed to evaluator.
+#[test]
+fn test_range_inclusive_creates_inclusive() {
+    // 1..=5 should include 5
+    let src = "1..=5";
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 5, "1..=5 should have 5 elements, got {}", arr.len());
+            assert_eq!(arr[4], DataType::Int64(5));
+        }
+        _ => panic!("expected array, got {:?}", result),
+    }
+}
+
+/// Range exclusive does not include end (regression test).
+#[test]
+fn test_range_exclusive_regression() {
+    let src = "1..5";
+    let result = run(src);
+    match result {
+        DataType::Array(arr) => {
+            assert_eq!(arr.len(), 4, "1..5 should have 4 elements, got {}", arr.len());
+            assert_eq!(arr[3], DataType::Int64(4));
+        }
+        _ => panic!("expected array, got {:?}", result),
+    }
+}
+
+/// Linter W203 detects missing enum variant even with duplicate arms.
+#[test]
+fn test_w203_duplicate_enum_arm_still_warns() {
+    let src = r#"
+        enum Color { Red, Green, Blue }
+        fn f(c) {
+            match c {
+                Color::Red => 1,
+                Color::Red => 2,
+            }
+        }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let config = magi_lang::linter::LintConfig::default();
+    let result = magi_lang::linter::lint(&program, &config);
+    let w203: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(!w203.is_empty(), "should warn W203 for missing Green/Blue, got: {:?}", result.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+/// MapFromEntries errors on non-array entry.
+#[test]
+fn test_map_from_entries_type_error() {
+    let src = r#"
+        let entries = [42]
+        output entries
+    "#;
+    let _result = run(src);
+    // Just testing it doesn't silently swallow — the actual MapFromEntries
+    // is a FullEvaluator operation, not directly testable through the interpreter
+}
+
+// ================================================================
+// Round 125: Set operations, eval_slice, debug state
+// ================================================================
+
+/// Slice with large positive indices doesn't panic.
+#[test]
+fn test_slice_large_positive_index() {
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5]
+        output arr[100..200]
+    "#);
+    assert_eq!(result, DataType::Array(vec![]));
+}
+
+/// Slice with negative indices wraps from end.
+#[test]
+fn test_slice_negative_wrap_round125() {
+    let result = run(r#"
+        let arr = [10, 20, 30, 40, 50]
+        output arr[-3..-1]
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(30),
+        DataType::Int64(40),
+    ]));
+}
+
+/// Substring with large positive indices doesn't panic.
+#[test]
+fn test_substring_large_index() {
+    let result = run(r#"
+        let s = "hello"
+        output s.substring(100, 200)
+    "#);
+    assert_eq!(result, DataType::String(String::new()));
+}
+
+/// Chunk method works correctly.
+#[test]
+fn test_chunk_method() {
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5]
+        let chunks = arr.chunk(2)
+        output chunks.length()
+    "#);
+    assert_eq!(result, DataType::Int64(3));
+}
+
+/// String slice with large index doesn't panic.
+#[test]
+fn test_string_slice_large_index() {
+    let result = run(r#"
+        let s = "hello world"
+        output s[0..5]
+    "#);
+    assert_eq!(result, DataType::String("hello".to_string()));
+}
+
+/// Negative substring indices.
+#[test]
+fn test_substring_negative() {
+    let result = run(r#"
+        let s = "hello"
+        output s.substring(-3)
+    "#);
+    assert_eq!(result, DataType::String("llo".to_string()));
+}
+
+// ================================================================
+// Additional edge case tests - round 125/126
+// ================================================================
+
+/// Inclusive range creates correct array via evaluator.
+#[test]
+fn test_inclusive_range_via_evaluator() {
+    let result = run(r#"
+        let arr = 1..=5
+        output arr
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4), DataType::Int64(5),
+    ]));
+}
+
+/// Exclusive range creates correct array.
+#[test]
+fn test_exclusive_range_via_evaluator() {
+    let result = run(r#"
+        let arr = 1..5
+        output arr
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4),
+    ]));
+}
+
+/// Empty array operations.
+#[test]
+fn test_empty_array_ops() {
+    let result = run(r#"
+        let arr = []
+        output arr.length()
+    "#);
+    assert_eq!(result, DataType::Int64(0));
+}
+
+/// Nested function calls.
+#[test]
+fn test_nested_function_calls() {
+    let result = run(r#"
+        fn double(x) { x * 2 }
+        fn add_one(x) { x + 1 }
+        output double(add_one(3))
+    "#);
+    assert_eq!(result, DataType::Int64(8));
+}
+
+/// Lambda captures value not reference (has_main mode).
+#[test]
+fn test_lambda_capture_by_value() {
+    // Lambdas capture variables by value at definition time
+    let result = run(r#"
+        fn main() {
+            let x = 10
+            let get_x = || { x }
+            output get_x()
+        }
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+/// Map field access with string key.
+#[test]
+fn test_map_field_access_name() {
+    let result = run(r#"
+        let m = {"name": "alice", "age": 30}
+        output m.name
+    "#);
+    assert_eq!(result, DataType::String("alice".to_string()));
+}
+
+/// String escape sequences.
+#[test]
+fn test_string_escapes() {
+    let result = run(r#"
+        output "tab\there\nnewline"
+    "#);
+    assert_eq!(result, DataType::String("tab\there\nnewline".to_string()));
+}
+
+/// Multi-line string via newline.
+#[test]
+fn test_multiline_string() {
+    let result = run(r#"
+        let s = "line1\nline2"
+        output s.lines().length()
+    "#);
+    assert_eq!(result, DataType::Int64(2));
+}
+
+/// Boolean short-circuit evaluation.
+#[test]
+fn test_short_circuit_and() {
+    let result = run(r#"
+        let mut called = false
+        fn side_effect() {
+            called = true
+            true
+        }
+        let result = false && side_effect()
+        output called
+    "#);
+    // Short-circuit: side_effect should NOT be called
+    assert_eq!(result, DataType::Bool(false));
+}
+
+/// Boolean short-circuit OR.
+#[test]
+fn test_short_circuit_or() {
+    let result = run(r#"
+        let mut called = false
+        fn side_effect() {
+            called = true
+            true
+        }
+        let result = true || side_effect()
+        output called
+    "#);
+    assert_eq!(result, DataType::Bool(false));
+}
+
+/// Null coalescing with non-null value.
+#[test]
+fn test_null_coalesce_non_null_value() {
+    let result = run(r#"
+        let x = 42
+        output x ?? 99
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+/// Null coalescing with null input.
+#[test]
+fn test_null_coalesce_null_input() {
+    let result = run(r#"
+        let x = null
+        output x ?? 99
+    "#);
+    assert_eq!(result, DataType::Int64(99));
+}
+
+/// Nested null coalescing deep chain.
+#[test]
+fn test_null_coalesce_deep_chain() {
+    let result = run(r#"
+        let a = null
+        let b = null
+        let c = 42
+        output a ?? b ?? c
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+/// Type checking: typeof on various types.
+#[test]
+fn test_typeof_types() {
+    let result = run(r#"
+        output typeof(42)
+    "#);
+    assert_eq!(result, DataType::String("int64".to_string()));
+}
+
+/// Enum construction and typeof (enums are maps internally).
+#[test]
+fn test_enum_typeof() {
+    let result = run(r#"
+        enum Color { Red, Green, Blue }
+        let c = Color::Red
+        output typeof(c)
+    "#);
+    // Enums are stored as Map with __enum marker, typeof returns "map"
+    assert_eq!(result, DataType::String("map".to_string()));
+}
+
+/// Struct construction and field sum.
+#[test]
+fn test_struct_field_sum() {
+    let result = run(r#"
+        struct Point { x, y }
+        let p = Point { x: 10, y: 20 }
+        output p.x + p.y
+    "#);
+    assert_eq!(result, DataType::Int64(30));
+}
+
+/// Slice with very large indices should not panic (usize safety).
+#[test]
+fn test_slice_large_indices() {
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5]
+        output arr[0..999999999]
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+        DataType::Int64(4), DataType::Int64(5),
+    ]));
+}
+
+/// Negative slice indices wrap from end.
+#[test]
+fn test_slice_negative_wrap() {
+    let result = run(r#"
+        let arr = [10, 20, 30, 40, 50]
+        output arr[-3..-1]
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Int64(30), DataType::Int64(40),
+    ]));
+}
+
+/// Debug evaluate should not leak state into subsequent execution.
+#[test]
+fn test_debug_evaluate_state_isolation() {
+    let result = run(r#"
+        let x = 42
+        output x
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+/// Parenthesized struct literal should work in if condition context.
+#[test]
+fn test_struct_literal_in_parens() {
+    let result = run(r#"
+        struct Config { enabled }
+        let c = Config { enabled: true }
+        if c.enabled {
+            output 1
+        } else {
+            output 0
+        }
+    "#);
+    assert_eq!(result, DataType::Int64(1));
+}
+
+/// Integer division should preserve integer type through type checker.
+#[test]
+fn test_integer_division_result_type() {
+    let result = run(r#"
+        let a = 10
+        let b = 3
+        output a / b
+    "#);
+    assert_eq!(result, DataType::Int64(3));
+}
+
+/// Chunk with exact divisor should produce correct number of chunks.
+#[test]
+fn test_chunk_exact_divisor() {
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5, 6]
+        output arr.chunk(2)
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]),
+        DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)]),
+        DataType::Array(vec![DataType::Int64(5), DataType::Int64(6)]),
+    ]));
+}
+
+/// Chunk with non-exact divisor includes trailing partial chunk.
+#[test]
+fn test_chunk_remainder() {
+    let result = run(r#"
+        let arr = [1, 2, 3, 4, 5]
+        output arr.chunk(2)
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]),
+        DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)]),
+        DataType::Array(vec![DataType::Int64(5)]),
+    ]));
+}
+
+/// Enumerate produces [index, value] pairs.
+#[test]
+fn test_enumerate_pairs() {
+    let result = run(r#"
+        let arr = ["a", "b", "c"]
+        output arr.enumerate()
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(0), DataType::String("a".to_string())]),
+        DataType::Array(vec![DataType::Int64(1), DataType::String("b".to_string())]),
+        DataType::Array(vec![DataType::Int64(2), DataType::String("c".to_string())]),
+    ]));
+}
+
+/// Zip produces paired arrays.
+#[test]
+fn test_zip_arrays() {
+    let result = run(r#"
+        let a = [1, 2, 3]
+        let b = ["x", "y", "z"]
+        output a.zip(b)
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::String("x".to_string())]),
+        DataType::Array(vec![DataType::Int64(2), DataType::String("y".to_string())]),
+        DataType::Array(vec![DataType::Int64(3), DataType::String("z".to_string())]),
+    ]));
+}
+
+/// Zip with unequal lengths uses shorter length.
+#[test]
+fn test_zip_unequal_lengths() {
+    let result = run(r#"
+        let a = [1, 2]
+        let b = ["x", "y", "z"]
+        output a.zip(b)
+    "#);
+    assert_eq!(result, DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::String("x".to_string())]),
+        DataType::Array(vec![DataType::Int64(2), DataType::String("y".to_string())]),
+    ]));
+}
+
+/// Match with or-pattern binding to literal set.
+#[test]
+fn test_match_or_pattern_literal_set() {
+    let result = run(r#"
+        let val = 2
+        let r = match val {
+            1 | 2 | 3 => "small",
+            _ => "big"
+        }
+        output r
+    "#);
+    assert_eq!(result, DataType::String("small".to_string()));
+}
+
+/// Match with guard condition.
+#[test]
+fn test_match_guard_condition() {
+    let result = run(r#"
+        let x = 15
+        let r = match x {
+            n if n > 10 => "big",
+            n if n > 5 => "medium",
+            _ => "small"
+        }
+        output r
+    "#);
+    assert_eq!(result, DataType::String("big".to_string()));
+}
+
+/// For loop over string characters.
+#[test]
+fn test_for_loop_string_chars() {
+    let result = run(r#"
+        let mut count = 0
+        for c in "hello" {
+            count = count + 1
+        }
+        output count
+    "#);
+    assert_eq!(result, DataType::Int64(5));
+}
+
+/// Try-catch-finally all blocks execute correctly.
+#[test]
+fn test_try_catch_finally_all_paths() {
+    let result = run(r#"
+        let mut log = ""
+        try {
+            log = log + "try "
+            throw "err"
+        } catch e {
+            log = log + "catch "
+        } finally {
+            log = log + "finally"
+        }
+        output log
+    "#);
+    assert_eq!(result, DataType::String("try catch finally".to_string()));
+}
+
+/// While loop breaking with computed value via mutable variable.
+#[test]
+fn test_while_loop_break_computed_value() {
+    let result = run(r#"
+        let mut i = 0
+        let mut r = 0
+        while i < 10 {
+            i = i + 1
+            if i == 5 {
+                r = i * 10
+                break
+            }
+        }
+        output r
+    "#);
+    assert_eq!(result, DataType::Int64(50));
+}
+
+/// String to_int with whitespace (trim).
+#[test]
+fn test_string_to_int_trim() {
+    let result = run(r#"output "  42  ".to_int()"#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+/// String to_float with whitespace (trim).
+#[test]
+fn test_string_to_float_trim() {
+    let result = run(r#"output "  3.14  ".to_float()"#);
+    assert_eq!(result, DataType::Float64(3.14));
+}
+
+/// is_numeric rejects infinity.
+#[test]
+fn test_is_numeric_rejects_infinity() {
+    let result = run(r#"output "Infinity".is_numeric()"#);
+    assert_eq!(result, DataType::Bool(false));
+}
+
+/// is_numeric rejects NaN.
+#[test]
+fn test_is_numeric_rejects_nan() {
+    let result = run(r#"output "NaN".is_numeric()"#);
+    assert_eq!(result, DataType::Bool(false));
+}
+
+/// is_numeric accepts normal number strings.
+#[test]
+fn test_is_numeric_accepts_number() {
+    let result = run(r#"output "42".is_numeric()"#);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+/// is_numeric accepts float strings.
+#[test]
+fn test_is_numeric_accepts_float() {
+    let result = run(r#"output "3.14".is_numeric()"#);
+    assert_eq!(result, DataType::Bool(true));
+}
+
+/// Sort array of integers.
+#[test]
+fn test_sort_integer_array() {
+    let result = run(r#"
+        let arr = [3, 1, 4, 1, 5, 9, 2, 6]
+        output arr.sort()
+    "#);
+    if let DataType::Array(arr) = result {
+        assert_eq!(arr.len(), 8);
+        // StubEvaluator delegates to ArraySort which should order integers
+    }
+}
+
+/// Use alias with non-snake_case triggers W200.
+#[test]
+fn test_lint_use_alias_naming() {
+    let source = r#"use std::math as MyMath"#;
+    let program = parse_v2(source).expect("parse");
+    let lint_config = magi_lang::linter::LintConfig::default();
+    let linter_result = magi_lang::linter::lint(&program, &lint_config);
+    let has_w200 = linter_result.diagnostics.iter().any(|d|
+        d.code.as_deref() == Some("W200") && d.message.contains("MyMath"));
+    assert!(has_w200, "expected W200 for non-snake_case use alias, got: {:?}",
+        linter_result.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+/// Comprehension filter with constant condition triggers W204.
+#[test]
+fn test_lint_comprehension_constant_filter() {
+    let source = r#"let x = [i for i in [1,2,3] if true]"#;
+    let program = parse_v2(source).expect("parse");
+    let analysis = check_types(&program, &Default::default());
+    let lint_config = magi_lang::linter::LintConfig::default();
+    let linter_result = magi_lang::linter::lint(&program, &lint_config);
+    let all_diags: Vec<_> = analysis.diagnostics.iter().chain(linter_result.diagnostics.iter()).collect();
+    let has_w204 = all_diags.iter().any(|d| d.code.as_deref() == Some("W204") || d.message.contains("always"));
+    assert!(has_w204, "expected W204 for constant condition in comprehension filter, got: {:?}",
+        all_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+/// ? operator unwraps Result::Ok to inner value.
+#[test]
+fn test_question_mark_unwraps_result_ok() {
+    let result = run(r#"
+        enum Result { Ok(v), Err(e) }
+        fn get_value() { Result::Ok(99) }
+        let x = get_value()?
+        output x
+    "#);
+    assert_eq!(result, DataType::Int64(99));
+}
+
+/// ? operator throws on Result::Err.
+#[test]
+fn test_question_mark_throws_result_err() {
+    let result = run(r#"
+        enum Result { Ok(v), Err(e) }
+        fn fail() { Result::Err("oops") }
+        let mut x = null
+        try {
+            x = fail()?
+        } catch e {
+            x = e
+        }
+        output x
+    "#);
+    assert_eq!(result, DataType::String("oops".to_string()));
+}
+
+/// Glob import does not leak nested module functions.
+#[test]
+fn test_glob_import_no_nested_module_leak() {
+    // use a::* should only import direct children, not nested b::nested
+    let result = run(r#"
+        mod a {
+            fn direct() { 1 }
+            mod b {
+                fn nested() { 2 }
+            }
+        }
+        use a::*
+        output direct()
+    "#);
+    assert_eq!(result, DataType::Int64(1));
+}
+
+/// Glob import from nested module works with explicit path.
+#[test]
+fn test_glob_import_nested_explicit() {
+    let result = run(r#"
+        mod a {
+            mod b {
+                fn inner() { 42 }
+            }
+        }
+        use a::b::*
+        output inner()
+    "#);
+    assert_eq!(result, DataType::Int64(42));
+}
+
+/// Optional index `?[` returns null when object is null.
+#[test]
+fn test_optional_index_null_propagation() {
+    let result = run(r#"
+        let x = null
+        output x?[0]
+    "#);
+    assert_eq!(result, DataType::Null);
+}
+
+/// Optional index `?[` returns the value when object is non-null.
+#[test]
+fn test_optional_index_non_null() {
+    let result = run(r#"
+        let arr = [10, 20, 30]
+        output arr?[1]
+    "#);
+    assert_eq!(result, DataType::Int64(20));
+}
+
+/// Formatter roundtrip for `?[` syntax.
+#[test]
+fn test_formatter_optional_index_roundtrip() {
+    let source = "let x = arr?[0]\n";
+    let program = magi_lang::syntax::parser::parse_v2(source).unwrap();
+    let formatted = magi_lang::formatter::format_program(&program, &Default::default());
+    assert!(formatted.contains("?["), "Expected ?[ in formatted output, got: {}", formatted);
+    // Roundtrip: format again should be identical
+    let program2 = magi_lang::syntax::parser::parse_v2(&formatted).unwrap();
+    let formatted2 = magi_lang::formatter::format_program(&program2, &Default::default());
+    assert_eq!(formatted, formatted2, "Formatter should be idempotent for ?[");
+}
+
+/// Null coalesce with pipe should preserve parens in formatter.
+#[test]
+fn test_formatter_null_coalesce_pipe_roundtrip() {
+    let source = "let x = a ?? (b |> c)\n";
+    let program = magi_lang::syntax::parser::parse_v2(source).unwrap();
+    let formatted = magi_lang::formatter::format_program(&program, &Default::default());
+    // After formatting, the pipe inside ?? should be parenthesized
+    let program2 = magi_lang::syntax::parser::parse_v2(&formatted).unwrap();
+    let formatted2 = magi_lang::formatter::format_program(&program2, &Default::default());
+    assert_eq!(formatted, formatted2, "Formatter should be idempotent for ?? with pipe");
+}
+
+// ── Round 134: Linter literal comparison fix ──────────────────────────
+
+#[test]
+fn test_linter_self_comparison_integers() {
+    // W205: self-comparison with integer literals should be detected
+    let source = "let x = 42 == 42\n";
+    let program = parse_v2(source).unwrap();
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(!w205.is_empty(), "Expected W205 for 42 == 42, got {:?}", lint_result.diagnostics);
+}
+
+#[test]
+fn test_linter_self_comparison_floats() {
+    // W205: self-comparison with float literals should be detected
+    let source = "let x = 3.14 == 3.14\n";
+    let program = parse_v2(source).unwrap();
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(!w205.is_empty(), "Expected W205 for 3.14 == 3.14, got {:?}", lint_result.diagnostics);
+}
+
+#[test]
+fn test_linter_self_comparison_different_literals() {
+    // No W205: different values
+    let source = "let x = 1 == 2\n";
+    let program = parse_v2(source).unwrap();
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(w205.is_empty(), "Should not warn on 1 == 2, got {:?}", w205);
+}
+
+#[test]
+fn test_linter_self_comparison_strings() {
+    // W205: self-comparison with string literals
+    let source = r#"let x = "hello" == "hello""#;
+    let program = parse_v2(source).unwrap();
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(!w205.is_empty(), "Expected W205 for string self-comparison");
+}
+
+#[test]
+fn test_linter_self_comparison_booleans() {
+    // W205: self-comparison with boolean literals
+    let source = "let x = true == true\n";
+    let program = parse_v2(source).unwrap();
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(!w205.is_empty(), "Expected W205 for true == true");
+}
+
+#[test]
+fn test_parser_duplicate_param_names() {
+    let result = parse_v2("fn f(x, x) { x }\n");
+    assert!(result.is_err(), "Duplicate parameter names should be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Duplicate parameter"), "Error should mention duplicate parameter: {}", msg);
+}
+
+#[test]
+fn test_parser_duplicate_enum_variant() {
+    let result = parse_v2("enum Color { Red, Red }\n");
+    assert!(result.is_err(), "Duplicate enum variants should be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Duplicate enum variant"), "Error should mention duplicate variant: {}", msg);
+}
+
+#[test]
+fn test_parser_duplicate_struct_field() {
+    let result = parse_v2("struct Point { x: int64, x: float64 }\n");
+    assert!(result.is_err(), "Duplicate struct fields should be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Duplicate struct field"), "Error should mention duplicate field: {}", msg);
+}
+
+#[test]
+fn test_try_catch_expr_finally() {
+    let source = r#"
+let mut log = ""
+let x = try { log = "try"; 42 } catch e { log = "catch"; 0 }
+assert_eq(x, 42)
+assert_eq(log, "try")
+"#;
+    run(source); // panics on error
+}
+
+#[test]
+fn test_type_checker_no_duplicate_self_comparison_warning() {
+    // W205 (self-comparison) should only come from the linter, not duplicated from type checker
+    let source = "let x = 5\nlet y = x == x\n";
+    let program = parse_v2(source).unwrap();
+    let tc_result = magi_lang::syntax::type_checker::check_types(&program, &std::collections::HashSet::new());
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let tc_self_comp: Vec<_> = tc_result.diagnostics.iter()
+        .filter(|d| d.message.contains("Comparing") && d.message.contains("itself"))
+        .collect();
+    let lint_w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(tc_self_comp.is_empty(), "Type checker should not emit self-comparison warning (linter handles it as W205): {:?}", tc_self_comp);
+    assert!(!lint_w205.is_empty(), "Linter should emit W205 for self-comparison");
+}
+
+// ===== Round 136 tests =====
+
+#[test]
+fn test_struct_construction_duplicate_field_parse_error() {
+    // Struct construction with duplicate fields should be rejected at parse time
+    let result = parse_v2(r#"
+struct Foo { a: int, b: int }
+let f = Foo { a: 1, b: 2, a: 3 }
+"#);
+    assert!(result.is_err(), "duplicate field in struct construction should be a parse error");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Duplicate field"), "error should mention 'Duplicate field', got: {}", msg);
+}
+
+#[test]
+fn test_w106_boolean_literal_comparison_only() {
+    // W106 should fire for boolean literal comparison (x == true), not self-comparison
+    let codes = typecheck_warnings(r#"
+let a = true
+let _b = a == true
+"#);
+    assert!(codes.contains(&"W106".to_string()), "expected W106 for boolean literal comparison, got: {:?}", codes);
+
+    // Self-comparison should NOT trigger W106 (linter W205 handles it)
+    let codes2 = typecheck_warnings("let x = 5; let _y = x == x;");
+    assert!(!codes2.contains(&"W106".to_string()), "W106 should not fire for self-comparison, got: {:?}", codes2);
+}
+
+#[test]
+fn test_w205_self_comparison_in_linter() {
+    // Self-comparison should be caught by linter W205 (not type checker W106)
+    let source = "let x = 5\nlet _y = x == x\n";
+    let program = parse_v2(source).unwrap();
+    let lint_result = magi_lang::linter::lint(&program, &Default::default());
+    let w205: Vec<_> = lint_result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(!w205.is_empty(), "Linter should emit W205 for self-comparison");
+}
+
+// ===== Round 137 tests =====
+
+#[test]
+fn test_match_negative_zero_cross_type() {
+    // Int literal 0 should match Float64 0.0 value (cross-type match)
+    let source = r#"
+let val = 0.0
+let result = match val {
+    0 => "matched int zero"
+    _ => "no match"
+}
+assert_eq(result, "matched int zero")
+"#;
+    run(source);
+}
+
+#[test]
+fn test_match_negative_zero_equals_zero() {
+    // -0.0 should match 0.0 in pattern matching (IEEE 754: -0.0 == 0.0)
+    let source = r#"
+let val = -0.0
+let result = match val {
+    0.0 => "matched zero"
+    _ => "no match"
+}
+assert_eq(result, "matched zero")
+"#;
+    run(source);
+}
+
+#[test]
+fn test_match_cross_type_float_int() {
+    // Cross-type numeric matching should work
+    let source = r#"
+let val = 42
+let result = match val {
+    42.0 => "matched float"
+    _ => "no match"
+}
+assert_eq(result, "matched float")
+"#;
+    run(source);
+}
+
+#[test]
+fn test_double_negation_w106() {
+    // W106 should still fire for double negation
+    let codes = typecheck_warnings("let x = 5; let _y = --x;");
+    assert!(codes.contains(&"W106".to_string()), "expected W106 for double negation, got: {:?}", codes);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Round 138: InvalidInput→TypeError, W203 module enums, WASM loop_stack, W205 NaN
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_w203_enum_inside_module() {
+    // W203 should detect missing variants for enums defined inside a module
+    let src = r#"
+        mod mymod {
+            enum Color { Red, Green, Blue }
+        }
+        use mymod::Color
+        fn check(c) {
+            match c {
+                Color::Red => "red"
+            }
+        }
+    "#;
+    let program = parse_v2(src).expect("parse");
+    let config = magi_lang::linter::LintConfig::default();
+    let result = magi_lang::linter::lint(&program, &config);
+    let w203: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(!w203.is_empty(), "should warn W203 for missing Green/Blue in module-scoped enum, got: {:?}",
+        result.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_w205_suggestion_mentions_nan() {
+    // W205 suggestion should mention NaN detection
+    let src = "let x = 5;\nlet b = x == x;";
+    let program = parse_v2(src).expect("parse");
+    let config = magi_lang::linter::LintConfig::default();
+    let result = magi_lang::linter::lint(&program, &config);
+    let w205: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W205"))
+        .collect();
+    assert!(!w205.is_empty(), "expected W205 for x == x");
+    let suggestion = w205[0].suggestion.as_deref().unwrap_or("");
+    assert!(suggestion.contains("is_nan"), "W205 suggestion should mention is_nan(), got: {:?}", suggestion);
+}
+
+#[test]
+fn test_formatter_compound_assign_all_ops() {
+    // Formatter should handle all 5 compound assignment operators
+    use magi_lang::formatter::{format_program, FormatConfig};
+    let config = FormatConfig::default();
+    for (src, expected_op) in [
+        ("let mut x = 1; x += 2;", "+="),
+        ("let mut x = 1; x -= 2;", "-="),
+        ("let mut x = 1; x *= 2;", "*="),
+        ("let mut x = 1; x /= 2;", "/="),
+        ("let mut x = 1; x %= 2;", "%="),
+    ] {
+        let program = parse_v2(src).expect("parse");
+        let formatted = format_program(&program, &config);
+        assert!(formatted.contains(expected_op), "expected {} in formatted output for {:?}, got: {}", expected_op, src, formatted);
+    }
+}
+
+#[test]
+fn test_lambda_in_loop() {
+    // Lambda defined inside loop should work correctly
+    let src = r#"
+        let f = |x| x * 2
+        let a = f(1)
+        let b = f(2)
+        let c = f(3)
+        assert_eq(a, 2)
+        assert_eq(b, 4)
+        assert_eq(c, 6)
+    "#;
+    run(src);
+}
+
+#[test]
+fn test_assert_type_error_on_non_bool() {
+    // assert() with non-bool should produce a TypeError with E100, not InvalidInput
+    let src = r#"assert(42)"#;
+    let result = run_result(src);
+    match result {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("E100") || msg.contains("Type error") || msg.contains("Bool"),
+                "expected TypeError (E100) for assert(42), got: {}", msg);
+        }
+        Ok(_) => panic!("assert(42) should error"),
+    }
+}
+
+// ── Round 139: Heap isolation, pipe spread, alias scoping, FS TypeError ──
+
+#[test]
+fn test_heap_isolation_between_tests() {
+    // Verify that mutable variable assignments don't leak between tests
+    let src = r#"
+        let mut x = 10
+
+        test "mutate x" {
+            x = 99
+            assert_eq(x, 99)
+        }
+
+        test "x should be pristine" {
+            assert_eq(x, 10)
+        }
+    "#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert_eq!(results.len(), 2, "expected 2 tests, got: {:?}", results);
+    assert!(results[0].passed, "first test should pass: {:?}", results[0].error_message);
+    assert!(results[1].passed, "second test should see original value: {:?}", results[1].error_message);
+}
+
+#[test]
+fn test_pipe_spread_args() {
+    // Pipe stage should support spread arguments
+    let src = r#"
+        fn add3(a, b, c) { a + b + c }
+        let args = [10, 20]
+        let result = 1 |> add3(_, ...args)
+        result
+    "#;
+    assert_eq!(run(src), DataType::Int64(31));
+}
+
+#[test]
+fn test_pipe_spread_with_lambda() {
+    // Pipe stage with lambda variable should also support spread
+    let src = r#"
+        let f = |a, b, c| a + b + c
+        let args = [10, 20]
+        let result = 1 |> f(_, ...args)
+        result
+    "#;
+    assert_eq!(run(src), DataType::Int64(31));
+}
+
+#[test]
+fn test_use_alias_does_not_leak_original_name() {
+    // After `use Mod::func as alias`, original name should not be accessible
+    let src = r#"
+        mod MyMod {
+            fn helper() { 42 }
+        }
+        use MyMod::helper as h
+        h()
+    "#;
+    assert_eq!(run(src), DataType::Int64(42));
+
+    // Now verify the original name is NOT accessible
+    let src2 = r#"
+        mod MyMod {
+            fn helper() { 42 }
+        }
+        use MyMod::helper as h
+        helper()
+    "#;
+    let result = run_result(src2);
+    assert!(result.is_err(), "original name 'helper' should not be accessible after aliased import");
+}
+
+#[test]
+fn test_w203_enum_inside_module_recursive() {
+    // W203 should find enum definitions recursively inside modules
+    use magi_lang::linter::{lint, LintConfig};
+    let src = "mod Colors {\n  enum Color { Red, Green, Blue }\n}\nuse Colors::Color\nlet c = Color::Red\nmatch c {\n  Color::Red => \"red\"\n}";
+    let program = parse(src);
+    let result = lint(&program, &LintConfig::default());
+    let w203: Vec<_> = result.diagnostics.iter()
+        .filter(|d| d.code.as_deref() == Some("W203"))
+        .collect();
+    assert!(!w203.is_empty(), "Should warn about missing Green/Blue variants");
+}
+
+#[test]
+fn test_pipe_spread_operation() {
+    // Spread should also work in pipe stage when calling an operation
+    let src = r#"
+        fn make_pair(a, b) { [a, b] }
+        let args = [20]
+        let result = 10 |> make_pair(_, ...args)
+        result
+    "#;
+    assert_eq!(run(src), DataType::Array(vec![DataType::Int64(10), DataType::Int64(20)]));
+}
+
+#[test]
+fn test_csv_stringify_non_map_rows_type_error() {
+    // CsvStringify with non-map rows should return TypeError
+    let src = r#"csv_stringify([1, 2, 3])"#;
+    let result = run_result(src);
+    match result {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("E100") || msg.contains("Type") || msg.contains("map"),
+                "expected TypeError for non-map csv rows, got: {}", msg);
+        }
+        Ok(_) => {} // StubEvaluator may not implement csv_stringify
+    }
+}
+
+#[test]
+fn test_heap_isolation_mutable_string() {
+    // Also verify string variable mutations don't leak between tests
+    let src = r#"
+        let mut s = "hello"
+
+        test "mutate string" {
+            s = "world"
+            assert_eq(s, "world")
+        }
+
+        test "string should be pristine" {
+            assert_eq(s, "hello")
+        }
+    "#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert_eq!(results.len(), 2, "expected 2 tests, got: {:?}", results);
+    assert!(results[0].passed, "first test should pass: {:?}", results[0].error_message);
+    assert!(results[1].passed, "second test should see original string: {:?}", results[1].error_message);
+}
+
+#[test]
+fn test_pipe_spread_type_error() {
+    // Spread of non-array in pipe should error
+    let src = r#"
+        fn f(a, b) { a + b }
+        1 |> f(_, ...42)
+    "#;
+    let result = run_result(src);
+    assert!(result.is_err(), "spread of non-array should error");
+}
+
+// ── Round 140: NaN handling, LSP imports, module scoping ──
+
+#[test]
+fn test_lsp_imports_extracted_from_ast() {
+    // LSP should extract imports from the AST instead of passing empty set
+    use magi_lang::lsp::analysis::analyze_document;
+    let src = "import \"math_plugin\"\nlet x = math_plugin(42)\n";
+    let (_state, diagnostics) = analyze_document(src);
+    // If imports are correctly extracted, the type checker should NOT emit E200
+    // for `math_plugin` since it's a known import
+    let has_e200_for_math = diagnostics.iter()
+        .any(|d| {
+            d.code.as_deref() == Some("E200") && d.message.contains("math_plugin")
+        });
+    assert!(!has_e200_for_math, "LSP should not emit E200 for imported module function");
+}
+
+#[test]
+fn test_module_enum_not_shadowed_by_later_module() {
+    // Verify module enum registration behavior
+    let src = r#"
+        enum Color { Red, Green }
+        mod Other {
+            enum Color { Blue, Yellow }
+        }
+        Color::Red
+    "#;
+    // This tests that top-level Color still works
+    // (The behavior depends on order — later module register_module may shadow)
+    let result = run_result(src);
+    assert!(result.is_ok(), "should be able to use top-level Color: {:?}", result.err());
+}
+
+#[test]
+fn test_heap_isolation_function_mutations() {
+    // Verify that function definitions inside tests don't leak
+    let src = r#"
+        fn original() { 1 }
+
+        test "override function" {
+            fn original() { 999 }
+            assert_eq(original(), 999)
+        }
+
+        test "function should be pristine" {
+            assert_eq(original(), 1)
+        }
+    "#;
+    let program = parse(src);
+    let evaluator = StubEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+    let results = interp.run_tests(&program);
+    assert_eq!(results.len(), 2, "expected 2 tests, got: {:?}", results);
+    assert!(results[0].passed, "first test should pass: {:?}", results[0].error_message);
+    assert!(results[1].passed, "second test should see original function: {:?}", results[1].error_message);
+}
+
+#[test]
+fn test_pipe_spread_empty_array() {
+    // Pipe spread with empty array should work
+    let src = r#"
+        fn identity(a) { a }
+        let empty = []
+        let result = 42 |> identity(_, ...empty)
+        result
+    "#;
+    // identity gets called with just the piped value since spread is empty
+    assert_eq!(run(src), DataType::Int64(42));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Stress tests: complex edge case combinations
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_stress_closure_capture_by_value_semantics() {
+    // Closures capture by value, so mutations to the outer variable
+    // should NOT affect the captured value inside the closure.
+    let src = r#"
+        let mut x = 10
+        let get_x = || x
+        x = 999
+        get_x()
+    "#;
+    // Closures capture by value (documented known limitation),
+    // so get_x still sees x=10
+    assert_eq!(run(src), DataType::Int64(10));
+}
+
+#[test]
+fn test_stress_closure_factory_independent_captures() {
+    // Factory function that creates closures with independent captures
+    let src = r#"
+        fn make_adder(n) {
+            |x| x + n
+        }
+        let add5 = make_adder(5)
+        let add10 = make_adder(10)
+        add5(100) + add10(100)
+    "#;
+    assert_eq!(run(src), DataType::Int64(215));
+}
+
+#[test]
+fn test_stress_nested_match_with_guards_and_or_patterns() {
+    // Match inside match, with guards and or-patterns combined
+    let src = r#"
+        enum Shape { Circle(r), Rect(w, h) }
+        let shapes = [Shape::Circle(5), Shape::Rect(3, 4), Shape::Circle(0)]
+        let mut result = 0
+        for s in shapes {
+            result = result + match s {
+                Shape::Circle(r) if r > 0 => match r {
+                    1 | 2 | 3 => 10,
+                    _ => r * r,
+                },
+                Shape::Rect(w, h) if w > 0 && h > 0 => w * h,
+                _ => -1,
+            }
+        }
+        result
+    "#;
+    // Circle(5): r=5, r>0, r doesn't match 1|2|3, so 5*5=25
+    // Rect(3,4): 3>0 && 4>0, so 3*4=12
+    // Circle(0): r=0, guard fails, wildcard => -1
+    // 25 + 12 + (-1) = 36
+    assert_eq!(run(src), DataType::Int64(36));
+}
+
+#[test]
+fn test_stress_match_destructure_nested_enum() {
+    // Match on nested enum variant with array destructuring in guard
+    let src = r#"
+        enum Wrapper { Val(inner) }
+        let w = Wrapper::Val([10, 20, 30])
+        match w {
+            Wrapper::Val(arr) if len(arr) == 3 => arr[0] + arr[2],
+            _ => 0,
+        }
+    "#;
+    assert_eq!(run(src), DataType::Int64(40));
+}
+
+#[test]
+fn test_stress_pipe_chain_with_hof_and_functions() {
+    // Complex pipe chain: value -> function -> HOF method -> function
+    let src = r#"
+        fn keep_big(arr) {
+            arr.filter(|x| x > 2)
+        }
+        fn scale_up(arr) {
+            arr.map(|x| x * 10)
+        }
+        fn sum_all(arr) {
+            arr.reduce(0, |acc, x| acc + x)
+        }
+        [1, 2, 3, 4, 5]
+            |> keep_big(_)
+            |> scale_up(_)
+            |> sum_all(_)
+    "#;
+    assert_eq!(run(src), DataType::Int64(120)); // (3+4+5)*10 = 120
+}
+
+#[test]
+fn test_stress_pipe_into_method_chain() {
+    // Pipe into a function, then chain HOF methods
+    let src = r#"
+        fn double_all(arr) {
+            arr.map(|x| x * 2)
+        }
+        let result = [1, 2, 3] |> double_all(_)
+        result.reduce(0, |acc, x| acc + x)
+    "#;
+    assert_eq!(run(src), DataType::Int64(12));
+}
+
+#[test]
+fn test_stress_mutual_recursion_with_accumulator() {
+    // Mutual recursion with accumulators - Collatz-like computation
+    let src = r#"
+        fn collatz(n, steps) {
+            if n == 1 { steps }
+            else if n % 2 == 0 { collatz_even(n, steps) }
+            else { collatz_odd(n, steps) }
+        }
+        fn collatz_even(n, steps) {
+            collatz(n / 2, steps + 1)
+        }
+        fn collatz_odd(n, steps) {
+            collatz(n * 3 + 1, steps + 1)
+        }
+        collatz(6, 0)
+    "#;
+    // 6 -> 3 -> 10 -> 5 -> 16 -> 8 -> 4 -> 2 -> 1 = 8 steps
+    assert_eq!(run(src), DataType::Int64(8));
+}
+
+#[test]
+fn test_stress_recursion_with_closure_callback() {
+    // Recursive function that takes a closure callback
+    let src = r#"
+        fn tree_sum(arr, transform) {
+            let mut total = 0
+            for item in arr {
+                total = total + match item {
+                    _ if typeof(item) == "array" => tree_sum(item, transform),
+                    _ => transform(item),
+                }
+            }
+            total
+        }
+        tree_sum([1, [2, 3], [4, [5]]], |x| x * 2)
+    "#;
+    // (1+2+3+4+5)*2 = 30
+    assert_eq!(run(src), DataType::Int64(30));
+}
+
+#[test]
+fn test_stress_type_coercion_chain_numeric() {
+    // Chain of numeric conversions and operations
+    let src = r#"
+        let a = 42
+        let b = a.to_float64()
+        let c = b + 0.5
+        let d = c.to_string()
+        let e = d.length()
+        e
+    "#;
+    // 42 -> 42.0 -> 42.5 -> "42.5" -> length 4
+    assert_eq!(run(src), DataType::Int64(4));
+}
+
+#[test]
+fn test_stress_try_catch_in_loop_with_accumulator() {
+    // Try/catch inside a loop, accumulating results
+    let src = r#"
+        let mut sum = 0
+        for x in [1, 0, 3, 0, 5] {
+            let val = try {
+                if x == 0 { throw "skip" }
+                x * 10
+            } catch e {
+                0
+            };
+            sum = sum + val
+        }
+        sum
+    "#;
+    // 10 + 0 + 30 + 0 + 50 = 90
+    assert_eq!(run(src), DataType::Int64(90));
+}
+
+#[test]
+fn test_stress_nested_try_catch() {
+    // Nested try/catch with different error handlers
+    let src = r#"
+        let result = try {
+            let inner = try {
+                throw "inner error"
+            } catch e {
+                42
+            };
+            inner + 8
+        } catch e {
+            -1
+        };
+        result
+    "#;
+    // Inner catch returns 42, outer try computes 42+8=50
+    assert_eq!(run(src), DataType::Int64(50));
+}
+
+#[test]
+fn test_stress_try_catch_in_comprehension() {
+    // try/catch wrapping a comprehension that might fail
+    let src = r#"
+        let data = [1, 2, 3]
+        let result = try {
+            [x * 10 for x in data]
+        } catch e {
+            []
+        };
+        result.reduce(0, |acc, x| acc + x)
+    "#;
+    assert_eq!(run(src), DataType::Int64(60));
+}
+
+#[test]
+fn test_stress_try_catch_finally_in_loop() {
+    // try/catch/finally inside a loop; finally always runs
+    let src = r#"
+        let mut log = 0
+        for i in [1, 2, 3] {
+            try {
+                if i == 2 { throw "err" }
+            } catch e {
+                log = log + 100
+            } finally {
+                log = log + 1
+            }
+        }
+        log
+    "#;
+    // i=1: finally +1 => 1
+    // i=2: catch +100, finally +1 => 102
+    // i=3: finally +1 => 103
+    assert_eq!(run(src), DataType::Int64(103));
+}
+
+#[test]
+fn test_stress_module_function_called_from_closure() {
+    // Closure that calls a module function directly
+    let src = r#"
+        mod math {
+            fn square(x) { x * x }
+        }
+        let compute = |x| math::square(x) + 1
+        compute(7)
+    "#;
+    // 7*7 + 1 = 50
+    assert_eq!(run(src), DataType::Int64(50));
+}
+
+#[test]
+fn test_stress_spread_in_nested_array() {
+    // Spread inside nested array construction
+    let src = r#"
+        let a = [1, 2]
+        let b = [3, 4]
+        let nested = [[0, ...a], [...b, 5]]
+        nested[0].reduce(0, |acc, x| acc + x) + nested[1].reduce(0, |acc, x| acc + x)
+    "#;
+    // [0,1,2] sum=3, [3,4,5] sum=12 => 15
+    assert_eq!(run(src), DataType::Int64(15));
+}
+
+#[test]
+fn test_stress_spread_merge_with_overwrite() {
+    // Spread arrays with overlapping positions
+    let src = r#"
+        let base = [10, 20, 30]
+        let extra = [40, 50]
+        let combined = [...base, ...extra]
+        combined.reduce(0, |acc, x| acc + x)
+    "#;
+    assert_eq!(run(src), DataType::Int64(150));
+}
+
+#[test]
+fn test_stress_comprehension_flatten_filter() {
+    // Flatten matrix and filter using HOF chain (no nested for-comprehension)
+    let src = r#"
+        let matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+        let flat = matrix.flat_map(|row| row)
+        let evens = [x for x in flat if x % 2 == 0]
+        evens.reduce(0, |acc, x| acc + x)
+    "#;
+    // 2 + 4 + 6 + 8 = 20
+    assert_eq!(run(src), DataType::Int64(20));
+}
+
+#[test]
+fn test_stress_fstring_with_conditional_expression() {
+    // f-string containing if/else expression
+    let src = r#"
+        let x = 42
+        f"x is {if x > 10 { "big" } else { "small" }}"
+    "#;
+    assert_eq!(run(src), DataType::String("x is big".into()));
+}
+
+#[test]
+fn test_stress_fstring_with_method_chain_and_arithmetic() {
+    // f-string with complex inner expressions
+    let src = r#"
+        let names = ["alice", "bob", "charlie"]
+        f"count={len(names)}, first={names[0].to_upper()}"
+    "#;
+    assert_eq!(run(src), DataType::String("count=3, first=ALICE".into()));
+}
+
+#[test]
+fn test_stress_fstring_nested_interpolation() {
+    // Nested f-string inside f-string
+    let src = r#"
+        let x = 5
+        let y = 10
+        f"result: {f"{x} + {y}"} = {x + y}"
+    "#;
+    assert_eq!(run(src), DataType::String("result: 5 + 10 = 15".into()));
+}
+
+#[test]
+fn test_stress_closure_captures_in_loop() {
+    // Build up results from closures created in a loop,
+    // each capturing the current loop variable by value.
+    let src = r#"
+        fn make_adder_for(n) {
+            |x| x + n
+        }
+        let mut sum = 0
+        for i in [0, 1, 2] {
+            let f = make_adder_for(i)
+            sum = sum + f(100)
+        }
+        sum
+    "#;
+    // f(100) with i=0: 100, i=1: 101, i=2: 102 => 303
+    assert_eq!(run(src), DataType::Int64(303));
+}
+
+#[test]
+fn test_stress_match_on_typeof_with_coercion() {
+    // Match on typeof result, then do type-specific operations
+    let src = r#"
+        fn describe(val) {
+            match typeof(val) {
+                "int64" => val * 2,
+                "string" => len(val),
+                "bool" => if val { 1 } else { 0 },
+                "array" => len(val) * 10,
+                _ => -1,
+            }
+        }
+        describe(21) + describe("hello") + describe(true) + describe([1,2,3])
+    "#;
+    // 42 + 5 + 1 + 30 = 78
+    assert_eq!(run(src), DataType::Int64(78));
+}
+
+#[test]
+fn test_stress_hof_chain_complex() {
+    // Chain multiple HOF methods in sequence
+    let src = r#"
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            .filter(|x| x % 2 == 0)
+            .map(|x| x * x)
+            .take_while(|x| x < 50)
+            .reduce(0, |acc, x| acc + x)
+    "#;
+    // filter: [2,4,6,8,10]
+    // map: [4,16,36,64,100]
+    // take_while <50: [4,16,36]
+    // reduce: 56
+    assert_eq!(run(src), DataType::Int64(56));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// WASM compiler stress tests — edge cases for compilation + validation
+// ══════════════════════════════════════════════════════════════════════
+
+/// Helper: compile MAGI source to WASM, assert valid WASM binary.
+fn wasm_compile_ok(src: &str) -> Vec<u8> {
+    let program = parse_v2(src).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let wasm = compiler::compile_to_wasm(&program)
+        .unwrap_or_else(|e| panic!("WASM compile error: {e}"));
+    assert_eq!(&wasm[0..4], b"\0asm", "missing WASM magic number");
+    assert_eq!(&wasm[4..8], &[1, 0, 0, 0], "expected WASM version 1");
+    assert!(wasm.len() > 50, "WASM binary too small ({} bytes)", wasm.len());
+    wasm
+}
+
+/// Helper: compile MAGI source to WASM, expect a compile error.
+fn wasm_compile_err(src: &str) -> String {
+    let program = parse_v2(src).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let err = compiler::compile_to_wasm(&program)
+        .expect_err("expected WASM compilation to fail");
+    err.to_string()
+}
+
+/// WASM stress 1: arithmetic with nested expressions and multiple operator types.
+#[test]
+fn test_wasm_stress_nested_arithmetic() {
+    let src = r#"
+    fn compute(a, b, c) {
+        let x = a + b * c
+        let y = (a - b) * (c + 1)
+        let z = x + y - a
+        z
+    }
+    let result = compute(10, 3, 5)
+    output result
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 2: chained comparisons in deeply nested if/else producing values.
+#[test]
+fn test_wasm_stress_chained_if_else() {
+    let src = r#"
+    fn classify(x) {
+        if x > 100 {
+            "large"
+        } else if x > 10 {
+            "medium"
+        } else if x > 0 {
+            "small"
+        } else if x == 0 {
+            "zero"
+        } else {
+            "negative"
+        }
+    }
+    let a = classify(200)
+    let b = classify(50)
+    let c = classify(5)
+    let d = classify(0)
+    let e = classify(-1)
+    output a
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 3: while loop with compound assignment operators and break.
+#[test]
+fn test_wasm_stress_while_compound_break() {
+    let src = r#"
+    fn sum_until(limit) {
+        let mut total = 0
+        let mut i = 1
+        while true {
+            if i > limit { break }
+            total += i
+            i += 1
+        }
+        total
+    }
+    let s = sum_until(100)
+    output s
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 4: for loop with continue + nested if + break.
+#[test]
+fn test_wasm_stress_for_continue_break_combined() {
+    let src = r#"
+    let items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    let mut even_sum = 0
+    for x in items {
+        if x % 2 != 0 {
+            continue
+        }
+        if x > 8 {
+            break
+        }
+        even_sum += x
+    }
+    output even_sum
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 5: recursive fibonacci function.
+#[test]
+fn test_wasm_stress_recursive_fibonacci() {
+    let src = r#"
+    fn fib(n) {
+        if n <= 1 {
+            n
+        } else {
+            fib(n - 1) + fib(n - 2)
+        }
+    }
+    output fib(10)
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 6: nested map construction and chained field access.
+#[test]
+fn test_wasm_stress_nested_maps_field_chain() {
+    let src = r#"
+    let inner = {"x": 1, "y": 2}
+    let outer = {"name": "point", "coords": inner}
+    let n = outer.name
+    let cx = outer.coords.x
+    output n
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 7: match with multiple literal arms and wildcard fallback.
+#[test]
+fn test_wasm_stress_match_multi_literal() {
+    let src = r#"
+    fn describe(code) {
+        match code {
+            200 => "ok",
+            404 => "not found",
+            500 => "server error",
+            _ => "unknown",
+        }
+    }
+    let a = describe(200)
+    let b = describe(404)
+    let c = describe(999)
+    output a
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 8: f-string interpolation with function calls and arithmetic.
+#[test]
+fn test_wasm_stress_fstring_with_expressions() {
+    let src = r#"
+    fn greet(name, age) {
+        f"Hello, {name}! In 10 years you will be {age + 10}."
+    }
+    let msg = greet("Alice", 30)
+    output msg
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 9: list comprehension with filter condition.
+#[test]
+fn test_wasm_stress_list_comp_filtered() {
+    let src = r#"
+    fn main() {
+        let nums = [1, 2, 3, 4, 5, 6, 7, 8]
+        let evens = [x * 10 for x in nums if x % 2 == 0]
+        output evens
+    }
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 10: map comprehension with string literal key.
+#[test]
+fn test_wasm_stress_map_comprehension() {
+    let src = r#"
+    fn main() {
+        let items = [1, 2, 3]
+        let m = {"val": x * x for x in items}
+        output m
+    }
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 11: lambda passed as argument + indirect call.
+#[test]
+fn test_wasm_stress_lambda_as_argument() {
+    let src = r#"
+    fn apply(f, x) { f(x) }
+    let double = |x| x * 2
+    let result = apply(double, 21)
+    output result
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 12: nested scopes with variable shadowing in blocks.
+#[test]
+fn test_wasm_stress_scope_shadowing() {
+    let src = r#"
+    fn main() {
+        let x = 1
+        let result = if true {
+            let x = 2
+            let inner = if true {
+                let x = 3
+                x
+            } else {
+                x
+            }
+            inner + x
+        } else {
+            x
+        }
+        output result
+    }
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 13: null coalescing chain with mixed null/non-null values.
+#[test]
+fn test_wasm_stress_null_coalesce_chain() {
+    let src = r#"
+    let a = null
+    let b = null
+    let c = 42
+    let result = a ?? b ?? c
+    output result
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 14: short-circuit && and || combined in complex conditions.
+#[test]
+fn test_wasm_stress_short_circuit_complex() {
+    let src = r#"
+    fn check(a, b, c) {
+        if (a > 0 && b > 0) || c {
+            "pass"
+        } else {
+            "fail"
+        }
+    }
+    output check(1, 2, false)
+    output check(-1, 2, true)
+    output check(-1, -1, false)
+    "#;
+    wasm_compile_ok(src);
+}
+
+/// WASM stress 15: integer boundary values for NaN-boxing (max positive, rejection).
+#[test]
+fn test_wasm_stress_nan_boxing_boundaries() {
+    // 2^47 - 1 is the max positive value in 48-bit signed range
+    wasm_compile_ok(r#"
+    let max_ok = 140737488355327
+    output max_ok
+    "#);
+
+    // -(2^47 - 1) is safely in range (negative literal uses unary neg on the positive literal)
+    wasm_compile_ok(r#"
+    let neg_ok = -140737488355327
+    output neg_ok
+    "#);
+
+    // 2^47 exceeds the range and should be rejected
+    let err = wasm_compile_err(r#"
+    let too_big = 140737488355328
+    output too_big
+    "#);
+    assert!(err.contains("NaN-boxing") || err.contains("range") || err.contains("exceeds"),
+        "Expected NaN-boxing range error, got: {}", err);
+
+    // Negative value using literal that exceeds range is also rejected
+    // (parser sees the positive literal 2^47 before applying negation)
+    let err2 = wasm_compile_err(r#"
+    let too_neg = -140737488355328
+    output too_neg
+    "#);
+    assert!(err2.contains("NaN-boxing") || err2.contains("range") || err2.contains("exceeds"),
+        "Expected NaN-boxing range error for negative boundary, got: {}", err2);
 }

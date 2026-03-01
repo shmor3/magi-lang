@@ -341,7 +341,7 @@ impl Compiler {
         }
 
         // Intern type name strings used by typeof runtime dispatch.
-        for name in &["null", "bool", "int64", "float64", "string", "array", "map"] {
+        for name in &["null", "bool", "int64", "float64", "string", "array", "map", "int32", "float32"] {
             self.module.intern_string(name);
         }
     }
@@ -539,7 +539,10 @@ impl Compiler {
             }
 
             StatementKind::Throw(expr) => {
+                // WASM MVP has no exception handling — throw compiles to trap.
+                // The value is computed and dropped since Unreachable discards the stack.
                 self.compile_expr(expr)?;
+                self.emit(Instruction::Drop);
                 self.emit(Instruction::Unreachable);
             }
 
@@ -579,6 +582,8 @@ impl Compiler {
                 });
 
                 let prev = self.current_fn.take();
+                let prev_depth = self.block_depth;
+                let prev_loop_stack = std::mem::take(&mut self.loop_stack);
                 self.begin_function(&test_name, false);
                 self.compile_block(body)?;
                 self.emit(Instruction::Drop); // discard block result
@@ -586,6 +591,8 @@ impl Compiler {
                 self.emit(Instruction::Return);
                 self.end_function();
                 self.current_fn = prev;
+                self.block_depth = prev_depth;
+                self.loop_stack = prev_loop_stack;
             }
 
             StatementKind::EnumDef { name, variants } => {
@@ -805,7 +812,7 @@ impl Compiler {
 
             ExpressionKind::Lambda { params, body } => {
                 let lambda_name = format!("__lambda_{}", self.lambda_counter);
-                self.lambda_counter += 1;
+                self.lambda_counter = self.lambda_counter.saturating_add(1);
 
                 let idx = self.module.functions.len() as u32;
                 self.fn_index.insert(lambda_name.clone(), idx);
@@ -822,6 +829,8 @@ impl Compiler {
 
                 // Save current context.
                 let prev = self.current_fn.take();
+                let prev_depth = self.block_depth;
+                let prev_loop_stack = std::mem::take(&mut self.loop_stack);
                 self.begin_function(&lambda_name, false);
                 {
                     let fb = self.fb()?;
@@ -835,16 +844,22 @@ impl Compiler {
                 self.emit(Instruction::Return);
                 self.end_function();
                 self.current_fn = prev;
+                self.block_depth = prev_depth;
+                self.loop_stack = prev_loop_stack;
 
                 // Push function reference.
                 self.emit(Instruction::PushI64(idx as i64));
             }
 
             ExpressionKind::Pipe { left, right } => {
-                // Compile left value and save to a local so it can be placed
-                // at the correct argument position (not just first).
+                // Compile left value and save to a dedicated local so it can be
+                // placed at the correct argument position (not just first).
+                // Must use a dedicated local (not __temp) because compiling
+                // the right-side arguments may use __temp internally (e.g.,
+                // for ?? or && expressions), which would clobber the pipe value
+                // before placeholder substitution.
                 self.compile_expr(left)?;
-                let pipe_local = self.ensure_temp_local()?;
+                let pipe_local = self.define_local("__pipe", ValType::Tagged, true)?;
                 self.emit(Instruction::LocalSet(pipe_local));
 
                 match &right.kind {
@@ -976,11 +991,21 @@ impl Compiler {
                 self.emit(Instruction::PushNull);
             }
 
-            ExpressionKind::TryCatchExpr { try_block, .. } => {
+            ExpressionKind::TryCatchExpr { try_block, finally_block, .. } => {
                 // In WASM MVP, traps can't be caught. Only compile the try block;
                 // the catch block is unreachable in WASM and would create stack issues
                 // if compiled unconditionally.
                 self.compile_block(try_block)?;
+
+                // Compile finally block if present (always runs).
+                if let Some(finally) = finally_block {
+                    // Save try result, execute finally, restore result
+                    let temp = self.ensure_temp_local()?;
+                    self.emit(Instruction::LocalSet(temp));
+                    self.compile_block(finally)?;
+                    self.emit(Instruction::Drop); // finally doesn't contribute a value
+                    self.emit(Instruction::LocalGet(temp));
+                }
             }
 
             ExpressionKind::ListComprehension { expr, pattern, iterable, condition } => {
@@ -1052,7 +1077,17 @@ impl Compiler {
 
     fn compile_literal(&mut self, lit: &Literal) -> Result<(), CompileError> {
         match lit {
-            Literal::Int64(n) => self.emit(Instruction::PushI64(*n)),
+            Literal::Int64(n) => {
+                const MAX_I48: i64 = (1 << 47) - 1;
+                const MIN_I48: i64 = -(1 << 47);
+                if *n > MAX_I48 || *n < MIN_I48 {
+                    return Err(CompileError::Internal(format!(
+                        "integer literal {} exceeds WASM NaN-boxing 48-bit range [{}, {}]",
+                        n, MIN_I48, MAX_I48
+                    )));
+                }
+                self.emit(Instruction::PushI64(*n));
+            }
             Literal::Float64(n) => self.emit(Instruction::PushF64(*n)),
             Literal::String(s) => {
                 let idx = self.module.intern_string(s);
@@ -1084,67 +1119,42 @@ impl Compiler {
     }
 
     fn compile_binop(&mut self, op: BinOp) -> Result<(), CompileError> {
-        // For Add, we need dynamic dispatch: string + string = StringConcat, else I64Add.
-        if matches!(op, BinOp::Add) {
-            // Stack: [left_tagged, right_tagged]
-            // Use RuntimeCall "__add" which wasm.rs handles with dynamic type dispatch.
-            let name_idx = self.module.intern_string("__add");
-            self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            return Ok(());
-        }
-
-        // For arithmetic and comparisons, untag both operands first.
-        // Stack: [left_tagged, right_tagged]
-        // We need to untag both. Use a temp local to hold right while untagging left.
-        let temp = self.ensure_temp_local()?;
-        self.emit(Instruction::LocalSet(temp)); // save right
-        self.emit(Instruction::UntagI64);       // untag left
-        self.emit(Instruction::LocalGet(temp));  // restore right
-        self.emit(Instruction::UntagI64);       // untag right
-
+        // Arithmetic operations use runtime dispatch to handle int/float.
+        // Comparison operations compare tagged values directly (works for same-type).
         match op {
-            BinOp::Add => unreachable!(), // handled above
+            BinOp::Add => {
+                let name_idx = self.module.intern_string("__add");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
+            }
             BinOp::Sub => {
-                self.emit(Instruction::I64Sub);
-                self.emit(Instruction::TagI64);
+                let name_idx = self.module.intern_string("__sub");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
             BinOp::Mul => {
-                self.emit(Instruction::I64Mul);
-                self.emit(Instruction::TagI64);
+                let name_idx = self.module.intern_string("__mul");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
             BinOp::Div => {
-                self.emit(Instruction::I64Div);
-                self.emit(Instruction::TagI64);
+                let name_idx = self.module.intern_string("__div");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
             BinOp::Mod => {
-                self.emit(Instruction::I64Rem);
-                self.emit(Instruction::TagI64);
+                let name_idx = self.module.intern_string("__mod");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
-            BinOp::Eq => {
-                self.emit(Instruction::I64Eq);
-                self.emit(Instruction::TagBool);
+            BinOp::Eq | BinOp::NotEq | BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq => {
+                let name_idx = self.module.intern_string(match op {
+                    BinOp::Eq => "__eq",
+                    BinOp::NotEq => "__ne",
+                    BinOp::Gt => "__gt",
+                    BinOp::Lt => "__lt",
+                    BinOp::GtEq => "__ge",
+                    BinOp::LtEq => "__le",
+                    _ => return Err(CompileError::at(0, 0, "unexpected comparison operator".to_string())),
+                });
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
-            BinOp::NotEq => {
-                self.emit(Instruction::I64Ne);
-                self.emit(Instruction::TagBool);
-            }
-            BinOp::Gt => {
-                self.emit(Instruction::I64Gt);
-                self.emit(Instruction::TagBool);
-            }
-            BinOp::Lt => {
-                self.emit(Instruction::I64Lt);
-                self.emit(Instruction::TagBool);
-            }
-            BinOp::GtEq => {
-                self.emit(Instruction::I64Ge);
-                self.emit(Instruction::TagBool);
-            }
-            BinOp::LtEq => {
-                self.emit(Instruction::I64Le);
-                self.emit(Instruction::TagBool);
-            }
-            BinOp::And | BinOp::Or => unreachable!("And/Or handled as short-circuit in compile_expr"),
+            BinOp::And | BinOp::Or => return Err(CompileError::at(0, 0, "And/Or should be handled as short-circuit in compile_expr".to_string())),
         }
         Ok(())
     }
@@ -1194,10 +1204,9 @@ impl Compiler {
 
         // Counter (raw untagged i64 — internal use only).
         let counter_local = self.define_local("__counter", ValType::I64, true)?;
-        self.emit(Instruction::PushNull); // placeholder 0 value (will be overwritten)
+        self.emit(Instruction::PushI64(0));
+        self.emit(Instruction::UntagI64);
         self.emit(Instruction::LocalSet(counter_local));
-        // Actually store raw 0. We use PushNull (i64 0) since it's
-        // already an i64 const 0. The counter is untagged.
 
         // Length (raw untagged i64).
         self.emit(Instruction::LocalGet(iter_local));
@@ -1461,50 +1470,22 @@ impl Compiler {
     fn compile_try_catch(
         &mut self,
         try_block: &Block,
-        catch_var: Option<&str>,
-        catch_block: &Block,
+        _catch_var: Option<&str>,
+        _catch_block: &Block,
         finally_block: Option<&Block>,
     ) -> Result<(), CompileError> {
-        // WASM doesn't have native exception handling in the MVP.
-        // Emulation strategy: compile try block normally. If a trap occurs,
-        // WASM will abort. For non-trapping errors (Result-based), the try
-        // block's value is checked: if it's a Result::Err enum map, branch
-        // to catch. Otherwise, fall through.
-        //
-        // This handles the common case: `try { risky() } catch e { fallback }`
-        // where risky() returns Result::Err(...) instead of throwing.
-        let try_result = self.ensure_temp_local()?;
+        // WASM MVP has no exception handling — traps (from `throw`/`unreachable`)
+        // cannot be caught. Only compile the try block; the catch block is dead
+        // code in WASM. The finally block always executes.
         self.compile_block(try_block)?;
-        self.emit(Instruction::LocalSet(try_result));
+        self.emit(Instruction::Drop); // try-catch is a statement, drop try result
 
-        // Check if result is an error (map with __variant == "Err")
-        // For simplicity, just use the try result. The catch block handles
-        // error inspection. In WASM, traps can't be caught, but Result-based
-        // errors can be.
-        self.emit(Instruction::LocalGet(try_result));
-
-        // Compile catch block (available but only reached via explicit error checks
-        // in user code that returns Result::Err).
-        if let Some(var_name) = catch_var {
-            // Bind the error value for the catch block's scope.
-            self.fb()?.push_scope();
-            let idx = self.define_local(var_name, ValType::Tagged, false)?;
-            // Store try result as the error binding (user should check if it's Err).
-            self.emit(Instruction::LocalGet(try_result));
-            self.emit(Instruction::LocalSet(idx));
-            // Compile catch block but drop its result (try result is the final value).
-            self.compile_block(catch_block)?;
-            self.emit(Instruction::Drop);
-            self.fb()?.pop_scope();
-        }
-
-        // Compile finally block if present.
+        // Compile finally block if present (always runs).
         if let Some(finally) = finally_block {
             self.compile_block(finally)?;
             self.emit(Instruction::Drop); // finally doesn't contribute a value
         }
 
-        // The try block's result stays on stack (via LocalGet above).
         Ok(())
     }
 
@@ -1609,10 +1590,47 @@ impl Compiler {
                 let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
-            _ => {
-                // Simplified: store in temp.
-                let tmp = self.define_local("__comp_elem", ValType::Tagged, false)?;
-                self.emit(Instruction::LocalSet(tmp));
+            ForPattern::ArrayDestructure(elements) => {
+                let elem_local = self.define_local("__comp_elem", ValType::Tagged, false)?;
+                self.emit(Instruction::LocalSet(elem_local));
+                for (i, elem) in elements.iter().enumerate() {
+                    match elem {
+                        DestructureElement::Name(name) => {
+                            self.emit(Instruction::LocalGet(elem_local));
+                            self.emit(Instruction::PushI64(i as i64));
+                            self.emit(Instruction::ArrayGet);
+                            let idx = self.define_local(name, ValType::Tagged, false)?;
+                            self.emit(Instruction::LocalSet(idx));
+                        }
+                        DestructureElement::Rest(name) => {
+                            self.emit(Instruction::LocalGet(elem_local));
+                            self.emit(Instruction::PushI64(i as i64));
+                            self.emit(Instruction::LocalGet(elem_local));
+                            self.emit(Instruction::ArrayLen);
+                            self.emit(Instruction::PushBool(false));
+                            let slice_name = self.module.intern_string("__slice");
+                            self.emit(Instruction::RuntimeCall {
+                                name: slice_name,
+                                arg_count: 4,
+                            });
+                            let idx = self.define_local(name, ValType::Tagged, false)?;
+                            self.emit(Instruction::LocalSet(idx));
+                        }
+                    }
+                }
+            }
+            ForPattern::MapDestructure(entries) => {
+                let elem_local = self.define_local("__comp_elem", ValType::Tagged, false)?;
+                self.emit(Instruction::LocalSet(elem_local));
+                for (key, alias) in entries {
+                    self.emit(Instruction::LocalGet(elem_local));
+                    let key_idx = self.module.intern_string(key);
+                    self.emit(Instruction::PushString(key_idx));
+                    self.emit(Instruction::MapGet);
+                    let bind_name = alias.as_deref().unwrap_or(key);
+                    let idx = self.define_local(bind_name, ValType::Tagged, false)?;
+                    self.emit(Instruction::LocalSet(idx));
+                }
             }
         }
 
@@ -1705,9 +1723,47 @@ impl Compiler {
                 let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
             }
-            _ => {
-                let tmp = self.define_local("__mcomp_elem", ValType::Tagged, false)?;
-                self.emit(Instruction::LocalSet(tmp));
+            ForPattern::ArrayDestructure(elements) => {
+                let elem_local = self.define_local("__mcomp_elem", ValType::Tagged, false)?;
+                self.emit(Instruction::LocalSet(elem_local));
+                for (i, elem) in elements.iter().enumerate() {
+                    match elem {
+                        DestructureElement::Name(name) => {
+                            self.emit(Instruction::LocalGet(elem_local));
+                            self.emit(Instruction::PushI64(i as i64));
+                            self.emit(Instruction::ArrayGet);
+                            let idx = self.define_local(name, ValType::Tagged, false)?;
+                            self.emit(Instruction::LocalSet(idx));
+                        }
+                        DestructureElement::Rest(name) => {
+                            self.emit(Instruction::LocalGet(elem_local));
+                            self.emit(Instruction::PushI64(i as i64));
+                            self.emit(Instruction::LocalGet(elem_local));
+                            self.emit(Instruction::ArrayLen);
+                            self.emit(Instruction::PushBool(false));
+                            let slice_name = self.module.intern_string("__slice");
+                            self.emit(Instruction::RuntimeCall {
+                                name: slice_name,
+                                arg_count: 4,
+                            });
+                            let idx = self.define_local(name, ValType::Tagged, false)?;
+                            self.emit(Instruction::LocalSet(idx));
+                        }
+                    }
+                }
+            }
+            ForPattern::MapDestructure(entries) => {
+                let elem_local = self.define_local("__mcomp_elem", ValType::Tagged, false)?;
+                self.emit(Instruction::LocalSet(elem_local));
+                for (key, alias) in entries {
+                    self.emit(Instruction::LocalGet(elem_local));
+                    let key_idx = self.module.intern_string(key);
+                    self.emit(Instruction::PushString(key_idx));
+                    self.emit(Instruction::MapGet);
+                    let bind_name = alias.as_deref().unwrap_or(key);
+                    let idx = self.define_local(bind_name, ValType::Tagged, false)?;
+                    self.emit(Instruction::LocalSet(idx));
+                }
             }
         }
 
@@ -2177,40 +2233,37 @@ mod tests {
     fn test_compile_arithmetic_sub() {
         let module = compile("let x = 10 - 3;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Sub)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
     }
 
     #[test]
     fn test_compile_arithmetic_mul() {
         let module = compile("let x = 4 * 5;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Mul)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
     }
 
     #[test]
     fn test_compile_arithmetic_div() {
         let module = compile("let x = 10 / 2;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Div)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
     }
 
     #[test]
     fn test_compile_arithmetic_mod() {
         let module = compile("let x = 10 % 3;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Rem)));
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })));
     }
 
     #[test]
     fn test_compile_comparison_ops() {
         let module = compile("let a = 1 == 1; let b = 1 != 2; let c = 1 < 2; let d = 2 > 1; let e = 1 <= 2; let f = 2 >= 1;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Eq)));
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Ne)));
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Lt)));
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Gt)));
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Le)));
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Ge)));
+        // All binary ops now emit RuntimeCall for type-dispatched operations
+        let rc_count = main.instructions.iter().filter(|i| matches!(i, Instruction::RuntimeCall { .. })).count();
+        assert!(rc_count >= 6, "expected at least 6 RuntimeCall instructions, got {}", rc_count);
     }
 
     #[test]
@@ -2609,5 +2662,63 @@ mod tests {
         assert!(main.instructions.iter().any(|i| matches!(i, Instruction::TagF64)));
         // Also has the integer path with I64Neg.
         assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Neg)));
+    }
+
+    #[test]
+    fn test_compile_pipe_uses_dedicated_local() {
+        // Pipe must use a dedicated local (not __temp) so that compiling
+        // arguments with expressions like ?? or && doesn't clobber it.
+        let module = compile(r#"
+            fn add(a, b) { a + b }
+            let x = null;
+            let r = 5 |> add(x ?? 10, _);
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // The pipe should use a __pipe local, not __temp.
+        assert!(main.locals.iter().any(|l| l.name == "__pipe"),
+            "pipe should use a dedicated __pipe local");
+        // The __temp local should also exist (used by ?? internally).
+        assert!(main.locals.iter().any(|l| l.name == "__temp"),
+            "__temp should exist for null coalesce");
+    }
+
+    #[test]
+    fn test_compile_pipe_no_placeholder_with_complex_arg() {
+        // Even without placeholder, pipe should use a dedicated local.
+        let module = compile(r#"
+            fn double(x) { x * 2 }
+            let r = (null ?? 21) |> double();
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.locals.iter().any(|l| l.name == "__pipe"),
+            "pipe should use a dedicated __pipe local");
+    }
+
+    #[test]
+    fn test_compile_nested_short_circuit() {
+        // Nested && and || should compile without errors.
+        let module = compile("let x = (true && false) || (false && true);").unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Should have BoolNot for && checks and BrIf for short-circuit.
+        let bool_not_count = main.instructions.iter()
+            .filter(|i| matches!(i, Instruction::BoolNot)).count();
+        assert!(bool_not_count >= 2, "expected at least 2 BoolNot for nested &&");
+    }
+
+    #[test]
+    fn test_compile_null_coalesce_in_pipe_placeholder() {
+        // This exercises the fix: __pipe local must not be __temp.
+        let module = compile(r#"
+            fn greet(name, greeting) { greeting }
+            let r = "world" |> greet(null ?? "hello", _);
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Verify both __pipe and __temp locals exist (separate).
+        let pipe_locals: Vec<_> = main.locals.iter()
+            .filter(|l| l.name == "__pipe").collect();
+        let temp_locals: Vec<_> = main.locals.iter()
+            .filter(|l| l.name == "__temp").collect();
+        assert_eq!(pipe_locals.len(), 1, "should have exactly one __pipe local");
+        assert_eq!(temp_locals.len(), 1, "should have exactly one __temp local");
     }
 }

@@ -23,6 +23,18 @@ const MAX_STRING_OUTPUT: usize = 10_000_000;
 /// Maximum array element count.
 const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 
+/// Maximum number of open connections in the global registry.
+const MAX_CONNECTIONS: usize = 1024;
+
+/// Maximum size of a single SSE line (1 MB).
+const MAX_SSE_LINE_BYTES: usize = 1_048_576;
+
+/// Maximum recursion depth for JSON conversion.
+const MAX_JSON_DEPTH: usize = 64;
+
+/// Maximum output size for ReflectInspect (1 MB).
+const MAX_INSPECT_OUTPUT: usize = 1_048_576;
+
 /// UTF-8 BOM (byte order mark).
 const UTF8_BOM: &str = "\u{FEFF}";
 
@@ -37,9 +49,16 @@ static CONNECTIONS: LazyLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> =
 
 /// Store a connection in the global registry.
 #[allow(dead_code)]
-fn conn_store<T: Send + 'static>(id: &str, conn: T) {
+fn conn_store<T: Send + 'static>(id: &str, conn: T) -> Result<(), EvalError> {
     let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() >= MAX_CONNECTIONS && !map.contains_key(id) {
+        return Err(EvalError::InvalidInput(format!(
+            "connection limit reached (max {})",
+            MAX_CONNECTIONS
+        )));
+    }
     map.insert(id.to_string(), Box::new(conn));
+    Ok(())
 }
 
 /// Execute a closure with mutable access to a typed connection.
@@ -101,6 +120,24 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 (seg[0] & 0xFFC0) == 0xFE80
                     // unique local fc00::/7
                     || (seg[0] & 0xFE00) == 0xFC00
+                    // Teredo 2001:0000::/32 — encapsulates IPv4, check inner
+                    || (seg[0] == 0x2001
+                        && seg[1] == 0x0000
+                        && is_blocked_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                            // Teredo encodes the IPv4 as bitwise NOT in seg[6..7]
+                            !((seg[6] >> 8) as u8),
+                            !(seg[6] as u8),
+                            !((seg[7] >> 8) as u8),
+                            !(seg[7] as u8),
+                        ))))
+                    // 6to4 2002::/16 — encapsulates IPv4 in seg[1..2]
+                    || (seg[0] == 0x2002
+                        && is_blocked_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                            (seg[1] >> 8) as u8,
+                            seg[1] as u8,
+                            (seg[2] >> 8) as u8,
+                            seg[2] as u8,
+                        ))))
                     // ::ffff:0:0/96 mapped IPv4 — check inner
                     || (seg[0] == 0
                         && seg[1] == 0
@@ -108,6 +145,21 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                         && seg[3] == 0
                         && seg[4] == 0
                         && seg[5] == 0xFFFF
+                        && is_blocked_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                            (seg[6] >> 8) as u8,
+                            seg[6] as u8,
+                            (seg[7] >> 8) as u8,
+                            seg[7] as u8,
+                        ))))
+                    // ::0:0/96 IPv4-compatible (deprecated but still routable
+                    // on some stacks) — check inner IPv4
+                    || (seg[0] == 0
+                        && seg[1] == 0
+                        && seg[2] == 0
+                        && seg[3] == 0
+                        && seg[4] == 0
+                        && seg[5] == 0
+                        && (seg[6] != 0 || seg[7] > 1) // exclude ::0 and ::1 (already handled)
                         && is_blocked_ip(IpAddr::V4(std::net::Ipv4Addr::new(
                             (seg[6] >> 8) as u8,
                             seg[6] as u8,
@@ -148,7 +200,6 @@ fn validate_host(host: &str) -> Result<(), EvalError> {
     if lower == "localhost"
         || lower.ends_with(".local")
         || lower.ends_with(".internal")
-        || lower == "metadata.google.internal"
         || lower == "[::1]"
     {
         return Err(EvalError::InvalidInput(format!(
@@ -164,6 +215,56 @@ fn validate_host(host: &str) -> Result<(), EvalError> {
             return Err(EvalError::InvalidInput(format!(
                 "Blocked IP address: {}",
                 ip
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a URL and also perform DNS resolution to check that the resolved
+/// IP addresses are not in blocked ranges. This mitigates DNS rebinding
+/// attacks where `validate_url` only checks the hostname string but the DNS
+/// can resolve to a private/internal IP.
+#[allow(dead_code)]
+fn validate_url_with_dns(url_str: &str) -> Result<(), EvalError> {
+    validate_url(url_str)?;
+
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| EvalError::InvalidInput(format!("Invalid URL: {}", e)))?;
+
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => return Ok(()), // already validated above
+    };
+
+    // If the host is already a literal IP, is_blocked_ip was already checked
+    // by validate_host inside validate_url. Skip DNS for raw IPs.
+    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
+    if ip_str.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    // Resolve hostname and check all returned IPs.
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addr = format!("{}:{}", host, port);
+    use std::net::ToSocketAddrs;
+    match addr.to_socket_addrs() {
+        Ok(addrs) => {
+            for sock_addr in addrs {
+                if is_blocked_ip(sock_addr.ip()) {
+                    return Err(EvalError::InvalidInput(format!(
+                        "Blocked IP after DNS resolution: {} resolved to {}",
+                        host,
+                        sock_addr.ip()
+                    )));
+                }
+            }
+        }
+        Err(e) => {
+            return Err(EvalError::InvalidInput(format!(
+                "DNS resolution failed for {}: {}",
+                host, e
             )));
         }
     }
@@ -223,10 +324,11 @@ fn get_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalEr
                 )))
             }
         }
-        Some(other) => Err(EvalError::InvalidInput(format!(
-            "Expected numeric port for '{}', got: {:?}",
-            key, other
-        ))),
+        Some(other) => Err(EvalError::TypeError {
+            expected: "numeric".to_string(),
+            actual: other.type_name().to_string(),
+            context: format!("port '{}'", key),
+        }),
         None => Err(EvalError::InvalidInput(format!(
             "Missing required input: {}",
             key
@@ -282,10 +384,11 @@ fn get_bind_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, E
                 )))
             }
         }
-        Some(other) => Err(EvalError::InvalidInput(format!(
-            "Expected numeric port for '{}', got: {:?}",
-            key, other
-        ))),
+        Some(other) => Err(EvalError::TypeError {
+            expected: "numeric".to_string(),
+            actual: other.type_name().to_string(),
+            context: format!("port '{}'", key),
+        }),
         None => Err(EvalError::InvalidInput(format!(
             "Missing required input: {}",
             key
@@ -294,9 +397,12 @@ fn get_bind_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, E
 }
 
 /// HTTP agent with sensible default timeouts.
+/// Redirects are disabled to prevent SSRF bypass (our pre-request DNS validation
+/// would not apply to redirect targets).
 fn http_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .max_redirects(0)
         .build()
         .new_agent()
 }
@@ -328,10 +434,11 @@ fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
 fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'a str, EvalError> {
     match inputs.get(key) {
         Some(DataType::String(s)) => Ok(s.as_str()),
-        Some(other) => Err(EvalError::InvalidInput(format!(
-            "Expected string for '{}', got: {:?}",
-            key, other
-        ))),
+        Some(other) => Err(EvalError::TypeError {
+            expected: "string".to_string(),
+            actual: other.type_name().to_string(),
+            context: format!("input '{}'", key),
+        }),
         None => Err(EvalError::InvalidInput(format!(
             "Missing required input: {}",
             key
@@ -351,7 +458,22 @@ fn data_to_bytes(data: &DataType) -> Vec<u8> {
 
 /// Read a .magi source file, stripping BOM and validating the contents.
 /// Prints an error message and exits with code 1 on failure.
+const MAX_SOURCE_FILE_SIZE: u64 = 64 * 1024 * 1024; // 64 MB
+
 fn read_source(path: &str) -> String {
+    // Check file size before reading to prevent DoS via huge files.
+    match fs::metadata(path) {
+        Ok(meta) => {
+            if meta.len() > MAX_SOURCE_FILE_SIZE {
+                eprintln!("error: '{}' exceeds maximum source file size ({} bytes, limit {} bytes)", path, meta.len(), MAX_SOURCE_FILE_SIZE);
+                process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path, e);
+            process::exit(1);
+        }
+    }
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -439,15 +561,26 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Negate => match &input {
                 DataType::Int64(x) => match x.checked_neg() {
                     Some(v) => Ok(DataType::Int64(v)),
-                    None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                    None => Err(EvalError::Overflow("integer overflow in negate".to_string())),
                 },
                 DataType::Int32(x) => match x.checked_neg() {
                     Some(v) => Ok(DataType::Int32(v)),
-                    None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                    None => Err(EvalError::Overflow("integer overflow in negate".to_string())),
                 },
                 DataType::Float64(x) => Ok(DataType::Float64(-x)),
                 DataType::Float32(x) => Ok(DataType::Float32(-x)),
-                _ => Ok(DataType::Null),
+                DataType::Uint32(x) => Ok(DataType::Int64(-(*x as i64))),
+                DataType::Uint64(x) => {
+                    let x = *x;
+                    if x <= i64::MAX as u64 {
+                        Ok(DataType::Int64(-(x as i64)))
+                    } else if x == i64::MIN.unsigned_abs() {
+                        Ok(DataType::Int64(i64::MIN))
+                    } else {
+                        Err(EvalError::Overflow("negation of Uint64 overflows i64".to_string()))
+                    }
+                },
+                _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: input.type_name().to_string(), context: "negate".to_string() }),
             },
 
             // String
@@ -473,35 +606,44 @@ impl OperationEvaluator for FullEvaluator {
                     (DataType::Map(m), DataType::String(k)) => {
                         Ok(m.get(k).cloned().unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapGet key".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapGet".to_string() }),
                 }
             }
             OperationType::MapSet => {
                 match (&map, &key) {
                     (DataType::Map(m), DataType::String(k)) => {
+                        if !m.contains_key(k.as_str()) && m.len() >= MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("MapSet would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                        }
                         let mut new_map = m.clone();
                         new_map.insert(k.clone(), value.clone());
                         Ok(DataType::Map(new_map))
                     }
-                    _ => Ok(DataType::Null),
+                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapSet key".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapSet".to_string() }),
                 }
             }
             OperationType::MapKeys => match &map {
                 DataType::Map(m) => Ok(DataType::Array(m.keys().map(|k| DataType::String(k.clone())).collect())),
-                _ => Ok(DataType::Array(vec![])),
+                _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapKeys".to_string() }),
             },
             OperationType::MapValues => match &map {
                 DataType::Map(m) => Ok(DataType::Array(m.values().cloned().collect())),
-                _ => Ok(DataType::Array(vec![])),
+                _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapValues".to_string() }),
             },
 
             // Array
             OperationType::ArrayLength => match &array {
                 DataType::Array(arr) => Ok(DataType::Int64(arr.len() as i64)),
-                _ => Ok(DataType::Int64(0)),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayLength".to_string() }),
             },
             OperationType::ArrayPush => {
-                let mut arr = match &array { DataType::Array(a) => a.clone(), _ => vec![] };
+                let arr = match &array {
+                    DataType::Array(a) => a.clone(),
+                    _ => return Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayPush".to_string() }),
+                };
+                let mut arr = arr;
                 if arr.len() >= MAX_ARRAY_ELEMENTS {
                     return Err(EvalError::InvalidInput(format!("array push would exceed {} elements", MAX_ARRAY_ELEMENTS)));
                 }
@@ -510,7 +652,8 @@ impl OperationEvaluator for FullEvaluator {
             }
             OperationType::ArrayPop => match &array {
                 DataType::Array(arr) if !arr.is_empty() => Ok(arr.last().cloned().unwrap_or(DataType::Null)),
-                _ => Ok(DataType::Null),
+                DataType::Array(_) => Ok(DataType::Null), // empty array → Null (correct semantic)
+                _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayPop".to_string() }),
             },
             OperationType::ArraySlice => {
                 let start_val = inputs.get("input_1").or(inputs.get("start")).cloned().unwrap_or(DataType::Int64(0));
@@ -519,12 +662,18 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Array(arr) => {
                         let len = arr.len() as i64;
                         let start = {
-                            let n = start_val.to_i64().unwrap_or(0);
+                            let n = match start_val.to_i64() {
+                                Some(n) => n,
+                                None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: start_val.type_name().to_string(), context: "ArraySlice start".into() }),
+                            };
                             if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
                         };
                         let end = match &end_val {
                             Some(v) => {
-                                let n = v.to_i64().unwrap_or(len);
+                                let n = match v.to_i64() {
+                                    Some(n) => n,
+                                    None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: v.type_name().to_string(), context: "ArraySlice end".into() }),
+                                };
                                 if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
                             }
                             None => arr.len(),
@@ -535,37 +684,26 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Array(arr[start..end].to_vec()))
                         }
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "array_slice".to_string() }),
                 }
             }
             OperationType::ArraySort => match &array {
                 DataType::Array(arr) => {
                     let mut sorted = arr.clone();
-                    sorted.sort_by(|a, b| {
-                        // Try numeric comparison first (handles cross-type: Int32, Int64, Float32, Float64, etc.)
-                        if let (Some(pa), Some(pb)) = (promote_numeric(a), promote_numeric(b)) {
-                            let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                            let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                            return fa.total_cmp(&fb);
-                        }
-                        match (a, b) {
-                            (DataType::String(x), DataType::String(y)) => x.cmp(y),
-                            _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
-                        }
-                    });
+                    sorted.sort_by(total_cmp_values);
                     Ok(DataType::Array(sorted))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArraySort".to_string() }),
             },
             OperationType::ArrayReverse => match &array {
                 DataType::Array(arr) => { let mut r = arr.clone(); r.reverse(); Ok(DataType::Array(r)) }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayReverse".to_string() }),
             },
             OperationType::ArrayContains => match (&array, &value) {
                 (DataType::Array(arr), val) => {
                     Ok(DataType::Bool(arr.iter().any(|item| item == val || numeric_eq(item, val))))
                 }
-                _ => Ok(DataType::Bool(false)),
+                _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayContains".to_string() }),
             },
             OperationType::ArrayJoin => match &array {
                 DataType::Array(arr) => {
@@ -580,20 +718,24 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(DataType::String(s.join(&sep)))
                 }
-                _ => Ok(DataType::String(String::new())),
+                other => Err(EvalError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "ArrayJoin".to_string() }),
             },
 
             // String ops
             OperationType::Length => match &input {
                 DataType::String(s) => Ok(DataType::Int64(s.chars().count() as i64)),
-                _ => Ok(DataType::Int64(0)),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Length".to_string() }),
             },
             OperationType::Split => {
                 let delim = inputs.get("delimiter").cloned().unwrap_or(DataType::Null);
                 match (&input, &delim) {
                     (DataType::String(s), DataType::String(sep)) => {
                         if sep.is_empty() {
-                            return Err(EvalError::InvalidInput("split delimiter must not be empty".to_string()));
+                            return Err(EvalError::TypeError {
+                                expected: "non-empty string".to_string(),
+                                actual: "empty string".to_string(),
+                                context: "split delimiter".to_string(),
+                            });
                         }
                         let parts: Vec<DataType> = s.split(sep.as_str()).take(MAX_ARRAY_ELEMENTS + 1).map(|p| DataType::String(p.to_string())).collect();
                         if parts.len() > MAX_ARRAY_ELEMENTS {
@@ -601,14 +743,16 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Array(parts))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: delim.type_name().to_string(), context: "Split delimiter".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Split".to_string() }),
                 }
             },
             OperationType::Contains => {
                 let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
                 match (&input, &search) {
                     (DataType::String(s), DataType::String(sub)) => Ok(DataType::Bool(s.contains(sub.as_str()))),
-                    _ => Ok(DataType::Bool(false)),
+                    (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: search.type_name().to_string(), context: "Contains search".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Contains".to_string() }),
                 }
             },
             OperationType::Replace => {
@@ -631,41 +775,59 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
                     }
-                    _ => Ok(input.clone()),
+                    (DataType::String(_), _, _) => {
+                        let bad = if !matches!(&search, DataType::String(_)) { &search } else { &replace };
+                        Err(EvalError::TypeError { expected: "string".to_string(), actual: bad.type_name().to_string(), context: "Replace argument".to_string() })
+                    }
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Replace".to_string() }),
                 }
             },
             OperationType::Trim => match &input {
                 DataType::String(s) => Ok(DataType::String(s.trim().to_string())),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Trim".to_string() }),
             },
             OperationType::TrimStart => match &input {
                 DataType::String(s) => Ok(DataType::String(s.trim_start().to_string())),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "TrimStart".to_string() }),
             },
             OperationType::TrimEnd => match &input {
                 DataType::String(s) => Ok(DataType::String(s.trim_end().to_string())),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "TrimEnd".to_string() }),
             },
             OperationType::ToUpper => match &input {
-                DataType::String(s) => Ok(DataType::String(s.to_uppercase())),
-                _ => Ok(DataType::Null),
+                DataType::String(s) => {
+                    let result = s.to_uppercase();
+                    if result.len() > MAX_STRING_OUTPUT {
+                        return Err(EvalError::InvalidInput(format!("to_uppercase output exceeds {} bytes", MAX_STRING_OUTPUT)));
+                    }
+                    Ok(DataType::String(result))
+                },
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "ToUpper".to_string() }),
             },
             OperationType::ToLower => match &input {
-                DataType::String(s) => Ok(DataType::String(s.to_lowercase())),
-                _ => Ok(DataType::Null),
+                DataType::String(s) => {
+                    let result = s.to_lowercase();
+                    if result.len() > MAX_STRING_OUTPUT {
+                        return Err(EvalError::InvalidInput(format!("to_lowercase output exceeds {} bytes", MAX_STRING_OUTPUT)));
+                    }
+                    Ok(DataType::String(result))
+                },
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "ToLower".to_string() }),
             },
             OperationType::StartsWith => {
                 let prefix = inputs.get("prefix").cloned().unwrap_or(DataType::Null);
                 match (&input, &prefix) {
                     (DataType::String(s), DataType::String(p)) => Ok(DataType::Bool(s.starts_with(p.as_str()))),
-                    _ => Ok(DataType::Bool(false)),
+                    (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: prefix.type_name().to_string(), context: "StartsWith prefix".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StartsWith".to_string() }),
                 }
             },
             OperationType::EndsWith => {
                 let suffix = inputs.get("suffix").cloned().unwrap_or(DataType::Null);
                 match (&input, &suffix) {
                     (DataType::String(s), DataType::String(sfx)) => Ok(DataType::Bool(s.ends_with(sfx.as_str()))),
-                    _ => Ok(DataType::Bool(false)),
+                    (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: suffix.type_name().to_string(), context: "EndsWith suffix".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "EndsWith".to_string() }),
                 }
             },
             OperationType::Substring => {
@@ -681,12 +843,17 @@ impl OperationEvaluator for FullEvaluator {
                             Some(n) => {
                                 if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
                             }
-                            None => 0,
+                            None => return Err(EvalError::TypeError {
+                                expected: "number".to_string(),
+                                actual: start_val.type_name().to_string(),
+                                context: "substring start index".to_string(),
+                            }),
                         };
-                        let end = match end_val.as_ref().and_then(|v| v.to_i64()) {
-                            Some(n) => {
-                                if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize }
-                            }
+                        let end = match &end_val {
+                            Some(v) => match v.to_i64() {
+                                Some(n) => if n < 0 { (len + n).max(0) as usize } else { n.min(len) as usize },
+                                None => return Err(EvalError::TypeError { expected: "number".into(), actual: v.type_name().to_string(), context: "substring end index".into() }),
+                            },
                             None => chars.len(),
                         };
                         if start >= end {
@@ -695,7 +862,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::String(chars[start..end].iter().collect()))
                         }
                     }
-                    _ => Ok(DataType::String(String::new())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Substring".to_string() }),
                 }
             }
             OperationType::IndexOf => {
@@ -706,18 +873,20 @@ impl OperationEvaluator for FullEvaluator {
                             s[..byte_idx].chars().count() as i64
                         }).unwrap_or(-1)))
                     }
-                    _ => Ok(DataType::Int64(-1)),
+                    (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: search.type_name().to_string(), context: "IndexOf search".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "IndexOf".to_string() }),
                 }
             },
 
             // Map
             OperationType::MapSize => match &map {
                 DataType::Map(m) => Ok(DataType::Int64(m.len() as i64)),
-                _ => Ok(DataType::Int64(0)),
+                _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapSize".to_string() }),
             },
             OperationType::MapHas => match (&map, &key) {
                 (DataType::Map(m), DataType::String(k)) => Ok(DataType::Bool(m.contains_key(k))),
-                _ => Ok(DataType::Bool(false)),
+                (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapHas key".to_string() }),
+                _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapHas".to_string() }),
             },
             OperationType::MapDelete => match (&map, &key) {
                 (DataType::Map(m), DataType::String(k)) => {
@@ -725,7 +894,8 @@ impl OperationEvaluator for FullEvaluator {
                     new_map.remove(k);
                     Ok(DataType::Map(new_map))
                 }
-                _ => Ok(DataType::Null),
+                (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapDelete key".to_string() }),
+                _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapDelete".to_string() }),
             },
             OperationType::MapEntries => match &map {
                 DataType::Map(m) => {
@@ -733,33 +903,52 @@ impl OperationEvaluator for FullEvaluator {
                         DataType::Array(vec![DataType::String(k.clone()), v.clone()])
                     }).collect()))
                 }
-                _ => Ok(DataType::Array(vec![])),
+                _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapEntries".to_string() }),
             },
             OperationType::MapFromEntries => match &array {
                 DataType::Array(arr) => {
+                    if arr.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!(
+                            "map_from_entries: array exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                        )));
+                    }
                     let mut m = std::collections::BTreeMap::new();
-                    for item in arr {
-                        if let DataType::Array(pair) = item {
-                            if pair.len() >= 2 {
+                    for (i, item) in arr.iter().enumerate() {
+                        match item {
+                            DataType::Array(pair) if pair.len() >= 2 => {
                                 if let DataType::String(k) = &pair[0] {
                                     m.insert(k.clone(), pair[1].clone());
+                                } else {
+                                    return Err(EvalError::TypeError { expected: "String key".to_string(), actual: pair[0].type_name().to_string(), context: format!("MapFromEntries entry[{}][0]", i) });
                                 }
+                            }
+                            DataType::Array(pair) => {
+                                return Err(EvalError::InvalidInput(format!("MapFromEntries entry[{}] has {} elements, expected at least 2", i, pair.len())));
+                            }
+                            _ => {
+                                return Err(EvalError::TypeError { expected: "Array pair".to_string(), actual: item.type_name().to_string(), context: format!("MapFromEntries entry[{}]", i) });
                             }
                         }
                     }
                     Ok(DataType::Map(m))
                 }
-                _ => Ok(DataType::Map(std::collections::BTreeMap::new())),
+                _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "MapFromEntries".to_string() }),
             },
             OperationType::MapMerge => match (&a, &b) {
                 (DataType::Map(m1), DataType::Map(m2)) => {
                     let mut merged = m1.clone();
                     for (k, v) in m2 {
+                        if !merged.contains_key(k.as_str()) && merged.len() >= MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("MapMerge would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                        }
                         merged.insert(k.clone(), v.clone());
                     }
                     Ok(DataType::Map(merged))
                 }
-                _ => Ok(DataType::Null),
+                _ => {
+                    let bad = if !matches!(a, DataType::Map(_)) { &a } else { &b };
+                    Err(EvalError::TypeError { expected: "Map".to_string(), actual: bad.type_name().to_string(), context: "MapMerge".to_string() })
+                }
             },
 
             // Array extras
@@ -767,19 +956,25 @@ impl OperationEvaluator for FullEvaluator {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match &array {
                     DataType::Array(arr) => {
-                        let i = index.to_i64().unwrap_or(-1);
+                        let i = match index.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: index.type_name().to_string(), context: "ArrayGet index".into() }),
+                        };
                         if i < 0 { return Ok(DataType::Null); }
                         let idx = usize::try_from(i).unwrap_or(usize::MAX);
                         Ok(arr.get(idx).cloned().unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayGet".to_string() }),
                 }
             },
             OperationType::ArraySet => {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match &array {
                     DataType::Array(arr) => {
-                        let i = index.to_i64().unwrap_or(-1);
+                        let i = match index.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: index.type_name().to_string(), context: "ArraySet index".into() }),
+                        };
                         if i < 0 { return Ok(DataType::Array(arr.clone())); }
                         let idx = usize::try_from(i).unwrap_or(usize::MAX);
                         let mut new_arr = arr.clone();
@@ -788,7 +983,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Array(new_arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArraySet".to_string() }),
                 }
             },
             OperationType::ArrayFlatten => match &array {
@@ -806,7 +1001,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(DataType::Array(flat))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayFlatten".to_string() }),
             },
             OperationType::ArrayConcat => match (&a, &b) {
                 (DataType::Array(a), DataType::Array(b)) => {
@@ -818,10 +1013,18 @@ impl OperationEvaluator for FullEvaluator {
                     result.extend(b.clone());
                     Ok(DataType::Array(result))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: a.type_name().to_string(), context: "ArrayConcat".to_string() }),
             },
             OperationType::ArrayUnique => match &array {
                 DataType::Array(arr) => {
+                    const MAX_UNIQUE: usize = 100_000;
+                    if arr.len() > MAX_UNIQUE {
+                        return Err(EvalError::InvalidInput(format!(
+                            "array_unique: array too large ({} elements, max {} for quadratic uniqueness check)",
+                            arr.len(),
+                            MAX_UNIQUE,
+                        )));
+                    }
                     let mut seen = Vec::new();
                     for item in arr {
                         if !seen.iter().any(|s: &DataType| s == item || numeric_eq(s, item)) {
@@ -830,13 +1033,13 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(DataType::Array(seen))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayUnique".to_string() }),
             },
             OperationType::ArrayFilterNulls => match &array {
                 DataType::Array(arr) => {
                     Ok(DataType::Array(arr.iter().filter(|v| !matches!(v, DataType::Null)).cloned().collect()))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayFilterNulls".to_string() }),
             },
 
             // Type conversions
@@ -860,9 +1063,9 @@ impl OperationEvaluator for FullEvaluator {
                         Ok(DataType::Int64(*f as i64))
                     }
                 }
-                DataType::String(s) => Ok(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null)),
+                DataType::String(s) => Ok(s.trim().parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null)),
                 DataType::Bool(b) => Ok(DataType::Int64(if *b { 1 } else { 0 })),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "numeric, string, or bool".to_string(), actual: input.type_name().to_string(), context: "ToInt64".to_string() }),
             },
             OperationType::ToFloat64 => match &input {
                 DataType::Float64(_) => Ok(input.clone()),
@@ -871,9 +1074,9 @@ impl OperationEvaluator for FullEvaluator {
                 DataType::Uint32(n) => Ok(DataType::Float64(*n as f64)),
                 DataType::Uint64(n) => Ok(DataType::Float64(*n as f64)),
                 DataType::Float32(f) => Ok(DataType::Float64(*f as f64)),
-                DataType::String(s) => Ok(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null)),
+                DataType::String(s) => Ok(s.trim().parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null)),
                 DataType::Bool(b) => Ok(DataType::Float64(if *b { 1.0 } else { 0.0 })),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "numeric, string, or bool".to_string(), actual: input.type_name().to_string(), context: "ToFloat64".to_string() }),
             },
             OperationType::ToBool => match &input {
                 DataType::Bool(_) => Ok(input.clone()),
@@ -892,41 +1095,49 @@ impl OperationEvaluator for FullEvaluator {
 
             // Math
             OperationType::Abs => match &input {
-                DataType::Int64(n) => Ok(match n.checked_abs() {
-                    Some(v) => DataType::Int64(v),
-                    None => DataType::Null,
-                }),
-                DataType::Int32(n) => Ok(match n.checked_abs() {
-                    Some(v) => DataType::Int32(v),
-                    None => DataType::Null,
-                }),
+                DataType::Int64(n) => match n.checked_abs() {
+                    Some(v) => Ok(DataType::Int64(v)),
+                    None => Err(EvalError::Overflow(format!("integer overflow: abs({})", n))),
+                },
+                DataType::Int32(n) => match n.checked_abs() {
+                    Some(v) => Ok(DataType::Int32(v)),
+                    None => Err(EvalError::Overflow(format!("integer overflow: abs({})", n))),
+                },
                 DataType::Uint32(_) | DataType::Uint64(_) => Ok(input.clone()),
                 DataType::Float64(f) => Ok(DataType::Float64(f.abs())),
                 DataType::Float32(f) => Ok(DataType::Float32(f.abs())),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: input.type_name().to_string(), context: "Abs".to_string() }),
             },
             OperationType::Round => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.round())),
                 DataType::Float32(n) => Ok(DataType::Float32(n.round())),
-                other => Ok(other.clone()),
+                DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => Ok(input.clone()),
+                other => Err(EvalError::TypeError { expected: "number".to_string(), actual: other.type_name().to_string(), context: "Round".to_string() }),
             },
             OperationType::Floor => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.floor())),
                 DataType::Float32(n) => Ok(DataType::Float32(n.floor())),
-                other => Ok(other.clone()),
+                DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => Ok(input.clone()),
+                other => Err(EvalError::TypeError { expected: "number".to_string(), actual: other.type_name().to_string(), context: "Floor".to_string() }),
             },
             OperationType::Ceil => match &input {
                 DataType::Float64(n) => Ok(DataType::Float64(n.ceil())),
                 DataType::Float32(n) => Ok(DataType::Float32(n.ceil())),
-                other => Ok(other.clone()),
+                DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) | DataType::Uint64(_) => Ok(input.clone()),
+                other => Err(EvalError::TypeError { expected: "number".to_string(), actual: other.type_name().to_string(), context: "Ceil".to_string() }),
             },
             OperationType::Sqrt => eval_unary_float_op(&input, f32::sqrt, f64::sqrt),
             OperationType::Power => {
                 let a = inputs.get("a").unwrap_or(&DataType::Null);
                 let b = inputs.get("b").unwrap_or(&DataType::Null);
+                if let (DataType::Float32(base), DataType::Float32(exp)) = (a, b) {
+                    return Ok(DataType::Float32(base.powf(*exp)));
+                }
                 match (promote_numeric(a), promote_numeric(b)) {
                     (Some(Ok(base)), Some(Ok(exp))) => {
-                        if exp < 0 {
+                        if base == 0 && exp < 0 {
+                            Ok(DataType::Null)
+                        } else if exp < 0 {
                             Ok(DataType::Float64((base as f64).powf(exp as f64)))
                         } else if exp > u32::MAX as i64 {
                             Ok(DataType::Null)
@@ -946,7 +1157,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                     }
                     (Some(Err(base)), Some(Err(exp))) => Ok(DataType::Float64(base.powf(exp))),
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "Power".to_string() }),
                 }
             },
             OperationType::Sin => eval_unary_float_op(&input, f32::sin, f64::sin),
@@ -957,20 +1168,23 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Log10 => eval_unary_float_op(&input, f32::log10, f64::log10),
             OperationType::Exp => eval_unary_float_op(&input, f32::exp, f64::exp),
             OperationType::Sign => {
-                if let DataType::Float32(n) = &input {
-                    return Ok(DataType::Float32(n.signum()));
-                }
-                match promote_numeric(&input) {
-                    Some(Ok(n)) => Ok(DataType::Int64(n.signum())),
-                    Some(Err(f)) => Ok(DataType::Float64(f.signum())),
-                    None => Ok(DataType::Null),
+                match &input {
+                    DataType::Float32(n) => Ok(DataType::Float32(n.signum())),
+                    DataType::Int32(n) => Ok(DataType::Int32(n.signum())),
+                    DataType::Uint32(_) => Ok(DataType::Uint32(if input == DataType::Uint32(0) { 0 } else { 1 })),
+                    DataType::Uint64(_) => Ok(DataType::Uint64(if input == DataType::Uint64(0) { 0 } else { 1 })),
+                    _ => match promote_numeric(&input) {
+                        Some(Ok(n)) => Ok(DataType::Int64(n.signum())),
+                        Some(Err(f)) => Ok(DataType::Float64(f.signum())),
+                        None => Err(EvalError::TypeError { expected: "number".to_string(), actual: input.type_name().to_string(), context: "Sign".to_string() }),
+                    }
                 }
             },
 
             // Array mutation operations
             OperationType::ArrayShift => match &array {
                 DataType::Array(arr) => Ok(arr.first().cloned().unwrap_or(DataType::Null)),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayShift".to_string() }),
             },
             OperationType::ArrayInsert => {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
@@ -979,20 +1193,26 @@ impl OperationEvaluator for FullEvaluator {
                         if arr.len() >= MAX_ARRAY_ELEMENTS {
                             return Err(EvalError::InvalidInput(format!("array exceeds maximum size ({})", MAX_ARRAY_ELEMENTS)));
                         }
-                        let i = index.to_i64().unwrap_or(0);
+                        let i = match index.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: index.type_name().to_string(), context: "ArrayInsert index".into() }),
+                        };
                         let idx = if i < 0 { 0 } else { usize::try_from(i).unwrap_or(usize::MAX).min(arr.len()) };
                         let mut new_arr = arr.clone();
                         new_arr.insert(idx, value.clone());
                         Ok(DataType::Array(new_arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayInsert".to_string() }),
                 }
             },
             OperationType::ArrayRemove => {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match &array {
                     DataType::Array(arr) => {
-                        let i = index.to_i64().unwrap_or(-1);
+                        let i = match index.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: index.type_name().to_string(), context: "ArrayRemove index".into() }),
+                        };
                         let idx = if i >= 0 { usize::try_from(i).ok() } else { None };
                         match idx {
                             Some(idx) if idx < arr.len() => {
@@ -1003,32 +1223,36 @@ impl OperationEvaluator for FullEvaluator {
                             _ => Ok(DataType::Array(arr.clone())),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayRemove".to_string() }),
                 }
             },
 
             // String methods
             OperationType::StringChars => match &input {
                 DataType::String(s) => {
-                    if s.chars().count() > MAX_ARRAY_ELEMENTS {
-                        return Err(EvalError::InvalidInput(format!("chars() would produce {} elements (max {})", s.chars().count(), MAX_ARRAY_ELEMENTS)));
+                    let count = s.chars().count();
+                    if count > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput(format!("chars() would produce {} elements (max {})", count, MAX_ARRAY_ELEMENTS)));
                     }
                     Ok(DataType::Array(s.chars().map(|c| DataType::String(c.to_string())).collect()))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StringChars".to_string() }),
             },
             OperationType::StringRepeat => {
                 let count = inputs.get("count").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
                 match &input {
                     DataType::String(s) => {
-                        let n = count.to_i64().unwrap_or(0).max(0) as usize;
+                        let n = match count.to_i64() {
+                            Some(n) => n.max(0) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: count.type_name().to_string(), context: "StringRepeat count".into() }),
+                        };
                         let result_len = s.len().saturating_mul(n);
                         if result_len > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("repeat result exceeds {} byte limit", MAX_STRING_OUTPUT)));
                         }
                         Ok(DataType::String(s.repeat(n)))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StringRepeat".to_string() }),
                 }
             },
             OperationType::StringLines => match &input {
@@ -1039,7 +1263,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(DataType::Array(lines))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StringLines".to_string() }),
             },
             OperationType::StringWords => match &input {
                 DataType::String(s) => {
@@ -1049,11 +1273,11 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(DataType::Array(words))
                 }
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StringWords".to_string() }),
             },
             OperationType::StringReverse => match &input {
                 DataType::String(s) => Ok(DataType::String(s.chars().rev().collect())),
-                _ => Ok(DataType::Null),
+                _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StringReverse".to_string() }),
             },
             OperationType::StringCount => {
                 let search = inputs.get("search").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
@@ -1064,19 +1288,23 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Int64(s.matches(sub.as_str()).count() as i64))
                     }
-                    _ => Ok(DataType::Int64(0)),
+                    (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: search.type_name().to_string(), context: "StringCount search".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "StringCount".to_string() }),
                 }
             },
             OperationType::CharAt => {
                 let index = inputs.get("index").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Int64(0));
                 match &input {
                     DataType::String(s) => {
-                        let i = index.to_i64().unwrap_or(-1);
+                        let i = match index.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: index.type_name().to_string(), context: "CharAt index".into() }),
+                        };
                         if i < 0 { return Ok(DataType::Null); }
                         let idx = usize::try_from(i).unwrap_or(usize::MAX);
                         Ok(s.chars().nth(idx).map(|c| DataType::String(c.to_string())).unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "CharAt".to_string() }),
                 }
             },
             OperationType::PadStart => {
@@ -1084,7 +1312,10 @@ impl OperationEvaluator for FullEvaluator {
                 let fill = inputs.get("fill").or(inputs.get("input_2")).cloned();
                 match &input {
                     DataType::String(s) => {
-                        let w = width.to_i64().unwrap_or(0).max(0) as usize;
+                        let w = match width.to_i64() {
+                            Some(n) => n.max(0) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: width.type_name().to_string(), context: "PadStart width".into() }),
+                        };
                         let pad_str = match &fill {
                             Some(DataType::String(f)) if !f.is_empty() => f.clone(),
                             _ => " ".to_string(),
@@ -1103,7 +1334,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::String(format!("{}{}", padding, s)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "PadStart".to_string() }),
                 }
             },
             OperationType::PadEnd => {
@@ -1111,7 +1342,10 @@ impl OperationEvaluator for FullEvaluator {
                 let fill = inputs.get("fill").or(inputs.get("input_2")).cloned();
                 match &input {
                     DataType::String(s) => {
-                        let w = width.to_i64().unwrap_or(0).max(0) as usize;
+                        let w = match width.to_i64() {
+                            Some(n) => n.max(0) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: width.type_name().to_string(), context: "PadEnd width".into() }),
+                        };
                         let pad_str = match &fill {
                             Some(DataType::String(f)) if !f.is_empty() => f.clone(),
                             _ => " ".to_string(),
@@ -1129,7 +1363,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::String(format!("{}{}", s, padding)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "PadEnd".to_string() }),
                 }
             },
 
@@ -1159,45 +1393,57 @@ impl OperationEvaluator for FullEvaluator {
 
             // Min/Max
             OperationType::Min => {
-                if let (DataType::Float32(x), DataType::Float32(y)) = (&a, &b) {
-                    return Ok(DataType::Float32(x.min(*y)));
-                }
-                match (promote_numeric(&a), promote_numeric(&b)) {
-                    (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.min(y))),
-                    (Some(pa), Some(pb)) => {
-                        let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                        let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                        Ok(DataType::Float64(fa.min(fb)))
+                match (&a, &b) {
+                    (DataType::Float32(x), DataType::Float32(y)) => Ok(DataType::Float32(x.min(*y))),
+                    (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32((*x).min(*y))),
+                    (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32((*x).min(*y))),
+                    (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64((*x).min(*y))),
+                    _ => match (promote_numeric(&a), promote_numeric(&b)) {
+                        (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.min(y))),
+                        (Some(pa), Some(pb)) => {
+                            let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                            let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                            Ok(DataType::Float64(fa.min(fb)))
+                        }
+                        _ => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "Min".to_string() }),
                     }
-                    _ => Ok(DataType::Null),
                 }
             },
             OperationType::Max => {
-                if let (DataType::Float32(x), DataType::Float32(y)) = (&a, &b) {
-                    return Ok(DataType::Float32(x.max(*y)));
-                }
-                match (promote_numeric(&a), promote_numeric(&b)) {
-                    (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.max(y))),
-                    (Some(pa), Some(pb)) => {
-                        let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                        let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                        Ok(DataType::Float64(fa.max(fb)))
+                match (&a, &b) {
+                    (DataType::Float32(x), DataType::Float32(y)) => Ok(DataType::Float32(x.max(*y))),
+                    (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32((*x).max(*y))),
+                    (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32((*x).max(*y))),
+                    (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64((*x).max(*y))),
+                    _ => match (promote_numeric(&a), promote_numeric(&b)) {
+                        (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Int64(x.max(y))),
+                        (Some(pa), Some(pb)) => {
+                            let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                            let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                            Ok(DataType::Float64(fa.max(fb)))
+                        }
+                        _ => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "Max".to_string() }),
                     }
-                    _ => Ok(DataType::Null),
                 }
             },
 
             // Range
             OperationType::Range => {
-                let start = inputs.get("start").or(inputs.get("a")).and_then(|v| v.to_i64()).unwrap_or(0);
-                let end = inputs.get("end").or(inputs.get("b")).and_then(|v| v.to_i64()).unwrap_or(0);
-                let step = inputs.get("step").and_then(|v| v.to_i64()).unwrap_or(if start <= end { 1 } else { -1 });
+                let start = require_i64_or_default(inputs.get("start").or(inputs.get("a")), 0, "Range start")?;
+                let end = require_i64_or_default(inputs.get("end").or(inputs.get("b")), 0, "Range end")?;
+                let inclusive = matches!(inputs.get("inclusive"), Some(DataType::Bool(true)));
+                let step = require_i64_or_default(inputs.get("step"), if start <= end { 1 } else { -1 }, "Range step")?;
                 if step == 0 { return Ok(DataType::Array(vec![])); }
                 let mut result = Vec::new();
                 let mut i = start;
                 loop {
-                    if step > 0 && i >= end { break; }
-                    if step < 0 && i <= end { break; }
+                    if inclusive {
+                        if step > 0 && i > end { break; }
+                        if step < 0 && i < end { break; }
+                    } else {
+                        if step > 0 && i >= end { break; }
+                        if step < 0 && i <= end { break; }
+                    }
                     if result.len() >= MAX_ARRAY_ELEMENTS {
                         return Err(EvalError::InvalidInput(format!("range would produce more than {} elements", MAX_ARRAY_ELEMENTS)));
                     }
@@ -1213,33 +1459,141 @@ impl OperationEvaluator for FullEvaluator {
             // ToJson
             OperationType::ToJson => {
                 let json_val = datatype_to_serde_json(&input);
-                Ok(DataType::String(serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string())))
+                let s = serde_json::to_string(&json_val).map_err(|e| EvalError::InvalidInput(format!("to_json: serialization failed: {}", e)))?;
+                if s.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "to_json: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                    )));
+                }
+                Ok(DataType::String(s))
             },
 
             // Bitwise operations
-            OperationType::BitAnd => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) => Ok(DataType::Int64(x & y)),
-                _ => Ok(DataType::Null),
+            OperationType::BitAnd => {
+                match (&a, &b) {
+                    (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x & y)),
+                    (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(x & y)),
+                    (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(x & y)),
+                    _ => match (a.to_i64(), b.to_i64()) {
+                        (Some(x), Some(y)) => Ok(DataType::Int64(x & y)),
+                        _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "BitAnd".to_string() }),
+                    }
+                }
             },
-            OperationType::BitOr => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) => Ok(DataType::Int64(x | y)),
-                _ => Ok(DataType::Null),
+            OperationType::BitOr => {
+                match (&a, &b) {
+                    (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x | y)),
+                    (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(x | y)),
+                    (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(x | y)),
+                    _ => match (a.to_i64(), b.to_i64()) {
+                        (Some(x), Some(y)) => Ok(DataType::Int64(x | y)),
+                        _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "BitOr".to_string() }),
+                    }
+                }
             },
-            OperationType::BitXor => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) => Ok(DataType::Int64(x ^ y)),
-                _ => Ok(DataType::Null),
+            OperationType::BitXor => {
+                match (&a, &b) {
+                    (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x ^ y)),
+                    (DataType::Uint32(x), DataType::Uint32(y)) => Ok(DataType::Uint32(x ^ y)),
+                    (DataType::Int32(x), DataType::Int32(y)) => Ok(DataType::Int32(x ^ y)),
+                    _ => match (a.to_i64(), b.to_i64()) {
+                        (Some(x), Some(y)) => Ok(DataType::Int64(x ^ y)),
+                        _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "BitXor".to_string() }),
+                    }
+                }
             },
-            OperationType::BitNot => match input.to_i64() {
-                Some(x) => Ok(DataType::Int64(!x)),
-                None => Ok(DataType::Null),
+            OperationType::BitNot => {
+                match &input {
+                    DataType::Uint64(x) => Ok(DataType::Uint64(!x)),
+                    DataType::Uint32(x) => Ok(DataType::Uint32(!x)),
+                    DataType::Int32(x) => Ok(DataType::Int32(!x)),
+                    _ => match input.to_i64() {
+                        Some(x) => Ok(DataType::Int64(!x)),
+                        None => Err(EvalError::TypeError { expected: "integer".to_string(), actual: input.type_name().to_string(), context: "BitNot".to_string() }),
+                    }
+                }
             },
-            OperationType::BitShiftLeft => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x << y)),
-                _ => Ok(DataType::Null),
+            OperationType::BitShiftLeft => {
+                match &a {
+                    DataType::Uint64(x) => {
+                        let shift = match b.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "integer".into(), actual: b.type_name().to_string(), context: "bitwise shift amount".into() }),
+                        };
+                        if (0..64).contains(&shift) {
+                            Ok(DataType::Uint64(x << shift))
+                        } else {
+                            Err(EvalError::TypeError { expected: "shift amount 0-63".to_string(), actual: format!("{}", shift), context: "BitShiftLeft".to_string() })
+                        }
+                    }
+                    DataType::Uint32(x) => {
+                        let shift = match b.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "integer".into(), actual: b.type_name().to_string(), context: "bitwise shift amount".into() }),
+                        };
+                        if (0..32).contains(&shift) {
+                            Ok(DataType::Uint32(x << shift))
+                        } else {
+                            Err(EvalError::TypeError { expected: "shift amount 0-31".to_string(), actual: format!("{}", shift), context: "BitShiftLeft".to_string() })
+                        }
+                    }
+                    DataType::Int32(x) => {
+                        let shift = match b.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "integer".into(), actual: b.type_name().to_string(), context: "bitwise shift amount".into() }),
+                        };
+                        if (0..32).contains(&shift) {
+                            Ok(DataType::Int32(x << shift))
+                        } else {
+                            Err(EvalError::TypeError { expected: "shift amount 0-31".to_string(), actual: format!("{}", shift), context: "BitShiftLeft".to_string() })
+                        }
+                    }
+                    _ => match (a.to_i64(), b.to_i64()) {
+                        (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x << y)),
+                        _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "BitShiftLeft".to_string() }),
+                    }
+                }
             },
-            OperationType::BitShiftRight => match (a.to_i64(), b.to_i64()) {
-                (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x >> y)),
-                _ => Ok(DataType::Null),
+            OperationType::BitShiftRight => {
+                match &a {
+                    DataType::Uint64(x) => {
+                        let shift = match b.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "integer".into(), actual: b.type_name().to_string(), context: "bitwise shift amount".into() }),
+                        };
+                        if (0..64).contains(&shift) {
+                            Ok(DataType::Uint64(x >> shift))
+                        } else {
+                            Err(EvalError::TypeError { expected: "shift amount 0-63".to_string(), actual: format!("{}", shift), context: "BitShiftRight".to_string() })
+                        }
+                    }
+                    DataType::Uint32(x) => {
+                        let shift = match b.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "integer".into(), actual: b.type_name().to_string(), context: "bitwise shift amount".into() }),
+                        };
+                        if (0..32).contains(&shift) {
+                            Ok(DataType::Uint32(x >> shift))
+                        } else {
+                            Err(EvalError::TypeError { expected: "shift amount 0-31".to_string(), actual: format!("{}", shift), context: "BitShiftRight".to_string() })
+                        }
+                    }
+                    DataType::Int32(x) => {
+                        let shift = match b.to_i64() {
+                            Some(n) => n,
+                            None => return Err(EvalError::TypeError { expected: "integer".into(), actual: b.type_name().to_string(), context: "bitwise shift amount".into() }),
+                        };
+                        if (0..32).contains(&shift) {
+                            Ok(DataType::Int32(x >> shift))
+                        } else {
+                            Err(EvalError::TypeError { expected: "shift amount 0-31".to_string(), actual: format!("{}", shift), context: "BitShiftRight".to_string() })
+                        }
+                    }
+                    _ => match (a.to_i64(), b.to_i64()) {
+                        (Some(x), Some(y)) if (0..64).contains(&y) => Ok(DataType::Int64(x >> y)),
+                        _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "BitShiftRight".to_string() }),
+                    }
+                }
             },
 
             // Type checking predicates
@@ -1253,10 +1607,15 @@ impl OperationEvaluator for FullEvaluator {
 
             // Assert / DebugLog
             OperationType::Assert => {
-                match &input {
+                let condition = inputs.get("condition").unwrap_or(&input);
+                let message = inputs.get("message").and_then(|m| if let DataType::String(s) = m { Some(s.as_str()) } else { None });
+                match condition {
                     DataType::Bool(true) => Ok(DataType::Null),
-                    DataType::Bool(false) => Err(EvalError::InvalidInput("Assertion failed".to_string())),
-                    _ => Err(EvalError::InvalidInput(format!("Assert expects bool, got {:?}", input))),
+                    DataType::Bool(false) => {
+                        let msg = message.unwrap_or("Assertion failed");
+                        Err(EvalError::InvalidInput(msg.to_string()))
+                    },
+                    _ => Err(EvalError::TypeError { expected: "bool".to_string(), actual: condition.type_name().to_string(), context: "assert".to_string() }),
                 }
             },
             OperationType::DebugLog => {
@@ -1268,15 +1627,15 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::BytesLength => {
                 match &input {
                     DataType::Bytes(b) => Ok(DataType::Int64(b.len() as i64)),
-                    _ => Err(EvalError::InvalidInput(format!("BytesLength expects Bytes, got {:?}", input))),
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_length".to_string() }),
                 }
             },
             OperationType::BytesSlice => {
                 match &input {
                     DataType::Bytes(b) => {
                         let len = b.len() as i64;
-                        let raw_start = inputs.get("input_1").or(inputs.get("start")).and_then(|v| v.to_i64()).unwrap_or(0);
-                        let raw_end = inputs.get("input_2").or(inputs.get("end")).and_then(|v| v.to_i64()).unwrap_or(len);
+                        let raw_start = require_i64_or_default(inputs.get("input_1").or(inputs.get("start")), 0, "BytesSlice start")?;
+                        let raw_end = require_i64_or_default(inputs.get("input_2").or(inputs.get("end")), len, "BytesSlice end")?;
                         let start = if raw_start < 0 { (len + raw_start).max(0) as usize } else { (raw_start as usize).min(b.len()) };
                         let end = if raw_end < 0 { (len + raw_end).max(0) as usize } else { (raw_end as usize).min(b.len()) };
                         if start >= end {
@@ -1285,7 +1644,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Bytes(b[start..end].to_vec()))
                         }
                     }
-                    _ => Err(EvalError::InvalidInput(format!("BytesSlice expects Bytes, got {:?}", input))),
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_slice".to_string() }),
                 }
             },
             OperationType::BytesConcat => {
@@ -1303,7 +1662,7 @@ impl OperationEvaluator for FullEvaluator {
                         result.extend_from_slice(b);
                         Ok(DataType::Bytes(result))
                     }
-                    _ => Err(EvalError::InvalidInput("BytesConcat expects two Bytes arguments".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_concat".to_string() }),
                 }
             },
             OperationType::BytesContains => {
@@ -1323,9 +1682,14 @@ impl OperationEvaluator for FullEvaluator {
                 use base64::Engine;
                 match &input {
                     DataType::Bytes(b) => {
+                        if b.len() * 4 / 3 + 4 > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "Base64Encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
                         Ok(DataType::String(base64::engine::general_purpose::STANDARD.encode(b)))
                     }
-                    _ => Err(EvalError::InvalidInput(format!("Base64Encode expects Bytes, got {:?}", input))),
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "base64_encode".to_string() }),
                 }
             },
             OperationType::Base64Decode => {
@@ -1337,7 +1701,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("Base64Decode failed: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput(format!("Base64Decode expects String, got {:?}", input))),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "base64_decode".to_string() }),
                 }
             },
 
@@ -1352,22 +1716,36 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Clamp => {
                 let min_val = inputs.get("min").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 let max_val = inputs.get("max").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
-                match (promote_numeric(&input), promote_numeric(&min_val), promote_numeric(&max_val)) {
-                    (Some(Ok(v)), Some(Ok(lo)), Some(Ok(hi))) => {
-                        Ok(DataType::Int64(v.max(lo).min(hi)))
+                match (&input, &min_val, &max_val) {
+                    (DataType::Int32(v), DataType::Int32(lo), DataType::Int32(hi)) => {
+                        Ok(DataType::Int32((*v).max(*lo).min(*hi)))
                     }
-                    (Some(v), Some(lo), Some(hi)) => {
-                        let fv = match v { Ok(i) => i as f64, Err(f) => f };
-                        let flo = match lo { Ok(i) => i as f64, Err(f) => f };
-                        let fhi = match hi { Ok(i) => i as f64, Err(f) => f };
-                        let clamped = fv.max(flo).min(fhi);
-                        if matches!(&input, DataType::Float32(_)) {
-                            Ok(DataType::Float32(clamped as f32))
-                        } else {
-                            Ok(DataType::Float64(clamped))
+                    (DataType::Uint32(v), DataType::Uint32(lo), DataType::Uint32(hi)) => {
+                        Ok(DataType::Uint32((*v).max(*lo).min(*hi)))
+                    }
+                    (DataType::Uint64(v), DataType::Uint64(lo), DataType::Uint64(hi)) => {
+                        Ok(DataType::Uint64((*v).max(*lo).min(*hi)))
+                    }
+                    (DataType::Float32(v), DataType::Float32(lo), DataType::Float32(hi)) => {
+                        Ok(DataType::Float32(v.max(*lo).min(*hi)))
+                    }
+                    _ => match (promote_numeric(&input), promote_numeric(&min_val), promote_numeric(&max_val)) {
+                        (Some(Ok(v)), Some(Ok(lo)), Some(Ok(hi))) => {
+                            Ok(DataType::Int64(v.max(lo).min(hi)))
                         }
+                        (Some(v), Some(lo), Some(hi)) => {
+                            let fv = match v { Ok(i) => i as f64, Err(f) => f };
+                            let flo = match lo { Ok(i) => i as f64, Err(f) => f };
+                            let fhi = match hi { Ok(i) => i as f64, Err(f) => f };
+                            let clamped = fv.max(flo).min(fhi);
+                            if matches!(&input, DataType::Float32(_)) {
+                                Ok(DataType::Float32(clamped as f32))
+                            } else {
+                                Ok(DataType::Float64(clamped))
+                            }
+                        }
+                        _ => Err(EvalError::InvalidInput("Clamp requires numeric arguments".to_string())),
                     }
-                    _ => Err(EvalError::InvalidInput("Clamp requires numeric arguments".to_string())),
                 }
             }
 
@@ -1404,7 +1782,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("Invalid JSON: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput(format!("ParseJson expects String, got {:?}", input))),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "parse_json".to_string() }),
                 }
             }
             OperationType::ParseInt => {
@@ -1416,7 +1794,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(_) => Ok(DataType::Null),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "ParseInt".to_string() }),
                 }
             }
             OperationType::ParseFloat => {
@@ -1428,7 +1806,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(_) => Ok(DataType::Null),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "ParseFloat".to_string() }),
                 }
             }
 
@@ -1440,7 +1818,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).asin())),
                     Some(Err(f)) => Ok(DataType::Float64(f.asin())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
             OperationType::Acos => {
@@ -1450,7 +1828,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).acos())),
                     Some(Err(f)) => Ok(DataType::Float64(f.acos())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
             OperationType::Atan => {
@@ -1460,7 +1838,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).atan())),
                     Some(Err(f)) => Ok(DataType::Float64(f.atan())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
             OperationType::Atan2 => {
@@ -1470,7 +1848,7 @@ impl OperationEvaluator for FullEvaluator {
                         let x = match bv { Ok(i) => i as f64, Err(f) => f };
                         Ok(DataType::Float64(y.atan2(x)))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             }
 
@@ -1482,7 +1860,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).sinh())),
                     Some(Err(f)) => Ok(DataType::Float64(f.sinh())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
             OperationType::Cosh => {
@@ -1492,7 +1870,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).cosh())),
                     Some(Err(f)) => Ok(DataType::Float64(f.cosh())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
             OperationType::Tanh => {
@@ -1502,7 +1880,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).tanh())),
                     Some(Err(f)) => Ok(DataType::Float64(f.tanh())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
 
@@ -1519,7 +1897,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Float64(val.ln() / base.ln()))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             }
 
@@ -1531,7 +1909,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_radians())),
                     Some(Err(f)) => Ok(DataType::Float64(f.to_radians())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
             OperationType::ToDegrees => {
@@ -1541,7 +1919,7 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(Ok(n)) => Ok(DataType::Float64((n as f64).to_degrees())),
                     Some(Err(f)) => Ok(DataType::Float64(f.to_degrees())),
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             },
 
@@ -1555,7 +1933,7 @@ impl OperationEvaluator for FullEvaluator {
                         let ft = match tv { Ok(i) => i as f64, Err(f) => f };
                         Ok(DataType::Float64(fa + (fb - fa) * ft))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
                 }
             }
 
@@ -1574,24 +1952,26 @@ impl OperationEvaluator for FullEvaluator {
                         let fb = match bv { Ok(i) => i as f64, Err(f) => f };
                         Ok(DataType::Bool((fa - fb).abs() <= epsilon))
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "ApproxEq".to_string() }),
                 }
             }
 
             // Greatest common divisor (Euclidean algorithm)
             OperationType::Gcd => {
                 match (a.to_i64(), b.to_i64()) {
-                    (Some(mut x), Some(mut y)) => {
-                        x = x.checked_abs().unwrap_or(0);
-                        y = y.checked_abs().unwrap_or(0);
-                        while y != 0 {
-                            let t = y;
-                            y = x % y;
-                            x = t;
+                    (Some(x), Some(y)) => {
+                        // Use i128 to handle abs(i64::MIN) without overflow
+                        let mut ax = (x as i128).abs();
+                        let mut ay = (y as i128).abs();
+                        while ay != 0 {
+                            let t = ay;
+                            ay = ax % ay;
+                            ax = t;
                         }
-                        Ok(DataType::Int64(x))
+                        // Result fits in i64 since gcd(a,b) <= max(|a|,|b|) and inputs were i64
+                        Ok(DataType::Int64(ax.min(i64::MAX as i128) as i64))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "Gcd".to_string() }),
                 }
             }
 
@@ -1602,8 +1982,9 @@ impl OperationEvaluator for FullEvaluator {
                         if x == 0 || y == 0 {
                             return Ok(DataType::Int64(0));
                         }
-                        let mut gx = x.checked_abs().unwrap_or(0);
-                        let mut gy = y.checked_abs().unwrap_or(0);
+                        // Use i128 to handle abs(i64::MIN) without overflow
+                        let mut gx = (x as i128).abs();
+                        let mut gy = (y as i128).abs();
                         while gy != 0 {
                             let t = gy;
                             gy = gx % gy;
@@ -1611,12 +1992,14 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         // gx is now gcd
                         // lcm = |x| / gcd * |y| to avoid overflow
-                        match (x.checked_abs().unwrap_or(0) / gx).checked_mul(y.checked_abs().unwrap_or(0)) {
-                            Some(v) => Ok(DataType::Int64(v)),
-                            None => Err(EvalError::InvalidInput("integer overflow in lcm".to_string())),
+                        let ax = (x as i128).abs();
+                        let ay = (y as i128).abs();
+                        match i64::try_from((ax / gx) * ay) {
+                            Ok(v) => Ok(DataType::Int64(v)),
+                            Err(_) => Err(EvalError::Overflow("integer overflow in lcm".to_string())),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "integer".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "Lcm".to_string() }),
                 }
             }
 
@@ -1662,8 +2045,8 @@ impl OperationEvaluator for FullEvaluator {
                 match arr_val {
                     DataType::Array(arr) => {
                         let parts: Vec<String> = arr.iter().map(|v| v.to_string_lossy()).collect();
-                        let estimated_len: usize = parts.iter().map(|p| p.len()).sum::<usize>()
-                            + parts.len().saturating_sub(1) * sep.len();
+                        let estimated_len: usize = parts.iter().map(|p| p.len()).fold(0usize, |acc, len| acc.saturating_add(len))
+                            .saturating_add(parts.len().saturating_sub(1).saturating_mul(sep.len()));
                         if estimated_len > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "string_join result exceeds {} byte limit", MAX_STRING_OUTPUT
@@ -1671,7 +2054,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::String(parts.join(&sep)))
                     }
-                    _ => Ok(DataType::String(String::new())),
+                    other => Err(EvalError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "StringJoin".to_string() }),
                 }
             }
 
@@ -1694,7 +2077,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::String(result))
                     }
-                    _ => Ok(template),
+                    _ => Err(EvalError::TypeError { expected: "(String, Map)".to_string(), actual: format!("({}, {})", template.type_name(), values.type_name()), context: "StringTemplate".to_string() }),
                 }
             }
 
@@ -1729,7 +2112,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::String(result))
                     }
-                    _ => Ok(template),
+                    _ => Err(EvalError::TypeError { expected: "(String, Map|Array)".to_string(), actual: format!("({}, {})", template.type_name(), values.type_name()), context: "StringFormat".to_string() }),
                 }
             }
 
@@ -1750,7 +2133,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Bytes(bytes))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String, Bytes, or Array".to_string(), actual: input.type_name().to_string(), context: "ToBytes".to_string() }),
                 }
             }
             OperationType::FromBytes => {
@@ -1761,7 +2144,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(_) => Err(EvalError::InvalidInput("from_bytes: invalid UTF-8".to_string())),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Bytes".to_string(), actual: input.type_name().to_string(), context: "FromBytes".to_string() }),
                 }
             }
 
@@ -1776,7 +2159,7 @@ impl OperationEvaluator for FullEvaluator {
                             DataType::Array(vec![DataType::String(k), v])
                         }).collect()))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "ArrayFromMap".to_string() }),
                 }
             }
 
@@ -1786,11 +2169,15 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::MapUpdate => {
                 match (&map, &key) {
                     (DataType::Map(m), DataType::String(k)) => {
+                        if !m.contains_key(k.as_str()) && m.len() >= MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("MapUpdate would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                        }
                         let mut new_map = m.clone();
                         new_map.insert(k.clone(), value.clone());
                         Ok(DataType::Map(new_map))
                     }
-                    _ => Ok(DataType::Null),
+                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapUpdate key".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapUpdate".to_string() }),
                 }
             }
 
@@ -1826,7 +2213,9 @@ impl OperationEvaluator for FullEvaluator {
                                     }
                                     float_sum += f;
                                 }
-                                None => {} // skip non-numeric
+                                None => {
+                                    return Err(EvalError::TypeError { expected: "number".to_string(), actual: item.type_name().to_string(), context: "MathSum".to_string() });
+                                }
                             }
                         }
                         if has_float {
@@ -1835,7 +2224,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Int64(int_sum))
                         }
                     }
-                    _ => Ok(DataType::Int64(0)),
+                    other => Err(EvalError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "MathSum".to_string() }),
                 }
             }
             OperationType::MathProduct => {
@@ -1867,7 +2256,9 @@ impl OperationEvaluator for FullEvaluator {
                                     }
                                     float_prod *= f;
                                 }
-                                None => {} // skip non-numeric
+                                None => {
+                                    return Err(EvalError::TypeError { expected: "number".to_string(), actual: item.type_name().to_string(), context: "MathProduct".to_string() });
+                                }
                             }
                         }
                         if has_float {
@@ -1876,78 +2267,80 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Int64(int_prod))
                         }
                     }
-                    _ => Ok(DataType::Int64(1)),
+                    other => Err(EvalError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "MathProduct".to_string() }),
                 }
             }
             OperationType::MathAverage => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
+                        if arr.is_empty() {
+                            return Ok(DataType::Float64(f64::NAN));
+                        }
                         let mut sum = 0.0f64;
-                        let mut count = 0usize;
                         for item in &arr {
                             match promote_numeric(item) {
-                                Some(Ok(i)) => { sum += i as f64; count += 1; }
-                                Some(Err(f)) => { sum += f; count += 1; }
-                                None => {}
+                                Some(Ok(i)) => { sum += i as f64; }
+                                Some(Err(f)) => { sum += f; }
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: "MathAverage".to_string() }),
                             }
                         }
-                        if count == 0 {
-                            Ok(DataType::Float64(f64::NAN))
-                        } else {
-                            Ok(DataType::Float64(sum / count as f64))
-                        }
+                        Ok(DataType::Float64(sum / arr.len() as f64))
                     }
-                    _ => Ok(DataType::Float64(f64::NAN)),
+                    other => Err(EvalError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "MathAverage".to_string() }),
                 }
             }
             OperationType::MathMinOf => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
-                        let mut min_val: Option<f64> = None;
-                        for item in &arr {
+                        if arr.is_empty() { return Ok(DataType::Null); }
+                        let mut best: Option<(f64, usize)> = None;
+                        for (idx, item) in arr.iter().enumerate() {
                             let f = match promote_numeric(item) {
                                 Some(Ok(i)) => i as f64,
                                 Some(Err(f)) => f,
-                                None => continue,
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: "MathMinOf".to_string() }),
                             };
-                            min_val = Some(match min_val {
-                                Some(cur) => cur.min(f),
-                                None => f,
+                            if f.is_nan() { continue; }
+                            best = Some(match best {
+                                Some((cur, ci)) => if f < cur { (f, idx) } else { (cur, ci) },
+                                None => (f, idx),
                             });
                         }
-                        Ok(min_val.map(DataType::Float64).unwrap_or(DataType::Null))
+                        Ok(best.map(|(_, idx)| arr[idx].clone()).unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "MathMinOf".to_string() }),
                 }
             }
             OperationType::MathMaxOf => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
-                        let mut max_val: Option<f64> = None;
-                        for item in &arr {
+                        if arr.is_empty() { return Ok(DataType::Null); }
+                        let mut best: Option<(f64, usize)> = None;
+                        for (idx, item) in arr.iter().enumerate() {
                             let f = match promote_numeric(item) {
                                 Some(Ok(i)) => i as f64,
                                 Some(Err(f)) => f,
-                                None => continue,
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: "MathMaxOf".to_string() }),
                             };
-                            max_val = Some(match max_val {
-                                Some(cur) => cur.max(f),
-                                None => f,
+                            if f.is_nan() { continue; }
+                            best = Some(match best {
+                                Some((cur, ci)) => if f > cur { (f, idx) } else { (cur, ci) },
+                                None => (f, idx),
                             });
                         }
-                        Ok(max_val.map(DataType::Float64).unwrap_or(DataType::Null))
+                        Ok(best.map(|(_, idx)| arr[idx].clone()).unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "MathMaxOf".to_string() }),
                 }
             }
             OperationType::MathCount => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => Ok(DataType::Int64(arr.len() as i64)),
-                    _ => Ok(DataType::Int64(0)),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "MathCount".to_string() }),
                 }
             }
 
@@ -1974,7 +2367,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Float64(fomin + t * (fomax - fomin)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: input.type_name().to_string(), context: "Remap".to_string() }),
                 }
             }
 
@@ -1997,7 +2390,7 @@ impl OperationEvaluator for FullEvaluator {
                             None => Err(EvalError::InvalidInput(format!("format_timestamp: invalid timestamp {}", ms))),
                         }
                     }
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "number".to_string(), actual: input.type_name().to_string(), context: "FormatTimestamp".to_string() }),
                 }
             }
 
@@ -2024,7 +2417,7 @@ impl OperationEvaluator for FullEvaluator {
                         let fb = match bv { Ok(i) => i, Err(f) => f as i64 };
                         Ok(DataType::Int64(fa.saturating_sub(fb)))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "TimestampDiff".to_string() }),
                 }
             }
 
@@ -2039,7 +2432,7 @@ impl OperationEvaluator for FullEvaluator {
                         let fa = match av { Ok(i) => i, Err(f) => f as i64 };
                         Ok(DataType::Int64(ft.saturating_add(fa)))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: format!("({}, {})", input.type_name(), amount.type_name()), context: "TimestampAdd".to_string() }),
                 }
             }
 
@@ -2071,9 +2464,9 @@ impl OperationEvaluator for FullEvaluator {
                                 return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
                             }
                         }
-                        Ok(DataType::Null)
+                        Err(EvalError::InvalidInput(format!("ParseTimestamp: unrecognized format: {}", s)))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "ParseTimestamp".to_string() }),
                 }
             }
 
@@ -2083,12 +2476,26 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HexEncode => {
                 match &input {
                     DataType::Bytes(b) => {
+                        if b.len() * 2 > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "hex_encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
                         Ok(DataType::String(hex::encode(b)))
                     }
                     DataType::String(s) => {
+                        if s.len() * 2 > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "hex_encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
                         Ok(DataType::String(hex::encode(s.as_bytes())))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError {
+                        expected: "String or Bytes".to_string(),
+                        actual: input.type_name().to_string(),
+                        context: "hex_encode".to_string(),
+                    }),
                 }
             }
             OperationType::HexDecode => {
@@ -2101,7 +2508,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("hex_decode: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "HexDecode".to_string() }),
                 }
             }
 
@@ -2112,9 +2519,13 @@ impl OperationEvaluator for FullEvaluator {
                 match &input {
                     DataType::String(s) => {
                         use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-                        Ok(DataType::String(utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()))
+                        let result = utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("UrlEncode output exceeds {} bytes", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UrlEncode".to_string() }),
                 }
             }
             OperationType::UrlDecode => {
@@ -2127,7 +2538,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(_) => Err(EvalError::InvalidInput("url_decode: invalid UTF-8".to_string())),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UrlDecode".to_string() }),
                 }
             }
 
@@ -2136,10 +2547,10 @@ impl OperationEvaluator for FullEvaluator {
             // ================================================================
             OperationType::HashSha256 => {
                 use sha2::{Sha256, Digest};
-                let data = data_to_bytes(&input);
-                if data.is_empty() && matches!(input, DataType::Null) {
-                    return Ok(DataType::Null);
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashSha256".to_string() });
                 }
+                let data = data_to_bytes(&input);
                 let hash = Sha256::digest(&data);
                 Ok(DataType::String(hex::encode(hash)))
             }
@@ -2150,10 +2561,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HashMd5 => {
                 use md5::Md5;
                 use md5::Digest;
-                let data = data_to_bytes(&input);
-                if data.is_empty() && matches!(input, DataType::Null) {
-                    return Ok(DataType::Null);
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashMd5".to_string() });
                 }
+                let data = data_to_bytes(&input);
                 let hash = Md5::digest(&data);
                 Ok(DataType::String(hex::encode(hash)))
             }
@@ -2185,7 +2596,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(current)
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: path.type_name().to_string(), context: "JsonGet path".to_string() }),
                 }
             }
             OperationType::JsonSet => {
@@ -2194,11 +2605,15 @@ impl OperationEvaluator for FullEvaluator {
                 let item = inputs.get("item").cloned().unwrap_or(DataType::Null);
                 match (&json_val, &path) {
                     (DataType::Map(m), DataType::String(key)) => {
+                        if !m.contains_key(key.as_str()) && m.len() >= MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("JsonSet would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                        }
                         let mut new_map = m.clone();
                         new_map.insert(key.clone(), item);
                         Ok(DataType::Map(new_map))
                     }
-                    _ => Ok(json_val),
+                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: path.type_name().to_string(), context: "JsonSet path".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "map".to_string(), actual: json_val.type_name().to_string(), context: "JsonSet".to_string() }),
                 }
             }
             OperationType::JsonDelete => {
@@ -2210,7 +2625,8 @@ impl OperationEvaluator for FullEvaluator {
                         new_map.remove(key);
                         Ok(DataType::Map(new_map))
                     }
-                    _ => Ok(json_val),
+                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: path.type_name().to_string(), context: "JsonDelete path".to_string() }),
+                    _ => Err(EvalError::TypeError { expected: "map".to_string(), actual: json_val.type_name().to_string(), context: "JsonDelete".to_string() }),
                 }
             }
             OperationType::JsonType => {
@@ -2230,20 +2646,35 @@ impl OperationEvaluator for FullEvaluator {
                     (DataType::Map(m1), DataType::Map(m2)) => {
                         let mut merged = m1.clone();
                         for (k, v) in m2 {
+                            if !merged.contains_key(k.as_str()) && merged.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!("JsonMerge would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                            }
                             merged.insert(k.clone(), v.clone());
                         }
                         Ok(DataType::Map(merged))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(Map, Map)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "JsonMerge".to_string() }),
                 }
             }
             OperationType::JsonPrettyPrint => {
                 let json_val = datatype_to_serde_json(&input);
-                Ok(DataType::String(serde_json::to_string_pretty(&json_val).unwrap_or_else(|_| "null".to_string())))
+                let s = serde_json::to_string_pretty(&json_val).map_err(|e| EvalError::InvalidInput(format!("json_pretty_print: serialization failed: {}", e)))?;
+                if s.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "json_pretty_print: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                    )));
+                }
+                Ok(DataType::String(s))
             }
             OperationType::JsonCompact => {
                 let json_val = datatype_to_serde_json(&input);
-                Ok(DataType::String(serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string())))
+                let s = serde_json::to_string(&json_val).map_err(|e| EvalError::InvalidInput(format!("json_compact: serialization failed: {}", e)))?;
+                if s.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "json_compact: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                    )));
+                }
+                Ok(DataType::String(s))
             }
             OperationType::JsonValidate => {
                 match &input {
@@ -2251,24 +2682,25 @@ impl OperationEvaluator for FullEvaluator {
                         // Try parsing as JSON
                         Ok(DataType::Bool(serde_json::from_str::<serde_json::Value>(s).is_ok()))
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "JsonValidate".to_string() }),
                 }
             }
             OperationType::JsonFlatten => {
-                fn json_flatten(val: &DataType, prefix: &str, result: &mut std::collections::BTreeMap<String, DataType>, depth: usize) {
-                    if depth > 64 { return; }
+                fn json_flatten(val: &DataType, prefix: &str, result: &mut std::collections::BTreeMap<String, DataType>, depth: usize) -> Result<(), ()> {
+                    if depth > 64 || result.len() > MAX_ARRAY_ELEMENTS { return Err(()); }
                     match val {
                         DataType::Map(m) => {
                             for (k, v) in m {
                                 if k.starts_with("__") { continue; }
                                 let new_key = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) };
-                                json_flatten(v, &new_key, result, depth + 1);
+                                json_flatten(v, &new_key, result, depth + 1)?;
                             }
                         }
                         DataType::Array(arr) => {
                             for (i, v) in arr.iter().enumerate() {
+                                if result.len() > MAX_ARRAY_ELEMENTS { return Err(()); }
                                 let new_key = if prefix.is_empty() { format!("{}", i) } else { format!("{}.{}", prefix, i) };
-                                json_flatten(v, &new_key, result, depth + 1);
+                                json_flatten(v, &new_key, result, depth + 1)?;
                             }
                         }
                         _ => {
@@ -2276,9 +2708,12 @@ impl OperationEvaluator for FullEvaluator {
                             result.insert(key, val.clone());
                         }
                     }
+                    Ok(())
                 }
                 let mut result = std::collections::BTreeMap::new();
-                json_flatten(&input, "", &mut result, 0);
+                if json_flatten(&input, "", &mut result, 0).is_err() {
+                    return Err(EvalError::InvalidInput(format!("JsonFlatten result exceeds {} elements", MAX_ARRAY_ELEMENTS)));
+                }
                 Ok(DataType::Map(result))
             }
             OperationType::JsonQuery => {
@@ -2306,7 +2741,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(current)
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: path.type_name().to_string(), context: "JsonQuery path".to_string() }),
                 }
             }
 
@@ -2331,7 +2766,14 @@ impl OperationEvaluator for FullEvaluator {
                         Ok(DataType::Int64(result))
                     }
                     (Some(lo), Some(hi)) if lo == hi => Ok(DataType::Int64(lo)),
-                    _ => Ok(DataType::Null),
+                    (Some(lo), Some(hi)) => Err(EvalError::InvalidInput(
+                        format!("random_range: min ({}) must be less than or equal to max ({})", lo, hi),
+                    )),
+                    _ => Err(EvalError::TypeError {
+                        expected: "number".to_string(),
+                        actual: format!("{}, {}", a.type_name(), b.type_name()),
+                        context: "random_range".to_string(),
+                    }),
                 }
             }
             OperationType::RandomChoice => {
@@ -2341,7 +2783,8 @@ impl OperationEvaluator for FullEvaluator {
                         let idx = rand::rng().random_range(0..arr.len());
                         Ok(arr[idx].clone())
                     }
-                    _ => Ok(DataType::Null),
+                    DataType::Array(_) => Ok(DataType::Null), // empty array → Null (correct semantic)
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "RandomChoice".to_string() }),
                 }
             }
             OperationType::RandomShuffle => {
@@ -2352,7 +2795,7 @@ impl OperationEvaluator for FullEvaluator {
                         arr.shuffle(&mut rand::rng());
                         Ok(DataType::Array(arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "RandomShuffle".to_string() }),
                 }
             }
             OperationType::RandomUuid => {
@@ -2371,7 +2814,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_match: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexMatch".to_string() }),
                 }
             }
             OperationType::RegexTest => {
@@ -2383,7 +2826,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_test: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexTest".to_string() }),
                 }
             }
             OperationType::RegexReplace => {
@@ -2404,7 +2847,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_replace: {}", e))),
                         }
                     }
-                    _ => Ok(input.clone()),
+                    _ => Err(EvalError::TypeError { expected: "(String, String, String)".to_string(), actual: format!("({}, {}, {})", input.type_name(), pattern.type_name(), replacement.type_name()), context: "RegexReplace".to_string() }),
                 }
             }
             OperationType::RegexExtract => {
@@ -2433,7 +2876,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_extract: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexExtract".to_string() }),
                 }
             }
             OperationType::RegexSplit => {
@@ -2456,13 +2899,19 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_split: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexSplit".to_string() }),
                 }
             }
             OperationType::RegexEscape => {
                 match &input {
-                    DataType::String(s) => Ok(DataType::String(regex::escape(s))),
-                    _ => Ok(DataType::Null),
+                    DataType::String(s) => {
+                        let result = regex::escape(s);
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("RegexEscape output exceeds {} bytes", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
+                    },
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "RegexEscape".to_string() }),
                 }
             }
             OperationType::RegexCaptures => {
@@ -2485,7 +2934,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_captures: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexCaptures".to_string() }),
                 }
             }
             OperationType::RegexFindAll => {
@@ -2508,7 +2957,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("regex_find_all: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexFindAll".to_string() }),
                 }
             }
 
@@ -2533,36 +2982,63 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::String(content))
                     }
-                    _ => Err(EvalError::InvalidInput("fs_read: path must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_read".to_string() }),
                 }
             }
             OperationType::FsWrite => {
+                const MAX_FILE_WRITE: usize = 64 * 1024 * 1024; // 64 MB
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 let content = inputs.get("content").cloned().unwrap_or(DataType::Null);
                 match (&path, &content) {
                     (DataType::String(p), DataType::String(c)) => {
+                        if c.len() > MAX_FILE_WRITE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE
+                            )));
+                        }
                         match fs::write(p, c) {
                             Ok(_) => Ok(DataType::Bool(true)),
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_write: {}", e))),
                         }
                     }
                     (DataType::String(p), DataType::Bytes(b)) => {
+                        if b.len() > MAX_FILE_WRITE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE
+                            )));
+                        }
                         match fs::write(p, b) {
                             Ok(_) => Ok(DataType::Bool(true)),
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_write: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_write: path and content must be provided".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_write".to_string() }),
                 }
             }
             OperationType::FsAppend => {
+                const MAX_FILE_WRITE: usize = 64 * 1024 * 1024; // 64 MB
+                const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024; // 256 MB max resulting file
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 let content = inputs.get("content").cloned().unwrap_or(DataType::Null);
                 match (&path, &content) {
                     (DataType::String(p), DataType::String(c)) => {
+                        if c.len() > MAX_FILE_WRITE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "fs_append: content exceeds {} byte limit", MAX_FILE_WRITE
+                            )));
+                        }
                         use std::io::Write;
                         match std::fs::OpenOptions::new().append(true).create(true).open(p) {
                             Ok(mut file) => {
+                                // Check resulting file size to prevent unbounded growth
+                                let existing_size = file.metadata()
+                                    .map(|m| m.len()).unwrap_or(0);
+                                if existing_size + c.len() as u64 > MAX_FILE_SIZE {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "fs_append: resulting file would exceed {} byte limit",
+                                        MAX_FILE_SIZE
+                                    )));
+                                }
                                 match file.write_all(c.as_bytes()) {
                                     Ok(_) => Ok(DataType::Bool(true)),
                                     Err(e) => Err(EvalError::InvalidInput(format!("fs_append: {}", e))),
@@ -2571,14 +3047,39 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_append: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_append: path and content must be strings".to_string())),
+                    (DataType::String(p), DataType::Bytes(b)) => {
+                        if b.len() > MAX_FILE_WRITE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "fs_append: content exceeds {} byte limit", MAX_FILE_WRITE
+                            )));
+                        }
+                        use std::io::Write;
+                        match std::fs::OpenOptions::new().append(true).create(true).open(p) {
+                            Ok(mut file) => {
+                                let existing_size = file.metadata()
+                                    .map(|m| m.len()).unwrap_or(0);
+                                if existing_size + b.len() as u64 > MAX_FILE_SIZE {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "fs_append: resulting file would exceed {} byte limit",
+                                        MAX_FILE_SIZE
+                                    )));
+                                }
+                                match file.write_all(b) {
+                                    Ok(_) => Ok(DataType::Bool(true)),
+                                    Err(e) => Err(EvalError::InvalidInput(format!("fs_append: {}", e))),
+                                }
+                            }
+                            Err(e) => Err(EvalError::InvalidInput(format!("fs_append: {}", e))),
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_append".to_string() }),
                 }
             }
             OperationType::FsExists => {
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match &path {
                     DataType::String(p) => Ok(DataType::Bool(std::path::Path::new(p).exists())),
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: path.type_name().to_string(), context: "FsExists".to_string() }),
                 }
             }
             OperationType::FsList => {
@@ -2603,7 +3104,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_list: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_list: path must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_list".to_string() }),
                 }
             }
             OperationType::FsMkdir => {
@@ -2615,39 +3116,43 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_mkdir: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_mkdir: path must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_mkdir".to_string() }),
                 }
             }
             OperationType::FsRemove => {
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match &path {
                     DataType::String(p) => {
-                        let pb = std::path::Path::new(p);
-                        let result = if pb.is_dir() {
-                            fs::remove_dir_all(p)
-                        } else {
-                            fs::remove_file(p)
-                        };
-                        match result {
+                        // Try remove_file first; if it fails with a "is a directory"
+                        // error, fall back to remove_dir_all. This avoids a TOCTOU race
+                        // between is_dir() and the actual removal.
+                        match fs::remove_file(p) {
                             Ok(_) => Ok(DataType::Bool(true)),
+                            Err(e) if e.kind() == std::io::ErrorKind::IsADirectory
+                                || e.raw_os_error() == Some(21) /* EISDIR */ => {
+                                match fs::remove_dir_all(p) {
+                                    Ok(_) => Ok(DataType::Bool(true)),
+                                    Err(e) => Err(EvalError::InvalidInput(format!("fs_remove: {}", e))),
+                                }
+                            }
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_remove: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_remove: path must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_remove".to_string() }),
                 }
             }
             OperationType::FsIsFile => {
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match &path {
                     DataType::String(p) => Ok(DataType::Bool(std::path::Path::new(p).is_file())),
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: path.type_name().to_string(), context: "FsIsFile".to_string() }),
                 }
             }
             OperationType::FsIsDir => {
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match &path {
                     DataType::String(p) => Ok(DataType::Bool(std::path::Path::new(p).is_dir())),
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: path.type_name().to_string(), context: "FsIsDir".to_string() }),
                 }
             }
             OperationType::FsSize => {
@@ -2659,7 +3164,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_size: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_size: path must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_size".to_string() }),
                 }
             }
             OperationType::FsCopy => {
@@ -2672,7 +3177,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_copy: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_copy: source and destination must be strings".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_copy".to_string() }),
                 }
             }
             OperationType::FsMove => {
@@ -2685,7 +3190,7 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_move: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("fs_move: source and destination must be strings".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "fs_move".to_string() }),
                 }
             }
 
@@ -2701,14 +3206,14 @@ impl OperationEvaluator for FullEvaluator {
                             Err(_) => Ok(DataType::Null),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: key_val.type_name().to_string(), context: "EnvGet".to_string() }),
                 }
             }
             OperationType::EnvHas => {
                 let key_val = inputs.get("key").cloned().unwrap_or(DataType::Null);
                 match &key_val {
                     DataType::String(k) => Ok(DataType::Bool(env::var(k).is_ok())),
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: key_val.type_name().to_string(), context: "EnvHas".to_string() }),
                 }
             }
             OperationType::EnvKeys => {
@@ -2743,7 +3248,7 @@ impl OperationEvaluator for FullEvaluator {
                         let joined = std::path::Path::new(p1).join(p2);
                         Ok(DataType::String(joined.to_string_lossy().to_string()))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "PathJoin".to_string() }),
                 }
             }
             OperationType::PathBasename => {
@@ -2754,7 +3259,7 @@ impl OperationEvaluator for FullEvaluator {
                             .map(|n| DataType::String(n.to_string_lossy().to_string()))
                             .unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathBasename".to_string() }),
                 }
             }
             OperationType::PathDirname => {
@@ -2765,7 +3270,7 @@ impl OperationEvaluator for FullEvaluator {
                             .map(|n| DataType::String(n.to_string_lossy().to_string()))
                             .unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathDirname".to_string() }),
                 }
             }
             OperationType::PathExtension => {
@@ -2776,7 +3281,7 @@ impl OperationEvaluator for FullEvaluator {
                             .map(|n| DataType::String(n.to_string_lossy().to_string()))
                             .unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathExtension".to_string() }),
                 }
             }
             OperationType::PathStem => {
@@ -2787,13 +3292,13 @@ impl OperationEvaluator for FullEvaluator {
                             .map(|n| DataType::String(n.to_string_lossy().to_string()))
                             .unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathStem".to_string() }),
                 }
             }
             OperationType::PathIsAbsolute => {
                 match &input {
                     DataType::String(p) => Ok(DataType::Bool(std::path::Path::new(p).is_absolute())),
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathIsAbsolute".to_string() }),
                 }
             }
             OperationType::PathParent => {
@@ -2804,7 +3309,7 @@ impl OperationEvaluator for FullEvaluator {
                             .map(|n| DataType::String(n.to_string_lossy().to_string()))
                             .unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathParent".to_string() }),
                 }
             }
             OperationType::PathNormalize => {
@@ -2829,7 +3334,7 @@ impl OperationEvaluator for FullEvaluator {
                         let normalized: std::path::PathBuf = components.into_iter().collect();
                         Ok(DataType::String(normalized.to_string_lossy().to_string()))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathNormalize".to_string() }),
                 }
             }
             OperationType::PathSplit => {
@@ -2841,7 +3346,7 @@ impl OperationEvaluator for FullEvaluator {
                             .collect();
                         Ok(DataType::Array(parts))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "PathSplit".to_string() }),
                 }
             }
             OperationType::PathWithExtension => {
@@ -2851,7 +3356,7 @@ impl OperationEvaluator for FullEvaluator {
                         let path = std::path::Path::new(p).with_extension(ext);
                         Ok(DataType::String(path.to_string_lossy().to_string()))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), extension.type_name()), context: "PathWithExtension".to_string() }),
                 }
             }
 
@@ -2873,26 +3378,41 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&value) {
                     Some(Ok(n)) => Ok(DataType::String(format!("{}", n))),
                     Some(Err(f)) => Ok(DataType::String(format!("{}", f))),
-                    None => Ok(DataType::String(value.to_string_lossy())),
+                    None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: value.type_name().to_string(), context: "FmtNumber".to_string() }),
                 }
             }
             OperationType::FmtHex => {
-                match value.to_i64() {
-                    Some(n) => Ok(DataType::String(format!("{:x}", n))),
-                    None => Ok(DataType::Null),
+                if let DataType::Uint64(n) = &value {
+                    Ok(DataType::String(format!("{:x}", n)))
+                } else {
+                    match value.to_i64() {
+                        Some(n) => Ok(DataType::String(format!("{:x}", n))),
+                        None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: value.type_name().to_string(), context: "FmtHex".to_string() }),
+                    }
                 }
             }
             OperationType::FmtBinary => {
-                match value.to_i64() {
-                    Some(n) => Ok(DataType::String(format!("{:b}", n))),
-                    None => Ok(DataType::Null),
+                if let DataType::Uint64(n) = &value {
+                    Ok(DataType::String(format!("{:b}", n)))
+                } else {
+                    match value.to_i64() {
+                        Some(n) => Ok(DataType::String(format!("{:b}", n))),
+                        None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: value.type_name().to_string(), context: "FmtBinary".to_string() }),
+                    }
                 }
             }
             OperationType::FmtPercent => {
                 match promote_numeric(&value) {
                     Some(Ok(n)) => Ok(DataType::String(format!("{}%", n))),
-                    Some(Err(f)) => Ok(DataType::String(format!("{:.1}%", f * 100.0))),
-                    None => Ok(DataType::Null),
+                    Some(Err(f)) => {
+                        // Format cleanly: if it's a whole number in i64 range use no decimals
+                        if f == f.trunc() && f.is_finite() && f >= i64::MIN as f64 && f < i64::MAX as f64 {
+                            Ok(DataType::String(format!("{}%", f as i64)))
+                        } else {
+                            Ok(DataType::String(format!("{}%", f)))
+                        }
+                    }
+                    None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: value.type_name().to_string(), context: "FmtPercent".to_string() }),
                 }
             }
             OperationType::FmtBytes => {
@@ -2915,7 +3435,7 @@ impl OperationEvaluator for FullEvaluator {
                         };
                         Ok(DataType::String(result))
                     }
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: value.type_name().to_string(), context: "FmtBytes".to_string() }),
                 }
             }
             OperationType::FmtDuration => {
@@ -2936,7 +3456,7 @@ impl OperationEvaluator for FullEvaluator {
                         };
                         Ok(DataType::String(if ms < 0 { format!("-{}", result) } else { result }))
                     }
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: value.type_name().to_string(), context: "FmtDuration".to_string() }),
                 }
             }
 
@@ -2946,59 +3466,91 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSlug => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(slug::slugify(s)))
+                        let result = slug::slugify(s);
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "text_slug: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "TextSlug".to_string() }),
                 }
             }
             OperationType::TextCamelCase => {
                 match &input {
                     DataType::String(s) => {
                         use heck::ToLowerCamelCase;
-                        Ok(DataType::String(s.to_lower_camel_case()))
+                        let result = s.to_lower_camel_case();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "camel_case output exceeds {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "TextCamelCase".to_string() }),
                 }
             }
             OperationType::TextSnakeCase => {
                 match &input {
                     DataType::String(s) => {
                         use heck::ToSnakeCase;
-                        Ok(DataType::String(s.to_snake_case()))
+                        let result = s.to_snake_case();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "snake_case output exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "TextSnakeCase".to_string() }),
                 }
             }
             OperationType::TextTitleCase => {
                 match &input {
                     DataType::String(s) => {
                         use heck::ToTitleCase;
-                        Ok(DataType::String(s.to_title_case()))
+                        let result = s.to_title_case();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "title_case output exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "TextTitleCase".to_string() }),
                 }
             }
             OperationType::TextWrap => {
                 match &input {
                     DataType::String(s) => {
-                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80).max(0) as usize;
-                        Ok(DataType::String(textwrap::fill(s, width)))
+                        let width = require_i64_or_default(inputs.get("input_1"), 80, "TextWrap width")?.max(1) as usize;
+                        let result = textwrap::fill(s, width);
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "text_wrap: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "TextWrap".to_string() }),
                 }
             }
             OperationType::TextTruncate => {
                 match &input {
                     DataType::String(s) => {
-                        let max_len = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(80).max(0) as usize;
+                        let max_len = require_i64_or_default(inputs.get("input_1"), 80, "TextTruncate max_len")?.max(0) as usize;
                         if s.chars().count() <= max_len {
                             Ok(DataType::String(s.clone()))
+                        } else if max_len <= 3 {
+                            // If max_len is too small for ellipsis, just truncate without it
+                            let truncated: String = s.chars().take(max_len).collect();
+                            Ok(DataType::String(truncated))
                         } else {
-                            let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+                            let truncated: String = s.chars().take(max_len - 3).collect();
                             Ok(DataType::String(format!("{}...", truncated)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "TextTruncate".to_string() }),
                 }
             }
 
@@ -3008,17 +3560,25 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlEscape => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(html_escape::encode_text(s).into_owned()))
+                        let result = html_escape::encode_text(s).into_owned();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("HtmlEscape output exceeds {} bytes", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "HtmlEscape".to_string() }),
                 }
             }
             OperationType::HtmlUnescape => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(html_escape::decode_html_entities(s).into_owned()))
+                        let result = html_escape::decode_html_entities(s).into_owned();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("HtmlUnescape output exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "HtmlUnescape".to_string() }),
                 }
             }
 
@@ -3034,7 +3594,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(t) => {
                         Ok(DataType::Bool(input.type_name() == t.as_str()))
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: type_name.type_name().to_string(), context: "ReflectIsType".to_string() }),
                 }
             }
             OperationType::ReflectFields => {
@@ -3052,7 +3612,7 @@ impl OperationEvaluator for FullEvaluator {
                 let field = inputs.get("field").cloned().unwrap_or(DataType::Null);
                 match (&input, &field) {
                     (DataType::Map(m), DataType::String(f)) => Ok(DataType::Bool(m.contains_key(f))),
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "(Map, String)".to_string(), actual: format!("({}, {})", input.type_name(), field.type_name()), context: "ReflectHasField".to_string() }),
                 }
             }
             OperationType::ReflectCallable => {
@@ -3064,7 +3624,17 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
             OperationType::ReflectInspect => {
-                Ok(DataType::String(format!("{:?}", input)))
+                let mut s = format!("{:?}", input);
+                if s.len() > MAX_INSPECT_OUTPUT {
+                    // Find a safe char boundary for truncation
+                    let mut end = MAX_INSPECT_OUTPUT;
+                    while end > 0 && !s.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    s.truncate(end);
+                    s.push_str("...[truncated]");
+                }
+                Ok(DataType::String(s))
             }
 
             // ================================================================
@@ -3092,7 +3662,7 @@ impl OperationEvaluator for FullEvaluator {
                     let case_key = format!("case_{}", i);
                     let value_key = format!("value_{}", i);
                     match (inputs.get(&case_key), inputs.get(&value_key)) {
-                        (Some(case), Some(result)) if *case == switch_val => {
+                        (Some(case), Some(result)) if *case == switch_val || numeric_eq(case, &switch_val) => {
                             return Ok(result.clone());
                         }
                         (None, _) => break,
@@ -3129,7 +3699,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         Ok(DataType::Bool(uuid::Uuid::parse_str(s.trim()).is_ok()))
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UuidIsValid".to_string() }),
                 }
             }
             OperationType::UuidParse => {
@@ -3144,10 +3714,10 @@ impl OperationEvaluator for FullEvaluator {
                                 ));
                                 Ok(DataType::Map(m))
                             }
-                            Err(_) => Ok(DataType::Null),
+                            Err(e) => Err(EvalError::InvalidInput(format!("UuidParse: invalid UUID: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UuidParse".to_string() }),
                 }
             }
 
@@ -3158,38 +3728,20 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(mut arr) => {
-                        arr.sort_by(|a, b| {
-                            match (promote_numeric(a), promote_numeric(b)) {
-                                (Some(pa), Some(pb)) => {
-                                    let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                                    let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fa.total_cmp(&fb)
-                                }
-                                _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
-                            }
-                        });
+                        arr.sort_by(total_cmp_values);
                         Ok(DataType::Array(arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "SortAsc".to_string() }),
                 }
             }
             OperationType::SortDesc => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(mut arr) => {
-                        arr.sort_by(|a, b| {
-                            match (promote_numeric(a), promote_numeric(b)) {
-                                (Some(pa), Some(pb)) => {
-                                    let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                                    let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fb.total_cmp(&fa)
-                                }
-                                _ => b.to_string_lossy().cmp(&a.to_string_lossy()),
-                            }
-                        });
+                        arr.sort_by(|a, b| total_cmp_values(b, a));
                         Ok(DataType::Array(arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "SortDesc".to_string() }),
                 }
             }
             OperationType::SortReverse => {
@@ -3199,7 +3751,7 @@ impl OperationEvaluator for FullEvaluator {
                         arr.reverse();
                         Ok(DataType::Array(arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "SortReverse".to_string() }),
                 }
             }
             // StableSort delegates to SortAsc (Rust's sort_by is already stable)
@@ -3207,19 +3759,10 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(mut arr) => {
-                        arr.sort_by(|a, b| {
-                            match (promote_numeric(a), promote_numeric(b)) {
-                                (Some(pa), Some(pb)) => {
-                                    let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                                    let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fa.total_cmp(&fb)
-                                }
-                                _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
-                            }
-                        });
+                        arr.sort_by(total_cmp_values);
                         Ok(DataType::Array(arr))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "StableSort".to_string() }),
                 }
             }
             OperationType::IsSorted => {
@@ -3227,48 +3770,33 @@ impl OperationEvaluator for FullEvaluator {
                 match arr_val {
                     DataType::Array(arr) => {
                         let sorted = arr.windows(2).all(|w| {
-                            match (promote_numeric(&w[0]), promote_numeric(&w[1])) {
-                                (Some(pa), Some(pb)) => {
-                                    let fa = match pa { Ok(i) => i as f64, Err(f) => f };
-                                    let fb = match pb { Ok(i) => i as f64, Err(f) => f };
-                                    fa <= fb
-                                }
-                                _ => w[0].to_string_lossy() <= w[1].to_string_lossy(),
-                            }
+                            total_cmp_values(&w[0], &w[1]) != std::cmp::Ordering::Greater
                         });
                         Ok(DataType::Bool(sorted))
                     }
-                    _ => Ok(DataType::Bool(true)),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "IsSorted".to_string() }),
                 }
             }
             OperationType::BinarySearch => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match (&arr_val, &value) {
                     (DataType::Array(arr), target) => {
-                        let result = arr.binary_search_by(|item| {
-                            if item == target { return std::cmp::Ordering::Equal; }
-                            match (promote_numeric(item), promote_numeric(target)) {
-                                (Some(av), Some(bv)) => {
-                                    let fa = match av { Ok(i) => i as f64, Err(f) => f };
-                                    let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-                                    fa.total_cmp(&fb)
-                                }
-                                _ => item.to_string_lossy().cmp(&target.to_string_lossy()),
-                            }
-                        });
+                        let result = arr.binary_search_by(|item| total_cmp_values(item, target));
                         match result {
                             Ok(i) => Ok(DataType::Int64(i as i64)),
                             Err(_) => Ok(DataType::Int64(-1)),
                         }
                     }
-                    _ => Ok(DataType::Int64(-1)),
+                    _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: arr_val.type_name().to_string(), context: "BinarySearch".to_string() }),
                 }
             }
             // SortBy and SortByKey require lambda callbacks, handled by interpreter
             OperationType::SortBy | OperationType::SortByKey => {
-                // Return input array unchanged (actual sorting done by interpreter HOF)
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
-                Ok(arr_val)
+                match arr_val {
+                    DataType::Array(_) => Ok(arr_val),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "SortBy".to_string() }),
+                }
             }
 
             // ================================================================
@@ -3278,71 +3806,128 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
+                        const MAX_UNIQUE: usize = 100_000;
+                        if arr.len() > MAX_UNIQUE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "set_from: array too large ({} elements, max {} for quadratic uniqueness check)",
+                                arr.len(),
+                                MAX_UNIQUE,
+                            )));
+                        }
                         let mut seen = Vec::new();
                         for item in arr {
-                            let already = seen.contains(&item);
-                            if !already {
+                            if !seen.iter().any(|s: &DataType| s == &item || numeric_eq(s, &item)) {
                                 seen.push(item);
                             }
                         }
                         Ok(DataType::Array(seen))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "SetFrom".to_string() }),
                 }
             }
             OperationType::SetUnion => {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
-                        let mut result = a_arr.clone();
-                        for item in b_arr {
-                            if !result.iter().any(|s| s == item) {
+                        const MAX_UNIQUE: usize = 100_000;
+                        let total = a_arr.len().saturating_add(b_arr.len());
+                        if total > MAX_UNIQUE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "set_union: combined arrays too large ({} elements, max {} for quadratic uniqueness check)",
+                                total,
+                                MAX_UNIQUE,
+                            )));
+                        }
+                        let mut result: Vec<DataType> = Vec::new();
+                        for item in a_arr.iter().chain(b_arr.iter()) {
+                            if !result.iter().any(|s| s == item || numeric_eq(s, item)) {
                                 result.push(item.clone());
                             }
                         }
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(Array, Array)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "SetUnion".to_string() }),
                 }
             }
             OperationType::SetIntersection => {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
-                        let result: Vec<DataType> = a_arr.iter()
-                            .filter(|item| b_arr.iter().any(|s| s == *item))
-                            .cloned().collect();
+                        const MAX_UNIQUE: usize = 100_000;
+                        let larger = a_arr.len().max(b_arr.len());
+                        if larger > MAX_UNIQUE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "set_intersection: array too large ({} elements, max {} for quadratic uniqueness check)",
+                                larger,
+                                MAX_UNIQUE,
+                            )));
+                        }
+                        let mut result: Vec<DataType> = Vec::new();
+                        for item in a_arr {
+                            if b_arr.iter().any(|s| s == item || numeric_eq(s, item))
+                                && !result.iter().any(|s| s == item || numeric_eq(s, item))
+                            {
+                                result.push(item.clone());
+                            }
+                        }
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(Array, Array)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "SetIntersection".to_string() }),
                 }
             }
             OperationType::SetDifference => {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
-                        let result: Vec<DataType> = a_arr.iter()
-                            .filter(|item| !b_arr.iter().any(|s| s == *item))
-                            .cloned().collect();
+                        const MAX_UNIQUE: usize = 100_000;
+                        let larger = a_arr.len().max(b_arr.len());
+                        if larger > MAX_UNIQUE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "set_difference: array too large ({} elements, max {} for quadratic uniqueness check)",
+                                larger,
+                                MAX_UNIQUE,
+                            )));
+                        }
+                        let mut result: Vec<DataType> = Vec::new();
+                        for item in a_arr {
+                            if !b_arr.iter().any(|s| s == item || numeric_eq(s, item))
+                                && !result.iter().any(|s| s == item || numeric_eq(s, item))
+                            {
+                                result.push(item.clone());
+                            }
+                        }
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(Array, Array)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "SetDifference".to_string() }),
                 }
             }
             OperationType::SetSymmetricDifference => {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
-                        let mut result = Vec::new();
+                        const MAX_UNIQUE: usize = 100_000;
+                        let total = a_arr.len().saturating_add(b_arr.len());
+                        if total > MAX_UNIQUE {
+                            return Err(EvalError::InvalidInput(format!(
+                                "set_symmetric_difference: combined arrays too large ({} elements, max {} for quadratic uniqueness check)",
+                                total,
+                                MAX_UNIQUE,
+                            )));
+                        }
+                        let mut result: Vec<DataType> = Vec::new();
                         for item in a_arr {
-                            if !b_arr.iter().any(|s| s == item) {
+                            if !b_arr.iter().any(|s| s == item || numeric_eq(s, item))
+                                && !result.iter().any(|s| s == item || numeric_eq(s, item))
+                            {
                                 result.push(item.clone());
                             }
                         }
                         for item in b_arr {
-                            if !a_arr.iter().any(|s| s == item) {
+                            if !a_arr.iter().any(|s| s == item || numeric_eq(s, item))
+                                && !result.iter().any(|s| s == item || numeric_eq(s, item))
+                            {
                                 result.push(item.clone());
                             }
                         }
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "(Array, Array)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "SetSymmetricDifference".to_string() }),
                 }
             }
             OperationType::Counter => {
@@ -3352,6 +3937,9 @@ impl OperationEvaluator for FullEvaluator {
                         let mut counts = std::collections::BTreeMap::new();
                         for item in &arr {
                             let key = item.to_string_lossy();
+                            if !counts.contains_key(&key) && counts.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!("Counter would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                            }
                             let count = counts.entry(key).or_insert(DataType::Int64(0));
                             if let DataType::Int64(n) = count {
                                 *n += 1;
@@ -3359,7 +3947,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Map(counts))
                     }
-                    _ => Ok(DataType::Map(std::collections::BTreeMap::new())),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "Counter".to_string() }),
                 }
             }
             OperationType::MostCommon => {
@@ -3376,32 +3964,41 @@ impl OperationEvaluator for FullEvaluator {
                             .filter(|(_, c)| *c == max_count)
                             .map(|(v, _)| v)
                             .collect();
-                        if most_common.len() == 1 {
-                            Ok(most_common.into_iter().next().unwrap_or(DataType::Null))
-                        } else {
-                            Ok(DataType::Array(most_common))
-                        }
+                        Ok(DataType::Array(most_common))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "MostCommon".to_string() }),
                 }
             }
             OperationType::OrderedMap => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
+                        if arr.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!(
+                                "ordered_map: array exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                            )));
+                        }
                         let mut m = std::collections::BTreeMap::new();
-                        for item in arr {
-                            if let DataType::Array(pair) = item {
-                                if pair.len() >= 2 {
+                        for (i, item) in arr.iter().enumerate() {
+                            match item {
+                                DataType::Array(pair) if pair.len() >= 2 => {
                                     if let DataType::String(k) = &pair[0] {
                                         m.insert(k.clone(), pair[1].clone());
+                                    } else {
+                                        return Err(EvalError::TypeError { expected: "String key".to_string(), actual: pair[0].type_name().to_string(), context: format!("OrderedMap entry[{}][0]", i) });
                                     }
+                                }
+                                DataType::Array(pair) => {
+                                    return Err(EvalError::InvalidInput(format!("OrderedMap entry[{}] has {} elements, expected at least 2", i, pair.len())));
+                                }
+                                _ => {
+                                    return Err(EvalError::TypeError { expected: "Array pair".to_string(), actual: item.type_name().to_string(), context: format!("OrderedMap entry[{}]", i) });
                                 }
                             }
                         }
                         Ok(DataType::Map(m))
                     }
-                    _ => Ok(DataType::Map(std::collections::BTreeMap::new())),
+                    _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: arr_val.type_name().to_string(), context: "OrderedMap".to_string() }),
                 }
             }
 
@@ -3413,15 +4010,15 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
-                        let nums: Vec<f64> = arr.iter().filter_map(|item| {
+                        if arr.is_empty() { return Ok(DataType::Null); }
+                        let mut nums: Vec<f64> = Vec::with_capacity(arr.len());
+                        for item in &arr {
                             match promote_numeric(item) {
-                                Some(Ok(i)) => Some(i as f64),
-                                Some(Err(f)) => Some(f),
-                                None => None,
+                                Some(Ok(i)) => nums.push(i as f64),
+                                Some(Err(f)) => nums.push(f),
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: format!("{:?}", op) }),
                             }
-                        }).collect();
-
-                        if nums.is_empty() { return Ok(DataType::Null); }
+                        }
 
                         match op {
                             OperationType::StatsSum => {
@@ -3447,11 +4044,13 @@ impl OperationEvaluator for FullEvaluator {
                                     *counts.entry(OrderedFloat(*n)).or_insert(0) += 1;
                                 }
                                 let max_count = counts.values().max().copied().unwrap_or(0);
-                                let mode = counts.into_iter()
+                                match counts.into_iter()
                                     .find(|(_, c)| *c == max_count)
                                     .map(|(of, _)| of.into_inner())
-                                    .unwrap_or(f64::NAN);
-                                Ok(DataType::Float64(mode))
+                                {
+                                    Some(mode) => Ok(DataType::Float64(mode)),
+                                    None => Ok(DataType::Null),
+                                }
                             }
                             OperationType::StatsVariance => {
                                 let mean = nums.iter().sum::<f64>() / nums.len() as f64;
@@ -3463,56 +4062,88 @@ impl OperationEvaluator for FullEvaluator {
                                 let variance = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
                                 Ok(DataType::Float64(variance.sqrt()))
                             }
-                            _ => unreachable!(),
+                            _ => Err(EvalError::InvalidInput(format!("unsupported stats op: {:?}", op))),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: format!("{:?}", op) }),
                 }
             }
             OperationType::StatsPercentile => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
-                let pct = inputs.get("percentile").and_then(|v| v.to_f64()).unwrap_or(50.0);
+                let pct = match inputs.get("percentile") {
+                    Some(v) => match v.to_f64() {
+                        Some(f) if !f.is_nan() => {
+                            if !(0.0..=100.0).contains(&f) {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "StatsPercentile: percentile must be 0-100, got {}", f
+                                )));
+                            }
+                            f
+                        }
+                        Some(_) => return Err(EvalError::TypeError { expected: "valid percentile".into(), actual: "NaN".into(), context: "StatsPercentile".into() }),
+                        None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: v.type_name().to_string(), context: "StatsPercentile percentile".into() }),
+                    },
+                    None => 50.0,
+                };
                 match arr_val {
                     DataType::Array(arr) => {
-                        let mut nums: Vec<f64> = arr.iter().filter_map(|item| {
+                        if arr.is_empty() { return Ok(DataType::Null); }
+                        let mut nums: Vec<f64> = Vec::with_capacity(arr.len());
+                        for item in &arr {
                             match promote_numeric(item) {
-                                Some(Ok(i)) => Some(i as f64),
-                                Some(Err(f)) => Some(f),
-                                None => None,
+                                Some(Ok(i)) => nums.push(i as f64),
+                                Some(Err(f)) => nums.push(f),
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: "StatsPercentile".to_string() }),
                             }
-                        }).collect();
-                        if nums.is_empty() { return Ok(DataType::Null); }
+                        }
                         nums.sort_by(|a, b| a.total_cmp(b));
-                        let k = (pct / 100.0 * (nums.len() - 1) as f64).clamp(0.0, (nums.len() - 1) as f64);
-                        let lower = k.floor() as usize;
-                        let upper = k.ceil() as usize;
+                        let max_idx = nums.len() - 1;
+                        let k = (pct / 100.0 * max_idx as f64).clamp(0.0, max_idx as f64);
+                        let lower = (k.floor() as usize).min(max_idx);
+                        let upper = (k.ceil() as usize).min(max_idx);
                         let frac = k - lower as f64;
                         Ok(DataType::Float64(nums[lower] * (1.0 - frac) + nums[upper] * frac))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "StatsPercentile".to_string() }),
                 }
             }
             OperationType::StatsQuantile => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
-                let q = inputs.get("quantile").and_then(|v| v.to_f64()).unwrap_or(0.5);
+                let q = match inputs.get("quantile") {
+                    Some(v) => match v.to_f64() {
+                        Some(f) if !f.is_nan() => {
+                            if !(0.0..=1.0).contains(&f) {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "StatsQuantile: quantile must be 0.0-1.0, got {}", f
+                                )));
+                            }
+                            f
+                        }
+                        Some(_) => return Err(EvalError::TypeError { expected: "valid quantile".into(), actual: "NaN".into(), context: "StatsQuantile".into() }),
+                        None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: v.type_name().to_string(), context: "StatsQuantile quantile".into() }),
+                    },
+                    None => 0.5,
+                };
                 match arr_val {
                     DataType::Array(arr) => {
-                        let mut nums: Vec<f64> = arr.iter().filter_map(|item| {
+                        if arr.is_empty() { return Ok(DataType::Null); }
+                        let mut nums: Vec<f64> = Vec::with_capacity(arr.len());
+                        for item in &arr {
                             match promote_numeric(item) {
-                                Some(Ok(i)) => Some(i as f64),
-                                Some(Err(f)) => Some(f),
-                                None => None,
+                                Some(Ok(i)) => nums.push(i as f64),
+                                Some(Err(f)) => nums.push(f),
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: "StatsQuantile".to_string() }),
                             }
-                        }).collect();
-                        if nums.is_empty() { return Ok(DataType::Null); }
+                        }
                         nums.sort_by(|a, b| a.total_cmp(b));
-                        let k = (q * (nums.len() - 1) as f64).clamp(0.0, (nums.len() - 1) as f64);
-                        let lower = k.floor() as usize;
-                        let upper = k.ceil() as usize;
+                        let max_idx = nums.len() - 1;
+                        let k = (q * max_idx as f64).clamp(0.0, max_idx as f64);
+                        let lower = (k.floor() as usize).min(max_idx);
+                        let upper = (k.ceil() as usize).min(max_idx);
                         let frac = k - lower as f64;
                         Ok(DataType::Float64(nums[lower] * (1.0 - frac) + nums[upper] * frac))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "StatsQuantile".to_string() }),
                 }
             }
             OperationType::StatsMinBy | OperationType::StatsMaxBy => {
@@ -3530,6 +4161,7 @@ impl OperationEvaluator for FullEvaluator {
                                         Some(Err(f)) => f,
                                         None => continue,
                                     };
+                                    if fv.is_nan() { continue; }
                                     let is_better = match (best_val, op) {
                                         (None, _) => true,
                                         (Some(cur), OperationType::StatsMinBy) => fv < cur,
@@ -3544,14 +4176,28 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(best.cloned().unwrap_or(DataType::Null))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(Array, String)".to_string(), actual: format!("({}, {})", arr_val.type_name(), key_name.type_name()), context: format!("{:?}", op) }),
                 }
             }
             OperationType::StatsCovariance | OperationType::StatsCorrelation => {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
-                        let a_nums: Vec<f64> = a_arr.iter().filter_map(|v| v.to_f64()).collect();
-                        let b_nums: Vec<f64> = b_arr.iter().filter_map(|v| v.to_f64()).collect();
+                        let mut a_nums: Vec<f64> = Vec::with_capacity(a_arr.len());
+                        for item in a_arr.iter() {
+                            match promote_numeric(item) {
+                                Some(Ok(i)) => a_nums.push(i as f64),
+                                Some(Err(f)) => a_nums.push(f),
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: format!("{:?}", op) }),
+                            }
+                        }
+                        let mut b_nums: Vec<f64> = Vec::with_capacity(b_arr.len());
+                        for item in b_arr.iter() {
+                            match promote_numeric(item) {
+                                Some(Ok(i)) => b_nums.push(i as f64),
+                                Some(Err(f)) => b_nums.push(f),
+                                None => return Err(EvalError::TypeError { expected: "numeric".to_string(), actual: item.type_name().to_string(), context: format!("{:?}", op) }),
+                            }
+                        }
                         let n = a_nums.len().min(b_nums.len());
                         if n == 0 { return Ok(DataType::Null); }
 
@@ -3565,13 +4211,13 @@ impl OperationEvaluator for FullEvaluator {
                             let a_std = ((0..n).map(|i| (a_nums[i] - a_mean).powi(2)).sum::<f64>() / n as f64).sqrt();
                             let b_std = ((0..n).map(|i| (b_nums[i] - b_mean).powi(2)).sum::<f64>() / n as f64).sqrt();
                             if a_std == 0.0 || b_std == 0.0 {
-                                Ok(DataType::Float64(0.0))
+                                Ok(DataType::Float64(f64::NAN))
                             } else {
                                 Ok(DataType::Float64(cov / (a_std * b_std)))
                             }
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(Array, Array)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: format!("{:?}", op) }),
                 }
             }
 
@@ -3585,8 +4231,7 @@ impl OperationEvaluator for FullEvaluator {
             | OperationType::ArraySome | OperationType::ArrayTakeWhile | OperationType::ArraySkipWhile
             | OperationType::ArrayGroupBy | OperationType::ArraySortBy | OperationType::ArrayPartition
             | OperationType::ArrayScan | OperationType::MapMapValues | OperationType::MapFilterEntries => {
-                let arr_val = inputs.get("array").or(inputs.get("map")).cloned().unwrap_or(DataType::Null);
-                Ok(arr_val)
+                Err(EvalError::InvalidInput(format!("{:?} requires lambda callback (interpreter context)", op)))
             }
 
             // ================================================================
@@ -3596,72 +4241,106 @@ impl OperationEvaluator for FullEvaluator {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
                         let len = a_arr.len().min(b_arr.len());
+                        if len > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!(
+                                "array_zip would produce {} elements (max {})", len, MAX_ARRAY_ELEMENTS
+                            )));
+                        }
                         let result: Vec<DataType> = (0..len)
                             .map(|i| DataType::Array(vec![a_arr[i].clone(), b_arr[i].clone()]))
                             .collect();
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: a.type_name().to_string(), context: "ArrayZip".to_string() }),
                 }
             }
             OperationType::ArrayEnumerate => {
                 match &array {
                     DataType::Array(arr) => {
+                        if arr.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!(
+                                "array_enumerate: input has {} elements (max {})", arr.len(), MAX_ARRAY_ELEMENTS
+                            )));
+                        }
                         let result: Vec<DataType> = arr.iter().enumerate()
                             .map(|(i, v)| DataType::Array(vec![DataType::Int64(i as i64), v.clone()]))
                             .collect();
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayEnumerate".to_string() }),
                 }
             }
             OperationType::ArrayTake => {
                 let count = inputs.get("input_1").or(inputs.get("count")).cloned().unwrap_or(DataType::Int64(0));
                 match &array {
                     DataType::Array(arr) => {
-                        let n = count.to_i64().unwrap_or(0).max(0) as usize;
+                        let n = match count.to_i64() {
+                            Some(n) => n.max(0) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: count.type_name().to_string(), context: "ArrayTake count".into() }),
+                        };
                         Ok(DataType::Array(arr[..n.min(arr.len())].to_vec()))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayTake".to_string() }),
                 }
             }
             OperationType::ArraySkip => {
                 let count = inputs.get("input_1").or(inputs.get("count")).cloned().unwrap_or(DataType::Int64(0));
                 match &array {
                     DataType::Array(arr) => {
-                        let n = count.to_i64().unwrap_or(0).max(0) as usize;
+                        let n = match count.to_i64() {
+                            Some(n) => n.max(0) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: count.type_name().to_string(), context: "ArraySkip count".into() }),
+                        };
                         Ok(DataType::Array(arr[n.min(arr.len())..].to_vec()))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArraySkip".to_string() }),
                 }
             }
             OperationType::ArrayChunk => {
                 let size = inputs.get("input_1").or(inputs.get("size")).cloned().unwrap_or(DataType::Int64(1));
                 match &array {
                     DataType::Array(arr) => {
-                        let n = size.to_i64().unwrap_or(1).max(1) as usize;
+                        let n = match size.to_i64() {
+                            Some(n) => n.max(1) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: size.type_name().to_string(), context: "ArrayChunk size".into() }),
+                        };
+                        let output_len = arr.len().div_ceil(n);
+                        if output_len > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!(
+                                "array_chunk would produce {} elements (max {})", output_len, MAX_ARRAY_ELEMENTS
+                            )));
+                        }
                         let result: Vec<DataType> = arr.chunks(n)
                             .map(|chunk| DataType::Array(chunk.to_vec()))
                             .collect();
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayChunk".to_string() }),
                 }
             }
             OperationType::ArrayWindow => {
                 let size = inputs.get("input_1").or(inputs.get("size")).cloned().unwrap_or(DataType::Int64(1));
                 match &array {
                     DataType::Array(arr) => {
-                        let n = size.to_i64().unwrap_or(1).max(1) as usize;
+                        let n = match size.to_i64() {
+                            Some(n) => n.max(1) as usize,
+                            None => return Err(EvalError::TypeError { expected: "numeric".into(), actual: size.type_name().to_string(), context: "ArrayWindow size".into() }),
+                        };
                         if n > arr.len() {
                             return Ok(DataType::Array(vec![]));
+                        }
+                        let output_len = arr.len() - n + 1;
+                        if output_len > MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!(
+                                "array_window would produce {} elements (max {})", output_len, MAX_ARRAY_ELEMENTS
+                            )));
                         }
                         let result: Vec<DataType> = arr.windows(n)
                             .map(|window| DataType::Array(window.to_vec()))
                             .collect();
                         Ok(DataType::Array(result))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "ArrayWindow".to_string() }),
                 }
             }
 
@@ -3676,7 +4355,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::FunctionDef | OperationType::FunctionCall
             | OperationType::AsyncSpawn | OperationType::AsyncAwait
             | OperationType::LoopGroup => {
-                Ok(DataType::Null)
+                Err(EvalError::InvalidInput(format!("{:?} is an interpreter-level construct", op)))
             }
 
             // ================================================================
@@ -3685,25 +4364,38 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextIndent => {
                 match &input {
                     DataType::String(s) => {
-                        let indent = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(4).max(0) as usize;
+                        let indent = require_i64_or_default(inputs.get("input_1"), 4, "TextIndent width")?.clamp(0, 1000) as usize;
                         let pad = " ".repeat(indent);
-                        Ok(DataType::String(textwrap::indent(s, &pad).trim_end_matches('\n').to_string()))
+                        let result = textwrap::indent(s, &pad).trim_end_matches('\n').to_string();
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("text_indent: output would exceed {} byte limit", MAX_STRING_OUTPUT)));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "TextIndent".to_string() }),
                 }
             }
             OperationType::TextDedent => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::String(textwrap::dedent(s)))
+                        let result = textwrap::dedent(s);
+                        if result.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "text_dedent: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::String(result))
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "TextDedent".to_string() }),
                 }
             }
             OperationType::TextPadLeft => {
                 match &input {
                     DataType::String(s) => {
-                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(0).max(0) as usize;
+                        let width = require_i64_or_default(inputs.get("input_1"), 0, "TextPadLeft width")?.max(0) as usize;
+                        if width > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("TextPadLeft width {} exceeds {} byte limit", width, MAX_STRING_OUTPUT)));
+                        }
                         let char_count = s.chars().count();
                         if char_count >= width {
                             Ok(DataType::String(s.clone()))
@@ -3712,13 +4404,16 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::String(format!("{}{}", padding, s)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "TextPadLeft".to_string() }),
                 }
             }
             OperationType::TextPadRight => {
                 match &input {
                     DataType::String(s) => {
-                        let width = inputs.get("input_1").and_then(|v| v.to_i64()).unwrap_or(0).max(0) as usize;
+                        let width = require_i64_or_default(inputs.get("input_1"), 0, "TextPadRight width")?.max(0) as usize;
+                        if width > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("TextPadRight width {} exceeds {} byte limit", width, MAX_STRING_OUTPUT)));
+                        }
                         let char_count = s.chars().count();
                         if char_count >= width {
                             Ok(DataType::String(s.clone()))
@@ -3727,7 +4422,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::String(format!("{}{}", s, padding)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "TextPadRight".to_string() }),
                 }
             }
 
@@ -3751,8 +4446,8 @@ impl OperationEvaluator for FullEvaluator {
                     .as_millis();
                 let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
                 match timestamp.to_i64() {
-                    Some(ts) => Ok(DataType::Int64(now - ts)),
-                    None => Ok(DataType::Null),
+                    Some(ts) => Ok(DataType::Int64(now.saturating_sub(ts))),
+                    None => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: timestamp.type_name().to_string(), context: "Elapsed".to_string() }),
                 }
             }
             OperationType::TimeSleep => {
@@ -3775,7 +4470,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Int64(ts.saturating_sub(dur)))
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: format!("({}, {})", timestamp.type_name(), duration.type_name()), context: format!("{:?}", op) }),
                 }
             }
             OperationType::TimeDiff => {
@@ -3785,7 +4480,7 @@ impl OperationEvaluator for FullEvaluator {
                             .and_then(|d| d.checked_abs())
                             .unwrap_or(i64::MAX)
                     )),
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "numeric".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "TimeDiff".to_string() }),
                 }
             }
             OperationType::StartOf | OperationType::EndOf => {
@@ -3800,7 +4495,7 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(DataType::Int64(day_start + day_ms - 1))
                         }
                     }
-                    None => Ok(DataType::Null),
+                    None => Err(EvalError::TypeError { expected: "numeric (timestamp)".to_string(), actual: input.type_name().to_string(), context: "StartOf/EndOf".to_string() }),
                 }
             }
 
@@ -3808,16 +4503,14 @@ impl OperationEvaluator for FullEvaluator {
             // Random remaining
             // ================================================================
             OperationType::RandomBytes => {
-                let count = inputs.get("input_1").or(inputs.get("count"))
-                    .and_then(|v| v.to_i64()).unwrap_or(16).max(0) as usize;
+                let count = require_i64_or_default(inputs.get("input_1").or(inputs.get("count")), 16, "RandomBytes count")?.max(0) as usize;
                 let count = count.min(1_000_000);
                 let mut bytes = vec![0u8; count];
                 rand::rng().fill(&mut bytes[..]);
                 Ok(DataType::Bytes(bytes))
             }
             OperationType::RandomString => {
-                let length = inputs.get("input_1").or(inputs.get("length"))
-                    .and_then(|v| v.to_i64()).unwrap_or(16).max(0) as usize;
+                let length = require_i64_or_default(inputs.get("input_1").or(inputs.get("length")), 16, "RandomString length")?.max(0) as usize;
                 let length = length.min(MAX_STRING_OUTPUT);
                 let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
                 let mut rng = rand::rng();
@@ -3829,8 +4522,7 @@ impl OperationEvaluator for FullEvaluator {
             }
             OperationType::RandomSample => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
-                let count = inputs.get("input_1").or(inputs.get("count"))
-                    .and_then(|v| v.to_i64()).unwrap_or(1).max(0) as usize;
+                let count = require_i64_or_default(inputs.get("input_1").or(inputs.get("count")), 1, "RandomSample count")?.max(0) as usize;
                 match arr_val {
                     DataType::Array(mut arr) => {
                         use rand::seq::SliceRandom;
@@ -3838,7 +4530,7 @@ impl OperationEvaluator for FullEvaluator {
                         let (shuffled, _) = arr.partial_shuffle(&mut rand::rng(), count);
                         Ok(DataType::Array(shuffled.to_vec()))
                     }
-                    _ => Ok(DataType::Array(vec![])),
+                    _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "RandomSample".to_string() }),
                 }
             }
 
@@ -3879,7 +4571,7 @@ impl OperationEvaluator for FullEvaluator {
                             }
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UrlParse".to_string() }),
                 }
             }
             OperationType::UrlJoin => {
@@ -3903,7 +4595,7 @@ impl OperationEvaluator for FullEvaluator {
                             }
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", base_val.type_name(), path_val.type_name()), context: "UrlJoin".to_string() }),
                 }
             }
 
@@ -3912,18 +4604,18 @@ impl OperationEvaluator for FullEvaluator {
             // ================================================================
             OperationType::HashSha512 => {
                 use sha2::{Sha512, Digest};
-                let data = data_to_bytes(&input);
-                if data.is_empty() && matches!(input, DataType::Null) {
-                    return Ok(DataType::Null);
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashSha512".to_string() });
                 }
+                let data = data_to_bytes(&input);
                 let hash = Sha512::digest(&data);
                 Ok(DataType::String(hex::encode(hash)))
             }
             OperationType::HashCrc32 => {
-                let data = data_to_bytes(&input);
-                if data.is_empty() && matches!(input, DataType::Null) {
-                    return Ok(DataType::Null);
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashCrc32".to_string() });
                 }
+                let data = data_to_bytes(&input);
                 let crc = crc32fast::hash(&data);
                 Ok(DataType::Int64(crc as i64))
             }
@@ -3935,12 +4627,12 @@ impl OperationEvaluator for FullEvaluator {
                 let data = match &input {
                     DataType::String(s) => s.as_bytes().to_vec(),
                     DataType::Bytes(b) => b.clone(),
-                    _ => return Ok(DataType::Null),
+                    _ => return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: input.type_name().to_string(), context: "HmacSha256 input".to_string() }),
                 };
                 let key = match &key_val {
                     DataType::String(s) => s.as_bytes().to_vec(),
                     DataType::Bytes(b) => b.clone(),
-                    _ => return Ok(DataType::Null),
+                    _ => return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: key_val.type_name().to_string(), context: "HmacSha256 key".to_string() }),
                 };
                 let mut mac = HmacSha256::new_from_slice(&key)
                     .map_err(|e| EvalError::InvalidInput(format!("hmac_sha256: {}", e)))?;
@@ -3972,8 +4664,13 @@ impl OperationEvaluator for FullEvaluator {
                 let data = match &input {
                     DataType::Bytes(b) => b.clone(),
                     DataType::String(s) => s.as_bytes().to_vec(),
-                    _ => return Ok(DataType::Null),
+                    _ => return Err(EvalError::TypeError { expected: "string or bytes".to_string(), actual: input.type_name().to_string(), context: "Base32Encode".to_string() }),
                 };
+                if data.len() * 8 / 5 + 8 > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "Base32Encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                    )));
+                }
                 Ok(DataType::String(data_encoding::BASE32.encode(&data)))
             }
             OperationType::Base32Decode => {
@@ -3981,10 +4678,10 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         match data_encoding::BASE32.decode(s.as_bytes()) {
                             Ok(decoded) => Ok(DataType::Bytes(decoded)),
-                            Err(_) => Ok(DataType::Null),
+                            Err(e) => Err(EvalError::InvalidInput(format!("Base32Decode: invalid base32 input: {}", e))),
                         }
                     }
-                    _ => Ok(DataType::Null),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Base32Decode".to_string() }),
                 }
             }
 
@@ -3992,10 +4689,10 @@ impl OperationEvaluator for FullEvaluator {
             // HashBlake3
             // ================================================================
             OperationType::HashBlake3 => {
-                let data = data_to_bytes(&input);
-                if data.is_empty() && matches!(input, DataType::Null) {
-                    return Ok(DataType::Null);
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashBlake3".to_string() });
                 }
+                let data = data_to_bytes(&input);
                 let hash = blake3::hash(&data);
                 Ok(DataType::String(hash.to_hex().to_string()))
             }
@@ -4011,11 +4708,15 @@ impl OperationEvaluator for FullEvaluator {
                             Err(e) => Err(EvalError::InvalidInput(format!("toml_parse: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("toml_parse: input must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "toml_parse".to_string() }),
                 }
             }
             OperationType::TomlStringify => {
-                fn datatype_to_toml(val: &DataType) -> toml::Value {
+                fn datatype_to_toml(val: &DataType, depth: usize) -> toml::Value {
+                    const MAX_DEPTH: usize = 64;
+                    if depth > MAX_DEPTH {
+                        return toml::Value::String("[max depth]".to_string());
+                    }
                     match val {
                         DataType::Null => toml::Value::String("null".to_string()),
                         DataType::Bool(b) => toml::Value::Boolean(*b),
@@ -4033,21 +4734,28 @@ impl OperationEvaluator for FullEvaluator {
                         DataType::Float64(f) => toml::Value::Float(*f),
                         DataType::String(s) => toml::Value::String(s.clone()),
                         DataType::Array(arr) => {
-                            toml::Value::Array(arr.iter().map(datatype_to_toml).collect())
+                            toml::Value::Array(arr.iter().map(|v| datatype_to_toml(v, depth + 1)).collect())
                         }
                         DataType::Map(m) => {
                             let table: toml::map::Map<String, toml::Value> = m.iter()
                                 .filter(|(k, _)| !k.starts_with("__"))
-                                .map(|(k, v)| (k.clone(), datatype_to_toml(v)))
+                                .map(|(k, v)| (k.clone(), datatype_to_toml(v, depth + 1)))
                                 .collect();
                             toml::Value::Table(table)
                         }
                         _ => toml::Value::String(val.to_string_lossy()),
                     }
                 }
-                let toml_val = datatype_to_toml(&input);
+                let toml_val = datatype_to_toml(&input, 0);
                 match toml::to_string_pretty(&toml_val) {
-                    Ok(s) => Ok(DataType::String(s)),
+                    Ok(s) => {
+                        if s.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "toml_stringify: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::String(s))
+                    }
                     Err(e) => Err(EvalError::InvalidInput(format!("toml_stringify: {}", e))),
                 }
             }
@@ -4068,6 +4776,11 @@ impl OperationEvaluator for FullEvaluator {
                             .collect();
                         let mut rows = Vec::new();
                         for result in reader.records() {
+                            if rows.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "csv_parse: row count exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                                )));
+                            }
                             let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?;
                             let mut row = std::collections::BTreeMap::new();
                             for (i, field) in record.iter().enumerate() {
@@ -4078,7 +4791,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Array(rows))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_parse: expected string input".into())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "csv_parse".to_string() }),
                 }
             }
             OperationType::CsvStringify => {
@@ -4086,10 +4799,14 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Array(rows) if !rows.is_empty() => {
                         let mut wtr = csv::Writer::from_writer(vec![]);
                         if let DataType::Map(first) = &rows[0] {
-                            let headers: Vec<&str> = first.keys().map(|k| k.as_str()).collect();
+                            let headers: Vec<&str> = first.keys()
+                                .filter(|k| !k.starts_with("__"))
+                                .map(|k| k.as_str()).collect();
                             wtr.write_record(&headers)
                                 .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
-                            let vals: Vec<String> = first.values().map(|v| v.to_string()).collect();
+                            let vals: Vec<String> = first.iter()
+                                .filter(|(k, _)| !k.starts_with("__"))
+                                .map(|(_, v)| v.to_string()).collect();
                             wtr.write_record(&vals)
                                 .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
                             for row in &rows[1..] {
@@ -4101,13 +4818,24 @@ impl OperationEvaluator for FullEvaluator {
                                         .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
                                 }
                             }
+                        } else {
+                            return Err(EvalError::TypeError {
+                                expected: "map".to_string(),
+                                actual: rows[0].type_name().to_string(),
+                                context: "csv_stringify: rows must be maps".to_string(),
+                            });
                         }
                         let bytes = wtr.into_inner()
                             .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                        if bytes.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "csv_stringify: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
                         Ok(DataType::String(String::from_utf8_lossy(&bytes).to_string()))
                     }
                     DataType::Array(_) => Ok(DataType::String(String::new())),
-                    _ => Err(EvalError::InvalidInput("csv_stringify: expected array input".into())),
+                    _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: input.type_name().to_string(), context: "csv_stringify".to_string() }),
                 }
             }
             OperationType::CsvHeaders => {
@@ -4123,7 +4851,7 @@ impl OperationEvaluator for FullEvaluator {
                             .collect();
                         Ok(DataType::Array(arr))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_headers: expected string input".into())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "csv_headers".to_string() }),
                 }
             }
             OperationType::CsvParseRows => {
@@ -4134,6 +4862,11 @@ impl OperationEvaluator for FullEvaluator {
                             .from_reader(s.as_bytes());
                         let mut rows = Vec::new();
                         for result in reader.records() {
+                            if rows.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "csv_parse_rows: row count exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                                )));
+                            }
                             let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse_rows: {}", e)))?;
                             let row: Vec<DataType> = record.iter()
                                 .map(|f| DataType::String(f.to_string()))
@@ -4142,47 +4875,58 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         Ok(DataType::Array(rows))
                     }
-                    _ => Err(EvalError::InvalidInput("csv_parse_rows: expected string input".into())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "csv_parse_rows".to_string() }),
                 }
             }
 
             // ================================================================
-            // YAML operations (serde_yaml)
+            // YAML operations (serde_yaml_ng)
             // ================================================================
             OperationType::YamlParse => {
                 match &input {
                     DataType::String(s) => {
-                        let yaml_val: serde_yaml::Value = serde_yaml::from_str(s)
+                        let yaml_val: serde_yaml_ng::Value = serde_yaml_ng::from_str(s)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_parse: {}", e)))?;
                         Ok(yaml_value_to_datatype(&yaml_val))
                     }
-                    _ => Err(EvalError::InvalidInput("yaml_parse: input must be a string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "yaml_parse".to_string() }),
                 }
             }
             OperationType::YamlStringify => {
                 let yaml_val = datatype_to_yaml_value(&input);
-                let s = serde_yaml::to_string(&yaml_val)
+                let s = serde_yaml_ng::to_string(&yaml_val)
                     .map_err(|e| EvalError::InvalidInput(format!("yaml_stringify: {}", e)))?;
+                if s.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "yaml_stringify: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                    )));
+                }
                 Ok(DataType::String(s))
             }
             OperationType::YamlValidate => {
                 match &input {
                     DataType::String(s) => {
-                        let valid = serde_yaml::from_str::<serde_yaml::Value>(s).is_ok();
+                        let valid = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(s).is_ok();
                         Ok(DataType::Bool(valid))
                     }
-                    _ => Ok(DataType::Bool(false)),
+                    _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "YamlValidate".to_string() }),
                 }
             }
             OperationType::YamlToJson => {
                 match &input {
                     DataType::String(s) => {
-                        let yaml_val: serde_yaml::Value = serde_yaml::from_str(s)
+                        let yaml_val: serde_yaml_ng::Value = serde_yaml_ng::from_str(s)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_to_json: {}", e)))?;
                         let data = yaml_value_to_datatype(&yaml_val);
-                        Ok(DataType::String(datatype_to_json_string(&data)))
+                        let json_str = datatype_to_json_string(&data)?;
+                        if json_str.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "yaml_to_json: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::String(json_str))
                     }
-                    _ => Err(EvalError::InvalidInput("yaml_to_json: input must be a YAML string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "yaml_to_json".to_string() }),
                 }
             }
             OperationType::YamlFromJson => {
@@ -4192,34 +4936,49 @@ impl OperationEvaluator for FullEvaluator {
                             Ok(json_val) => {
                                 let data = json_value_to_datatype(&json_val);
                                 let yaml_val = datatype_to_yaml_value(&data);
-                                let yaml_str = serde_yaml::to_string(&yaml_val)
+                                let yaml_str = serde_yaml_ng::to_string(&yaml_val)
                                     .map_err(|e| EvalError::InvalidInput(format!("yaml_from_json: {}", e)))?;
+                                if yaml_str.len() > MAX_STRING_OUTPUT {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "yaml_from_json: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                                    )));
+                                }
                                 Ok(DataType::String(yaml_str))
                             }
                             Err(e) => Err(EvalError::InvalidInput(format!("yaml_from_json: invalid JSON: {}", e))),
                         }
                     }
-                    _ => Err(EvalError::InvalidInput("yaml_from_json: input must be a JSON string".to_string())),
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "yaml_from_json".to_string() }),
                 }
             }
             OperationType::YamlMerge => {
                 match (&a, &b) {
                     (DataType::Map(m1), DataType::Map(m2)) => {
                         let mut merged = m1.clone();
-                        for (k, v) in m2 { merged.insert(k.clone(), v.clone()); }
+                        for (k, v) in m2 {
+                            if !merged.contains_key(k.as_str()) && merged.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!("YamlMerge would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                            }
+                            merged.insert(k.clone(), v.clone());
+                        }
                         Ok(DataType::Map(merged))
                     }
                     (DataType::String(s1), DataType::String(s2)) => {
-                        let v1: serde_yaml::Value = serde_yaml::from_str(s1)
+                        let v1: serde_yaml_ng::Value = serde_yaml_ng::from_str(s1)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_merge: {}", e)))?;
-                        let v2: serde_yaml::Value = serde_yaml::from_str(s2)
+                        let v2: serde_yaml_ng::Value = serde_yaml_ng::from_str(s2)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_merge: {}", e)))?;
                         let d1 = yaml_value_to_datatype(&v1);
                         let d2 = yaml_value_to_datatype(&v2);
                         match (d1, d2) {
                             (DataType::Map(m1), DataType::Map(m2)) => {
                                 let mut merged = m1;
-                                for (k, v) in m2 { merged.insert(k, v); }
+                                for (k, v) in m2 {
+                                    if !merged.contains_key(k.as_str()) && merged.len() >= MAX_ARRAY_ELEMENTS {
+                                        return Err(EvalError::InvalidInput(format!("YamlMerge would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                                    }
+                                    merged.insert(k, v);
+                                }
                                 Ok(DataType::Map(merged))
                             }
                             _ => Err(EvalError::InvalidInput("yaml_merge: both inputs must be YAML maps".to_string())),
@@ -4235,7 +4994,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpGet => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let resp = http_agent().get(url)
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_get: {}", e)))?;
@@ -4245,7 +5004,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpPost => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
                 let resp = http_agent().post(url)
                     .header("Content-Type", "application/json")
@@ -4257,7 +5016,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpPut => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
                 let resp = http_agent().put(url)
                     .header("Content-Type", "application/json")
@@ -4269,7 +5028,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpDelete => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let resp = http_agent().delete(url)
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_delete: {}", e)))?;
@@ -4280,7 +5039,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpRequest => {
                 let method = get_string(inputs, "method")?;
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let headers = inputs.get("headers").and_then(|d| d.as_map()).cloned();
                 let payload = inputs.get("body").map(|d| d.to_string());
                 let method_upper = method.to_uppercase();
@@ -4327,7 +5086,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpHead => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let resp = http_agent().head(url)
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_head: {}", e)))?;
@@ -4352,7 +5111,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpOptions => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let agent = http_agent();
                 let resp = agent
                     .options(url)
@@ -4384,7 +5143,7 @@ impl OperationEvaluator for FullEvaluator {
 
             OperationType::HttpPatch => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
                 let resp = http_agent().patch(url)
                     .header("Content-Type", "application/json")
@@ -4398,7 +5157,16 @@ impl OperationEvaluator for FullEvaluator {
             // Compression operations
             // ================================================================
             OperationType::CompressZstd => {
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "CompressZstd".to_string() });
+                }
                 let bytes = data_to_bytes(&input);
+                const MAX_COMPRESS_INPUT: usize = 64 * 1024 * 1024;
+                if bytes.len() > MAX_COMPRESS_INPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "compress_zstd: input exceeds {} byte limit", MAX_COMPRESS_INPUT
+                    )));
+                }
                 let compressed = zstd::encode_all(bytes.as_slice(), 3)
                     .map_err(|e| EvalError::InvalidInput(format!("compress_zstd: {}", e)))?;
                 Ok(DataType::Bytes(compressed))
@@ -4406,7 +5174,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::DecompressZstd => {
                 let bytes = match &input {
                     DataType::Bytes(b) => b.as_slice(),
-                    _ => return Err(EvalError::InvalidInput("decompress_zstd: expected bytes input".into())),
+                    _ => return Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "decompress_zstd".to_string() }),
                 };
                 const MAX_DECOMPRESS: usize = 64 * 1024 * 1024;
                 let mut decoder = zstd::Decoder::new(bytes)
@@ -4427,14 +5195,23 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Bytes(output))
             }
             OperationType::CompressLz4 => {
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "CompressLz4".to_string() });
+                }
                 let bytes = data_to_bytes(&input);
+                const MAX_COMPRESS_INPUT: usize = 64 * 1024 * 1024;
+                if bytes.len() > MAX_COMPRESS_INPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "compress_lz4: input exceeds {} byte limit", MAX_COMPRESS_INPUT
+                    )));
+                }
                 let compressed = lz4_flex::compress_prepend_size(&bytes);
                 Ok(DataType::Bytes(compressed))
             }
             OperationType::DecompressLz4 => {
                 let bytes = match &input {
                     DataType::Bytes(b) => b.as_slice(),
-                    _ => return Err(EvalError::InvalidInput("decompress_lz4: expected bytes input".into())),
+                    _ => return Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "decompress_lz4".to_string() }),
                 };
                 const MAX_DECOMPRESS: usize = 64 * 1024 * 1024;
                 if bytes.len() >= 4 {
@@ -4567,25 +5344,31 @@ impl OperationEvaluator for FullEvaluator {
                 let _ = stream.set_read_timeout(timeout);
                 let _ = stream.set_write_timeout(timeout);
                 let id = conn_id("tcp");
-                conn_store(&id, Mutex::new(stream));
+                conn_store(&id, Mutex::new(stream))?;
                 Ok(DataType::String(id))
             }
             OperationType::TcpWrite => {
                 let cid = get_string(inputs, "conn_id")?;
                 let data = inputs.get("data").cloned().unwrap_or(DataType::Null);
                 let bytes = data_to_bytes(&data);
+                const MAX_TCP_WRITE: usize = 64 * 1024 * 1024;
+                if bytes.len() > MAX_TCP_WRITE {
+                    return Err(EvalError::InvalidInput(format!(
+                        "tcp_write: data exceeds {} byte limit", MAX_TCP_WRITE
+                    )));
+                }
                 conn_with::<Mutex<std::net::TcpStream>, _>(cid, |mtx| {
                     use std::io::Write;
                     let stream = mtx
                         .get_mut()
                         .map_err(|_| EvalError::InvalidInput("tcp lock poisoned".into()))?;
-                    let written = stream
-                        .write(&bytes)
+                    stream
+                        .write_all(&bytes)
                         .map_err(|e| EvalError::InvalidInput(format!("tcp_write: {}", e)))?;
                     stream
                         .flush()
                         .map_err(|e| EvalError::InvalidInput(format!("tcp_write flush: {}", e)))?;
-                    Ok(DataType::Int64(written as i64))
+                    Ok(DataType::Int64(bytes.len() as i64))
                 })
             }
             OperationType::TcpRead => {
@@ -4626,7 +5409,7 @@ impl OperationEvaluator for FullEvaluator {
                 let listener = std::net::TcpListener::bind(&addr)
                     .map_err(|e| EvalError::InvalidInput(format!("tcp_bind: {}", e)))?;
                 let id = conn_id("tcp-listener");
-                conn_store(&id, Mutex::new(listener));
+                conn_store(&id, Mutex::new(listener))?;
                 Ok(DataType::String(id))
             }
             OperationType::TcpAccept => {
@@ -4667,8 +5450,11 @@ impl OperationEvaluator for FullEvaluator {
                         result
                     })?;
                 stream.set_nonblocking(false).ok();
+                let timeout = Some(std::time::Duration::from_secs(30));
+                let _ = stream.set_read_timeout(timeout);
+                let _ = stream.set_write_timeout(timeout);
                 let id = conn_id("tcp");
-                conn_store(&id, Mutex::new(stream));
+                conn_store(&id, Mutex::new(stream))?;
                 Ok(DataType::Map(std::collections::BTreeMap::from([
                     ("conn_id".into(), DataType::String(id)),
                     ("address".into(), DataType::String(addr.to_string())),
@@ -4690,7 +5476,7 @@ impl OperationEvaluator for FullEvaluator {
                 let socket = std::net::UdpSocket::bind(&addr)
                     .map_err(|e| EvalError::InvalidInput(format!("udp_bind: {}", e)))?;
                 let id = conn_id("udp");
-                conn_store(&id, Mutex::new(socket));
+                conn_store(&id, Mutex::new(socket))?;
                 Ok(DataType::String(id))
             }
             OperationType::UdpSendTo => {
@@ -4700,24 +5486,27 @@ impl OperationEvaluator for FullEvaluator {
                 validate_host(address)?;
                 let port = get_port(inputs, "port")?;
                 let target = format!("{}:{}", address, port);
-                // Post-DNS-resolution SSRF check
+                // Post-DNS-resolution SSRF check — resolve once, check all IPs, use resolved addr
                 use std::net::ToSocketAddrs;
-                if let Ok(mut addrs) = target.to_socket_addrs() {
-                    if let Some(resolved) = addrs.next() {
-                        if is_blocked_ip(resolved.ip()) {
-                            return Err(EvalError::InvalidInput(format!(
-                                "udp_send_to: blocked IP after DNS resolution: {}", resolved.ip()
-                            )));
-                        }
+                let resolved_addrs: Vec<_> = target.to_socket_addrs()
+                    .map_err(|e| EvalError::InvalidInput(format!("udp_send_to: DNS resolution failed: {}", e)))?
+                    .collect();
+                for resolved in &resolved_addrs {
+                    if is_blocked_ip(resolved.ip()) {
+                        return Err(EvalError::InvalidInput(format!(
+                            "udp_send_to: blocked IP after DNS resolution: {}", resolved.ip()
+                        )));
                     }
                 }
+                let sock_addr = resolved_addrs.into_iter().next()
+                    .ok_or_else(|| EvalError::InvalidInput("udp_send_to: no addresses resolved".into()))?;
                 let bytes = data_to_bytes(&data);
                 conn_with::<Mutex<std::net::UdpSocket>, _>(sid, |mtx| {
                     let socket = mtx
                         .get_mut()
                         .map_err(|_| EvalError::InvalidInput("udp lock poisoned".into()))?;
                     let sent = socket
-                        .send_to(&bytes, &target)
+                        .send_to(&bytes, sock_addr)
                         .map_err(|e| EvalError::InvalidInput(format!("udp_send_to: {}", e)))?;
                     Ok(DataType::Int64(sent as i64))
                 })
@@ -4755,20 +5544,74 @@ impl OperationEvaluator for FullEvaluator {
             // WebSocket operations
             // ================================================================
             OperationType::WsConnect => {
-                let url = get_string(inputs, "url")?;
-                validate_url(url)?;
-                let (socket, _resp) = tungstenite::connect(url)
-                    .map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?;
+                use std::net::ToSocketAddrs;
+                let url_str = get_string(inputs, "url")?;
+                validate_url(url_str)?;
+                let parsed_url = url::Url::parse(url_str)
+                    .map_err(|e| EvalError::InvalidInput(format!("ws_connect: invalid URL: {}", e)))?;
+                let host = parsed_url.host_str()
+                    .ok_or_else(|| EvalError::InvalidInput("ws_connect: URL has no host".to_string()))?;
+                let port = parsed_url.port_or_known_default()
+                    .unwrap_or(if parsed_url.scheme() == "wss" { 443 } else { 80 });
+                let addr = format!("{}:{}", host, port);
+                // Single DNS resolution + SSRF IP check (no TOCTOU)
+                let sock_addr = addr.to_socket_addrs()
+                    .map_err(|e| EvalError::InvalidInput(format!("ws_connect: DNS resolution failed: {}", e)))?
+                    .next()
+                    .ok_or_else(|| EvalError::InvalidInput("ws_connect: no addresses found".to_string()))?;
+                if is_blocked_ip(sock_addr.ip()) {
+                    return Err(EvalError::InvalidInput(format!(
+                        "ws_connect: blocked IP after DNS resolution: {}", sock_addr.ip()
+                    )));
+                }
+                let tcp_stream = std::net::TcpStream::connect_timeout(
+                    &sock_addr,
+                    std::time::Duration::from_secs(30),
+                ).map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?;
+                let timeout = std::time::Duration::from_secs(30);
+                let _ = tcp_stream.set_read_timeout(Some(timeout));
+                let _ = tcp_stream.set_write_timeout(Some(timeout));
+                let stream: tungstenite::stream::MaybeTlsStream<std::net::TcpStream> = if parsed_url.scheme() == "wss" {
+                    let connector = native_tls::TlsConnector::new()
+                        .map_err(|e| EvalError::InvalidInput(format!("ws_connect: TLS init failed: {}", e)))?;
+                    let tls_stream = connector.connect(host, tcp_stream)
+                        .map_err(|e| EvalError::InvalidInput(format!("ws_connect: TLS handshake failed: {}", e)))?;
+                    tungstenite::stream::MaybeTlsStream::NativeTls(tls_stream)
+                } else {
+                    tungstenite::stream::MaybeTlsStream::Plain(tcp_stream)
+                };
+                let (socket, _resp) = tungstenite::client(
+                    tungstenite::http::Request::builder()
+                        .uri(url_str)
+                        .body(())
+                        .map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?,
+                    stream,
+                ).map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?;
                 let id = conn_id("ws");
-                conn_store(&id, Mutex::new(socket));
+                conn_store(&id, Mutex::new(socket))?;
                 Ok(DataType::String(id))
             }
             OperationType::WsSend => {
                 let cid = get_string(inputs, "conn_id")?;
                 let message = inputs.get("message").cloned().unwrap_or(DataType::Null);
                 let msg = match &message {
-                    DataType::Bytes(b) => tungstenite::Message::Binary(b.clone().into()),
-                    other => tungstenite::Message::Text(other.to_string().into()),
+                    DataType::Bytes(b) => {
+                        if b.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "ws_send: message exceeds {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        tungstenite::Message::Binary(b.clone().into())
+                    }
+                    other => {
+                        let s = other.to_string();
+                        if s.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "ws_send: message exceeds {} byte limit", MAX_STRING_OUTPUT
+                            )));
+                        }
+                        tungstenite::Message::Text(s.into())
+                    }
                 };
                 type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
                 conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
@@ -4782,6 +5625,12 @@ impl OperationEvaluator for FullEvaluator {
                 type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
                 conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
                     let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
+                    let tcp_ref = match ws.get_ref() {
+                        tungstenite::stream::MaybeTlsStream::Plain(s) => s,
+                        tungstenite::stream::MaybeTlsStream::NativeTls(s) => s.get_ref(),
+                        _ => return Err(EvalError::InvalidInput("ws_receive: unsupported stream type".to_string())),
+                    };
+                    let _ = tcp_ref.set_read_timeout(Some(std::time::Duration::from_secs(30)));
                     let msg = ws.read().map_err(|e| EvalError::InvalidInput(format!("ws_receive: {}", e)))?;
                     match msg {
                         tungstenite::Message::Text(t) => {
@@ -4824,7 +5673,7 @@ impl OperationEvaluator for FullEvaluator {
             // ================================================================
             OperationType::SseConnect => {
                 let url = get_string(inputs, "url")?;
-                validate_url(url)?;
+                validate_url_with_dns(url)?;
                 let resp = http_agent().get(url)
                     .header("Accept", "text/event-stream")
                     .call()
@@ -4832,7 +5681,7 @@ impl OperationEvaluator for FullEvaluator {
                 let reader = resp.into_body().into_reader();
                 let buffered: Box<dyn std::io::BufRead + Send> = Box::new(std::io::BufReader::new(reader));
                 let id = conn_id("sse");
-                conn_store(&id, Mutex::new(buffered));
+                conn_store(&id, Mutex::new(buffered))?;
                 Ok(DataType::String(id))
             }
             OperationType::SseReadEvent => {
@@ -4842,6 +5691,7 @@ impl OperationEvaluator for FullEvaluator {
                     let mut event_type = String::new();
                     let mut data_lines = Vec::new();
                     let mut event_id = String::new();
+                    let mut total_data_bytes: usize = 0;
                     const MAX_SSE_LINES: usize = 10_000;
                     let mut line_count = 0usize;
                     loop {
@@ -4850,6 +5700,11 @@ impl OperationEvaluator for FullEvaluator {
                         let n = reader.read_line(&mut line)
                             .map_err(|e| EvalError::InvalidInput(format!("sse_read_event: {}", e)))?;
                         if n == 0 { return Ok(DataType::Null); }
+                        if line.len() > MAX_SSE_LINE_BYTES {
+                            return Err(EvalError::InvalidInput(format!(
+                                "sse_read_event: line exceeds {} byte limit", MAX_SSE_LINE_BYTES
+                            )));
+                        }
                         line_count += 1;
                         if line_count > MAX_SSE_LINES {
                             return Err(EvalError::InvalidInput(
@@ -4872,7 +5727,14 @@ impl OperationEvaluator for FullEvaluator {
                             continue;
                         }
                         if let Some(rest) = trimmed.strip_prefix("data:") {
-                            data_lines.push(rest.trim_start().to_string());
+                            let s = rest.trim_start().to_string();
+                            total_data_bytes = total_data_bytes.saturating_add(s.len()).saturating_add(1);
+                            if total_data_bytes > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "sse_read_event: accumulated data exceeds {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
+                            data_lines.push(s);
                         } else if let Some(rest) = trimmed.strip_prefix("event:") {
                             event_type = rest.trim_start().to_string();
                         } else if let Some(rest) = trimmed.strip_prefix("id:") {
@@ -4897,74 +5759,134 @@ impl OperationEvaluator for FullEvaluator {
                 let listener = std::net::TcpListener::bind(&addr)
                     .map_err(|e| EvalError::InvalidInput(format!("http_server_start: {}", e)))?;
                 let id = conn_id("http-server");
-                conn_store(&id, Mutex::new(listener));
+                conn_store(&id, Mutex::new(listener))?;
                 Ok(DataType::String(id))
             }
             OperationType::HttpServerReceive => {
                 let sid = get_string(inputs, "server_id")?;
                 // Accept and parse outside conn_with to avoid deadlock when storing client
-                let (stream, addr) = conn_with::<Mutex<std::net::TcpListener>, _>(sid, |mtx| {
+                let (mut stream, addr) = conn_with::<Mutex<std::net::TcpListener>, _>(sid, |mtx| {
                     let listener = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
-                    listener.accept().map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))
+                    listener.set_nonblocking(true).map_err(|e| {
+                        EvalError::InvalidInput(format!("http_server_receive: {}", e))
+                    })?;
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_millis(30000);
+                    let result = loop {
+                        match listener.accept() {
+                            Ok(r) => break Ok(r),
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                if std::time::Instant::now() >= deadline {
+                                    listener.set_nonblocking(false).ok();
+                                    break Err(EvalError::InvalidInput(
+                                        "http_server_receive: timed out".into(),
+                                    ));
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                            Err(e) => {
+                                listener.set_nonblocking(false).ok();
+                                break Err(EvalError::InvalidInput(format!(
+                                    "http_server_receive: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    };
+                    listener.set_nonblocking(false).ok();
+                    result
                 })?;
-                // Parse HTTP request from the accepted stream
-                use std::io::BufRead;
-                let mut reader = std::io::BufReader::new(&stream);
-                let mut request_line = String::new();
-                reader.read_line(&mut request_line)
-                    .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
-                if request_line.len() > 8192 {
-                    return Err(EvalError::InvalidInput(
-                        "http_server_receive: request line exceeds 8192 byte limit".to_string()
-                    ));
-                }
-                let parts: Vec<&str> = request_line.trim().splitn(3, ' ').collect();
-                let method = parts.first().unwrap_or(&"GET").to_string();
-                let path = parts.get(1).unwrap_or(&"/").to_string();
-                let mut headers = std::collections::BTreeMap::new();
-                let mut content_length: usize = 0;
-                const MAX_HEADERS: usize = 256;
-                let mut header_count = 0usize;
-                const MAX_HEADER_LINE: usize = 8192;
+                // Parse HTTP request from the accepted stream using httparse
+                use std::io::Read as _;
+                let timeout = Some(std::time::Duration::from_secs(30));
+                let _ = stream.set_read_timeout(timeout);
+                let _ = stream.set_write_timeout(timeout);
+                // Read headers into buffer (max 64KB for headers)
+                const MAX_HEADER_BUF: usize = 64 * 1024;
+                let mut buf = Vec::with_capacity(4096);
+                let mut tmp = [0u8; 4096];
+                let header_end;
                 loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line)
+                    let n = stream.read(&mut tmp)
                         .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
-                    if line.len() > MAX_HEADER_LINE {
-                        return Err(EvalError::InvalidInput(format!(
-                            "http_server_receive: header line exceeds {} byte limit", MAX_HEADER_LINE
-                        )));
-                    }
-                    let trimmed = line.trim().to_string();
-                    if trimmed.is_empty() { break; }
-                    header_count += 1;
-                    if header_count > MAX_HEADERS {
+                    if n == 0 {
                         return Err(EvalError::InvalidInput(
-                            "http_server_receive: too many headers (max 256)".to_string()
+                            "http_server_receive: connection closed before headers complete".to_string()
                         ));
                     }
-                    if let Some((key, value)) = trimmed.split_once(':') {
-                        let key = key.trim().to_lowercase();
-                        let value = value.trim().to_string();
-                        if key == "content-length" {
-                            content_length = value.parse().unwrap_or(0);
-                        }
-                        headers.insert(key, DataType::String(value));
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > MAX_HEADER_BUF {
+                        return Err(EvalError::InvalidInput(format!(
+                            "http_server_receive: headers exceed {} byte limit", MAX_HEADER_BUF
+                        )));
+                    }
+                    // Check for end of headers (\r\n\r\n)
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = pos + 4;
+                        break;
+                    }
+                    // Also handle \n\n (lenient)
+                    if let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
+                        header_end = pos + 2;
+                        break;
                     }
                 }
+                // Parse with httparse
+                let mut parsed_headers = [httparse::EMPTY_HEADER; 256];
+                let mut req = httparse::Request::new(&mut parsed_headers);
+                let status = req.parse(&buf[..header_end])
+                    .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                if status.is_partial() {
+                    return Err(EvalError::InvalidInput(
+                        "http_server_receive: incomplete HTTP request".to_string()
+                    ));
+                }
+                let method = req.method.unwrap_or("GET").to_string();
+                let path = req.path.unwrap_or("/").to_string();
+                let mut headers = std::collections::BTreeMap::new();
+                let mut content_length: usize = 0;
+                let mut seen_content_length = false;
+                for h in req.headers.iter() {
+                    let key = h.name.to_lowercase();
+                    let value = String::from_utf8_lossy(h.value).to_string();
+                    if key == "content-length" {
+                        let len: usize = value.trim().parse().map_err(|_| {
+                            EvalError::InvalidInput(format!(
+                                "http_server_receive: invalid Content-Length: {:?}", value
+                            ))
+                        })?;
+                        if seen_content_length && len != content_length {
+                            return Err(EvalError::InvalidInput(
+                                "http_server_receive: conflicting Content-Length headers".to_string()
+                            ));
+                        }
+                        content_length = len;
+                        seen_content_length = true;
+                    }
+                    headers.insert(key, DataType::String(value));
+                }
+                // Read body
                 const MAX_BODY: usize = 16 * 1024 * 1024;
                 let body = if content_length > MAX_BODY {
                     return Err(EvalError::InvalidInput(format!(
                         "http_server_receive: Content-Length {} exceeds max {}", content_length, MAX_BODY
                     )));
                 } else if content_length > 0 {
-                    let mut buf = vec![0u8; content_length];
-                    reader.read_exact(&mut buf)
-                        .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
-                    String::from_utf8_lossy(&buf).to_string()
+                    // We may have already read some body bytes past the header end
+                    let already_read = buf.len() - header_end;
+                    let mut body_buf = Vec::with_capacity(content_length);
+                    body_buf.extend_from_slice(&buf[header_end..]);
+                    if already_read < content_length {
+                        let remaining = content_length - already_read;
+                        let mut rest = vec![0u8; remaining];
+                        stream.read_exact(&mut rest)
+                            .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
+                        body_buf.extend_from_slice(&rest);
+                    }
+                    String::from_utf8_lossy(&body_buf[..content_length]).to_string()
                 } else { String::new() };
                 let client_id = conn_id("http-client");
-                conn_store(&client_id, Mutex::new(stream));
+                conn_store(&client_id, Mutex::new(stream))?;
                 Ok(DataType::Map(std::collections::BTreeMap::from([
                     ("method".into(), DataType::String(method)),
                     ("path".into(), DataType::String(path)),
@@ -4977,9 +5899,12 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpServerRespond => {
                 let cid = get_string(inputs, "client_id")?;
                 let status = match inputs.get("status") {
-                    Some(DataType::Int64(n)) => *n,
-                    Some(DataType::Int32(n)) => *n as i64,
-                    _ => 200,
+                    Some(v) => v.to_i64().ok_or_else(|| EvalError::TypeError {
+                        expected: "numeric".to_string(),
+                        actual: v.type_name().to_string(),
+                        context: "http_server_respond status".to_string(),
+                    })?,
+                    None => 200,
                 };
                 if !(100..=599).contains(&status) {
                     return Err(EvalError::InvalidInput(format!(
@@ -4987,6 +5912,11 @@ impl OperationEvaluator for FullEvaluator {
                     )));
                 }
                 let body = inputs.get("body").map(|d| d.to_string()).unwrap_or_default();
+                if body.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "http_server_respond: body exceeds {} byte limit", MAX_STRING_OUTPUT
+                    )));
+                }
                 let reason = http::StatusCode::from_u16(status as u16)
                     .ok()
                     .and_then(|s| s.canonical_reason())
@@ -5032,7 +5962,8 @@ fn is_truthy(val: &DataType) -> bool {
         DataType::Null => false,
         DataType::Array(a) => !a.is_empty(),
         DataType::Map(m) => !m.is_empty(),
-        _ => true,
+        DataType::Bytes(b) => !b.is_empty(),
+        DataType::Future(_) => true,
     }
 }
 
@@ -5051,16 +5982,75 @@ fn promote_numeric(val: &DataType) -> Option<Result<i64, f64>> {
     }
 }
 
+/// Total ordering comparator for DataType values that guarantees transitivity.
+/// Type tier: Null(0) < Bool(1) < Numeric(2) < String(3) < Array(4) < Map(5) < Bytes(6).
+/// Within each tier, type-specific comparison is used.
+fn total_cmp_values(a: &DataType, b: &DataType) -> std::cmp::Ordering {
+    fn type_tier(v: &DataType) -> u8 {
+        match v {
+            DataType::Null => 0,
+            DataType::Bool(_) => 1,
+            DataType::Int64(_) | DataType::Int32(_) | DataType::Uint32(_) |
+            DataType::Uint64(_) | DataType::Float64(_) | DataType::Float32(_) => 2,
+            DataType::String(_) => 3,
+            DataType::Array(_) => 4,
+            DataType::Map(_) => 5,
+            DataType::Bytes(_) => 6,
+            DataType::Future(_) => 7,
+        }
+    }
+    let ta = type_tier(a);
+    let tb = type_tier(b);
+    if ta != tb {
+        return ta.cmp(&tb);
+    }
+    match (a, b) {
+        (DataType::Null, DataType::Null) => std::cmp::Ordering::Equal,
+        (DataType::Bool(x), DataType::Bool(y)) => x.cmp(y),
+        _ if ta == 2 => {
+            // Numeric tier: use i128 for integer pairs to avoid f64 precision loss
+            // on large Uint64 values, then fall back to f64 total_cmp for mixed types.
+            fn to_i128_for_cmp(val: &DataType) -> Option<i128> {
+                match val {
+                    DataType::Int64(x) => Some(*x as i128),
+                    DataType::Int32(x) => Some(*x as i128),
+                    DataType::Uint32(x) => Some(*x as i128),
+                    DataType::Uint64(x) => Some(*x as i128),
+                    _ => None,
+                }
+            }
+            if let (Some(ai), Some(bi)) = (to_i128_for_cmp(a), to_i128_for_cmp(b)) {
+                return ai.cmp(&bi);
+            }
+            if let (Some(pa), Some(pb)) = (promote_numeric(a), promote_numeric(b)) {
+                let fa = match pa { Ok(i) => i as f64, Err(f) => f };
+                let fb = match pb { Ok(i) => i as f64, Err(f) => f };
+                fa.total_cmp(&fb)
+            } else {
+                std::cmp::Ordering::Equal // unreachable: tier 2 is always numeric
+            }
+        }
+        (DataType::String(x), DataType::String(y)) => x.cmp(y),
+        _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
+    }
+}
+
 fn toml_value_to_datatype(val: &toml::Value) -> DataType {
+    toml_value_to_datatype_depth(val, 0)
+}
+
+fn toml_value_to_datatype_depth(val: &toml::Value, depth: usize) -> DataType {
+    const MAX_DEPTH: usize = 64;
+    if depth > MAX_DEPTH { return DataType::Null; }
     match val {
         toml::Value::String(s) => DataType::String(s.clone()),
         toml::Value::Integer(n) => DataType::Int64(*n),
         toml::Value::Float(f) => DataType::Float64(*f),
         toml::Value::Boolean(b) => DataType::Bool(*b),
-        toml::Value::Array(arr) => DataType::Array(arr.iter().map(toml_value_to_datatype).collect()),
+        toml::Value::Array(arr) => DataType::Array(arr.iter().map(|v| toml_value_to_datatype_depth(v, depth + 1)).collect()),
         toml::Value::Table(t) => {
             let m: std::collections::BTreeMap<String, DataType> = t.iter()
-                .map(|(k, v)| (k.clone(), toml_value_to_datatype(v)))
+                .map(|(k, v)| (k.clone(), toml_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
         }
@@ -5070,6 +6060,19 @@ fn toml_value_to_datatype(val: &toml::Value) -> DataType {
 
 /// Cross-type numeric equality (e.g. Float32(1.0) == Int64(1)).
 fn numeric_eq(a: &DataType, b: &DataType) -> bool {
+    // Use i128 comparison for integer pairs to avoid f64 precision loss on large Uint64.
+    fn to_i128(val: &DataType) -> Option<i128> {
+        match val {
+            DataType::Int64(x) => Some(*x as i128),
+            DataType::Int32(x) => Some(*x as i128),
+            DataType::Uint32(x) => Some(*x as i128),
+            DataType::Uint64(x) => Some(*x as i128),
+            _ => None,
+        }
+    }
+    if let (Some(ai), Some(bi)) = (to_i128(a), to_i128(b)) {
+        return ai == bi;
+    }
     match (promote_numeric(a), promote_numeric(b)) {
         (Some(av), Some(bv)) => {
             let fa = match av { Ok(i) => i as f64, Err(f) => f };
@@ -5086,21 +6089,22 @@ fn num_div_op(
     int_op: fn(i64, i64) -> Option<i64>,
     float_op: fn(f64, f64) -> f64,
 ) -> Result<DataType, EvalError> {
+    let kind = numeric_result_kind(a, b);
     match (promote_numeric(a), promote_numeric(b)) {
         (Some(Ok(x)), Some(Ok(y))) => {
             if y == 0 { return Err(EvalError::DivisionByZero); }
             match int_op(x, y) {
-                Some(v) => Ok(DataType::Int64(v)),
-                None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+                Some(v) => wrap_int_result(v, kind),
+                None => Err(EvalError::Overflow("integer overflow".to_string())),
             }
         }
         (Some(av), Some(bv)) => {
             let fb = match bv { Ok(i) => i as f64, Err(f) => f };
             if fb == 0.0 { return Err(EvalError::DivisionByZero); }
             let fa = match av { Ok(i) => i as f64, Err(f) => f };
-            Ok(DataType::Float64(float_op(fa, fb)))
+            Ok(wrap_float_result(float_op(fa, fb), kind))
         }
-        _ => Ok(DataType::Null),
+        _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "arithmetic".to_string() }),
     }
 }
 
@@ -5116,7 +6120,74 @@ fn eval_unary_float_op(
     match promote_numeric(input) {
         Some(Ok(n)) => Ok(DataType::Float64(f64_op(n as f64))),
         Some(Err(f)) => Ok(DataType::Float64(f64_op(f))),
-        None => Ok(DataType::Null),
+        None => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "math operation".to_string() }),
+    }
+}
+
+/// Extract an i64 from an optional DataType, distinguishing "not provided" from "non-numeric".
+/// Returns Ok(default) if the value is None, Ok(n) if numeric, Err(TypeError) if non-numeric.
+fn require_i64_or_default(val: Option<&DataType>, default: i64, context: &str) -> Result<i64, EvalError> {
+    match val {
+        None => Ok(default),
+        Some(v) => match v.to_i64() {
+            Some(n) => Ok(n),
+            None => Err(EvalError::TypeError {
+                expected: "numeric".to_string(),
+                actual: v.type_name().to_string(),
+                context: context.to_string(),
+            }),
+        },
+    }
+}
+
+/// Determine the common numeric type for binary operations.
+/// Returns 32 for Int32+Int32, 64 for Int64 (default int), 132 for Uint32+Uint32,
+/// 164 for Uint64, 232 for Float32+Float32, 264 for Float64 (default float).
+fn numeric_result_kind(a: &DataType, b: &DataType) -> i32 {
+    match (a, b) {
+        (DataType::Float32(_), DataType::Float32(_)) => 232,
+        (DataType::Float32(_), _) | (_, DataType::Float32(_)) => 264, // mixed float → Float64
+        (DataType::Float64(_), _) | (_, DataType::Float64(_)) => 264,
+        (DataType::Uint64(_), _) | (_, DataType::Uint64(_)) => 164,
+        (DataType::Uint32(_), DataType::Uint32(_)) => 132,
+        (DataType::Int32(_), DataType::Int32(_)) => 32,
+        _ => 64, // default int
+    }
+}
+
+fn wrap_int_result(v: i64, kind: i32) -> Result<DataType, EvalError> {
+    match kind {
+        32 => {
+            if v < i32::MIN as i64 || v > i32::MAX as i64 {
+                Err(EvalError::Overflow("int32 overflow".to_string()))
+            } else {
+                Ok(DataType::Int32(v as i32))
+            }
+        }
+        132 => {
+            if v < 0 || v > u32::MAX as i64 {
+                Err(EvalError::Overflow("uint32 overflow".to_string()))
+            } else {
+                Ok(DataType::Uint32(v as u32))
+            }
+        }
+        164 => {
+            if v < 0 {
+                Err(EvalError::Overflow("uint64 overflow".to_string()))
+            } else {
+                Ok(DataType::Uint64(v as u64))
+            }
+        }
+        232 => Ok(DataType::Float32(v as f32)),
+        264 => Ok(DataType::Float64(v as f64)),
+        _ => Ok(DataType::Int64(v)),
+    }
+}
+
+fn wrap_float_result(v: f64, kind: i32) -> DataType {
+    match kind {
+        232 => DataType::Float32(v as f32),
+        _ => DataType::Float64(v),
     }
 }
 
@@ -5125,17 +6196,18 @@ fn num_binop(
     int_op: fn(i64, i64) -> Option<i64>,
     float_op: fn(f64, f64) -> f64,
 ) -> Result<DataType, EvalError> {
+    let kind = numeric_result_kind(a, b);
     match (promote_numeric(a), promote_numeric(b)) {
         (Some(Ok(x)), Some(Ok(y))) => match int_op(x, y) {
-            Some(v) => Ok(DataType::Int64(v)),
-            None => Err(EvalError::InvalidInput("integer overflow".to_string())),
+            Some(v) => wrap_int_result(v, kind),
+            None => Err(EvalError::Overflow("integer overflow".to_string())),
         },
         (Some(av), Some(bv)) => {
             let fa = match av { Ok(i) => i as f64, Err(f) => f };
             let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-            Ok(DataType::Float64(float_op(fa, fb)))
+            Ok(wrap_float_result(float_op(fa, fb), kind))
         }
-        _ => Ok(DataType::Null),
+        _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "arithmetic".to_string() }),
     }
 }
 
@@ -5149,6 +6221,25 @@ fn num_cmp(
     if let (DataType::String(x), DataType::String(y)) = (a, b) {
         return Ok(DataType::Bool(str_op(x, y)));
     }
+    // Use i128 for integer-pair comparisons to avoid f64 precision loss on large Uint64.
+    fn to_i128_cmp(val: &DataType) -> Option<i128> {
+        match val {
+            DataType::Int64(x) => Some(*x as i128),
+            DataType::Int32(x) => Some(*x as i128),
+            DataType::Uint32(x) => Some(*x as i128),
+            DataType::Uint64(x) => Some(*x as i128),
+            _ => None,
+        }
+    }
+    if let (Some(ai), Some(bi)) = (to_i128_cmp(a), to_i128_cmp(b)) {
+        // Map i128 ordering to i64 proxy values so int_op gives the correct result.
+        let proxy: i64 = match ai.cmp(&bi) {
+            std::cmp::Ordering::Greater => 1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Less => -1,
+        };
+        return Ok(DataType::Bool(int_op(&proxy, &0)));
+    }
     match (promote_numeric(a), promote_numeric(b)) {
         (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Bool(int_op(&x, &y))),
         (Some(av), Some(bv)) => {
@@ -5156,96 +6247,127 @@ fn num_cmp(
             let fb = match bv { Ok(i) => i as f64, Err(f) => f };
             Ok(DataType::Bool(float_op(&fa, &fb)))
         }
-        _ => Ok(DataType::Bool(false)),
+        _ => Err(EvalError::TypeError {
+            expected: "number or string".to_string(),
+            actual: format!("{}, {}", a.type_name(), b.type_name()),
+            context: "comparison".to_string(),
+        }),
     }
 }
 
 
 // =============================================================================
-// YAML helpers (serde_yaml conversion)
+// YAML helpers (serde_yaml_ng conversion)
 // =============================================================================
 
-fn yaml_value_to_datatype(val: &serde_yaml::Value) -> DataType {
+fn yaml_value_to_datatype(val: &serde_yaml_ng::Value) -> DataType {
+    yaml_value_to_datatype_depth(val, 0)
+}
+
+fn yaml_value_to_datatype_depth(val: &serde_yaml_ng::Value, depth: usize) -> DataType {
+    const MAX_DEPTH: usize = 64;
+    if depth > MAX_DEPTH { return DataType::Null; }
     match val {
-        serde_yaml::Value::Null => DataType::Null,
-        serde_yaml::Value::Bool(b) => DataType::Bool(*b),
-        serde_yaml::Value::Number(n) => {
+        serde_yaml_ng::Value::Null => DataType::Null,
+        serde_yaml_ng::Value::Bool(b) => DataType::Bool(*b),
+        serde_yaml_ng::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 DataType::Int64(i)
+            } else if let Some(u) = n.as_u64() {
+                DataType::Uint64(u)
             } else if let Some(f) = n.as_f64() {
                 DataType::Float64(f)
             } else {
                 DataType::Null
             }
         }
-        serde_yaml::Value::String(s) => DataType::String(s.clone()),
-        serde_yaml::Value::Sequence(arr) => {
-            DataType::Array(arr.iter().map(yaml_value_to_datatype).collect())
+        serde_yaml_ng::Value::String(s) => DataType::String(s.clone()),
+        serde_yaml_ng::Value::Sequence(arr) => {
+            if arr.len() > MAX_ARRAY_ELEMENTS {
+                return DataType::String(format!("[sequence too large: {} elements]", arr.len()));
+            }
+            DataType::Array(arr.iter().map(|v| yaml_value_to_datatype_depth(v, depth + 1)).collect())
         }
-        serde_yaml::Value::Mapping(map) => {
+        serde_yaml_ng::Value::Mapping(map) => {
+            if map.len() > MAX_ARRAY_ELEMENTS {
+                return DataType::String(format!("[mapping too large: {} entries]", map.len()));
+            }
             let m: std::collections::BTreeMap<String, DataType> = map.iter()
                 .map(|(k, v)| {
                     let key = match k {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => format!("{}", n),
-                        serde_yaml::Value::Bool(b) => format!("{}", b),
-                        serde_yaml::Value::Null => "null".to_string(),
+                        serde_yaml_ng::Value::String(s) => s.clone(),
+                        serde_yaml_ng::Value::Number(n) => format!("{}", n),
+                        serde_yaml_ng::Value::Bool(b) => format!("{}", b),
+                        serde_yaml_ng::Value::Null => "null".to_string(),
                         other => format!("{:?}", other),
                     };
-                    (key, yaml_value_to_datatype(v))
+                    (key, yaml_value_to_datatype_depth(v, depth + 1))
                 })
                 .collect();
             DataType::Map(m)
         }
-        serde_yaml::Value::Tagged(tagged) => yaml_value_to_datatype(&tagged.value),
+        serde_yaml_ng::Value::Tagged(tagged) => yaml_value_to_datatype_depth(&tagged.value, depth),
     }
 }
 
-fn datatype_to_yaml_value(data: &DataType) -> serde_yaml::Value {
+fn datatype_to_yaml_value(data: &DataType) -> serde_yaml_ng::Value {
+    datatype_to_yaml_value_depth(data, 0)
+}
+
+fn datatype_to_yaml_value_depth(data: &DataType, depth: usize) -> serde_yaml_ng::Value {
+    const MAX_DEPTH: usize = 64;
+    if depth > MAX_DEPTH { return serde_yaml_ng::Value::Null; }
     match data {
-        DataType::Null => serde_yaml::Value::Null,
-        DataType::Bool(b) => serde_yaml::Value::Bool(*b),
-        DataType::Int64(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n)),
-        DataType::Int32(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
-        DataType::Uint32(n) => serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64)),
+        DataType::Null => serde_yaml_ng::Value::Null,
+        DataType::Bool(b) => serde_yaml_ng::Value::Bool(*b),
+        DataType::Int64(n) => serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n)),
+        DataType::Int32(n) => serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n as i64)),
+        DataType::Uint32(n) => serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n as i64)),
         DataType::Uint64(n) => {
             if *n > i64::MAX as u64 {
-                serde_yaml::Value::String(n.to_string())
+                serde_yaml_ng::Value::String(n.to_string())
             } else {
-                serde_yaml::Value::Number(serde_yaml::Number::from(*n as i64))
+                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n as i64))
             }
         }
         DataType::Float64(f) => {
             if f.is_nan() || f.is_infinite() {
-                serde_yaml::Value::String(format!("{}", f))
+                serde_yaml_ng::Value::String(format!("{}", f))
             } else {
-                serde_yaml::Value::Number(serde_yaml::Number::from(*f))
+                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*f))
             }
         }
         DataType::Float32(f) => {
             if f.is_nan() || f.is_infinite() {
-                serde_yaml::Value::String(format!("{}", f))
+                serde_yaml_ng::Value::String(format!("{}", f))
             } else {
-                serde_yaml::Value::Number(serde_yaml::Number::from(*f as f64))
+                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*f as f64))
             }
         }
-        DataType::String(s) => serde_yaml::Value::String(s.clone()),
+        DataType::String(s) => serde_yaml_ng::Value::String(s.clone()),
         DataType::Array(arr) => {
-            serde_yaml::Value::Sequence(arr.iter().map(datatype_to_yaml_value).collect())
+            serde_yaml_ng::Value::Sequence(arr.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
         }
         DataType::Map(m) => {
-            let mapping: serde_yaml::Mapping = m.iter()
+            let mapping: serde_yaml_ng::Mapping = m.iter()
                 .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (serde_yaml::Value::String(k.clone()), datatype_to_yaml_value(v)))
+                .map(|(k, v)| (serde_yaml_ng::Value::String(k.clone()), datatype_to_yaml_value_depth(v, depth + 1)))
                 .collect();
-            serde_yaml::Value::Mapping(mapping)
+            serde_yaml_ng::Value::Mapping(mapping)
         }
-        DataType::Bytes(b) => serde_yaml::Value::String(format!("<bytes:{}>", b.len())),
-        DataType::Future(_) => serde_yaml::Value::Null,
+        DataType::Bytes(b) => serde_yaml_ng::Value::String(format!("<bytes:{}>", b.len())),
+        DataType::Future(_) => serde_yaml_ng::Value::Null,
     }
 }
 
 fn datatype_to_serde_json(val: &DataType) -> serde_json::Value {
+    datatype_to_serde_json_depth(val, 0)
+}
+
+fn datatype_to_serde_json_depth(val: &DataType, depth: usize) -> serde_json::Value {
+    if depth > MAX_JSON_DEPTH {
+        return serde_json::Value::String("[max depth]".into());
+    }
     match val {
         DataType::Null | DataType::Future(_) => serde_json::Value::Null,
         DataType::Bool(b) => serde_json::Value::Bool(*b),
@@ -5260,11 +6382,11 @@ fn datatype_to_serde_json(val: &DataType) -> serde_json::Value {
             if f.is_finite() { serde_json::json!(*f as f64) } else { serde_json::Value::Null }
         }
         DataType::String(s) => serde_json::Value::String(s.clone()),
-        DataType::Array(arr) => serde_json::Value::Array(arr.iter().map(datatype_to_serde_json).collect()),
+        DataType::Array(arr) => serde_json::Value::Array(arr.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
         DataType::Map(m) => {
             let obj: serde_json::Map<String, serde_json::Value> = m.iter()
                 .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (k.clone(), datatype_to_serde_json(v)))
+                .map(|(k, v)| (k.clone(), datatype_to_serde_json_depth(v, depth + 1)))
                 .collect();
             serde_json::Value::Object(obj)
         }
@@ -5275,24 +6397,41 @@ fn datatype_to_serde_json(val: &DataType) -> serde_json::Value {
     }
 }
 
-fn datatype_to_json_string(val: &DataType) -> String {
-    serde_json::to_string(&datatype_to_serde_json(val)).unwrap_or_else(|_| "null".to_string())
+fn datatype_to_json_string(val: &DataType) -> Result<String, EvalError> {
+    serde_json::to_string(&datatype_to_serde_json(val))
+        .map_err(|e| EvalError::InvalidInput(format!("json serialization failed: {}", e)))
 }
 
 fn json_value_to_datatype(val: &serde_json::Value) -> DataType {
+    json_value_to_datatype_depth(val, 0)
+}
+
+fn json_value_to_datatype_depth(val: &serde_json::Value, depth: usize) -> DataType {
+    if depth > MAX_JSON_DEPTH {
+        return DataType::String("[max depth]".to_string());
+    }
     match val {
         serde_json::Value::Null => DataType::Null,
         serde_json::Value::Bool(b) => DataType::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() { DataType::Int64(i) }
+            else if let Some(u) = n.as_u64() { DataType::Uint64(u) }
             else if let Some(f) = n.as_f64() { DataType::Float64(f) }
             else { DataType::Null }
         }
         serde_json::Value::String(s) => DataType::String(s.clone()),
-        serde_json::Value::Array(arr) => DataType::Array(arr.iter().map(json_value_to_datatype).collect()),
+        serde_json::Value::Array(arr) => {
+            if arr.len() > MAX_ARRAY_ELEMENTS {
+                return DataType::String(format!("[array too large: {} elements]", arr.len()));
+            }
+            DataType::Array(arr.iter().map(|v| json_value_to_datatype_depth(v, depth + 1)).collect())
+        }
         serde_json::Value::Object(obj) => {
+            if obj.len() > MAX_ARRAY_ELEMENTS {
+                return DataType::String(format!("[object too large: {} entries]", obj.len()));
+            }
             let m: std::collections::BTreeMap<String, DataType> = obj.iter()
-                .map(|(k, v)| (k.clone(), json_value_to_datatype(v)))
+                .map(|(k, v)| (k.clone(), json_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
         }
@@ -5467,17 +6606,28 @@ fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage
         }
         // Check if resolved path escapes the project root
         let dep_resolved = dir.join(rel_path);
-        if let (Ok(project_canonical), Ok(dep_canonical)) = (dir.canonicalize(), dep_resolved.canonicalize()) {
-            // Find the common ancestor: the project root's parent (to allow sibling dirs)
-            let project_root = project_canonical.parent().unwrap_or(&project_canonical);
-            if !dep_canonical.starts_with(project_root) {
-                eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+        let project_canonical = match dir.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("Warning: dependency '{}': cannot resolve project directory, skipping", id);
                 continue;
             }
+        };
+        let dep_canonical = match dep_resolved.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("Warning: dependency '{}': cannot resolve dependency path, skipping", id);
+                continue;
+            }
+        };
+        let project_root = project_canonical.parent().unwrap_or(&project_canonical);
+        if !dep_canonical.starts_with(project_root) {
+            eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+            continue;
         }
 
-        let dep_dir = dir.join(rel_path);
-        let source_path = dep_dir.join("source.magi");
+        // Read using canonicalized path to avoid TOCTOU race
+        let source_path = dep_canonical.join("source.magi");
         let source = match fs::read_to_string(&source_path) {
             Ok(s) => s,
             Err(e) => {
@@ -5534,18 +6684,28 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
         }
 
         // Check if resolved path escapes the project root
-        let dep_resolved = dir.join(rel_path);
-        if let (Ok(project_canonical), Ok(dep_canonical)) = (dir.canonicalize(), dep_resolved.canonicalize()) {
-            let project_root = project_canonical.parent().unwrap_or(&project_canonical);
-            if !dep_canonical.starts_with(project_root) {
-                eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
-                continue;
-            }
-        }
-
         let dep_dir = dir.join(rel_path);
         let source_path = dep_dir.join("source.magi");
-        match fs::read_to_string(&source_path) {
+
+        // Canonicalize the actual file we will read and verify it's within the project dir
+        let project_canonical = match dir.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let source_canonical = match source_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: could not resolve dependency '{}' at {}: {}", id, source_path.display(), e);
+                continue;
+            }
+        };
+        if !source_canonical.starts_with(&project_canonical) {
+            eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+            continue;
+        }
+
+        // Read the canonicalized path (same inode we validated)
+        match fs::read_to_string(&source_canonical) {
             Ok(s) => sources.push(s),
             Err(e) => {
                 eprintln!("Warning: could not read dependency '{}' at {}: {}", id, source_path.display(), e);
@@ -5578,7 +6738,16 @@ fn cmd_check(path: &str) {
     let mut has_errors = false;
     let mut count = 0;
 
-    for d in analysis.diagnostics.iter().chain(lint_result.diagnostics.iter()) {
+    // Deduplicate diagnostics from type checker and linter (same as LSP does)
+    let mut seen = std::collections::HashSet::new();
+    let all_diagnostics: Vec<_> = analysis.diagnostics.iter().chain(lint_result.diagnostics.iter())
+        .filter(|d| {
+            let key = (d.line, d.column, d.code.clone().unwrap_or_default());
+            seen.insert(key)
+        })
+        .collect();
+
+    for d in all_diagnostics {
         let severity = match d.severity {
             DiagnosticSeverity::Error => { has_errors = true; "error" }
             DiagnosticSeverity::Warning => "warning",
@@ -5622,7 +6791,12 @@ fn cmd_lint(path: &str) {
     } else {
         for d in &result.diagnostics {
             let code = d.code.as_deref().unwrap_or("");
-            eprintln!("{}:{}:{}: warning [{}]: {}", path, d.line, d.column, code, d.message);
+            let severity = match d.severity {
+                DiagnosticSeverity::Error => "error",
+                DiagnosticSeverity::Warning => "warning",
+                DiagnosticSeverity::Info => "info",
+            };
+            eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
             if let Some(ref help) = d.help {
                 eprintln!("  help: {}", help);
             }
@@ -5750,6 +6924,9 @@ fn cmd_compile(path: &str) {
         };
         let code = d.code.as_deref().unwrap_or("");
         eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
+        if let Some(ref help) = d.help {
+            eprintln!("  help: {}", help);
+        }
     }
     if has_errors {
         eprintln!("Type errors found; aborting compilation.");
@@ -5793,43 +6970,45 @@ fn format_tagged_value(val: i64, data: &[u8]) -> String {
 const MAX_TAGGED_DEPTH: usize = 32;
 
 fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
+    use magi_lang::compiler::tag;
     if depth >= MAX_TAGGED_DEPTH {
         return "<...>".to_string();
     }
-    let tag = (val >> 56) as u8;
-    let payload = val & 0x00FFFFFFFFFFFFFF;
-    match tag {
-        0 => "null".to_string(),
-        1 => format!("{}", payload != 0),
-        2 => {
-            // Sign-extend from 56 bits.
-            let n = if payload & (1 << 55) != 0 {
-                payload | !0x00FFFFFFFFFFFFFF
+    // NaN-boxing: check if value is a NaN-boxed non-float
+    let is_nanboxed = (val & tag::NANBOX_MASK) == tag::NANBOX_SIG;
+    if !is_nanboxed {
+        // It's a raw f64 value
+        let f = f64::from_bits(val as u64);
+        if f == (f as i64 as f64) && !f.is_nan() && f.abs() < 1e15 {
+            return format!("{}.0", f as i64);
+        } else {
+            return format!("{}", f);
+        }
+    }
+    let type_tag = ((val >> tag::TAG_SHIFT) & 0x07) as u8;
+    let payload = val & tag::PAYLOAD_MASK;
+    match type_tag {
+        tag::NULL => "null".to_string(),
+        tag::BOOL => format!("{}", payload != 0),
+        tag::I64 => {
+            // Sign-extend from 48 bits.
+            let n = if payload & (1 << 47) != 0 {
+                payload | !tag::PAYLOAD_MASK
             } else {
                 payload
             };
             format!("{}", n)
         }
-        3 => {
-            // F64: payload is lower 56 bits of IEEE 754. Top 8 bits are lost.
-            // Reconstruct with zeroed top 8 bits (precision loss for negative/large floats).
-            let bits = payload & 0x00FFFFFFFFFFFFFF;
-            let f = f64::from_bits(bits as u64);
-            if f == (f as i64 as f64) && !f.is_nan() && f.abs() < 1e15 {
-                format!("{}.0", f as i64)  // show as integer-like if exact
-            } else {
-                format!("{}", f)
-            }
-        }
-        4 => {
+        tag::STRING => {
             // String: payload is memory offset.
-            let offset = payload as usize;
+            let offset = payload.max(0) as usize;
             if offset.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<string@{}>", offset);
             }
-            let len = u32::from_le_bytes(
-                data[offset..offset + 4].try_into().unwrap(),
-            ) as usize;
+            let len = match data[offset..offset + 4].try_into() {
+                Ok(bytes) => u32::from_le_bytes(bytes) as usize,
+                Err(_) => return format!("<string@{}>", offset),
+            };
             match offset.checked_add(4).and_then(|o| o.checked_add(len)) {
                 Some(end) if end <= data.len() => {
                     String::from_utf8_lossy(&data[offset + 4..end]).to_string()
@@ -5837,17 +7016,18 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
                 _ => format!("<string@{}>", offset),
             }
         }
-        5 => {
+        tag::ARRAY => {
             // Array: payload is memory offset.
             // Layout: [i32 length][i32 capacity][i64 elem0][i64 elem1]...
             const MAX_DISPLAY_ELEMENTS: usize = 10_000;
-            let ptr = payload as usize;
+            let ptr = payload.max(0) as usize;
             if ptr.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<array@{}>", ptr);
             }
-            let raw_len = u32::from_le_bytes(
-                data[ptr..ptr + 4].try_into().unwrap(),
-            ) as usize;
+            let raw_len = match data[ptr..ptr + 4].try_into() {
+                Ok(bytes) => u32::from_le_bytes(bytes) as usize,
+                Err(_) => return format!("<array@{}>", ptr),
+            };
             let len = raw_len.min(MAX_DISPLAY_ELEMENTS);
             let mut parts = Vec::with_capacity(len);
             for i in 0..len {
@@ -5858,9 +7038,10 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
                 if elem_offset.checked_add(8).is_none_or(|end| end > data.len()) {
                     break;
                 }
-                let elem = i64::from_le_bytes(
-                    data[elem_offset..elem_offset + 8].try_into().unwrap(),
-                );
+                let elem = match data[elem_offset..elem_offset + 8].try_into() {
+                    Ok(bytes) => i64::from_le_bytes(bytes),
+                    Err(_) => break,
+                };
                 parts.push(format_tagged_value_depth(elem, data, depth + 1));
             }
             if raw_len > MAX_DISPLAY_ELEMENTS {
@@ -5868,17 +7049,18 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
             }
             format!("[{}]", parts.join(", "))
         }
-        6 => {
+        tag::MAP => {
             // Map: payload is memory offset.
             // Layout: [i32 count][i32 capacity][i64 key0][i64 val0]...
             const MAX_DISPLAY_ENTRIES: usize = 10_000;
-            let ptr = payload as usize;
+            let ptr = payload.max(0) as usize;
             if ptr.checked_add(4).is_none_or(|end| end > data.len()) {
                 return format!("<map@{}>", ptr);
             }
-            let raw_count = u32::from_le_bytes(
-                data[ptr..ptr + 4].try_into().unwrap(),
-            ) as usize;
+            let raw_count = match data[ptr..ptr + 4].try_into() {
+                Ok(bytes) => u32::from_le_bytes(bytes) as usize,
+                Err(_) => return format!("<map@{}>", ptr),
+            };
             let count = raw_count.min(MAX_DISPLAY_ENTRIES);
             let mut parts = Vec::with_capacity(count);
             for i in 0..count {
@@ -5893,12 +7075,14 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
                 if val_offset.checked_add(8).is_none_or(|end| end > data.len()) {
                     break;
                 }
-                let key = i64::from_le_bytes(
-                    data[key_offset..key_offset + 8].try_into().unwrap(),
-                );
-                let value = i64::from_le_bytes(
-                    data[val_offset..val_offset + 8].try_into().unwrap(),
-                );
+                let key = match data[key_offset..key_offset + 8].try_into() {
+                    Ok(bytes) => i64::from_le_bytes(bytes),
+                    Err(_) => break,
+                };
+                let value = match data[val_offset..val_offset + 8].try_into() {
+                    Ok(bytes) => i64::from_le_bytes(bytes),
+                    Err(_) => break,
+                };
                 parts.push(format!("{}: {}", format_tagged_value_depth(key, data, depth + 1), format_tagged_value_depth(value, data, depth + 1)));
             }
             if raw_count > MAX_DISPLAY_ENTRIES {
@@ -5906,8 +7090,8 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
             }
             format!("{{{}}}", parts.join(", "))
         }
-        7 => {
-            // I32: payload is a 32-bit signed integer (sign-extended in 56 bits)
+        tag::I32 => {
+            // I32: payload is a 32-bit signed integer
             let n = if payload & (1 << 31) != 0 {
                 (payload | !0xFFFFFFFF) as i32
             } else {
@@ -5915,17 +7099,32 @@ fn format_tagged_value_depth(val: i64, data: &[u8], depth: usize) -> String {
             };
             format!("{}", n)
         }
-        8 => {
+        tag::F32 => {
             // F32: payload is lower 32 bits of IEEE 754 f32
             let bits = (payload & 0xFFFFFFFF) as u32;
             let f = f32::from_bits(bits);
             format!("{}", f)
         }
-        _ => format!("<tagged:{}:{}>", tag, payload),
+        _ => format!("<tagged:{}:{}>", type_tag, payload),
     }
 }
 
+/// Maximum WASM file size (256 MB).
+const MAX_WASM_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
 fn cmd_run_wasm(path: &str) {
+    // Check file size before reading to prevent unbounded allocation
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_WASM_FILE_SIZE => {
+            eprintln!("error: '{}' exceeds maximum WASM file size ({} bytes, limit {} bytes)", path, meta.len(), MAX_WASM_FILE_SIZE);
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path, e);
+            process::exit(1);
+        }
+        _ => {}
+    }
     let wasm_bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -5963,30 +7162,35 @@ fn cmd_run_wasm(path: &str) {
                 println!("<no-memory>");
             }
         })
-        .expect("failed to define print");
+        .unwrap_or_else(|e| { eprintln!("error: failed to define print: {}", e); process::exit(1); });
 
     linker
         .func_wrap("env", "runtime_call", |_caller: wasmtime::Caller<'_, ()>, _name: i32, _argc: i32| -> i64 {
-            // Stub runtime call — return null.
-            0i64
+            // Stub runtime call — return null (NaN-boxed).
+            magi_lang::compiler::tag::encode(magi_lang::compiler::tag::NULL, 0)
         })
-        .expect("failed to define runtime_call");
+        .unwrap_or_else(|e| { eprintln!("error: failed to define runtime_call: {}", e); process::exit(1); });
 
     linker
         .func_wrap("env", "__to_string", |mut caller: wasmtime::Caller<'_, ()>, val: i64| -> i64 {
-            let tag = (val >> 56) as u8;
-            // If already a string, return as-is.
-            if tag == 4 {
-                return val;
+            use magi_lang::compiler::tag;
+            let null_val = tag::encode(tag::NULL, 0);
+            // NaN-boxing: check if it's a NaN-boxed string
+            let is_nanboxed = (val & tag::NANBOX_MASK) == tag::NANBOX_SIG;
+            if is_nanboxed {
+                let type_tag = ((val >> tag::TAG_SHIFT) & 0x07) as u8;
+                if type_tag == tag::STRING {
+                    return val;
+                }
             }
 
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
-                None => return 0, // null tagged value
+                None => return null_val,
             };
             let heap_global = match caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
                 Some(g) => g,
-                None => return 0,
+                None => return null_val,
             };
 
             let formatted = {
@@ -5999,32 +7203,33 @@ fn cmd_run_wasm(path: &str) {
             // Read current heap pointer from exported global.
             let ptr = match heap_global.get(&mut caller).i32() {
                 Some(v) => v as u32,
-                None => return 0,
+                None => return null_val,
             };
 
             // Write string: [u32 len][bytes...]
             let str_offset = ptr as usize;
             {
                 let data = memory.data_mut(&mut caller);
-                if str_offset.saturating_add(4).saturating_add(bytes.len()) > data.len() {
-                    return 0; // out of memory
-                }
+                let end = match str_offset.checked_add(4).and_then(|o| o.checked_add(bytes.len())) {
+                    Some(e) if e <= data.len() => e,
+                    _ => return null_val, // out of memory or overflow
+                };
                 let len_bytes = (bytes.len() as u32).to_le_bytes();
                 data[str_offset..str_offset + 4].copy_from_slice(&len_bytes);
-                data[str_offset + 4..str_offset + 4 + bytes.len()].copy_from_slice(bytes);
+                data[str_offset + 4..end].copy_from_slice(bytes);
             }
 
             // Update heap pointer.
             let new_ptr = match ptr.checked_add(total as u32) {
                 Some(v) => v,
-                None => return 0,
+                None => return null_val,
             };
             let _ = heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32));
 
-            // Return tagged string: (STRING_TAG << 56) | offset
-            ((4i64) << 56) | (str_offset as i64)
+            // Return NaN-boxed string
+            magi_lang::compiler::tag::encode(magi_lang::compiler::tag::STRING, str_offset as i64)
         })
-        .expect("failed to define __to_string");
+        .unwrap_or_else(|e| { eprintln!("error: failed to define __to_string: {}", e); process::exit(1); });
 
     let instance = match linker.instantiate(&mut store, &module) {
         Ok(i) => i,
@@ -6045,15 +7250,15 @@ fn cmd_run_wasm(path: &str) {
 
     match main_fn.call(&mut store, ()) {
         Ok(result) => {
-            if result != 0 {
-                let tag = (result >> 56) as u8;
-                if tag != 0 {
-                    // Use format_tagged_value which handles all tag types
-                    let mem = instance.get_memory(&mut store, "memory")
-                        .map(|m| m.data(&store).to_vec())
-                        .unwrap_or_default();
-                    println!("Result: {}", format_tagged_value(result, &mem));
-                }
+            // NaN-boxing: check if result is non-null
+            // Null is encoded as tag::encode(NULL, 0) = NANBOX_SIG
+            let null_val = magi_lang::compiler::tag::encode(magi_lang::compiler::tag::NULL, 0);
+            if result != null_val {
+                // Use format_tagged_value which handles all tag types
+                let mem = instance.get_memory(&mut store, "memory")
+                    .map(|m| m.data(&store).to_vec())
+                    .unwrap_or_default();
+                println!("Result: {}", format_tagged_value(result, &mem));
             }
         }
         Err(e) => {

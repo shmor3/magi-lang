@@ -113,6 +113,7 @@ struct AllocMeta {
 }
 
 /// Virtual heap with bump allocation, free list, scope tracking, and refcounting.
+#[derive(Clone)]
 struct Heap {
     values: HashMap<MemAddr, DataType>,
     metadata: HashMap<MemAddr, AllocMeta>,
@@ -507,6 +508,25 @@ impl<'a> Interpreter<'a> {
                 }
                 DebugCommand::Evaluate(expr) => {
                     // Parse and evaluate expression in current scope
+                    // Save interpreter state to prevent permanent mutation from debug expressions
+                    let saved_functions = self.functions.clone();
+                    let saved_enums = self.enum_defs.clone();
+                    let saved_structs = self.struct_defs.clone();
+                    let saved_async_fns = self.async_fns.clone();
+                    let saved_aliases = self.std_op_aliases.clone();
+                    let saved_closures = self.closure_captures.clone();
+                    let saved_lambda_counter = self.lambda_counter;
+                    let saved_imports = self.imports.clone();
+                    let saved_importing = self.importing_packages.clone();
+                    let saved_logs = self.logs.clone();
+                    let saved_call_depth = self.call_depth;
+                    let saved_symbols = self.symbols.clone();
+                    let saved_stacks = self.saved_symbol_stacks.clone();
+                    // Save heap state to prevent leaking allocations from debug eval
+                    let saved_next_addr = self.heap.next_addr;
+                    let saved_free_list = self.heap.free_list.clone();
+                    let saved_allocs = self.heap.allocs_since_gc;
+                    self.heap.push_scope();
                     // Temporarily disable debug to avoid recursive blocking_recv
                     let debug_state = self.debug.take();
                     let (result, error) = match crate::syntax::parser::parse_v2(&expr) {
@@ -520,6 +540,25 @@ impl<'a> Interpreter<'a> {
                         },
                     };
                     self.debug = debug_state;
+                    // Restore heap state — pop scope frees debug allocations
+                    self.heap.pop_scope();
+                    self.heap.next_addr = saved_next_addr;
+                    self.heap.free_list = saved_free_list;
+                    self.heap.allocs_since_gc = saved_allocs;
+                    // Restore state to prevent permanent mutation
+                    self.functions = saved_functions;
+                    self.enum_defs = saved_enums;
+                    self.struct_defs = saved_structs;
+                    self.async_fns = saved_async_fns;
+                    self.std_op_aliases = saved_aliases;
+                    self.closure_captures = saved_closures;
+                    self.lambda_counter = saved_lambda_counter;
+                    self.imports = saved_imports;
+                    self.importing_packages = saved_importing;
+                    self.logs = saved_logs;
+                    self.call_depth = saved_call_depth;
+                    self.symbols = saved_symbols;
+                    self.saved_symbol_stacks = saved_stacks;
                     if let Some(ref debug) = self.debug {
                         debug
                             .event_sender
@@ -566,6 +605,10 @@ impl<'a> Interpreter<'a> {
     /// with qualified names (e.g., `math::double`, `math::inner::helper`).
     /// Enums and structs are also registered unqualified for use within module functions.
     fn register_module(&mut self, prefix: &str, body: &Block) {
+        // Guard against deeply nested module definitions (stack overflow protection)
+        if prefix.matches("::").count() >= 64 {
+            return;
+        }
         for inner in &body.statements {
             match &inner.kind {
                 StatementKind::FunctionDef(def) => {
@@ -1107,7 +1150,7 @@ impl<'a> Interpreter<'a> {
                 }
                 let full_path = path.join("::");
                 if *glob {
-                    // Glob import: import all functions, enums, and structs from the module
+                    // Glob import: import direct children only (not nested modules)
                     let prefix = format!("{}::", full_path);
                     let matching_fns: Vec<(String, FunctionDef)> = self
                         .functions
@@ -1117,11 +1160,12 @@ impl<'a> Interpreter<'a> {
                             let short_name = k.strip_prefix(&*prefix).unwrap_or(k).to_string();
                             (short_name, v.clone())
                         })
+                        .filter(|(short_name, _)| !short_name.contains("::"))
                         .collect();
                     for (short_name, def) in matching_fns {
                         self.functions.insert(short_name, def);
                     }
-                    // Also import enums with qualified names under the prefix
+                    // Also import enums with qualified names under the prefix (direct only)
                     let matching_enums: Vec<(String, Vec<EnumVariant>)> = self
                         .enum_defs
                         .iter()
@@ -1130,11 +1174,12 @@ impl<'a> Interpreter<'a> {
                             let short_name = k.strip_prefix(&*prefix).unwrap_or(k).to_string();
                             (short_name, v.clone())
                         })
+                        .filter(|(short_name, _)| !short_name.contains("::"))
                         .collect();
                     for (short_name, variants) in matching_enums {
                         self.enum_defs.insert(short_name, variants);
                     }
-                    // Also import structs with qualified names under the prefix
+                    // Also import structs with qualified names under the prefix (direct only)
                     let matching_structs: Vec<(String, Vec<StructField>)> = self
                         .struct_defs
                         .iter()
@@ -1143,6 +1188,7 @@ impl<'a> Interpreter<'a> {
                             let short_name = k.strip_prefix(&*prefix).unwrap_or(k).to_string();
                             (short_name, v.clone())
                         })
+                        .filter(|(short_name, _)| !short_name.contains("::"))
                         .collect();
                     for (short_name, fields) in matching_structs {
                         self.struct_defs.insert(short_name, fields);
@@ -1152,11 +1198,7 @@ impl<'a> Interpreter<'a> {
                     let local_name = alias.as_ref().unwrap_or(&item_name).clone();
                     // Try function first
                     if let Some(func) = self.functions.get(&full_path).cloned() {
-                        self.functions.insert(local_name, func.clone());
-                        // Also register under unqualified name for recursive calls
-                        if alias.is_some() && !self.functions.contains_key(&item_name) {
-                            self.functions.insert(item_name, func);
-                        }
+                        self.functions.insert(local_name, func);
                     } else if let Some(variants) = self.enum_defs.get(&full_path).cloned() {
                         // Try enum
                         self.enum_defs.insert(local_name, variants);
@@ -1165,7 +1207,11 @@ impl<'a> Interpreter<'a> {
                         self.struct_defs.insert(local_name, fields);
                     } else {
                         // Collect available items from the module for suggestions
-                        let module_prefix = format!("{}::", path[..path.len()-1].join("::"));
+                        let module_prefix = if path.len() > 1 {
+                            format!("{}::", path[..path.len()-1].join("::"))
+                        } else {
+                            String::new()
+                        };
                         let mut available: Vec<String> = self.functions.keys()
                             .filter(|k| k.starts_with(&module_prefix))
                             .map(|k| k.strip_prefix(&*module_prefix).unwrap_or(k).to_string())
@@ -1204,12 +1250,58 @@ impl<'a> Interpreter<'a> {
         for arg in args {
             if let ExpressionKind::Spread(inner) = &arg.kind {
                 match self.eval_expr(inner)? {
-                    DataType::Array(arr) => result.extend(arr),
+                    DataType::Array(arr) => {
+                        result.extend(arr);
+                        if result.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{} elements", result.len()),
+                                context: "spread in function call".to_string(),
+                                span: arg.span,
+                            });
+                        }
+                    }
                     other => {
                         return Err(InterpError::TypeError {
                             expected: "Array".to_string(),
                             actual: other.type_name().to_string(),
                             context: "spread operator".to_string(),
+                            span: arg.span,
+                        });
+                    }
+                }
+            } else {
+                result.push(self.eval_expr(arg)?);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Spread-aware argument evaluation for pipe stages.
+    /// Replaces Placeholder expressions with the piped value.
+    fn eval_pipe_call_args(&mut self, args: &[Expression], piped_value: &DataType) -> Result<Vec<DataType>, InterpError> {
+        let mut result = Vec::new();
+        for arg in args {
+            if matches!(arg.kind, ExpressionKind::Placeholder) {
+                result.push(piped_value.clone());
+            } else if let ExpressionKind::Spread(inner) = &arg.kind {
+                match self.eval_expr(inner)? {
+                    DataType::Array(arr) => {
+                        result.extend(arr);
+                        if result.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit {
+                                limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
+                                actual: format!("{} elements", result.len()),
+                                context: "spread in pipe call".to_string(),
+                                span: arg.span,
+                            });
+                        }
+                    }
+                    other => {
+                        return Err(InterpError::TypeError {
+                            expected: "Array".to_string(),
+                            actual: other.type_name().to_string(),
+                            context: "spread operator in pipe".to_string(),
                             span: arg.span,
                         });
                     }
@@ -1229,13 +1321,18 @@ impl<'a> Interpreter<'a> {
         let len = match obj {
             DataType::Array(arr) => arr.len() as i64,
             DataType::String(s) => s.chars().count() as i64,
-            _ => 0,
+            _ => return Err(InterpError::TypeError {
+                expected: "Array or String".to_string(),
+                actual: obj.type_name().to_string(),
+                context: "slice operation".to_string(),
+                span,
+            }),
         };
         let s_raw = start.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: start.type_name().to_string(), context: "slice start".to_string(), span })?;
         let e_raw_i = end.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: end.type_name().to_string(), context: "slice end".to_string(), span })?;
         // Wrap negative indices from end (Python-style)
-        let s = if s_raw < 0 { (len + s_raw).max(0) as usize } else { s_raw as usize };
-        let e_raw = if e_raw_i < 0 { (len + e_raw_i).max(0) as usize } else { e_raw_i as usize };
+        let s = if s_raw < 0 { (len + s_raw).max(0) as usize } else { usize::try_from(s_raw).unwrap_or(usize::MAX) };
+        let e_raw = if e_raw_i < 0 { (len + e_raw_i).max(0) as usize } else { usize::try_from(e_raw_i).unwrap_or(usize::MAX) };
         let e = if inclusive { e_raw.saturating_add(1) } else { e_raw };
 
         match obj {
@@ -1278,6 +1375,74 @@ impl<'a> Interpreter<'a> {
     }
 
     // =========================================================================
+    // Merge sort with fallible comparator for sort_by
+    // =========================================================================
+
+    fn merge_sort_by(
+        &mut self,
+        items: Vec<DataType>,
+        comparator: &Expression,
+        span: Span,
+        comparison_count: &std::cell::Cell<usize>,
+        max_comparisons: usize,
+    ) -> Result<Vec<DataType>, InterpError> {
+        let len = items.len();
+        if len <= 1 {
+            return Ok(items);
+        }
+
+        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+
+        let mid = len / 2;
+        let left = self.merge_sort_by(items[..mid].to_vec(), comparator, span, comparison_count, max_comparisons)?;
+        let right = self.merge_sort_by(items[mid..].to_vec(), comparator, span, comparison_count, max_comparisons)?;
+
+        // Merge the two sorted halves
+        let mut result = Vec::with_capacity(len);
+        let mut li = 0;
+        let mut ri = 0;
+
+        while li < left.len() && ri < right.len() {
+            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+            let count = comparison_count.get() + 1;
+            comparison_count.set(count);
+            if count > max_comparisons {
+                return Err(InterpError::MaxIterations { limit: max_comparisons, span });
+            }
+
+            let cmp = self.call_lambda_with_args(comparator, &[left[li].clone(), right[ri].clone()], span)?;
+            let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
+                expected: "number".to_string(),
+                actual: cmp.type_name().to_string(),
+                context: "sort_by comparator must return a number".to_string(),
+                span,
+            })?;
+            if cmp_val.is_nan() {
+                return Err(InterpError::TypeError {
+                    expected: "finite number".to_string(),
+                    actual: "NaN".to_string(),
+                    context: "sort_by comparator returned NaN".to_string(),
+                    span,
+                });
+            }
+
+            if cmp_val <= 0.0 {
+                result.push(left[li].clone());
+                li += 1;
+            } else {
+                result.push(right[ri].clone());
+                ri += 1;
+            }
+        }
+
+        // Append remaining elements
+        result.extend_from_slice(&left[li..]);
+        result.extend_from_slice(&right[ri..]);
+
+        Ok(result)
+    }
+
+    // =========================================================================
     // Higher-order function methods (Phase 1)
     // =========================================================================
 
@@ -1287,9 +1452,12 @@ impl<'a> Interpreter<'a> {
                 match method {
                     "map" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut result = Vec::new();
+                        let mut result = Vec::with_capacity(arr.len().min(MAX_ARRAY_ELEMENTS));
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "map result".to_string(), span });
+                            }
                             result.push(self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?);
                         }
                         Ok(Some(DataType::Array(result)))
@@ -1302,6 +1470,9 @@ impl<'a> Interpreter<'a> {
                             let keep = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if keep.to_bool() {
                                 result.push(item.clone());
+                                if result.len() >= MAX_ARRAY_ELEMENTS {
+                                    return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", result.len()), context: "filter".to_string(), span });
+                                }
                             }
                         }
                         Ok(Some(DataType::Array(result)))
@@ -1369,7 +1540,7 @@ impl<'a> Interpreter<'a> {
                                 DataType::Array(inner) => result.extend(inner),
                                 other => result.push(other),
                             }
-                            if result.len() > MAX_ARRAY_ELEMENTS {
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
                                 return Err(InterpError::ResourceLimit {
                                     limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
                                     actual: format!("{} elements", result.len()),
@@ -1390,45 +1561,11 @@ impl<'a> Interpreter<'a> {
                     }
                     "sort_by" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sort_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut sorted = arr.clone();
+                        let sorted = arr.clone();
                         let max_comparisons = MAX_LOOP_ITERATIONS * 10; // 100,000 comparisons
-                        let mut comparison_count = 0usize;
-                        // Simple insertion sort with comparator
-                        for i in 1..sorted.len() {
-                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                            let key = sorted[i].clone();
-                            let mut j = i;
-                            while j > 0 {
-                                if self.is_cancelled() { return Err(InterpError::Cancelled); }
-                                comparison_count += 1;
-                                if comparison_count > max_comparisons {
-                                    return Err(InterpError::MaxIterations { limit: max_comparisons, span });
-                                }
-                                let cmp = self.call_lambda_with_args(&args[0], &[sorted[j - 1].clone(), key.clone()], span)?;
-                                let cmp_val = cmp.to_f64().ok_or_else(|| InterpError::TypeError {
-                                    expected: "number".to_string(),
-                                    actual: cmp.type_name().to_string(),
-                                    context: "sort_by comparator must return a number".to_string(),
-                                    span,
-                                })?;
-                                if cmp_val.is_nan() {
-                                    return Err(InterpError::TypeError {
-                                        expected: "finite number".to_string(),
-                                        actual: "NaN".to_string(),
-                                        context: "sort_by comparator returned NaN".to_string(),
-                                        span,
-                                    });
-                                }
-                                if cmp_val > 0.0 {
-                                    sorted[j] = sorted[j - 1].clone();
-                                    j -= 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                            sorted[j] = key;
-                        }
-                        Ok(Some(DataType::Array(sorted)))
+                        let comparison_count = std::cell::Cell::new(0usize);
+                        let result = self.merge_sort_by(sorted, &args[0], span, &comparison_count, max_comparisons)?;
+                        Ok(Some(DataType::Array(result)))
                     }
                     "group_by" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "group_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
@@ -1515,6 +1652,9 @@ impl<'a> Interpreter<'a> {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let keep = self.call_lambda_with_args(&args[0], std::slice::from_ref(item), span)?;
                             if !keep.to_bool() { break; }
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "take_while result".to_string(), span });
+                            }
                             result.push(item.clone());
                         }
                         Ok(Some(DataType::Array(result)))
@@ -1531,6 +1671,9 @@ impl<'a> Interpreter<'a> {
                                 skipping = false;
                             }
                             result.push(item.clone());
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", result.len()), context: "skip_while".to_string(), span });
+                            }
                         }
                         Ok(Some(DataType::Array(result)))
                     }
@@ -1546,6 +1689,9 @@ impl<'a> Interpreter<'a> {
                             } else {
                                 falses.push(item.clone());
                             }
+                            if trues.len().saturating_add(falses.len()) >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", trues.len() + falses.len()), context: "partition".to_string(), span });
+                            }
                         }
                         Ok(Some(DataType::Array(vec![
                             DataType::Array(trues),
@@ -1560,15 +1706,27 @@ impl<'a> Interpreter<'a> {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             acc = self.call_lambda_with_args(&args[1], &[acc.clone(), item.clone()], span)?;
                             result.push(acc.clone());
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
+                                    actual: format!("{} elements", result.len()),
+                                    context: "scan".to_string(),
+                                    span,
+                                });
+                            }
                         }
                         Ok(Some(DataType::Array(result)))
                     }
                     "enumerate" => {
                         if !args.is_empty() { return Err(InterpError::ArityMismatch { name: "enumerate".to_string(), expected: "0".to_string(), actual: args.len(), span }); }
-                        let mut result = Vec::with_capacity(arr.len());
+                        let cap = arr.len().min(MAX_ARRAY_ELEMENTS);
+                        let mut result = Vec::with_capacity(cap);
                         for (i, item) in arr.iter().enumerate() {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             result.push(DataType::Array(vec![DataType::Int64(i as i64), item.clone()]));
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", result.len()), context: "enumerate".to_string(), span });
+                            }
                         }
                         Ok(Some(DataType::Array(result)))
                     }
@@ -1584,10 +1742,14 @@ impl<'a> Interpreter<'a> {
                                 span,
                             }),
                         };
-                        let mut result = Vec::with_capacity(arr.len().min(other_arr.len()));
+                        let cap = arr.len().min(other_arr.len()).min(MAX_ARRAY_ELEMENTS);
+                        let mut result = Vec::with_capacity(cap);
                         for (a_item, b_item) in arr.iter().zip(other_arr.iter()) {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             result.push(DataType::Array(vec![a_item.clone(), b_item.clone()]));
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", result.len()), context: "zip".to_string(), span });
+                            }
                         }
                         Ok(Some(DataType::Array(result)))
                     }
@@ -1608,11 +1770,14 @@ impl<'a> Interpreter<'a> {
                                 span,
                             });
                         }
-                        let size = size_i64 as usize;
+                        let size = usize::try_from(size_i64).unwrap_or(usize::MAX);
                         let mut result = Vec::new();
                         for chunk in arr.chunks(size) {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             result.push(DataType::Array(chunk.to_vec()));
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", result.len()), context: "chunk".to_string(), span });
+                            }
                         }
                         Ok(Some(DataType::Array(result)))
                     }
@@ -1629,6 +1794,14 @@ impl<'a> Interpreter<'a> {
                             let keep = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
                             if keep.to_bool() {
                                 result.insert(k.clone(), v.clone());
+                                if result.len() >= MAX_ARRAY_ELEMENTS {
+                                    return Err(InterpError::ResourceLimit {
+                                        limit: format!("{} entries", MAX_ARRAY_ELEMENTS),
+                                        actual: format!("{} entries", result.len()),
+                                        context: "filter_entries".to_string(),
+                                        span,
+                                    });
+                                }
                             }
                         }
                         Ok(Some(DataType::Map(result)))
@@ -1640,6 +1813,14 @@ impl<'a> Interpreter<'a> {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let new_v = self.call_lambda_with_args(&args[0], std::slice::from_ref(v), span)?;
                             result.insert(k.clone(), new_v);
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} entries", MAX_ARRAY_ELEMENTS),
+                                    actual: format!("{} entries", result.len()),
+                                    context: "map_values".to_string(),
+                                    span,
+                                });
+                            }
                         }
                         Ok(Some(DataType::Map(result)))
                     }
@@ -1654,6 +1835,14 @@ impl<'a> Interpreter<'a> {
                                 other => other.to_string_lossy(),
                             };
                             result.insert(key_str, v.clone());
+                            if result.len() >= MAX_ARRAY_ELEMENTS {
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} entries", MAX_ARRAY_ELEMENTS),
+                                    actual: format!("{} entries", result.len()),
+                                    context: "map_keys".to_string(),
+                                    span,
+                                });
+                            }
                         }
                         Ok(Some(DataType::Map(result)))
                     }
@@ -1672,10 +1861,10 @@ impl<'a> Interpreter<'a> {
         match obj {
             // Number methods (Phase 13)
             DataType::Int64(n) => match method {
-                "abs" => Ok(Some(match n.checked_abs() {
-                    Some(v) => DataType::Int64(v),
-                    None => DataType::Null, // i64::MIN overflow
-                })),
+                "abs" => match n.checked_abs() {
+                    Some(v) => Ok(Some(DataType::Int64(v))),
+                    None => Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("abs(i64::MIN)".to_string()), span }),
+                },
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n as f64))),
                 "to_int64" => Ok(Some(DataType::Int64(*n))),
@@ -1690,11 +1879,11 @@ impl<'a> Interpreter<'a> {
                         else if *n == -1 { Ok(Some(DataType::Int64(if exp % 2 == 0 { 1 } else { -1 }))) }
                         else { Ok(Some(DataType::Int64(0))) }
                     } else if exp > u32::MAX as i64 {
-                        Ok(Some(DataType::Null)) // exponent too large
+                        Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("pow exponent too large".to_string()), span })
                     } else {
                         match n.checked_pow(exp as u32) {
                             Some(result) => Ok(Some(DataType::Int64(result))),
-                            None => Ok(Some(DataType::Null)), // overflow
+                            None => Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("integer pow overflow".to_string()), span }),
                         }
                     }
                 }
@@ -1734,8 +1923,10 @@ impl<'a> Interpreter<'a> {
                 "sqrt" => Ok(Some(DataType::Float64(n.sqrt()))),
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
+                "is_finite" => Ok(Some(DataType::Bool(n.is_finite()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float64" => Ok(Some(DataType::Float64(*n))),
+                "to_float32" => Ok(Some(DataType::Float32(*n as f32))),
                 "to_int64" => {
                     if !n.is_finite() || *n >= i64::MAX as f64 || *n < i64::MIN as f64 {
                         Ok(Some(DataType::Null))
@@ -1770,6 +1961,13 @@ impl<'a> Interpreter<'a> {
                 "sin" => Ok(Some(DataType::Float64(n.sin()))),
                 "cos" => Ok(Some(DataType::Float64(n.cos()))),
                 "tan" => Ok(Some(DataType::Float64(n.tan()))),
+                "asin" => Ok(Some(DataType::Float64(n.asin()))),
+                "acos" => Ok(Some(DataType::Float64(n.acos()))),
+                "atan" => Ok(Some(DataType::Float64(n.atan()))),
+                "sinh" => Ok(Some(DataType::Float64(n.sinh()))),
+                "cosh" => Ok(Some(DataType::Float64(n.cosh()))),
+                "tanh" => Ok(Some(DataType::Float64(n.tanh()))),
+                "exp" => Ok(Some(DataType::Float64(n.exp()))),
                 "clamp" => {
                     if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "clamp".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                     let lo_arg = self.eval_expr(&args[0])?;
@@ -1794,6 +1992,7 @@ impl<'a> Interpreter<'a> {
                 "sqrt" => Ok(Some(DataType::Float32(n.sqrt()))),
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
+                "is_finite" => Ok(Some(DataType::Bool(n.is_finite()))),
                 "sign" => Ok(Some(DataType::Float32(n.signum()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_float32" => Ok(Some(DataType::Float32(*n))),
@@ -1845,13 +2044,20 @@ impl<'a> Interpreter<'a> {
                 "sin" => Ok(Some(DataType::Float32((*n as f64).sin() as f32))),
                 "cos" => Ok(Some(DataType::Float32((*n as f64).cos() as f32))),
                 "tan" => Ok(Some(DataType::Float32((*n as f64).tan() as f32))),
+                "asin" => Ok(Some(DataType::Float32((*n as f64).asin() as f32))),
+                "acos" => Ok(Some(DataType::Float32((*n as f64).acos() as f32))),
+                "atan" => Ok(Some(DataType::Float32((*n as f64).atan() as f32))),
+                "sinh" => Ok(Some(DataType::Float32((*n as f64).sinh() as f32))),
+                "cosh" => Ok(Some(DataType::Float32((*n as f64).cosh() as f32))),
+                "tanh" => Ok(Some(DataType::Float32((*n as f64).tanh() as f32))),
+                "exp" => Ok(Some(DataType::Float32((*n as f64).exp() as f32))),
                 _ => Ok(None),
             },
             DataType::Int32(n) => match method {
-                "abs" => Ok(Some(match n.checked_abs() {
-                    Some(v) => DataType::Int32(v),
-                    None => DataType::Null, // i32::MIN overflow
-                })),
+                "abs" => match n.checked_abs() {
+                    Some(v) => Ok(Some(DataType::Int32(v))),
+                    None => Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("abs(i32::MIN)".to_string()), span }),
+                },
                 "sign" => Ok(Some(DataType::Int32(n.signum()))),
                 "to_string" => Ok(Some(DataType::String(n.to_string()))),
                 "to_int32" => Ok(Some(DataType::Int32(*n))),
@@ -1867,11 +2073,11 @@ impl<'a> Interpreter<'a> {
                         else if *n == -1 { Ok(Some(DataType::Int32(if exp % 2 == 0 { 1 } else { -1 }))) }
                         else { Ok(Some(DataType::Int32(0))) }
                     } else if exp > u32::MAX as i64 {
-                        Ok(Some(DataType::Null))
+                        Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("pow exponent too large".to_string()), span })
                     } else {
                         match n.checked_pow(exp as u32) {
                             Some(result) => Ok(Some(DataType::Int32(result))),
-                            None => Ok(Some(DataType::Null)),
+                            None => Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("integer pow overflow".to_string()), span }),
                         }
                     }
                 }
@@ -1921,11 +2127,11 @@ impl<'a> Interpreter<'a> {
                         else if *n == 1 { Ok(Some(DataType::Uint32(1))) }
                         else { Ok(Some(DataType::Uint32(0))) }
                     }
-                    else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
+                    else if exp > u32::MAX as i64 { Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("pow exponent too large".to_string()), span }) }
                     else {
                         match n.checked_pow(exp as u32) {
                             Some(result) => Ok(Some(DataType::Uint32(result))),
-                            None => Ok(Some(DataType::Null)),
+                            None => Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("integer pow overflow".to_string()), span }),
                         }
                     }
                 }
@@ -1977,11 +2183,11 @@ impl<'a> Interpreter<'a> {
                         else if *n == 1 { Ok(Some(DataType::Uint64(1))) }
                         else { Ok(Some(DataType::Uint64(0))) }
                     }
-                    else if exp > u32::MAX as i64 { Ok(Some(DataType::Null)) }
+                    else if exp > u32::MAX as i64 { Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("pow exponent too large".to_string()), span }) }
                     else {
                         match n.checked_pow(exp as u32) {
                             Some(result) => Ok(Some(DataType::Uint64(result))),
-                            None => Ok(Some(DataType::Null)),
+                            None => Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("integer pow overflow".to_string()), span }),
                         }
                     }
                 }
@@ -2014,16 +2220,38 @@ impl<'a> Interpreter<'a> {
             // String methods (Phase 16+)
             DataType::String(s) => match method {
                 "is_empty" => Ok(Some(DataType::Bool(s.is_empty()))),
-                "is_numeric" => Ok(Some(DataType::Bool(!s.is_empty() && s.parse::<f64>().is_ok()))),
+                "is_numeric" => Ok(Some(DataType::Bool(!s.is_empty() && s.trim().parse::<f64>().is_ok_and(|f| f.is_finite())))),
                 "is_alphabetic" => Ok(Some(DataType::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))),
-                "to_int" => Ok(Some(s.parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null))),
-                "to_float" => Ok(Some(s.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null))),
+                "to_int" => Ok(Some(s.trim().parse::<i64>().map(DataType::Int64).unwrap_or(DataType::Null))),
+                "to_float" => Ok(Some(s.trim().parse::<f64>().map(DataType::Float64).unwrap_or(DataType::Null))),
                 "len" | "length" => Ok(Some(DataType::Int64(s.chars().count() as i64))),
                 "trim" => Ok(Some(DataType::String(s.trim().to_string()))),
                 "trim_start" => Ok(Some(DataType::String(s.trim_start().to_string()))),
                 "trim_end" => Ok(Some(DataType::String(s.trim_end().to_string()))),
-                "to_upper" | "to_uppercase" => Ok(Some(DataType::String(s.to_uppercase()))),
-                "to_lower" | "to_lowercase" => Ok(Some(DataType::String(s.to_lowercase()))),
+                "to_upper" | "to_uppercase" => {
+                    // Check input length first to avoid allocating huge strings
+                    // (case conversion can expand at most ~3x for edge cases like ß→SS)
+                    if s.len() > MAX_STRING_OUTPUT {
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{} bytes", MAX_STRING_OUTPUT),
+                            actual: format!("{}", s.len()),
+                            context: "to_uppercase input".to_string(),
+                            span,
+                        });
+                    }
+                    Ok(Some(DataType::String(s.to_uppercase())))
+                },
+                "to_lower" | "to_lowercase" => {
+                    if s.len() > MAX_STRING_OUTPUT {
+                        return Err(InterpError::ResourceLimit {
+                            limit: format!("{} bytes", MAX_STRING_OUTPUT),
+                            actual: format!("{}", s.len()),
+                            context: "to_lowercase input".to_string(),
+                            span,
+                        });
+                    }
+                    Ok(Some(DataType::String(s.to_lowercase())))
+                },
                 "reverse" => Ok(Some(DataType::String(s.chars().rev().collect()))),
                 "chars" => {
                     let chars: Vec<DataType> = s.chars().take(MAX_ARRAY_ELEMENTS + 1).map(|c| DataType::String(c.to_string())).collect();
@@ -2136,7 +2364,14 @@ impl<'a> Interpreter<'a> {
                             span,
                         });
                     }
-                    let pad_str = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) if !c.is_empty() => c, _ => " ".to_string() } } else { " ".to_string() };
+                    let pad_str = if args.len() > 1 {
+                        let fill = self.eval_expr(&args[1])?;
+                        match fill {
+                            DataType::String(c) if !c.is_empty() => c,
+                            DataType::String(_) => " ".to_string(),
+                            other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "pad_start fill".to_string(), span }),
+                        }
+                    } else { " ".to_string() };
                     let pad_len = width.saturating_sub(s.chars().count());
                     let max_pad_bytes = pad_len.saturating_mul(pad_str.len());
                     if s.len().saturating_add(max_pad_bytes) > MAX_STRING_OUTPUT {
@@ -2163,7 +2398,14 @@ impl<'a> Interpreter<'a> {
                             span,
                         });
                     }
-                    let pad_str = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(c) if !c.is_empty() => c, _ => " ".to_string() } } else { " ".to_string() };
+                    let pad_str = if args.len() > 1 {
+                        let fill = self.eval_expr(&args[1])?;
+                        match fill {
+                            DataType::String(c) if !c.is_empty() => c,
+                            DataType::String(_) => " ".to_string(),
+                            other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "pad_end fill".to_string(), span }),
+                        }
+                    } else { " ".to_string() };
                     let pad_len = width.saturating_sub(s.chars().count());
                     let max_pad_bytes = pad_len.saturating_mul(pad_str.len());
                     if s.len().saturating_add(max_pad_bytes) > MAX_STRING_OUTPUT {
@@ -2187,8 +2429,8 @@ impl<'a> Interpreter<'a> {
                         end_arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: end_arg.type_name().to_string(), context: "substring end".to_string(), span })?
                     } else { char_len };
                     // Support negative indices (count from end)
-                    let start = if raw_start < 0 { (char_len + raw_start).max(0) as usize } else { (raw_start as usize).min(char_len as usize) };
-                    let end = if raw_end < 0 { (char_len + raw_end).max(0) as usize } else { (raw_end as usize).min(char_len as usize) };
+                    let start = if raw_start < 0 { (char_len + raw_start).max(0) as usize } else { usize::try_from(raw_start).unwrap_or(usize::MAX).min(char_len as usize) };
+                    let end = if raw_end < 0 { (char_len + raw_end).max(0) as usize } else { usize::try_from(raw_end).unwrap_or(usize::MAX).min(char_len as usize) };
                     if start >= end {
                         Ok(Some(DataType::String(String::new())))
                     } else {
@@ -2217,11 +2459,20 @@ impl<'a> Interpreter<'a> {
                                     if !int_overflow {
                                         match int_sum.checked_add(i) {
                                             Some(v) => int_sum = v,
-                                            None => { has_float = true; float_sum += int_sum as f64 + i as f64; int_overflow = true; }
+                                            None => {
+                                                has_float = true;
+                                                float_sum += int_sum as f64;
+                                                int_overflow = true;
+                                                float_sum += i as f64;
+                                            }
                                         }
                                     } else { float_sum += i as f64; }
                                 } else {
                                     has_float = true;
+                                    if !int_overflow {
+                                        float_sum += int_sum as f64;
+                                        int_overflow = true;
+                                    }
                                     float_sum += *u as f64;
                                 }
                             }
@@ -2232,8 +2483,9 @@ impl<'a> Interpreter<'a> {
                                         Some(v) => int_sum = v,
                                         None => {
                                             has_float = true;
-                                            float_sum += int_sum as f64 + val as f64;
+                                            float_sum += int_sum as f64;
                                             int_overflow = true;
+                                            float_sum += val as f64;
                                         }
                                     }
                                 } else {
@@ -2263,11 +2515,20 @@ impl<'a> Interpreter<'a> {
                                     if !int_overflow {
                                         match int_prod.checked_mul(i) {
                                             Some(v) => int_prod = v,
-                                            None => { has_float = true; float_prod *= int_prod as f64 * i as f64; int_overflow = true; }
+                                            None => {
+                                                has_float = true;
+                                                float_prod *= int_prod as f64;
+                                                int_overflow = true;
+                                                float_prod *= i as f64;
+                                            }
                                         }
                                     } else { float_prod *= i as f64; }
                                 } else {
                                     has_float = true;
+                                    if !int_overflow {
+                                        float_prod *= int_prod as f64;
+                                        int_overflow = true;
+                                    }
                                     float_prod *= *u as f64;
                                 }
                             }
@@ -2278,8 +2539,9 @@ impl<'a> Interpreter<'a> {
                                         Some(v) => int_prod = v,
                                         None => {
                                             has_float = true;
-                                            float_prod *= int_prod as f64 * val as f64;
+                                            float_prod *= int_prod as f64;
                                             int_overflow = true;
+                                            float_prod *= val as f64;
                                         }
                                     }
                                 } else {
@@ -2666,6 +2928,7 @@ impl<'a> Interpreter<'a> {
                         DataType::Null => false,
                         DataType::Array(a) => !a.is_empty(),
                         DataType::Map(m) => !m.is_empty(),
+                        DataType::Bytes(b) => !b.is_empty(),
                         _ => true,
                     };
                     return Ok(DataType::Bool(!truthy));
@@ -3002,13 +3265,24 @@ impl<'a> Interpreter<'a> {
                 }
                 let idx = self.eval_expr(index)?;
 
-                // Dispatch MapGet for map indexing (map["key"]), ArrayGet otherwise
+                // Dispatch based on type: MapGet for maps, CharAt for strings, ArrayGet for arrays
                 if matches!(obj, DataType::Map(_)) {
                     let inputs = HashMap::from([
                         ("map".to_string(), obj),
                         ("key".to_string(), idx),
                     ]);
                     self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
+                        InterpError::EvalError {
+                            error: e,
+                            span: expr.span,
+                        }
+                    })
+                } else if matches!(obj, DataType::String(_)) {
+                    let inputs = HashMap::from([
+                        ("input".to_string(), obj),
+                        ("index".to_string(), idx),
+                    ]);
+                    self.evaluator.eval_operation(OperationType::CharAt, &inputs, &EMPTY_CONFIG).map_err(|e| {
                         InterpError::EvalError {
                             error: e,
                             span: expr.span,
@@ -3125,10 +3399,13 @@ impl<'a> Interpreter<'a> {
                     }
                     _ => {
                         // Fallback to evaluator for non-int ranges
-                        let inputs = HashMap::from([
+                        let mut inputs = HashMap::from([
                             ("start".to_string(), start_val),
                             ("end".to_string(), end_val),
                         ]);
+                        if *inclusive {
+                            inputs.insert("inclusive".to_string(), DataType::Bool(true));
+                        }
                         self.evaluator.eval_operation(OperationType::Range, &inputs, &EMPTY_CONFIG).map_err(|e| {
                             InterpError::EvalError {
                                 error: e,
@@ -3417,7 +3694,7 @@ impl<'a> Interpreter<'a> {
                     self.symbols.pop();
                     if let Some(val) = iter_result? {
                         result.push(val);
-                        if result.len() > MAX_ARRAY_ELEMENTS {
+                        if result.len() >= MAX_ARRAY_ELEMENTS {
                             return Err(InterpError::ResourceLimit {
                                 limit: format!("{} elements", MAX_ARRAY_ELEMENTS),
                                 actual: format!("{}", result.len()),
@@ -3514,7 +3791,7 @@ impl<'a> Interpreter<'a> {
                     self.symbols.pop();
                     if let Some((k, v)) = iter_result? {
                         result.insert(k, v);
-                        if result.len() > MAX_ARRAY_ELEMENTS {
+                        if result.len() >= MAX_ARRAY_ELEMENTS {
                             return Err(InterpError::ResourceLimit {
                                 limit: format!("{} entries", MAX_ARRAY_ELEMENTS),
                                 actual: format!("{}", result.len()),
@@ -3638,18 +3915,27 @@ impl<'a> Interpreter<'a> {
                         span,
                     }),
                     Ok(val) => {
-                        // Check if it's a Result::Err enum
+                        // Check if it's a Result enum
                         if let DataType::Map(ref m) = val {
-                            if m.get("__enum").map(|v| v.to_string_lossy()) == Some("Result".to_string())
-                                && m.get("__variant").map(|v| v.to_string_lossy()) == Some("Err".to_string()) {
-                                // Extract the error data for the thrown value
-                                let error_val = m.get("__data")
-                                    .and_then(|d| if let DataType::Array(arr) = d { arr.first().cloned() } else { None })
-                                    .unwrap_or(val.clone());
-                                return Err(InterpError::ThrownError {
-                                    value: error_val,
-                                    span,
-                                });
+                            if m.get("__enum").map(|v| v.to_string_lossy()) == Some("Result".to_string()) {
+                                let variant = m.get("__variant").map(|v| v.to_string_lossy());
+                                if variant.as_deref() == Some("Err") {
+                                    // Result::Err — throw the error value
+                                    let error_val = m.get("__data")
+                                        .and_then(|d| if let DataType::Array(arr) = d { arr.first().cloned() } else { None })
+                                        .unwrap_or(val.clone());
+                                    return Err(InterpError::ThrownError {
+                                        value: error_val,
+                                        span,
+                                    });
+                                }
+                                if variant.as_deref() == Some("Ok") {
+                                    // Result::Ok — unwrap the inner value
+                                    let ok_val = m.get("__data")
+                                        .and_then(|d| if let DataType::Array(arr) = d { arr.first().cloned() } else { None })
+                                        .unwrap_or(DataType::Null);
+                                    return Ok(ok_val);
+                                }
                             }
                         }
                         Ok(val)
@@ -3824,7 +4110,7 @@ impl<'a> Interpreter<'a> {
                     });
                     return Ok(val.clone());
                 }
-                if self.functions.contains_key(fn_name.as_str()) {
+                if fn_name == "assert" {
                     let evaluated_args: Vec<DataType> = args.iter()
                         .map(|arg| {
                             if matches!(arg.kind, ExpressionKind::Placeholder) {
@@ -3834,6 +4120,51 @@ impl<'a> Interpreter<'a> {
                             }
                         })
                         .collect::<Result<_, _>>()?;
+                    let val = evaluated_args.first().unwrap_or(piped_value);
+                    return match val {
+                        DataType::Bool(true) => Ok(DataType::Null),
+                        DataType::Bool(false) => {
+                            let msg = evaluated_args.get(1).map(datatype_to_display)
+                                .unwrap_or_else(|| "Assertion failed".to_string());
+                            Err(InterpError::AssertionFailed { message: msg, span: stage.span })
+                        }
+                        other => Err(InterpError::TypeError {
+                            expected: "Bool".to_string(), actual: other.type_name().to_string(),
+                            context: "assert()".to_string(), span: stage.span,
+                        }),
+                    };
+                }
+                if matches!(fn_name.as_str(), "assert_eq" | "assert_ne") {
+                    let has_placeholder = args.iter().any(|a| matches!(a.kind, ExpressionKind::Placeholder));
+                    let evaluated_args: Vec<DataType> = args.iter()
+                        .map(|arg| {
+                            if matches!(arg.kind, ExpressionKind::Placeholder) {
+                                Ok(piped_value.clone())
+                            } else {
+                                self.eval_expr(arg)
+                            }
+                        })
+                        .collect::<Result<_, _>>()?;
+                    // When no placeholder is used, prepend piped value as first arg
+                    let (left, right) = if !has_placeholder && evaluated_args.len() < 2 {
+                        (piped_value as &DataType, evaluated_args.first().unwrap_or(&DataType::Null))
+                    } else {
+                        (evaluated_args.first().unwrap_or(piped_value), evaluated_args.get(1).unwrap_or(&DataType::Null))
+                    };
+                    let eq = left == right;
+                    let pass = if fn_name == "assert_eq" { eq } else { !eq };
+                    if pass { return Ok(DataType::Null); }
+                    let msg = evaluated_args.get(2).map(datatype_to_display).unwrap_or_else(|| {
+                        if fn_name == "assert_eq" {
+                            format!("Assertion failed: expected values to be equal\n  left:  {}\n  right: {}", datatype_to_display(left), datatype_to_display(right))
+                        } else {
+                            format!("Assertion failed: expected values to differ, both are: {}", datatype_to_display(left))
+                        }
+                    });
+                    return Err(InterpError::AssertionFailed { message: msg, span: stage.span });
+                }
+                if self.functions.contains_key(fn_name.as_str()) {
+                    let evaluated_args = self.eval_pipe_call_args(args, piped_value)?;
                     return self.call_function(fn_name, &evaluated_args, stage.span);
                 }
 
@@ -3842,15 +4173,7 @@ impl<'a> Interpreter<'a> {
                     let addr = entry.addr;
                     if let Some(DataType::String(ref_name)) = self.heap.read(addr).cloned() {
                         if self.functions.contains_key(ref_name.as_str()) {
-                            let evaluated_args: Vec<DataType> = args.iter()
-                                .map(|arg| {
-                                    if matches!(arg.kind, ExpressionKind::Placeholder) {
-                                        Ok(piped_value.clone())
-                                    } else {
-                                        self.eval_expr(arg)
-                                    }
-                                })
-                                .collect::<Result<_, _>>()?;
+                            let evaluated_args = self.eval_pipe_call_args(args, piped_value)?;
                             return self.call_function(&ref_name, &evaluated_args, stage.span);
                         }
                     }
@@ -3871,21 +4194,17 @@ impl<'a> Interpreter<'a> {
 
                 let input_ports = op_input_ports(op_type);
 
-                let inputs: HashMap<String, DataType> = args.iter().enumerate()
-                    .map(|(i, arg)| {
+                let evaluated_args = self.eval_pipe_call_args(args, piped_value)?;
+                let inputs: HashMap<String, DataType> = evaluated_args.into_iter().enumerate()
+                    .map(|(i, val)| {
                         let port = if i < input_ports.len() {
                             input_ports[i].to_string()
                         } else {
                             format!("input_{}", i)
                         };
-                        let val = if matches!(arg.kind, ExpressionKind::Placeholder) {
-                            piped_value.clone()
-                        } else {
-                            self.eval_expr(arg)?
-                        };
-                        Ok((port, val))
+                        (port, val)
                     })
-                    .collect::<Result<_, InterpError>>()?;
+                    .collect();
 
                 let config: HashMap<String, DataType> = kwargs.iter()
                     .map(|(key, val_expr)| Ok((key.clone(), self.eval_expr(val_expr)?)))
@@ -4113,10 +4432,21 @@ impl<'a> Interpreter<'a> {
             }
         };
 
+        // Save state that may be modified by package use statements
+        let saved_aliases = self.std_op_aliases.clone();
+        let saved_enums = self.enum_defs.clone();
+        let saved_structs = self.struct_defs.clone();
+        let saved_functions = self.functions.clone();
+
         // Execute the package's own use statements (e.g. `use std::array`)
         // so that std aliases are available when package functions run
         for use_stmt in &pkg.use_statements {
             if let Err(e) = self.exec_statement(use_stmt) {
+                self.std_op_aliases = saved_aliases;
+                self.enum_defs = saved_enums;
+                self.struct_defs = saved_structs;
+                self.functions = saved_functions;
+                self.importing_packages.remove(package_id);
                 return Err(InterpError::EvalError {
                     error: EvalError::InvalidInput(format!("package '{}' setup failed: {}", package_id, e)),
                     span,
@@ -4124,28 +4454,41 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Register package enum/struct definitions
-        for (name, variants) in &pkg.enum_defs {
-            self.enum_defs.insert(name.clone(), variants.clone());
-        }
-        for (name, fields) in &pkg.struct_defs {
-            self.struct_defs.insert(name.clone(), fields.clone());
-        }
-
         if glob || path.len() == 2 {
             // `use pkg::collections::*` or `use pkg::collections` — import all exports
+            // Register all package enum/struct definitions for glob/module-level imports
+            for (name, variants) in &pkg.enum_defs {
+                self.enum_defs.insert(name.clone(), variants.clone());
+            }
+            for (name, fields) in &pkg.struct_defs {
+                self.struct_defs.insert(name.clone(), fields.clone());
+            }
             for (name, func) in &pkg.functions {
                 self.functions.insert(name.clone(), func.clone());
             }
         } else if path.len() >= 3 {
             // `use pkg::collections::sorted_unique` or with alias
             let func_name = &path[2];
+            let local_name = alias.unwrap_or(func_name.as_str());
             if let Some(func) = pkg.functions.get(func_name) {
-                let local_name = alias.unwrap_or(func_name.as_str());
                 self.functions.insert(local_name.to_string(), func.clone());
+            } else if let Some((_, variants)) = pkg.enum_defs.iter().find(|(n, _)| n == func_name) {
+                self.enum_defs.insert(local_name.to_string(), variants.clone());
+            } else if let Some((_, fields)) = pkg.struct_defs.iter().find(|(n, _)| n == func_name) {
+                self.struct_defs.insert(local_name.to_string(), fields.clone());
             } else {
+                self.enum_defs = saved_enums;
+                self.struct_defs = saved_structs;
+                self.std_op_aliases = saved_aliases;
+                self.functions = saved_functions;
                 self.importing_packages.remove(package_id);
-                let available: Vec<&str> = pkg.functions.keys().map(|s| s.as_str()).collect();
+                let mut available: Vec<&str> = pkg.functions.keys().map(|s| s.as_str()).collect();
+                for (n, _) in &pkg.enum_defs {
+                    available.push(n.as_str());
+                }
+                for (n, _) in &pkg.struct_defs {
+                    available.push(n.as_str());
+                }
                 let suggestion = super::errors::suggest_name(func_name, &available);
                 return Err(InterpError::UnknownOperation {
                     name: format!("pkg::{}::{}", package_id, func_name),
@@ -4264,13 +4607,19 @@ impl<'a> Interpreter<'a> {
                 let saved_closures = self.closure_captures.clone();
                 let saved_stacks = self.saved_symbol_stacks.clone();
                 let saved_async_fns = self.async_fns.clone();
+                let saved_importing = self.importing_packages.clone();
+                let saved_logs = self.logs.clone();
+                let saved_lambda_counter = self.lambda_counter;
+                let saved_imports = self.imports.clone();
+                let saved_call_depth = self.call_depth;
+                let saved_heap = self.heap.clone();
                 self.symbols.push(HashMap::new());
                 self.heap.push_scope();
 
                 let test_result = self.exec_block(body);
 
-                // Restore all state
-                self.heap.pop_scope();
+                // Restore all state (heap restore ensures heap value mutations don't leak)
+                self.heap = saved_heap;
                 while self.symbols.len() > saved_symbols_len {
                     self.symbols.pop();
                 }
@@ -4281,6 +4630,11 @@ impl<'a> Interpreter<'a> {
                 self.closure_captures = saved_closures;
                 self.saved_symbol_stacks = saved_stacks;
                 self.async_fns = saved_async_fns;
+                self.importing_packages = saved_importing;
+                self.logs = saved_logs;
+                self.lambda_counter = saved_lambda_counter;
+                self.imports = saved_imports;
+                self.call_depth = saved_call_depth;
 
                 match test_result {
                     Ok(_) => {
@@ -4878,20 +5232,19 @@ fn to_i128_numeric(val: &DataType) -> Option<i128> {
         DataType::Uint64(n) => Some(*n as i128),
         DataType::Uint32(n) => Some(*n as i128),
         DataType::Float64(n) => {
-            if n.is_finite() && *n >= (i128::MIN as f64) && *n <= (i128::MAX as f64) {
+            if n.is_finite() && *n >= (i128::MIN as f64) && *n < (i128::MAX as f64) {
                 Some(*n as i128)
             } else {
                 None
             }
         }
         DataType::Float32(n) => {
-            if n.is_finite() && *n >= (i128::MIN as f32) && *n <= (i128::MAX as f32) {
+            if n.is_finite() && *n >= (i128::MIN as f32) && *n < (i128::MAX as f32) {
                 Some((*n as f64) as i128)
             } else {
                 None
             }
         }
-        DataType::Bool(b) => Some(*b as i128),
         _ => None,
     }
 }
@@ -5018,14 +5371,16 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
             methods.extend_from_slice(&["abs", "sign", "to_uint64", "pow", "min", "max", "clamp"]);
         }
         DataType::Float64(_) => {
-            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
-                "sign", "pow", "min", "max", "clamp",
-                "ln", "log2", "log10", "sin", "cos", "tan"]);
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite", "is_finite",
+                "sign", "to_float32", "pow", "min", "max", "clamp",
+                "ln", "log2", "log10", "sin", "cos", "tan",
+                "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp"]);
         }
         DataType::Float32(_) => {
-            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite", "is_finite",
                 "sign", "to_float32", "pow", "min", "max", "clamp",
-                "ln", "log2", "log10", "sin", "cos", "tan"]);
+                "ln", "log2", "log10", "sin", "cos", "tan",
+                "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp"]);
         }
         DataType::Map(_) => {
             methods.extend_from_slice(&["get", "set", "delete", "has", "keys", "values", "entries",
@@ -5066,7 +5421,7 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
                 (Literal::Int64(a), DataType::Uint32(b)) => *a == (*b as i64),
                 (Literal::Int64(a), DataType::Uint64(b)) => *a >= 0 && (*a as u64) == *b,
                 (Literal::Int64(a), DataType::Float32(b)) => (*a as f64) == (*b as f64),
-                (Literal::Float64(a), DataType::Float64(b)) => a.to_bits() == b.to_bits(),
+                (Literal::Float64(a), DataType::Float64(b)) => a == b || (a.is_nan() && b.is_nan()),
                 (Literal::Float64(a), DataType::Int64(b)) => *a == (*b as f64),
                 (Literal::Float64(a), DataType::Float32(b)) => *a == (*b as f64),
                 (Literal::Float64(a), DataType::Int32(b)) => *a == (*b as f64),
@@ -5365,7 +5720,7 @@ impl std::fmt::Display for InterpError {
                 )
             }
             InterpError::EvalError { error, span } => {
-                write!(f, "{} [E406]: {}", span, error)
+                write!(f, "{} [{}]: {}", span, error.error_code(), error)
             }
             InterpError::MaxIterations { limit, span } => {
                 write!(
@@ -5374,7 +5729,7 @@ impl std::fmt::Display for InterpError {
                     span, limit
                 )
             }
-            InterpError::Cancelled => write!(f, "[E407] Execution cancelled"),
+            InterpError::Cancelled => write!(f, "[E407]: Execution cancelled"),
             InterpError::InvalidPlaceholder { span } => {
                 write!(
                     f,
@@ -5578,6 +5933,16 @@ mod tests {
         let span = Span::new(1, 1, 1, 1);
         let result = interp.try_eval_direct_method(&obj, "to_float32", &args, span).unwrap();
         assert_eq!(result, Some(DataType::Float32(3.14)));
+    }
+
+    #[test]
+    fn test_float64_to_float32_narrowing() {
+        let mut interp = make_interp();
+        let obj = DataType::Float64(3.14);
+        let args = vec![];
+        let span = Span::new(1, 1, 1, 1);
+        let result = interp.try_eval_direct_method(&obj, "to_float32", &args, span).unwrap();
+        assert_eq!(result, Some(DataType::Float32(3.14_f64 as f32)));
     }
 
     #[test]

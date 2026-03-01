@@ -16,7 +16,7 @@ fn to_snake_case(name: &str) -> String {
 /// Also accepts SCREAMING_SNAKE_CASE (e.g., `MAX_SIZE`) for constants.
 pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> {
     // Skip names starting with _ (conventional suppression) or single-char names
-    if name.starts_with('_') || name.len() <= 1 {
+    if name.starts_with('_') || name.chars().count() <= 1 {
         return None;
     }
     // snake_case: only lowercase letters, digits, and underscores
@@ -100,9 +100,21 @@ pub fn check_dead_code_in_block(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                     terminated = true;
                 }
             }
-            // A try/catch where both blocks terminate is a terminator.
-            StatementKind::TryCatch { try_block, catch_block, .. } => {
-                if is_terminating_block(try_block) && is_terminating_block(catch_block) {
+            // A try/catch where both blocks terminate, or finally terminates, is a terminator.
+            StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+                if (is_terminating_block(try_block) && is_terminating_block(catch_block))
+                    || finally_block.as_ref().is_some_and(is_terminating_block)
+                {
+                    terminated = true;
+                }
+            }
+            // `while true { return/throw; }` is a terminator (condition is always true).
+            // But if the body contains a `break`, code after the loop IS reachable.
+            StatementKind::WhileLoop { condition, body, .. } => {
+                if matches!(&condition.kind, ExpressionKind::Literal(Literal::Bool(true)))
+                    && is_terminating_block(body)
+                    && !block_contains_break(body)
+                {
                     terminated = true;
                 }
             }
@@ -281,12 +293,14 @@ fn is_terminating_expr(expr: &Expression) -> bool {
             let has_catch_all = arms.iter().any(|a| a.guard.is_none() && is_catch_all_pattern(&a.pattern));
             has_catch_all && arms.iter().all(|a| is_terminating_block(&a.body))
         }
-        // A loop always either runs forever or exits via break/return/throw,
-        // so code after it is unreachable if the loop body terminates unconditionally.
-        ExpressionKind::Loop(block) => is_terminating_block(block),
-        // A try/catch expression where both blocks terminate is a terminator.
-        ExpressionKind::TryCatchExpr { try_block, catch_block, .. } => {
-            is_terminating_block(try_block) && is_terminating_block(catch_block)
+        // A loop always either runs forever or exits via break/return/throw.
+        // Code after it is unreachable only if the body terminates without break
+        // (break would exit the loop, making subsequent code reachable).
+        ExpressionKind::Loop(block) => is_terminating_block(block) && !block_contains_break(block),
+        // A try/catch expression where both blocks terminate, or finally terminates, is a terminator.
+        ExpressionKind::TryCatchExpr { try_block, catch_block, finally_block, .. } => {
+            (is_terminating_block(try_block) && is_terminating_block(catch_block))
+                || finally_block.as_ref().is_some_and(is_terminating_block)
         }
         _ => false,
     }
@@ -302,6 +316,22 @@ fn is_terminating_block(block: &Block) -> bool {
             | StatementKind::Throw(_) => return true,
             StatementKind::ExprStatement(expr) => {
                 if is_terminating_expr(expr) {
+                    return true;
+                }
+            }
+            StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+                if (is_terminating_block(try_block) && is_terminating_block(catch_block))
+                    || finally_block.as_ref().is_some_and(is_terminating_block)
+                {
+                    return true;
+                }
+            }
+            // `while true { return/throw; }` always terminates, unless it contains break.
+            StatementKind::WhileLoop { condition, body, .. } => {
+                if matches!(&condition.kind, ExpressionKind::Literal(Literal::Bool(true)))
+                    && is_terminating_block(body)
+                    && !block_contains_break(body)
+                {
                     return true;
                 }
             }
@@ -325,14 +355,23 @@ fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     }
 }
 
+/// Check if a pattern contains any enum patterns (including inside Or-patterns).
+fn contains_enum_pattern(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::EnumPattern { .. } => true,
+        Pattern::Or(alternatives) => alternatives.iter().any(contains_enum_pattern),
+        _ => false,
+    }
+}
+
 /// Recursively collect enum variant names from a pattern, including inside Or-patterns.
 fn collect_enum_variants(
     pattern: &Pattern,
-    map: &mut std::collections::HashMap<String, Vec<String>>,
+    map: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) {
     match pattern {
         Pattern::EnumPattern { enum_name, variant, .. } => {
-            map.entry(enum_name.clone()).or_default().push(variant.clone());
+            map.entry(enum_name.clone()).or_default().insert(variant.clone());
         }
         Pattern::Or(alternatives) => {
             for alt in alternatives {
@@ -349,6 +388,7 @@ fn collect_enum_variants(
 pub fn check_match_exhaustiveness(
     arms: &[MatchArm],
     enum_defs: &[(String, Vec<String>)],
+    match_span: Span,
 ) -> Vec<AstDiagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -360,17 +400,15 @@ pub fn check_match_exhaustiveness(
     }
 
     // Collect enum names referenced in arms
-    let mut enum_variants_used: std::collections::HashMap<String, Vec<String>> =
+    let mut enum_variants_used: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
 
     let mut has_non_enum_arm = false;
     for arm in arms {
         // Only count unguarded arms as covering a variant — guarded arms may not match
         if arm.guard.is_none() {
-            let before = enum_variants_used.values().map(|v| v.len()).sum::<usize>();
             collect_enum_variants(&arm.pattern, &mut enum_variants_used);
-            let after = enum_variants_used.values().map(|v| v.len()).sum::<usize>();
-            if before == after && !is_catch_all_pattern(&arm.pattern) {
+            if !contains_enum_pattern(&arm.pattern) && !is_catch_all_pattern(&arm.pattern) {
                 // This arm is not an enum pattern and not a catch-all — mixed match
                 has_non_enum_arm = true;
             }
@@ -383,22 +421,49 @@ pub fn check_match_exhaustiveness(
         return diagnostics;
     }
 
+    // If all arms were guarded (no unguarded enum coverage), check for guarded enum patterns
+    if enum_variants_used.is_empty() {
+        let mut guarded_enums: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for arm in arms {
+            if arm.guard.is_some() {
+                collect_enum_variants(&arm.pattern, &mut guarded_enums);
+            }
+        }
+        for enum_name in guarded_enums.keys() {
+            if let Some((_, all_variants)) = enum_defs.iter().find(|(name, _)| name == enum_name) {
+                let code = ErrorCode::W203;
+                let all_names: Vec<&str> = all_variants.iter().map(|s| s.as_str()).collect();
+                diagnostics.push(AstDiagnostic {
+                    line: match_span.start_line,
+                    column: match_span.start_col,
+                    message: format!(
+                        "non-exhaustive match: all arms are guarded, no variant of {} is definitively covered",
+                        enum_name,
+                    ),
+                    severity: DiagnosticSeverity::Warning,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: Some(format!("add a wildcard arm `_ => ...` or unguarded variant arms for {}", all_names.join(", "))),
+                });
+            }
+        }
+    }
+
     // For each enum referenced, check if all its variants are covered
     for (enum_name, used_variants) in &enum_variants_used {
         if let Some((_, all_variants)) = enum_defs.iter().find(|(name, _)| name == enum_name) {
             let missing: Vec<&String> = all_variants
                 .iter()
-                .filter(|v| !used_variants.contains(v))
+                .filter(|v| !used_variants.contains(*v))
                 .collect();
 
             if !missing.is_empty() {
                 let code = ErrorCode::W203;
                 let missing_names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-                // Use the span of the first arm as a reasonable location
-                let span = arms.first().map_or(Span::default(), |a| a.span);
                 diagnostics.push(AstDiagnostic {
-                    line: span.start_line,
-                    column: span.start_col,
+                    line: match_span.start_line,
+                    column: match_span.start_col,
                     message: format!(
                         "non-exhaustive match: missing variant(s) {}::{{{}}}",
                         enum_name,
@@ -414,6 +479,81 @@ pub fn check_match_exhaustiveness(
     }
 
     diagnostics
+}
+
+// =============================================================================
+// W205: Self-comparison (comparing a value to itself)
+// =============================================================================
+
+/// Check if a binary comparison compares an expression to itself.
+/// e.g., `x == x`, `y != y`, `a > a`, `a < a`, `a >= a`, `a <= a`
+pub fn check_self_comparison(op: &BinOp, left: &Expression, right: &Expression, span: Span) -> Option<AstDiagnostic> {
+    // Only check comparison operators
+    match op {
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {}
+        _ => return None,
+    }
+    if exprs_structurally_equal(left, right) {
+        let code = ErrorCode::W205;
+        Some(AstDiagnostic {
+            line: span.start_line,
+            column: span.start_col,
+            message: format!("comparing a value to itself (`{}`)", op_symbol(op)),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: Some("Did you mean to compare to a different value? Use `x.is_nan()` to check for NaN.".to_string()),
+        })
+    } else {
+        None
+    }
+}
+
+/// Check if two expressions are structurally identical (simple cases only).
+fn exprs_structurally_equal(a: &Expression, b: &Expression) -> bool {
+    match (&a.kind, &b.kind) {
+        (ExpressionKind::Variable(va), ExpressionKind::Variable(vb)) => va == vb,
+        (
+            ExpressionKind::FieldAccess { object: oa, field: fa },
+            ExpressionKind::FieldAccess { object: ob, field: fb },
+        ) => fa == fb && exprs_structurally_equal(oa, ob),
+        (
+            ExpressionKind::Index { object: oa, index: ia },
+            ExpressionKind::Index { object: ob, index: ib },
+        ) => exprs_structurally_equal(oa, ob) && exprs_structurally_equal(ia, ib),
+        (ExpressionKind::Literal(la), ExpressionKind::Literal(lb)) => literals_equal(la, lb),
+        _ => false,
+    }
+}
+
+/// Check if two literals are equal.
+fn literals_equal(a: &Literal, b: &Literal) -> bool {
+    match (a, b) {
+        (Literal::Int64(ia), Literal::Int64(ib)) => ia == ib,
+        (Literal::Float64(fa), Literal::Float64(fb)) => fa == fb,
+        (Literal::String(sa), Literal::String(sb)) => sa == sb,
+        (Literal::Bool(ba), Literal::Bool(bb)) => ba == bb,
+        (Literal::Null, Literal::Null) => true,
+        _ => false,
+    }
+}
+
+fn op_symbol(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Eq => "==",
+        BinOp::NotEq => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::LtEq => "<=",
+        BinOp::GtEq => ">=",
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+    }
 }
 
 // =============================================================================
@@ -453,6 +593,26 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                     })
                     .collect(),
             },
+            StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
+                vec![(fdef.name.clone(), fdef.span)]
+            }
+            StatementKind::EnumDef { name, .. }
+            | StatementKind::StructDef { name, .. }
+            | StatementKind::TypeAlias { name, .. }
+            | StatementKind::ModuleDef { name, .. } => {
+                vec![(name.clone(), stmt.span)]
+            }
+            StatementKind::Use { path, alias, glob } => {
+                if *glob {
+                    vec![]
+                } else if let Some(alias_name) = alias {
+                    vec![(alias_name.clone(), stmt.span)]
+                } else if let Some(last) = path.last() {
+                    vec![(last.clone(), stmt.span)]
+                } else {
+                    vec![]
+                }
+            }
             _ => vec![],
         };
 
@@ -473,7 +633,7 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: Some(format!(
-                        "Use a different name or remove the earlier `let {}`",
+                        "Use a different name or remove the earlier declaration of `{}`",
                         name
                     )),
                 });
@@ -492,10 +652,9 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
 
 /// Check if a finally block contains return/break/continue/throw statements,
 /// which override the try/catch result and are almost always bugs.
-pub fn check_return_in_finally(finally_block: &Block, span: Span) -> Vec<AstDiagnostic> {
+pub fn check_control_flow_in_finally(finally_block: &Block) -> Vec<AstDiagnostic> {
     let mut diagnostics = Vec::new();
     find_control_flow_in_block(finally_block, &mut diagnostics);
-    let _ = span;
     diagnostics
 }
 
@@ -541,8 +700,17 @@ fn find_control_flow_in_stmt(stmt: &Statement, diagnostics: &mut Vec<AstDiagnost
                 find_control_flow_in_block(fb, diagnostics);
             }
         }
-        StatementKind::ExprStatement(expr) => {
+        StatementKind::ExprStatement(expr)
+        | StatementKind::Output(expr) => {
             find_control_flow_in_expr(expr, diagnostics);
+        }
+        StatementKind::Let { value, .. }
+        | StatementKind::LetMut { value, .. }
+        | StatementKind::LetDestructure { value, .. }
+        | StatementKind::ConstDef { value, .. }
+        | StatementKind::Assignment { value, .. }
+        | StatementKind::CompoundAssign { value, .. } => {
+            find_control_flow_in_expr(value, diagnostics);
         }
         StatementKind::FunctionDef(_) | StatementKind::AsyncFunctionDef(_) => {}
         _ => {}
@@ -579,12 +747,36 @@ fn find_return_throw_in_block(block: &Block, diagnostics: &mut Vec<AstDiagnostic
             StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. } => {
                 find_return_throw_in_block(body, diagnostics);
             }
-            StatementKind::ExprStatement(expr) => {
+            StatementKind::TryCatch {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                find_return_throw_in_block(try_block, diagnostics);
+                find_return_throw_in_block(catch_block, diagnostics);
+                if let Some(fb) = finally_block {
+                    find_return_throw_in_block(fb, diagnostics);
+                }
+            }
+            StatementKind::ExprStatement(expr)
+            | StatementKind::Output(expr) => {
                 find_return_throw_in_expr(expr, diagnostics);
+            }
+            StatementKind::Let { value, .. }
+            | StatementKind::LetMut { value, .. }
+            | StatementKind::LetDestructure { value, .. }
+            | StatementKind::ConstDef { value, .. }
+            | StatementKind::Assignment { value, .. }
+            | StatementKind::CompoundAssign { value, .. } => {
+                find_return_throw_in_expr(value, diagnostics);
             }
             StatementKind::FunctionDef(_) | StatementKind::AsyncFunctionDef(_) => {}
             _ => {}
         }
+    }
+    if let Some(tail) = &block.tail_expr {
+        find_return_throw_in_expr(tail, diagnostics);
     }
 }
 
@@ -611,6 +803,18 @@ fn find_return_throw_in_expr(expr: &Expression, diagnostics: &mut Vec<AstDiagnos
         }
         ExpressionKind::Loop(block) => {
             find_return_throw_in_block(block, diagnostics);
+        }
+        ExpressionKind::TryCatchExpr {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            find_return_throw_in_block(try_block, diagnostics);
+            find_return_throw_in_block(catch_block, diagnostics);
+            if let Some(fb) = finally_block {
+                find_return_throw_in_block(fb, diagnostics);
+            }
         }
         _ => {}
     }

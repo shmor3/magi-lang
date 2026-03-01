@@ -249,6 +249,25 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, SyntaxError> {
     .collect()
 }
 
+/// Tokenize source code with an offset applied to all span positions.
+/// Used for f-string interpolation expressions to preserve original source locations.
+pub fn tokenize_with_offset(source: &str, line_offset: u32, col_offset: u32) -> Result<Vec<Token>, SyntaxError> {
+    let mut lexer = Lexer::new(source);
+    // Adjust the starting position to the offset
+    lexer.line = line_offset;
+    lexer.col = col_offset;
+    let mut done = false;
+    std::iter::from_fn(|| {
+        if done { return None; }
+        let token = lexer.next_token();
+        if matches!(&token, Ok(t) if t.kind == TokenKind::Eof) {
+            done = true;
+        }
+        Some(token)
+    })
+    .collect()
+}
+
 struct Lexer<'a> {
     source: &'a [u8],
     pos: usize,
@@ -1060,9 +1079,9 @@ impl<'a> Lexer<'a> {
         if self.peek() == Some(b'0') {
             if let Some(prefix) = self.peek_at(1) {
                 match prefix {
-                    b'x' | b'X' => return self.lex_int_with_base(start, start_line, start_col, 16, |c| c.is_ascii_hexdigit()),
-                    b'o' | b'O' => return self.lex_int_with_base(start, start_line, start_col, 8, |c| matches!(c, b'0'..=b'7')),
-                    b'b' | b'B' => return self.lex_int_with_base(start, start_line, start_col, 2, |c| c == b'0' || c == b'1'),
+                    b'x' | b'X' => return self.lex_int_with_base(start_line, start_col, 16, |c| c.is_ascii_hexdigit()),
+                    b'o' | b'O' => return self.lex_int_with_base(start_line, start_col, 8, |c| matches!(c, b'0'..=b'7')),
+                    b'b' | b'B' => return self.lex_int_with_base(start_line, start_col, 2, |c| c == b'0' || c == b'1'),
                     _ => {}
                 }
             }
@@ -1120,7 +1139,7 @@ impl<'a> Lexer<'a> {
         })
     }
 
-    fn lex_int_with_base(&mut self, _start: usize, start_line: u32, start_col: u32, base: u32, is_valid_digit: fn(u8) -> bool) -> Result<Token, SyntaxError> {
+    fn lex_int_with_base(&mut self, start_line: u32, start_col: u32, base: u32, is_valid_digit: fn(u8) -> bool) -> Result<Token, SyntaxError> {
         self.advance(); // consume '0'
         self.advance(); // consume prefix letter (x/o/b)
 
@@ -1150,7 +1169,7 @@ impl<'a> Lexer<'a> {
         let value = i64::from_str_radix(&digits, base).map_err(|_| SyntaxError {
             line: start_line as usize,
             column: start_col as usize,
-            message: "Invalid numeric literal".to_string(),
+            message: "Integer literal out of range (max 9223372036854775807)".to_string(),
         })?;
 
         Ok(Token {

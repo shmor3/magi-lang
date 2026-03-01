@@ -16,6 +16,9 @@ use super::SyntaxError;
 /// so this effectively limits paren nesting to ~64 levels.
 const MAX_PARSE_DEPTH: usize = 128;
 
+/// Positional arguments and keyword arguments parsed from a call site.
+type ArgsAndKwargs = (Vec<Expression>, Vec<(String, Expression)>);
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -102,6 +105,7 @@ impl Parser {
                     self.errors.push(e);
                     self.synchronize();
                     self.depth = 0; // Reset depth after error recovery to prevent leak
+                    self.no_struct_literal = false; // Reset struct literal flag to prevent misparsing
                 }
             }
         }
@@ -141,7 +145,8 @@ impl Parser {
     // =========================================================================
 
     fn peek(&self) -> &Token {
-        &self.tokens[self.pos.min(self.tokens.len() - 1)]
+        // tokens always contains at least the EOF token from the lexer.
+        &self.tokens[self.pos.min(self.tokens.len().saturating_sub(1))]
     }
 
     fn peek_kind(&self) -> &TokenKind {
@@ -154,7 +159,7 @@ impl Parser {
 
     /// Peek at the token after the current one.
     fn peek_next_kind(&self) -> &TokenKind {
-        let next = (self.pos + 1).min(self.tokens.len() - 1);
+        let next = (self.pos + 1).min(self.tokens.len().saturating_sub(1));
         &self.tokens[next].kind
     }
 
@@ -176,8 +181,8 @@ impl Parser {
     }
 
     fn advance(&mut self) -> &Token {
-        let tok = &self.tokens[self.pos.min(self.tokens.len() - 1)];
-        if self.pos < self.tokens.len() - 1 {
+        let tok = &self.tokens[self.pos.min(self.tokens.len().saturating_sub(1))];
+        if self.pos < self.tokens.len().saturating_sub(1) {
             self.pos += 1;
         }
         tok
@@ -307,12 +312,15 @@ impl Parser {
             TokenKind::Struct => self.parse_struct_def(start),
             TokenKind::Pub => {
                 // pub fn / pub mod / pub enum / pub struct / pub const
+                let pub_span = self.peek().span;
                 self.advance(); // consume 'pub'
                 match self.peek_kind() {
                     TokenKind::Fn | TokenKind::Async | TokenKind::Mod
                     | TokenKind::Enum | TokenKind::Struct | TokenKind::Const
                     | TokenKind::Type | TokenKind::Use => {
-                        self.parse_statement()
+                        let mut stmt = self.parse_statement()?;
+                        stmt.span = pub_span.merge(stmt.span);
+                        Ok(stmt)
                     }
                     TokenKind::Pub => Err(SyntaxError {
                         line: start.start_line as usize,
@@ -783,10 +791,18 @@ impl Parser {
 
     fn parse_function_params(&mut self, end_token: &TokenKind) -> Result<Vec<FunctionParam>, SyntaxError> {
         let mut params = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
         while !self.at(end_token) && !self.at(&TokenKind::Eof) {
             let param_start = self.peek().span;
             let is_rest = self.eat(&TokenKind::DotDotDot);
             let param_tok = self.expect_identifier()?;
+            if !seen_names.insert(param_tok.text.clone()) {
+                return Err(SyntaxError {
+                    line: param_start.start_line as usize,
+                    column: param_start.start_col as usize,
+                    message: format!("Duplicate parameter name '{}'", param_tok.text),
+                });
+            }
             let type_annotation = if self.eat(&TokenKind::Colon) {
                 let type_tok = self.expect(&TokenKind::Ident)?;
                 Some(type_tok.text)
@@ -808,6 +824,13 @@ impl Parser {
             });
             if is_rest {
                 // Rest param must be last
+                if self.at(&TokenKind::Comma) {
+                    return Err(SyntaxError {
+                        line: param_start.start_line as usize,
+                        column: param_start.start_col as usize,
+                        message: "Rest parameter must be the last parameter".to_string(),
+                    });
+                }
                 break;
             }
             if !self.eat(&TokenKind::Comma) {
@@ -1233,6 +1256,27 @@ impl Parser {
             // We handle this by checking what came before. In a Pratt parser the
             // unary case is only reached if we haven't started an expression yet.
             self.advance();
+
+            // Special case: -9223372036854775808 is i64::MIN, which cannot be
+            // represented as a positive i64 then negated. Parse it directly.
+            if let TokenKind::IntLiteral = self.peek().kind {
+                let num_tok = self.peek().clone();
+                // Only use this path when the positive value overflows i64
+                // (i.e., it's exactly 9223372036854775808). For all other values,
+                // fall through to the normal UnaryOp::Neg path so the WASM compiler
+                // can emit I64Neg instructions.
+                if num_tok.text.parse::<i64>().is_err() {
+                    if let Ok(val) = format!("-{}", num_tok.text).parse::<i64>() {
+                        self.advance(); // consume the int literal
+                        let end = num_tok.span;
+                        return Ok(Expression {
+                            kind: ExpressionKind::Literal(Literal::Int64(val)),
+                            span: start.merge(end),
+                        });
+                    }
+                }
+            }
+
             let operand = self.parse_unary_expr()?;
             let span = start.merge(operand.span);
             return Ok(Expression {
@@ -1268,6 +1312,72 @@ impl Parser {
                     },
                     span,
                 };
+            } else if self.at(&TokenKind::Question) && self.peek_next_kind() == &TokenKind::LBracket
+                && self.peek().span.end_line == self.tokens.get(self.pos + 1).map(|t| t.span.start_line).unwrap_or(0) {
+                // Optional chaining on index: expr?[index] (must be on same line)
+                self.advance(); // consume '?'
+                self.advance(); // consume '['
+                let index = self.parse_expression()?;
+                let end = self.expect(&TokenKind::RBracket)?;
+                let span = expr.span.merge(end.span);
+                // Wrap expr in OptionalChain marker, then Index
+                let optional_marker = Expression {
+                    kind: ExpressionKind::OptionalChain {
+                        object: Box::new(expr),
+                        field: String::new(), // empty field = index access marker
+                    },
+                    span,
+                };
+                expr = Expression {
+                    kind: ExpressionKind::Index {
+                        object: Box::new(optional_marker),
+                        index: Box::new(index),
+                    },
+                    span,
+                };
+                // Propagate optional chaining through subsequent .field, .method(), [index]
+                while self.at(&TokenKind::Dot) || self.at(&TokenKind::LBracket) {
+                    if self.at(&TokenKind::LBracket) {
+                        self.advance();
+                        let index = self.parse_expression()?;
+                        let end = self.expect(&TokenKind::RBracket)?;
+                        let span = expr.span.merge(end.span);
+                        expr = Expression {
+                            kind: ExpressionKind::Index {
+                                object: Box::new(expr),
+                                index: Box::new(index),
+                            },
+                            span,
+                        };
+                        continue;
+                    }
+                    self.advance(); // consume '.'
+                    let next_field = self.expect(&TokenKind::Ident)?;
+                    if self.at(&TokenKind::LParen) {
+                        self.advance();
+                        let (args, kwargs) = self.parse_args_and_kwargs()?;
+                        let end = self.expect(&TokenKind::RParen)?;
+                        let method_span = expr.span.merge(end.span);
+                        expr = Expression {
+                            kind: ExpressionKind::MethodCall {
+                                object: Box::new(expr),
+                                method: next_field.text,
+                                args,
+                                kwargs,
+                            },
+                            span: method_span,
+                        };
+                    } else {
+                        let new_span = expr.span.merge(next_field.span);
+                        expr = Expression {
+                            kind: ExpressionKind::FieldAccess {
+                                object: Box::new(expr),
+                                field: next_field.text,
+                            },
+                            span: new_span,
+                        };
+                    }
+                }
             } else if self.at(&TokenKind::Question) {
                 // Error propagation: expr?
                 let q = self.advance();
@@ -1284,24 +1394,7 @@ impl Parser {
                 // Check if this is a direct optional method call: obj?.method(args)
                 if self.at(&TokenKind::LParen) {
                     self.advance(); // consume '('
-                    let mut args = Vec::new();
-                    let mut kwargs = Vec::new();
-                    while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
-                        if self.peek_kind() == &TokenKind::Ident {
-                            let saved = self.pos;
-                            let name_tok = self.advance().clone();
-                            if self.at(&TokenKind::Eq) {
-                                self.advance();
-                                let value = self.parse_expression()?;
-                                kwargs.push((name_tok.text, value));
-                                if !self.eat(&TokenKind::Comma) { break; }
-                                continue;
-                            }
-                            self.pos = saved;
-                        }
-                        args.push(self.parse_expression()?);
-                        if !self.eat(&TokenKind::Comma) { break; }
-                    }
+                    let (args, kwargs) = self.parse_args_and_kwargs()?;
                     let end = self.expect(&TokenKind::RParen)?;
                     let method_span = expr.span.merge(end.span);
                     // Wrap expr in OptionalChain as a marker for null propagation
@@ -1353,24 +1446,7 @@ impl Parser {
                     if self.at(&TokenKind::LParen) {
                         // Optional method call: a?.b.method() → optional wrap
                         self.advance();
-                        let mut args = Vec::new();
-                        let mut kwargs = Vec::new();
-                        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
-                            if self.peek_kind() == &TokenKind::Ident {
-                                let saved = self.pos;
-                                let name_tok = self.advance().clone();
-                                if self.at(&TokenKind::Eq) {
-                                    self.advance();
-                                    let value = self.parse_expression()?;
-                                    kwargs.push((name_tok.text, value));
-                                    if !self.eat(&TokenKind::Comma) { break; }
-                                    continue;
-                                }
-                                self.pos = saved;
-                            }
-                            args.push(self.parse_expression()?);
-                            if !self.eat(&TokenKind::Comma) { break; }
-                        }
+                        let (args, kwargs) = self.parse_args_and_kwargs()?;
                         let end = self.expect(&TokenKind::RParen)?;
                         let method_span = expr.span.merge(end.span);
                         // Wrap: if expr is null, stay null; else call method
@@ -1402,32 +1478,7 @@ impl Parser {
                 // Check if followed by `(` — that makes it a method call
                 if self.at(&TokenKind::LParen) {
                     self.advance(); // consume '('
-                    let mut args = Vec::new();
-                    let mut kwargs = Vec::new();
-
-                    while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
-                        // Check for keyword argument
-                        if self.peek_kind() == &TokenKind::Ident {
-                            let saved = self.pos;
-                            let name_tok = self.advance().clone();
-                            if self.at(&TokenKind::Eq) {
-                                self.advance();
-                                let value = self.parse_expression()?;
-                                kwargs.push((name_tok.text, value));
-                                if !self.eat(&TokenKind::Comma) {
-                                    break;
-                                }
-                                continue;
-                            }
-                            self.pos = saved;
-                        }
-
-                        let arg = self.parse_expression()?;
-                        args.push(arg);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
+                    let (args, kwargs) = self.parse_args_and_kwargs()?;
                     let end = self.expect(&TokenKind::RParen)?;
                     let span = expr.span.merge(end.span);
                     expr = Expression {
@@ -1457,38 +1508,42 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Parse call arguments when we've already parsed the callee.
-    fn parse_call_expr(&mut self, callee: Expression) -> Result<Expression, SyntaxError> {
-        self.advance(); // consume '('
+    /// Parse a comma-separated argument list with optional keyword arguments (`name=value`).
+    /// Assumes the opening `(` has already been consumed. Does NOT consume the closing `)`.
+    fn parse_args_and_kwargs(&mut self) -> Result<ArgsAndKwargs, SyntaxError> {
         let mut args = Vec::new();
         let mut kwargs = Vec::new();
-
+        let mut kwarg_names = std::collections::HashSet::new();
         while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
-            // Check for keyword argument: `name=value`
             if self.peek_kind() == &TokenKind::Ident {
                 let saved = self.pos;
                 let name_tok = self.advance().clone();
                 if self.at(&TokenKind::Eq) {
-                    self.advance(); // consume '='
+                    self.advance();
                     let value = self.parse_expression()?;
-                    kwargs.push((name_tok.text, value));
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
+                    if !kwarg_names.insert(name_tok.text.clone()) {
+                        return Err(SyntaxError {
+                            line: name_tok.span.start_line as usize,
+                            column: name_tok.span.start_col as usize,
+                            message: format!("duplicate keyword argument '{}'", name_tok.text),
+                        });
                     }
+                    kwargs.push((name_tok.text, value));
+                    if !self.eat(&TokenKind::Comma) { break; }
                     continue;
                 }
-                // Not a kwarg — backtrack
                 self.pos = saved;
             }
-
-            let arg = self.parse_expression()?;
-            args.push(arg);
-
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
+            args.push(self.parse_expression()?);
+            if !self.eat(&TokenKind::Comma) { break; }
         }
+        Ok((args, kwargs))
+    }
 
+    /// Parse call arguments when we've already parsed the callee.
+    fn parse_call_expr(&mut self, callee: Expression) -> Result<Expression, SyntaxError> {
+        self.advance(); // consume '('
+        let (args, kwargs) = self.parse_args_and_kwargs()?;
         let end = self.expect(&TokenKind::RParen)?;
 
         // Extract function name from callee
@@ -1635,8 +1690,16 @@ impl Parser {
                     let name = tok.text.clone();
                     self.advance(); // consume {
                     let mut fields = Vec::new();
+                    let mut seen_fields = std::collections::HashSet::new();
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
                         let field_tok = self.expect_identifier()?;
+                        if !seen_fields.insert(field_tok.text.clone()) {
+                            return Err(SyntaxError {
+                                line: field_tok.span.start_line as usize,
+                                column: field_tok.span.start_col as usize,
+                                message: format!("Duplicate field '{}' in struct construction", field_tok.text),
+                            });
+                        }
                         self.expect(&TokenKind::Colon)?;
                         let value = self.parse_expression()?;
                         fields.push((field_tok.text, value));
@@ -1660,7 +1723,10 @@ impl Parser {
             // Parenthesized expression
             TokenKind::LParen => {
                 self.advance();
+                let saved_no_struct = self.no_struct_literal;
+                self.no_struct_literal = false; // parens disambiguate struct literals
                 let expr = self.parse_expression()?;
+                self.no_struct_literal = saved_no_struct;
                 let end = self.expect(&TokenKind::RParen)?;
                 // Preserve the expression but update span
                 Ok(Expression {
@@ -2063,7 +2129,8 @@ impl Parser {
                             self.advance(); // consume `-`
                             let end_tok = self.peek().clone();
                             self.advance(); // consume end integer
-                            let end_val: i64 = end_tok.text.parse::<i64>().map_err(|_| self.error("Invalid integer"))?.wrapping_neg();
+                            let end_val: i64 = end_tok.text.parse::<i64>().map_err(|_| self.error("Invalid integer"))?
+                                .checked_neg().ok_or_else(|| self.error("Integer negation overflow"))?;
                             return Ok(Pattern::RangePattern {
                                 start: Box::new(start_expr),
                                 end: Box::new(Expression {
@@ -2153,6 +2220,28 @@ impl Parser {
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Pattern::Array(elements))
             }
+            TokenKind::LBrace => {
+                // Map pattern: { key: pattern, key2: pattern2 }
+                // Shorthand: { key } means { key: Variable("key") }
+                self.advance();
+                let mut entries = Vec::new();
+                while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                    let key_tok = self.expect_identifier()?;
+                    let key = key_tok.text;
+                    let pattern = if self.eat(&TokenKind::Colon) {
+                        self.parse_pattern()?
+                    } else {
+                        // Shorthand: { name } is equivalent to { name: name }
+                        Pattern::Variable(key.clone())
+                    };
+                    entries.push((key, pattern));
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace)?;
+                Ok(Pattern::Map(entries))
+            }
             TokenKind::Ident => {
                 self.advance();
                 // Enum pattern: Name::Variant or Name::Variant(bindings)
@@ -2200,7 +2289,7 @@ impl Parser {
                         .text
                         .parse()
                         .map_err(|_| self.error("Invalid integer"))?;
-                    let neg_val = -val;
+                    let neg_val = val.checked_neg().ok_or_else(|| self.error("Integer negation overflow"))?;
                     // Check for range pattern: -10..5 or -10..=5
                     if self.at(&TokenKind::DotDot) || self.at(&TokenKind::DotDotEq) {
                         let inclusive = self.at(&TokenKind::DotDotEq);
@@ -2239,7 +2328,8 @@ impl Parser {
                                 self.advance(); // consume `-`
                                 let end_tok = self.peek().clone();
                                 self.advance();
-                                let end_val: i64 = end_tok.text.parse::<i64>().map_err(|_| self.error("Invalid integer"))?.wrapping_neg();
+                                let end_val: i64 = end_tok.text.parse::<i64>().map_err(|_| self.error("Invalid integer"))?
+                                    .checked_neg().ok_or_else(|| self.error("Integer negation overflow"))?;
                                 let start_expr = Expression {
                                     kind: ExpressionKind::Literal(Literal::Int64(neg_val)),
                                     span: tok.span,
@@ -2370,20 +2460,32 @@ impl Parser {
         let mut parts = Vec::new();
         let mut current_lit = String::new();
         let mut chars = raw.chars().peekable();
+        // Track position within the f-string content.
+        // The f-string token starts at tok.span.start_col and includes the `f"` prefix (2 chars).
+        let base_line = tok.span.start_line;
+        let base_col = tok.span.start_col + 2; // skip past `f"`
+        let mut cur_line = base_line;
+        let mut cur_col = base_col;
 
         while let Some(ch) = chars.next() {
             if ch == '\u{FFF0}' {
                 // Escaped brace sentinel from lexer — literal '{'
                 current_lit.push('{');
+                cur_col += 2; // \{ is 2 chars in source
                 continue;
             }
             if ch == '\u{FFF1}' {
                 // Escaped brace sentinel from lexer — literal '}'
                 current_lit.push('}');
+                cur_col += 2; // \} is 2 chars in source
                 continue;
             }
             if ch == '{' {
-                // Start of expression interpolation
+                // Start of expression interpolation — cur_col points to the '{' itself
+                let expr_start_line = cur_line;
+                let expr_start_col = cur_col + 1; // expression starts after '{'
+                cur_col += 1; // advance past '{'
+
                 if !current_lit.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current_lit)));
                 }
@@ -2391,6 +2493,12 @@ impl Parser {
                 let mut expr_str = String::new();
                 let mut depth = 1;
                 while let Some(inner) = chars.next() {
+                    if inner == '\n' {
+                        cur_line += 1;
+                        cur_col = 1;
+                    } else {
+                        cur_col += 1;
+                    }
                     if inner == '{' {
                         depth += 1;
                         expr_str.push(inner);
@@ -2405,9 +2513,21 @@ impl Parser {
                         let quote = inner;
                         expr_str.push(quote);
                         while let Some(sch) = chars.next() {
+                            if sch == '\n' {
+                                cur_line += 1;
+                                cur_col = 1;
+                            } else {
+                                cur_col += 1;
+                            }
                             expr_str.push(sch);
                             if sch == '\\' {
                                 if let Some(esc) = chars.next() {
+                                    if esc == '\n' {
+                                        cur_line += 1;
+                                        cur_col = 1;
+                                    } else {
+                                        cur_col += 1;
+                                    }
                                     expr_str.push(esc);
                                 }
                             } else if sch == quote {
@@ -2425,17 +2545,21 @@ impl Parser {
                         message: "Unclosed interpolation brace in f-string".to_string(),
                     });
                 }
-                // Parse the inner expression
-                let inner_tokens = super::lexer::tokenize(&expr_str).map_err(|e| SyntaxError {
-                    line: tok.span.start_line as usize,
-                    column: tok.span.start_col as usize,
+                // Parse the inner expression with correct offset
+                let inner_tokens = super::lexer::tokenize_with_offset(
+                    &expr_str,
+                    expr_start_line,
+                    expr_start_col,
+                ).map_err(|e| SyntaxError {
+                    line: e.line,
+                    column: e.column,
                     message: format!("Error in f-string expression: {}", e.message),
                 })?;
                 let mut inner_parser = Parser::new(inner_tokens);
                 inner_parser.depth = self.depth;
                 let expr = inner_parser.parse_expression().map_err(|e| SyntaxError {
-                    line: tok.span.start_line as usize,
-                    column: tok.span.start_col as usize,
+                    line: e.line,
+                    column: e.column,
                     message: format!("Error in f-string expression: {}", e.message),
                 })?;
                 if !inner_parser.at(&TokenKind::Eof) {
@@ -2447,6 +2571,12 @@ impl Parser {
                 }
                 parts.push(StringPart::Expr(expr));
             } else {
+                if ch == '\n' {
+                    cur_line += 1;
+                    cur_col = 1;
+                } else {
+                    cur_col += 1;
+                }
                 current_lit.push(ch);
             }
         }
@@ -2500,9 +2630,24 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
 
         let mut variants = Vec::new();
+        let mut seen_variants = std::collections::HashSet::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let var_start = self.peek().span;
             let var_tok = self.expect_identifier()?;
+            if !seen_variants.insert(var_tok.text.clone()) {
+                return Err(SyntaxError {
+                    line: var_start.start_line as usize,
+                    column: var_start.start_col as usize,
+                    message: format!("Duplicate enum variant '{}'", var_tok.text),
+                });
+            }
+            if var_tok.text.starts_with("__") {
+                return Err(SyntaxError {
+                    line: var_start.start_line as usize,
+                    column: var_start.start_col as usize,
+                    message: format!("variant name '{}' is reserved (double-underscore prefix)", var_tok.text),
+                });
+            }
             let mut fields = Vec::new();
             if self.eat(&TokenKind::LParen) {
                 while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
@@ -2513,13 +2658,6 @@ impl Parser {
                     }
                 }
                 self.expect(&TokenKind::RParen)?;
-            }
-            if var_tok.text.starts_with("__") {
-                return Err(SyntaxError {
-                    line: var_start.start_line as usize,
-                    column: var_start.start_col as usize,
-                    message: format!("variant name '{}' is reserved (double-underscore prefix)", var_tok.text),
-                });
             }
             let var_end = self.peek().span;
             variants.push(EnumVariant {
@@ -2546,9 +2684,17 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
 
         let mut fields = Vec::new();
+        let mut seen_fields = std::collections::HashSet::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let field_start = self.peek().span;
             let field_tok = self.expect_identifier()?;
+            if !seen_fields.insert(field_tok.text.clone()) {
+                return Err(SyntaxError {
+                    line: field_start.start_line as usize,
+                    column: field_start.start_col as usize,
+                    message: format!("Duplicate struct field '{}'", field_tok.text),
+                });
+            }
             if field_tok.text.starts_with("__") {
                 return Err(SyntaxError {
                     line: field_start.start_line as usize,

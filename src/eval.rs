@@ -6,14 +6,8 @@ use std::collections::HashMap;
 /// Error type for operation evaluation.
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
-    #[error("Missing input: {0}")]
-    MissingInput(String),
-
     #[error("Division by zero")]
     DivisionByZero,
-
-    #[error("Type conversion error: {0}")]
-    TypeConversion(String),
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
@@ -25,11 +19,31 @@ pub enum EvalError {
         context: String,
     },
 
-    #[error("Index out of bounds: index {index}, length {length}")]
-    IndexOutOfBounds { index: i64, length: usize },
-
     #[error("Arithmetic overflow: {0}")]
     Overflow(String),
+}
+
+impl EvalError {
+    /// Returns the appropriate MAGI error code for this error variant.
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            EvalError::DivisionByZero => "E104",
+            EvalError::TypeError { .. } => "E100",
+            EvalError::Overflow(_) => "E103",
+            EvalError::InvalidInput(msg) => {
+                if msg.contains("exceeds")
+                    || msg.contains("would produce")
+                    || msg.contains("would exceed")
+                    || msg.contains("byte limit")
+                    || msg.contains("element limit")
+                {
+                    "E409"
+                } else {
+                    "E406"
+                }
+            }
+        }
+    }
 }
 
 /// Trait for evaluating MAGI operations.

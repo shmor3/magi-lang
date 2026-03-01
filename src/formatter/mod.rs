@@ -5,6 +5,22 @@
 
 use crate::syntax::ast::*;
 
+/// Returns true if a statement is a "definition" (function, enum, struct, etc.)
+/// that should be separated by blank lines in formatted output.
+fn is_definition(stmt: &Statement) -> bool {
+    matches!(
+        &stmt.kind,
+        StatementKind::FunctionDef(_)
+            | StatementKind::AsyncFunctionDef(_)
+            | StatementKind::EnumDef { .. }
+            | StatementKind::StructDef { .. }
+            | StatementKind::ModuleDef { .. }
+            | StatementKind::TestDef { .. }
+            | StatementKind::ConstDef { .. }
+            | StatementKind::TypeAlias { .. }
+    )
+}
+
 /// Re-escape a string's contents so that control characters are represented
 /// as their escape sequences (e.g., newline → `\n`). This ensures the
 /// formatter produces valid, parseable string literals.
@@ -67,7 +83,10 @@ struct Formatter<'a> {
     output: String,
     indent: usize,
     at_line_start: bool,
+    depth: usize,
 }
+
+const MAX_FORMAT_DEPTH: usize = 128;
 
 impl<'a> Formatter<'a> {
     fn new(config: &'a FormatConfig) -> Self {
@@ -76,6 +95,7 @@ impl<'a> Formatter<'a> {
             output: String::new(),
             indent: 0,
             at_line_start: true,
+            depth: 0,
         }
     }
 
@@ -101,11 +121,16 @@ impl<'a> Formatter<'a> {
         self.indent = self.indent.saturating_sub(1);
     }
 
-    /// Estimate the length of an expression when formatted on a single line.
+    /// Estimate the display width of an expression when formatted on a single line.
+    /// Inherits the current depth to prevent exponential blowup on nested collections.
     fn expr_len(&self, expr: &Expression) -> usize {
+        if self.depth >= MAX_FORMAT_DEPTH {
+            return self.config.max_width; // force multi-line at extreme depth
+        }
         let mut f = Formatter::new(self.config);
+        f.depth = self.depth + 1; // inherit depth to bound recursion
         f.fmt_expression(expr);
-        f.output.len()
+        f.output.chars().count()
     }
 
     /// Check if a block is "short" enough to inline.
@@ -123,17 +148,7 @@ impl<'a> Formatter<'a> {
         let mut prev_was_def = false;
 
         for (i, stmt) in program.statements.iter().enumerate() {
-            let is_def = matches!(
-                &stmt.kind,
-                StatementKind::FunctionDef(_)
-                    | StatementKind::AsyncFunctionDef(_)
-                    | StatementKind::EnumDef { .. }
-                    | StatementKind::StructDef { .. }
-                    | StatementKind::ModuleDef { .. }
-                    | StatementKind::TestDef { .. }
-                    | StatementKind::ConstDef { .. }
-                    | StatementKind::TypeAlias { .. }
-            );
+            let is_def = is_definition(stmt);
 
             // Blank line before definitions (but not the very first statement)
             if i > 0 && (is_def || prev_was_def) {
@@ -205,13 +220,13 @@ impl<'a> Formatter<'a> {
             }
             StatementKind::CompoundAssign { name, op, value } => {
                 self.write(name);
+                // Parser only produces CompoundAssign with Add/Sub/Mul/Div/Mod
                 let op_str = match op {
                     BinOp::Add => "+=",
                     BinOp::Sub => "-=",
                     BinOp::Mul => "*=",
                     BinOp::Div => "/=",
-                    BinOp::Mod => "%=",
-                    other => &format!("{}=", other),
+                    _ => "%=",  // Mod (only remaining valid operator)
                 };
                 self.write(&format!(" {} ", op_str));
                 self.fmt_expression(value);
@@ -418,7 +433,7 @@ impl<'a> Formatter<'a> {
 
     fn fmt_block(&mut self, block: &Block) {
         // Try inline for short blocks
-        if self.is_short_block(block) && block.statements.is_empty() {
+        if self.is_short_block(block) {
             if let Some(tail) = &block.tail_expr {
                 self.write("{ ");
                 self.fmt_expression(tail);
@@ -435,17 +450,7 @@ impl<'a> Formatter<'a> {
 
         let mut prev_was_def = false;
         for (i, stmt) in block.statements.iter().enumerate() {
-            let is_def = matches!(
-                &stmt.kind,
-                StatementKind::FunctionDef(_)
-                    | StatementKind::AsyncFunctionDef(_)
-                    | StatementKind::EnumDef { .. }
-                    | StatementKind::StructDef { .. }
-                    | StatementKind::ModuleDef { .. }
-                    | StatementKind::TestDef { .. }
-                    | StatementKind::ConstDef { .. }
-                    | StatementKind::TypeAlias { .. }
-            );
+            let is_def = is_definition(stmt);
 
             if i > 0 && (is_def || prev_was_def) {
                 self.newline();
@@ -485,6 +490,16 @@ impl<'a> Formatter<'a> {
     }
 
     fn fmt_expression_prec(&mut self, expr: &Expression, parent_prec: u8) {
+        if self.depth >= MAX_FORMAT_DEPTH {
+            self.write("/* ... */");
+            return;
+        }
+        self.depth += 1;
+        self.fmt_expression_prec_inner(expr, parent_prec);
+        self.depth -= 1;
+    }
+
+    fn fmt_expression_prec_inner(&mut self, expr: &Expression, parent_prec: u8) {
         match &expr.kind {
             ExpressionKind::Literal(lit) => self.fmt_literal(lit),
             ExpressionKind::Variable(name) => self.write(name),
@@ -595,8 +610,22 @@ impl<'a> Formatter<'a> {
                 self.fmt_block(block);
             }
             ExpressionKind::Index { object, index } => {
-                self.fmt_expression_prec(object, 9);
-                self.write("[");
+                // Detect optional index: obj?[idx] — the parser wraps obj in
+                // OptionalChain { field: "" } as a marker for ?[ syntax.
+                let is_optional_index = matches!(
+                    &object.kind,
+                    ExpressionKind::OptionalChain { field, .. } if field.is_empty()
+                );
+                if is_optional_index {
+                    // Extract the inner object from the OptionalChain marker
+                    if let ExpressionKind::OptionalChain { object: inner, .. } = &object.kind {
+                        self.fmt_expression_prec(inner, 9);
+                        self.write("?[");
+                    }
+                } else {
+                    self.fmt_expression_prec(object, 9);
+                    self.write("[");
+                }
                 self.fmt_expression(index);
                 self.write("]");
             }
@@ -617,13 +646,16 @@ impl<'a> Formatter<'a> {
                 if needs_parens {
                     self.write("(");
                 }
-                self.fmt_expression(start);
+                // Range children are parsed by parse_binary_expr(0), so they cannot
+                // contain Pipe, NullCoalesce, Range, or Lambda without parens.
+                // Pass prec=1 to force parens on those sub-binary expression types.
+                self.fmt_expression_prec(start, 1);
                 if *inclusive {
                     self.write("..=");
                 } else {
                     self.write("..");
                 }
-                self.fmt_expression(end);
+                self.fmt_expression_prec(end, 1);
                 if needs_parens {
                     self.write(")");
                 }
@@ -739,9 +771,12 @@ impl<'a> Formatter<'a> {
                 if needs_parens {
                     self.write("(");
                 }
-                self.fmt_expression(left);
+                // NullCoalesce children are parsed by parse_range_expr, so they cannot
+                // contain Pipe or Lambda without parens. Pass prec=1 to force parens
+                // on sub-binary expression types (Pipe, Lambda, Range, NullCoalesce).
+                self.fmt_expression_prec(left, 1);
                 self.write(" ?? ");
-                self.fmt_expression(right);
+                self.fmt_expression_prec(right, 1);
                 if needs_parens {
                     self.write(")");
                 }
@@ -939,7 +974,7 @@ impl<'a> Formatter<'a> {
                     let s = f.to_string();
                     if s.contains('e') || s.contains('E') {
                         // Scientific notation: format with explicit decimal to ensure parsability
-                        self.write(&format!("{:.1e}", f));
+                        self.write(&format!("{:e}", f));
                     } else if !s.contains('.') {
                         self.write(&format!("{}.0", s));
                     } else {
@@ -981,6 +1016,9 @@ impl<'a> Formatter<'a> {
             }
             Literal::Map(entries) => {
                 if entries.is_empty() {
+                    // Unreachable from parsed code: the parser never produces an empty
+                    // Map literal (it would be parsed as an empty block instead).
+                    // Kept as a defensive fallback for programmatically-constructed ASTs.
                     self.write("{}");
                     return;
                 }
@@ -1702,6 +1740,7 @@ for n in 1..=10 {
             // OptionalChain
             ("opt_chain", "let x = obj?.field;"),
             ("opt_chain_method", "let x = obj?.method();"),
+            ("opt_chain_index", "let x = arr?[0];"),
             // Spread
             ("spread", "let arr = [...other, 1, 2];"),
             // Loop
@@ -1755,7 +1794,25 @@ for n in 1..=10 {
             ("not_field", "let x = (!a).val;"),
             // Pipe/Range/NullCoalesce/Lambda parenthesized in postfix
             ("lambda_in_call", "let x = items.map((|x| x * 2));"),
+            // Pipe inside NullCoalesce (round 132 fix)
+            ("pipe_in_null_coalesce", "let x = a ?? (b\n    |> c);"),
+            // NullCoalesce inside Range (round 132 fix)
+            ("null_coalesce_in_range", "let x = (a ?? b)..(a ?? c);"),
+            // Lambda inside Range (round 132 fix)
+            ("lambda_in_range", "let x = (|x| x)..(|y| y);"),
+            // Range inside NullCoalesce — slightly over-parenthesized but correct
+            ("range_in_null_coalesce", "let x = (0..10) ?? (1..5);"),
         ]);
+    }
+
+    #[test]
+    fn test_optional_index_formatting() {
+        // Round 132: optional index expr?[idx] should not become expr?.[idx]
+        let source = "let x = arr?[0];";
+        let result = format_source(source);
+        assert!(result.contains("arr?[0]"), "got: {}", result);
+        assert!(!result.contains("?."), "should not contain ?. for optional index, got: {}", result);
+        assert_idempotent(source);
     }
 
     // -----------------------------------------------------------------

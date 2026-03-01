@@ -99,7 +99,9 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
         if parse_errors.is_empty() {
             // Only run type checker and linter on a complete (error-free) AST.
             // Partial ASTs from error recovery would produce confusing secondary diagnostics.
-            let imports = HashSet::new();
+            let imports: HashSet<String> = prog.statements.iter()
+                .filter_map(|s| if let StatementKind::Import(id) = &s.kind { Some(id.clone()) } else { None })
+                .collect();
             let analysis = type_checker::check_types(prog, &imports);
             all_diagnostics.extend(analysis.diagnostics);
 
@@ -137,26 +139,61 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
 fn deduplicate_diagnostics(diagnostics: &mut Vec<AstDiagnostic>) {
     let mut seen = HashSet::new();
     diagnostics.retain(|d| {
-        let key = (d.line, d.column, d.code.clone().unwrap_or_default());
+        let key = (d.line, d.column, d.code.clone().unwrap_or_default(), d.message.clone());
         seen.insert(key)
     });
 }
 
+/// Build a byte-offset index of line starts for O(1) line lookup.
+fn build_line_index(source: &str) -> Vec<usize> {
+    let mut offsets = vec![0]; // line 1 starts at byte 0
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' && i < source.len() {
+            offsets.push(i + 1);
+        }
+    }
+    offsets
+}
+
+/// Get the text of a 1-based line using a pre-built line index.
+fn get_line<'a>(source: &'a str, line_index: &[usize], line: u32) -> Option<&'a str> {
+    let idx = line.saturating_sub(1) as usize;
+    let start = *line_index.get(idx)?;
+    let end = line_index.get(idx + 1).map(|&e| e.saturating_sub(1)).unwrap_or(source.len());
+    // Trim trailing \r for CRLF
+    let line_text = &source[start..end];
+    Some(line_text.trim_end_matches('\r'))
+}
+
 /// Find the 1-based column of `name` in the given 1-based source line.
 /// Uses word-boundary matching to avoid matching substrings of other identifiers.
+#[cfg(test)]
 fn find_name_col(source: &str, line: u32, name: &str) -> Option<u32> {
     let line_text = source.lines().nth(line.saturating_sub(1) as usize)?;
+    find_name_col_in_line(line_text, name)
+}
+
+/// Find the 1-based column of `name` in a line using a pre-built line index.
+fn find_name_col_indexed(source: &str, line_index: &[usize], line: u32, name: &str) -> Option<u32> {
+    let line_text = get_line(source, line_index, line)?;
+    find_name_col_in_line(line_text, name)
+}
+
+/// Core implementation: find the 1-based column of `name` in a line string.
+fn find_name_col_in_line(line_text: &str, name: &str) -> Option<u32> {
     let name_bytes = name.as_bytes();
     let mut start = 0;
     while let Some(offset) = line_text[start..].find(name) {
         let abs_offset = start + offset;
+        // Check character before match is not an identifier char (Unicode-aware)
         let before_ok = abs_offset == 0
-            || !line_text.as_bytes().get(abs_offset - 1)
-                .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
+            || !line_text[..abs_offset].chars().next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
         let after_pos = abs_offset + name_bytes.len();
+        // Check character after match is not an identifier char (Unicode-aware)
         let after_ok = after_pos >= line_text.len()
-            || !line_text.as_bytes().get(after_pos)
-                .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
+            || !line_text[after_pos..].chars().next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
         if before_ok && after_ok {
             let char_col = line_text[..abs_offset].chars().count() as u32;
             return Some(char_col + 1);
@@ -168,16 +205,29 @@ fn find_name_col(source: &str, line: u32, name: &str) -> Option<u32> {
             start += 1;
         }
     }
-    // Fallback to substring match if no word-boundary match found
-    let byte_offset = line_text.find(name)?;
-    let char_col = line_text[..byte_offset].chars().count() as u32;
-    Some(char_col + 1)
+    // No word-boundary match found — return None rather than a potentially
+    // incorrect substring match position.
+    None
 }
 
 /// Extract top-level symbols from a program.
 pub fn extract_symbols(
     program: &Program,
     source: &str,
+    functions: &mut HashMap<String, FunctionSymbol>,
+    variables: &mut HashMap<String, VariableSymbol>,
+    enums: &mut HashMap<String, EnumSymbol>,
+    structs: &mut HashMap<String, StructSymbol>,
+) {
+    let line_index = build_line_index(source);
+    extract_symbols_indexed(program, source, &line_index, functions, variables, enums, structs);
+}
+
+/// Extract top-level symbols using a pre-built line index for O(1) line lookup.
+fn extract_symbols_indexed(
+    program: &Program,
+    source: &str,
+    line_index: &[usize],
     functions: &mut HashMap<String, FunctionSymbol>,
     variables: &mut HashMap<String, VariableSymbol>,
     enums: &mut HashMap<String, EnumSymbol>,
@@ -200,7 +250,7 @@ pub fn extract_symbols(
                     s
                 }).collect();
 
-                let name_col = find_name_col(source, fdef.span.start_line, &fdef.name)
+                let name_col = find_name_col_indexed(source, line_index, fdef.span.start_line, &fdef.name)
                     .unwrap_or(fdef.span.start_col);
                 functions.insert(fdef.name.clone(), FunctionSymbol {
                     name: fdef.name.clone(),
@@ -212,7 +262,7 @@ pub fn extract_symbols(
                 });
             }
             StatementKind::Let { name, type_annotation, .. } => {
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
@@ -225,7 +275,7 @@ pub fn extract_symbols(
                 });
             }
             StatementKind::LetMut { name, type_annotation, .. } => {
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
@@ -238,7 +288,7 @@ pub fn extract_symbols(
                 });
             }
             StatementKind::ConstDef { name, type_annotation, .. } => {
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
@@ -252,7 +302,7 @@ pub fn extract_symbols(
             }
             StatementKind::EnumDef { name, variants } => {
                 let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 enums.insert(name.clone(), EnumSymbol {
                     name: name.clone(),
@@ -265,7 +315,7 @@ pub fn extract_symbols(
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| {
                     (f.name.clone(), f.type_annotation.clone())
                 }).collect();
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 structs.insert(name.clone(), StructSymbol {
                     name: name.clone(),
@@ -275,7 +325,7 @@ pub fn extract_symbols(
                 });
             }
             StatementKind::TypeAlias { name, target } => {
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
@@ -288,7 +338,7 @@ pub fn extract_symbols(
                 });
             }
             StatementKind::ModuleDef { name, body } => {
-                let name_col = find_name_col(source, stmt.span.start_line, name)
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
                 variables.insert(name.clone(), VariableSymbol {
                     name: name.clone(),
@@ -299,18 +349,18 @@ pub fn extract_symbols(
                     line: stmt.span.start_line,
                     col: name_col,
                 });
-                // Also extract symbols from module body
+                // Also extract symbols from module body (reuse same line index)
                 let module_program = crate::syntax::ast::Program {
                     statements: body.statements.clone(),
                     span: body.span,
                 };
-                extract_symbols(&module_program, source, functions, variables, enums, structs);
+                extract_symbols_indexed(&module_program, source, line_index, functions, variables, enums, structs);
             }
             StatementKind::LetDestructure { pattern, mutable, .. } => {
                 // Extract variable names from destructure patterns
                 let names = destructure_names(pattern);
                 for name in names {
-                    let name_col = find_name_col(source, stmt.span.start_line, &name)
+                    let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, &name)
                         .unwrap_or(stmt.span.start_col);
                     variables.insert(name.clone(), VariableSymbol {
                         name,
@@ -334,10 +384,10 @@ pub fn extract_symbols(
                         continue;
                     };
                     let name_col = if let Some(a) = alias {
-                        find_name_col(source, stmt.span.start_line, a)
+                        find_name_col_indexed(source, line_index, stmt.span.start_line, a)
                             .unwrap_or(stmt.span.start_col)
                     } else if let Some(last) = path.last() {
-                        find_name_col(source, stmt.span.start_line, last)
+                        find_name_col_indexed(source, line_index, stmt.span.start_line, last)
                             .unwrap_or(stmt.span.start_col)
                     } else {
                         stmt.span.start_col
@@ -352,6 +402,18 @@ pub fn extract_symbols(
                         col: name_col,
                     });
                 }
+            }
+            StatementKind::TestDef { name, .. } => {
+                let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
+                    .unwrap_or(stmt.span.start_col);
+                functions.insert(format!("test:{}", name), FunctionSymbol {
+                    name: format!("test \"{}\"", name),
+                    params: Vec::new(),
+                    is_async: false,
+                    line: stmt.span.start_line,
+                    col: name_col,
+                    return_type: None,
+                });
             }
             _ => {}
         }
@@ -401,7 +463,7 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
             let end_char = if start < chars.len() && is_ident_start(chars[start]) {
                 // Identifier: scan alphanumeric + underscore
                 let mut end = start;
-                while end < chars.len() && is_ident_char_unicode(chars[end]) {
+                while end < chars.len() && is_ident_char(chars[end]) {
                     end += 1;
                 }
                 end as u32
@@ -421,6 +483,7 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
                 while end < chars.len() && chars[end] != quote {
                     if chars[end] == '\\' {
                         end += 1; // skip escaped char
+                        if end >= chars.len() { break; }
                     }
                     end += 1;
                 }
@@ -476,7 +539,7 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
 }
 
 fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
+    c.is_alphabetic() || c == '_'
 }
 
 /// Convert a 0-based char column to a 0-based UTF-16 code unit offset.
@@ -518,13 +581,13 @@ pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<
 
     // Scan backwards for start of identifier
     let mut start = col;
-    while start > 0 && is_ident_char_unicode(chars[start - 1]) {
+    while start > 0 && is_ident_char(chars[start - 1]) {
         start -= 1;
     }
 
     // Scan forwards for end of identifier
     let mut end = col;
-    while end < chars.len() && is_ident_char_unicode(chars[end]) {
+    while end < chars.len() && is_ident_char(chars[end]) {
         end += 1;
     }
 
@@ -535,8 +598,8 @@ pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<
     Some(chars[start..end].iter().collect())
 }
 
-fn is_ident_char_unicode(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+pub fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Detect if cursor is on an `EnumName::Variant` pattern.
@@ -553,13 +616,13 @@ pub fn find_enum_variant_at_position(source: &str, line: u32, character: u32) ->
 
     // Scan backwards for start of identifier
     let mut start = col;
-    while start > 0 && is_ident_char_unicode(chars[start - 1]) {
+    while start > 0 && is_ident_char(chars[start - 1]) {
         start -= 1;
     }
 
     // Scan forwards for end of identifier
     let mut end = col;
-    while end < chars.len() && is_ident_char_unicode(chars[end]) {
+    while end < chars.len() && is_ident_char(chars[end]) {
         end += 1;
     }
 
@@ -574,7 +637,7 @@ pub fn find_enum_variant_at_position(source: &str, line: u32, character: u32) ->
         // Scan backwards from `::` to find the enum name
         let enum_end = start - 2;
         let mut enum_start = enum_end;
-        while enum_start > 0 && is_ident_char_unicode(chars[enum_start - 1]) {
+        while enum_start > 0 && is_ident_char(chars[enum_start - 1]) {
             enum_start -= 1;
         }
         if enum_start < enum_end {
@@ -588,7 +651,7 @@ pub fn find_enum_variant_at_position(source: &str, line: u32, character: u32) ->
         // Scan forwards from `::` to find the variant name
         let variant_start = end + 2;
         let mut variant_end = variant_start;
-        while variant_end < chars.len() && is_ident_char_unicode(chars[variant_end]) {
+        while variant_end < chars.len() && is_ident_char(chars[variant_end]) {
             variant_end += 1;
         }
         if variant_start < variant_end {
@@ -615,20 +678,24 @@ pub fn find_dot_receiver_at_position(source: &str, line: u32, character: u32) ->
     // Walk backwards from cursor to find the dot
     let mut pos = col;
     // Skip any partial identifier the user is typing after the dot
-    while pos > 0 && is_ident_char_unicode(chars[pos - 1]) {
+    while pos > 0 && is_ident_char(chars[pos - 1]) {
         pos -= 1;
     }
 
-    // Check for dot
+    // Check for dot (also handles `?.` optional chain since `.` is still the last char)
     if pos == 0 || chars[pos - 1] != '.' {
         return None;
     }
     pos -= 1; // skip the dot
+    // Skip `?` for optional chain (`?.`)
+    if pos > 0 && chars[pos - 1] == '?' {
+        pos -= 1;
+    }
 
     // Now scan backwards for the receiver identifier
     let recv_end = pos;
     let mut recv_start = recv_end;
-    while recv_start > 0 && is_ident_char_unicode(chars[recv_start - 1]) {
+    while recv_start > 0 && is_ident_char(chars[recv_start - 1]) {
         recv_start -= 1;
     }
 
@@ -642,33 +709,61 @@ pub fn find_dot_receiver_at_position(source: &str, line: u32, character: u32) ->
 /// Find the function name and argument index at a call site.
 /// Used for signature help. Returns `(function_name, active_param_index)`.
 /// `character` is a 0-based UTF-16 code unit offset (per LSP spec).
+/// Supports multiline calls by scanning backwards across lines.
 pub fn find_call_context_at_position(source: &str, line: u32, character: u32) -> Option<(String, u32)> {
-    let target_line = source.lines().nth(line as usize)?;
-    let chars: Vec<char> = target_line.chars().collect();
-    let col = utf16_to_char_col(target_line, character) as usize;
-
-    if col > chars.len() {
+    // Build a flat character buffer from line 0 through the cursor position,
+    // then scan backwards from the cursor to find the matching `(`.
+    let lines: Vec<&str> = source.lines().collect();
+    if (line as usize) >= lines.len() {
         return None;
     }
 
-    // Scan backwards to find the matching `(`
+    // Collect chars near the cursor position (limited to ~2000 chars to avoid O(file_size) allocation)
+    const SCAN_LIMIT: usize = 2000;
+    let mut all_chars: Vec<char> = Vec::with_capacity(SCAN_LIMIT + 200);
+    let cursor_line = line as usize;
+    // Start collecting from the cursor line backwards, up to SCAN_LIMIT chars
+    {
+        let col = utf16_to_char_col(lines[cursor_line], character) as usize;
+        let line_chars: Vec<char> = lines[cursor_line].chars().collect();
+        let end = col.min(line_chars.len());
+        // Prepend lines from cursor line backwards until we have enough chars
+        let mut collected_lines: Vec<Vec<char>> = vec![line_chars[..end].to_vec()];
+        let mut total_chars = end;
+        let mut li = cursor_line;
+        while total_chars < SCAN_LIMIT && li > 0 {
+            li -= 1;
+            let lc: Vec<char> = lines[li].chars().collect();
+            total_chars += lc.len() + 1; // +1 for newline
+            collected_lines.push(lc);
+        }
+        // Build all_chars in forward order
+        for (idx, lc) in collected_lines.iter().rev().enumerate() {
+            if idx > 0 {
+                all_chars.push('\n');
+            }
+            all_chars.extend(lc);
+        }
+    }
+
+    // Apply final limit
+    let scan_start = all_chars.len().saturating_sub(SCAN_LIMIT);
+    let chars = &all_chars[scan_start..];
+
     let mut depth = 0i32;
-    let mut pos = col;
+    let mut pos = chars.len();
     let mut commas = 0u32;
 
     // Walk backwards from cursor, skipping string literals
     while pos > 0 {
         pos -= 1;
-        // Skip string literals when scanning backwards: if we land on a closing quote,
-        // walk back to the opening quote (handling escapes).
+        // Skip string literals when scanning backwards
         if chars[pos] == '"' || chars[pos] == '\'' {
             let quote = chars[pos];
             if pos > 0 {
                 pos -= 1;
-                // Walk backwards to find the matching opening quote
                 while pos > 0 {
                     if chars[pos] == quote {
-                        // Check if this quote is escaped
                         let mut backslash_count = 0;
                         let mut bp = pos;
                         while bp > 0 && chars[bp - 1] == '\\' {
@@ -676,13 +771,16 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
                             bp -= 1;
                         }
                         if backslash_count % 2 == 0 {
-                            // Unescaped quote — this is the opening quote
                             break;
                         }
                     }
                     pos -= 1;
                 }
             }
+            continue;
+        }
+        // Skip newlines
+        if chars[pos] == '\n' || chars[pos] == '\r' {
             continue;
         }
         match chars[pos] {
@@ -696,12 +794,12 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
                 if depth == 0 {
                     // Found our opening paren. The function name is before it.
                     let mut name_end = pos;
-                    // Skip whitespace
-                    while name_end > 0 && chars[name_end - 1] == ' ' {
+                    // Skip whitespace and newlines
+                    while name_end > 0 && (chars[name_end - 1] == ' ' || chars[name_end - 1] == '\n' || chars[name_end - 1] == '\r' || chars[name_end - 1] == '\t') {
                         name_end -= 1;
                     }
                     let mut name_start = name_end;
-                    while name_start > 0 && is_ident_char_unicode(chars[name_start - 1]) {
+                    while name_start > 0 && is_ident_char(chars[name_start - 1]) {
                         name_start -= 1;
                     }
                     if name_start < name_end {
@@ -710,7 +808,11 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
                     }
                     return None;
                 }
-                depth -= 1;
+                // Only decrement if depth > 0 (consistent with `[`/`{` handling).
+                // Prevents depth going negative from unbalanced `)` in incomplete source.
+                if depth > 0 {
+                    depth -= 1;
+                }
             }
             ',' if depth == 0 => {
                 commas += 1;
@@ -1024,11 +1126,9 @@ mod tests {
     fn test_find_word_at_position_unicode() {
         let source = "let αβγ = 42;";
         // cursor on 'α' (col 4)
-        // αβγ are not ASCII alphanumeric, so is_ident_char_unicode returns false for them
-        // This means the word detection won't pick up Greek letters as identifiers
-        // (by design - is_ident_char_unicode only does ASCII)
+        // Unicode alphanumeric characters are treated as identifier chars
         let word = find_word_at_position(source, 0, 4);
-        assert_eq!(word, None); // Greek letters not treated as identifiers
+        assert_eq!(word, Some("αβγ".to_string()));
     }
 
     #[test]
@@ -1115,6 +1215,24 @@ mod tests {
     #[test]
     fn test_find_call_context_empty_source() {
         assert_eq!(find_call_context_at_position("", 0, 0), None);
+    }
+
+    #[test]
+    fn test_find_call_context_unbalanced_close_paren() {
+        // Unbalanced `)` before the actual call -- should not prevent finding `foo`
+        // Source simulates editing: ") foo(x, y)" with cursor on "y"
+        let source = ") foo(x, y)";
+        let result = find_call_context_at_position(source, 0, 10);
+        // Should still find foo with active_param=1 despite leading unbalanced `)`
+        assert_eq!(result, Some(("foo".to_string(), 1)));
+    }
+
+    #[test]
+    fn test_find_call_context_multiple_unbalanced_close_parens() {
+        // Multiple unbalanced `)` -- depth should not go negative
+        let source = "))) bar(a, b, c)";
+        let result = find_call_context_at_position(source, 0, 14);
+        assert_eq!(result, Some(("bar".to_string(), 2)));
     }
 
     // =========================================================================
@@ -1422,7 +1540,7 @@ mod tests {
         let source = "while true { output 1; }";
         let (_, diagnostics) = analyze_document(source);
         let const_cond_diags: Vec<_> = diagnostics.iter()
-            .filter(|d| d.message.contains("always") && d.code.as_deref().is_some_and(|c| c == "W204" || c == "W105"))
+            .filter(|d| d.message.contains("always") && d.code.as_deref().is_some_and(|c| c == "W204"))
             .collect();
         assert_eq!(const_cond_diags.len(), 1,
             "expected exactly 1 constant condition diagnostic (W204), got {}: {:?}",
@@ -1435,16 +1553,23 @@ mod tests {
         let mut diags = vec![
             AstDiagnostic {
                 line: 1, column: 1,
-                message: "first".to_string(),
+                message: "unused variable".to_string(),
                 severity: crate::eval::DiagnosticSeverity::Warning,
                 code: Some("W100".to_string()),
                 help: None, suggestion: None,
             },
             AstDiagnostic {
                 line: 1, column: 1,
-                message: "duplicate".to_string(),
+                message: "unused variable".to_string(),
                 severity: crate::eval::DiagnosticSeverity::Warning,
                 code: Some("W100".to_string()),
+                help: None, suggestion: None,
+            },
+            AstDiagnostic {
+                line: 1, column: 1,
+                message: "different warning".to_string(),
+                severity: crate::eval::DiagnosticSeverity::Warning,
+                code: Some("W200".to_string()),
                 help: None, suggestion: None,
             },
             AstDiagnostic {
@@ -1456,8 +1581,9 @@ mod tests {
             },
         ];
         deduplicate_diagnostics(&mut diags);
-        assert_eq!(diags.len(), 2, "expected 2 after dedup, got {}", diags.len());
-        assert_eq!(diags[0].message, "first");
-        assert_eq!(diags[1].message, "different location");
+        assert_eq!(diags.len(), 3, "expected 3 after dedup, got {}", diags.len());
+        assert_eq!(diags[0].message, "unused variable");
+        assert_eq!(diags[1].message, "different warning");
+        assert_eq!(diags[2].message, "different location");
     }
 }

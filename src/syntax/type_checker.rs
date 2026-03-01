@@ -121,8 +121,8 @@ struct TypeChecker {
     current_return_type: ChannelType,
     /// Known enum definitions: enum_name → list of (variant_name, field_count).
     enum_variants: HashMap<String, Vec<(String, usize)>>,
-    /// Known struct definitions: struct_name → list of field names.
-    struct_defs: HashMap<String, Vec<String>>,
+    /// Known struct definitions: struct_name → list of (field_name, type_annotation).
+    struct_defs: HashMap<String, Vec<(String, Option<String>)>>,
     /// Tracks seen `use` import paths for duplicate detection.
     seen_imports: HashSet<String>,
     /// Names brought into scope by `use` statements (suppresses E201).
@@ -253,6 +253,28 @@ impl TypeChecker {
     }
 
     /// Define a variable in the current (innermost) scope.
+    fn check_default_param_type(&mut self, default_expr: &Expression, annotation: &ChannelType) {
+        let default_type = self.infer_expr(default_expr);
+        if *annotation != ChannelType::Null
+            && default_type != ChannelType::Null
+            && !default_type.is_compatible_with(annotation)
+        {
+            let code = super::errors::ErrorCode::W112;
+            self.diagnostics.push(AstDiagnostic {
+                line: default_expr.span.start_line,
+                column: default_expr.span.start_col,
+                message: format!(
+                    "default value type '{}' doesn't match parameter type '{}'",
+                    default_type, annotation
+                ),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: None,
+            });
+        }
+    }
+
     fn define_var(&mut self, name: &str, ct: ChannelType, mutable: bool, line: u32, col: u32) {
         if is_reserved_keyword(name) {
             self.emit_coded(
@@ -347,8 +369,8 @@ impl TypeChecker {
                 self.enum_variants.insert(name.clone(), variant_info);
             }
             if let StatementKind::StructDef { name, fields } = &stmt.kind {
-                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                self.struct_defs.insert(name.clone(), field_names);
+                let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
+                self.struct_defs.insert(name.clone(), field_info);
             }
             if let StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) =
                 &stmt.kind
@@ -384,6 +406,61 @@ impl TypeChecker {
                         used: false,
                     },
                 );
+            }
+            // Pre-register functions, enums, and structs inside module bodies with qualified names
+            if let StatementKind::ModuleDef { name: mod_name, body } = &stmt.kind {
+                for s in &body.statements {
+                    if let StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) =
+                        &s.kind
+                    {
+                        let params: Vec<(String, ChannelType)> = def
+                            .params
+                            .iter()
+                            .map(|p| {
+                                let ct = p
+                                    .type_annotation
+                                    .as_deref()
+                                    .and_then(|s| self.resolve_type(s))
+                                    .unwrap_or(ChannelType::Null);
+                                (p.name.clone(), ct)
+                            })
+                            .collect();
+                        let has_rest = def.params.iter().any(|p| p.rest);
+                        let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
+                        let return_type = def
+                            .return_type
+                            .as_deref()
+                            .and_then(|s| self.resolve_type(s))
+                            .unwrap_or(ChannelType::Null);
+                        let qualified_name = format!("{}::{}", mod_name, def.name);
+                        self.function_sigs.insert(
+                            qualified_name,
+                            FunctionSig {
+                                params,
+                                required_params,
+                                has_rest,
+                                return_type,
+                                def_line: s.span.start_line,
+                                def_col: s.span.start_col,
+                                used: false,
+                            },
+                        );
+                    }
+                    // Register module-scoped enums with both qualified and unqualified names
+                    if let StatementKind::EnumDef { name, variants } = &s.kind {
+                        let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
+                        let qualified = format!("{}::{}", mod_name, name);
+                        self.enum_variants.insert(qualified, variant_info.clone());
+                        self.enum_variants.entry(name.clone()).or_insert(variant_info);
+                    }
+                    // Register module-scoped structs with both qualified and unqualified names
+                    if let StatementKind::StructDef { name, fields } = &s.kind {
+                        let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
+                        let qualified = format!("{}::{}", mod_name, name);
+                        self.struct_defs.insert(qualified, field_info.clone());
+                        self.struct_defs.entry(name.clone()).or_insert(field_info);
+                    }
+                }
             }
         }
 
@@ -636,25 +713,7 @@ impl TypeChecker {
                         .unwrap_or(ChannelType::Null);
                     // Type-check default param expression if present
                     if let Some(default_expr) = &param.default {
-                        let default_type = self.infer_expr(default_expr);
-                        if ct != ChannelType::Null
-                            && default_type != ChannelType::Null
-                            && !default_type.is_compatible_with(&ct)
-                        {
-                            let code = super::errors::ErrorCode::W112;
-                            self.diagnostics.push(AstDiagnostic {
-                                line: default_expr.span.start_line,
-                                column: default_expr.span.start_col,
-                                message: format!(
-                                    "default value type '{}' doesn't match parameter type '{}'",
-                                    default_type, ct
-                                ),
-                                severity: DiagnosticSeverity::Warning,
-                                code: Some(code.to_string()),
-                                help: Some(code.help().to_string()),
-                                suggestion: None,
-                            });
-                        }
+                        self.check_default_param_type(default_expr, &ct);
                     }
                     self.define_var(
                         &param.name,
@@ -795,7 +854,7 @@ impl TypeChecker {
                                     val_type.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
-                                super::errors::ErrorCode::E102,
+                                super::errors::ErrorCode::E100,
                                 None,
                             );
                         }
@@ -1101,8 +1160,8 @@ impl TypeChecker {
                 self.enum_variants.insert(name.clone(), variant_info);
             }
             StatementKind::StructDef { name, fields } => {
-                let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                self.struct_defs.insert(name.clone(), field_names);
+                let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
+                self.struct_defs.insert(name.clone(), field_info);
             }
         }
     }
@@ -1302,6 +1361,9 @@ impl TypeChecker {
                             }
                             return ChannelType::Null; // function type is opaque
                         }
+                        if self.use_aliases.contains(name.as_str()) {
+                            return ChannelType::Null;
+                        }
                         let suggestion = self.suggest_variable(name);
                         self.emit_coded(
                             expr.span.start_line,
@@ -1494,6 +1556,15 @@ impl TypeChecker {
                 if let Some(op) = OperationType::parse(name) {
                     let expected_inputs = op_input_types(op);
 
+                    if arg_types.len() != expected_inputs.len() {
+                        self.emit_coded(
+                            expr.span.start_line, expr.span.start_col,
+                            format!("Operation '{}' expects {} arguments, got {}", name, expected_inputs.len(), arg_types.len()),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::E405, None,
+                        );
+                    }
+
                     // Check positional arg types against expected input ports.
                     for (i, (port_name, expected_type)) in expected_inputs.iter().enumerate() {
                         if let Some(&actual_type) = arg_types.get(i) {
@@ -1663,7 +1734,7 @@ impl TypeChecker {
                 }
 
                 // E105: Negative array index literal.
-                if obj_ty == ChannelType::Array || obj_ty == ChannelType::Null {
+                if obj_ty == ChannelType::Array {
                     if let Some(idx_val) = literal_int(index) {
                         if idx_val < 0 {
                             self.emit_coded(
@@ -1816,8 +1887,8 @@ impl TypeChecker {
 
                 // Mark receiver as mutated for known in-place mutating methods
                 const MUTATING_METHODS: &[&str] = &[
-                    "push", "pop", "set", "remove", "insert", "clear",
-                    "delete", "merge", "sort", "reverse", "extend",
+                    "push", "pop", "set", "remove", "insert",
+                    "delete", "merge", "sort", "reverse",
                     "shift", "filter_nulls",
                 ];
                 if MUTATING_METHODS.contains(&method.as_str()) {
@@ -1858,7 +1929,7 @@ impl TypeChecker {
                             "to_uint64" => ChannelType::Uint64,
                             "to_float64" => ChannelType::Float64,
                             "to_float32" => ChannelType::Float32,
-                            "is_nan" | "is_infinite" => ChannelType::Bool,
+                            "is_nan" | "is_infinite" | "is_finite" => ChannelType::Bool,
                             _ => obj_ty, // abs, sign, pow, min, max, clamp preserve receiver type
                         },
                         "array_hof" => match method.as_str() {
@@ -1919,25 +1990,7 @@ impl TypeChecker {
                         .unwrap_or(ChannelType::Null);
                     // Type-check default param expression if present
                     if let Some(default_expr) = &param.default {
-                        let default_type = self.infer_expr(default_expr);
-                        if ct != ChannelType::Null
-                            && default_type != ChannelType::Null
-                            && !default_type.is_compatible_with(&ct)
-                        {
-                            let code = super::errors::ErrorCode::W112;
-                            self.diagnostics.push(AstDiagnostic {
-                                line: default_expr.span.start_line,
-                                column: default_expr.span.start_col,
-                                message: format!(
-                                    "default value type '{}' doesn't match parameter type '{}'",
-                                    default_type, ct
-                                ),
-                                severity: DiagnosticSeverity::Warning,
-                                code: Some(code.to_string()),
-                                help: Some(code.help().to_string()),
-                                suggestion: None,
-                            });
-                        }
+                        self.check_default_param_type(default_expr, &ct);
                     }
                     self.define_var(
                         &param.name,
@@ -2059,9 +2112,11 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // Optional chaining: obj?.field
             // -----------------------------------------------------------------
-            ExpressionKind::OptionalChain { object, field: _ } => {
+            ExpressionKind::OptionalChain { object, field } => {
                 let obj_ty = self.infer_expr(object);
-                if obj_ty != ChannelType::Map && obj_ty != ChannelType::Null {
+                // Empty field means this is an index-access marker (expr?[index]),
+                // which is valid on any nullable type, not just maps.
+                if !field.is_empty() && obj_ty != ChannelType::Map && obj_ty != ChannelType::Null {
                     self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
@@ -2245,6 +2300,13 @@ impl TypeChecker {
                             suggestion: super::errors::suggest_name(variant, &variant_names),
                         });
                     }
+                } else if !enum_name.contains("::") && !self.use_aliases.contains(enum_name.as_str()) {
+                    self.emit_coded(
+                        expr.span.start_line, expr.span.start_col,
+                        format!("Undefined enum '{}'", enum_name),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E201, None,
+                    );
                 }
                 for arg in args {
                     self.infer_expr(arg);
@@ -2253,8 +2315,9 @@ impl TypeChecker {
             }
 
             ExpressionKind::StructConstruct { name, fields } => {
-                // Check for duplicate field names
+                // Check for duplicate field names and infer field types
                 let mut seen = HashSet::new();
+                let mut field_types: HashMap<&str, ChannelType> = HashMap::new();
                 for (field_name, field_expr) in fields {
                     if !seen.insert(field_name.as_str()) {
                         let code = super::errors::ErrorCode::E107;
@@ -2268,16 +2331,18 @@ impl TypeChecker {
                             suggestion: None,
                         });
                     }
-                    self.infer_expr(field_expr);
+                    let ft = self.infer_expr(field_expr);
+                    field_types.insert(field_name.as_str(), ft);
                 }
                 // Validate fields against struct definition
                 if let Some(def_fields) = self.struct_defs.get(name.as_str()).cloned() {
                     let provided: HashSet<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
-                    let defined: HashSet<&str> = def_fields.iter().map(|f| f.as_str()).collect();
+                    let defined: HashSet<&str> = def_fields.iter().map(|(f, _)| f.as_str()).collect();
+                    let def_names: Vec<&str> = def_fields.iter().map(|(f, _)| f.as_str()).collect();
                     // Check for unknown fields
                     for (field_name, _) in fields {
                         if !defined.contains(field_name.as_str()) {
-                            let suggestion = super::errors::suggest_name(field_name, &def_fields.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                            let suggestion = super::errors::suggest_name(field_name, &def_names);
                             self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
@@ -2292,7 +2357,7 @@ impl TypeChecker {
                         }
                     }
                     // Check for missing fields
-                    for def_field in &def_fields {
+                    for (def_field, _) in &def_fields {
                         if !provided.contains(def_field.as_str()) {
                             self.emit_coded(
                                 expr.span.start_line,
@@ -2305,6 +2370,31 @@ impl TypeChecker {
                                 super::errors::ErrorCode::E100,
                                 None,
                             );
+                        }
+                    }
+                    // Validate field types against annotations
+                    for (def_field, ann) in &def_fields {
+                        if let Some(ann_str) = ann {
+                            if let Some(inferred) = field_types.get(def_field.as_str()) {
+                                if let Some(expected) = self.resolve_type(ann_str) {
+                                    if *inferred != ChannelType::Null
+                                        && *inferred != expected
+                                        && !inferred.is_compatible_with(&expected)
+                                    {
+                                        self.emit_coded(
+                                            expr.span.start_line,
+                                            expr.span.start_col,
+                                            format!(
+                                                "field '{}' in struct '{}' expects type '{}' but got '{}'",
+                                                def_field, name, ann_str, inferred.as_str()
+                                            ),
+                                            DiagnosticSeverity::Warning,
+                                            super::errors::ErrorCode::W112,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2556,9 +2646,9 @@ impl TypeChecker {
                     return ChannelType::String;
                 }
 
-                // Division always returns Float64.
+                // Division: uses numeric promotion for all cases (int/int = int, preserves Float32)
                 if op == BinOp::Div {
-                    return ChannelType::Float64;
+                    return promote_numeric(&[left, right]);
                 }
 
                 // Look up via OperationType for consistency with abstract_interp.
@@ -2649,24 +2739,8 @@ impl TypeChecker {
             );
         }
 
-        // W106: Self-comparison.
-        if matches!(
-            op,
-            BinOp::Eq | BinOp::NotEq | BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq
-        ) {
-            if let (Some(l), Some(r)) = (as_variable(left), as_variable(right)) {
-                if l == r {
-                    self.emit_coded(
-                        span.start_line,
-                        span.start_col,
-                        format!("Comparing variable '{}' with itself", l),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::W106,
-                        None,
-                    );
-                }
-            }
-        }
+        // Self-comparison is handled by the linter as W205 (more thorough:
+        // covers literals and complex expressions, not just variables).
 
         // W2: Arithmetic on non-numeric types.
         // Exempt Add on strings (string concatenation is valid).
@@ -2933,14 +3007,18 @@ fn is_integer(ct: ChannelType) -> bool {
 /// - Same int => same int type
 /// - All Null => Null
 fn promote_numeric(inputs: &[ChannelType]) -> ChannelType {
-    let mut has_float = false;
+    let mut has_float64 = false;
+    let mut has_float32 = false;
     let mut has_int = false;
     let mut common: Option<ChannelType> = None;
 
     for ct in inputs {
         match ct {
-            ChannelType::Float32 | ChannelType::Float64 => {
-                has_float = true;
+            ChannelType::Float64 => {
+                has_float64 = true;
+            }
+            ChannelType::Float32 => {
+                has_float32 = true;
             }
             ChannelType::Int32 | ChannelType::Int64 | ChannelType::Uint32 | ChannelType::Uint64 => {
                 has_int = true;
@@ -2954,8 +3032,10 @@ fn promote_numeric(inputs: &[ChannelType]) -> ChannelType {
         }
     }
 
-    if has_float {
+    if has_float64 {
         ChannelType::Float64
+    } else if has_float32 {
+        if has_int { ChannelType::Float64 } else { ChannelType::Float32 }
     } else if has_int {
         common.unwrap_or(ChannelType::Int64)
     } else {
@@ -2978,8 +3058,8 @@ fn refine_call_output(op: OperationType, arg_types: &[ChannelType]) -> ChannelTy
 
     match op {
         // Arithmetic: promote based on inputs.
-        Add | Subtract | Multiply | Modulo | Power | Min | Max | Negate | Abs | Round | Floor
-        | Ceil => promote_numeric(arg_types),
+        Add | Subtract | Multiply | Divide | Modulo | Power | Min | Max | Negate | Abs | Round
+        | Floor | Ceil | Sign | Clamp => promote_numeric(arg_types),
 
         Sqrt => ChannelType::Float64,
 
@@ -3084,14 +3164,6 @@ fn is_literal_bool(expr: &Expression, val: bool) -> bool {
     matches!(&expr.kind, ExpressionKind::Literal(Literal::Bool(b)) if *b == val)
 }
 
-/// Extract the variable name from an expression, if it is a simple variable reference.
-fn as_variable(expr: &Expression) -> Option<&str> {
-    match &expr.kind {
-        ExpressionKind::Variable(name) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
 // is_empty_block, block_contains_break, expr_contains_break removed —
 // these checks are now handled by the linter (W206, W204).
 
@@ -3116,15 +3188,29 @@ fn available_methods_for_channel_type(obj_type: ChannelType) -> Vec<&'static str
                 "split", "contains", "replace", "starts_with", "ends_with",
                 "words", "count"]);
         }
-        ChannelType::Int64 | ChannelType::Int32 | ChannelType::Uint32 | ChannelType::Uint64 => {
-            methods.extend_from_slice(&["abs", "sign", "to_string", "to_int64", "to_float64",
-                "to_int32", "to_uint32", "to_uint64", "pow", "min", "max", "clamp"]);
+        ChannelType::Int64 => {
+            methods.extend_from_slice(&["abs", "sign", "pow", "min", "max", "clamp"]);
         }
-        ChannelType::Float64 | ChannelType::Float32 => {
-            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite",
-                "sign", "to_string", "to_int64", "to_float64", "to_float32",
-                "pow", "min", "max", "clamp",
-                "ln", "log2", "log10", "sin", "cos", "tan"]);
+        ChannelType::Int32 => {
+            methods.extend_from_slice(&["abs", "sign", "to_int32", "pow", "min", "max", "clamp"]);
+        }
+        ChannelType::Uint32 => {
+            methods.extend_from_slice(&["abs", "sign", "to_uint32", "pow", "min", "max", "clamp"]);
+        }
+        ChannelType::Uint64 => {
+            methods.extend_from_slice(&["abs", "sign", "to_uint64", "pow", "min", "max", "clamp"]);
+        }
+        ChannelType::Float64 => {
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite", "is_finite",
+                "sign", "to_float32", "pow", "min", "max", "clamp",
+                "ln", "log2", "log10", "sin", "cos", "tan",
+                "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp"]);
+        }
+        ChannelType::Float32 => {
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite", "is_finite",
+                "sign", "to_float32", "pow", "min", "max", "clamp",
+                "ln", "log2", "log10", "sin", "cos", "tan",
+                "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp"]);
         }
         ChannelType::Map => {
             methods.extend_from_slice(&["get", "set", "delete", "has", "keys", "values", "entries",
@@ -3258,16 +3344,16 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
         },
         ChannelType::Float64 => match method {
             "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
-            | "to_int64" | "to_float64" | "pow" | "min" | "max" | "clamp" | "is_nan"
-            | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
-            | "tan" => Some("numeric_method".into()),
+            | "to_int64" | "to_float64" | "to_float32" | "pow" | "min" | "max" | "clamp" | "is_nan"
+            | "is_infinite" | "is_finite" | "ln" | "log2" | "log10" | "sin" | "cos"
+            | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "exp" => Some("numeric_method".into()),
             _ => None,
         },
         ChannelType::Float32 => match method {
             "abs" | "round" | "floor" | "ceil" | "sqrt" | "sign" | "to_string"
             | "to_int64" | "to_float64" | "to_float32" | "pow" | "min" | "max" | "clamp" | "is_nan"
-            | "is_infinite" | "ln" | "log2" | "log10" | "sin" | "cos"
-            | "tan" => Some("numeric_method".into()),
+            | "is_infinite" | "is_finite" | "ln" | "log2" | "log10" | "sin" | "cos"
+            | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "exp" => Some("numeric_method".into()),
             _ => None,
         },
         _ => None,
@@ -3411,8 +3497,14 @@ output x;"#,
     }
 
     #[test]
-    fn test_divide_always_float() {
+    fn test_divide_int_int_returns_int() {
         let a = check("let x = 10;\nlet y = 3;\nlet r = x / y;\noutput r;");
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_divide_int_float_returns_float() {
+        let a = check("let x = 10;\nlet y = 3.0;\nlet r = x / y;\noutput r;");
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Float64));
     }
 
@@ -4180,12 +4272,14 @@ output r;"#,
     }
 
     #[test]
-    fn test_self_comparison_warns() {
+    fn test_self_comparison_not_in_type_checker() {
+        // Self-comparison is handled by linter as W205, not type checker
         let a = check("let x = 5;\nlet r = x == x;\noutput r;");
         let w = warnings(&a);
-        assert!(w
-            .iter()
-            .any(|d| d.message.contains("Comparing variable 'x' with itself")));
+        assert!(
+            !w.iter().any(|d| d.message.contains("Comparing") && d.message.contains("itself")),
+            "Type checker should not emit self-comparison warning (linter handles it as W205)"
+        );
     }
 
     // =========================================================================
@@ -5236,8 +5330,14 @@ test "reads outer" { let r = x + 1; output r; }"#,
     }
 
     #[test]
-    fn test_binop_div_returns_float64() {
+    fn test_binop_div_int_returns_int64() {
         let a = check("let x = 10 / 3;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+    }
+
+    #[test]
+    fn test_binop_div_float_returns_float64() {
+        let a = check("let x = 10.0 / 3;\noutput x;");
         assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
     }
 
@@ -5724,6 +5824,71 @@ test "reads outer" { let r = x + 1; output r; }"#,
             e.iter().any(|d| d.message.contains("declares return type") && d.message.contains("body evaluates to")),
             "Expected return type mismatch error, got: {:?}", e
         );
+    }
+
+    #[test]
+    fn test_module_scoped_enum_registered() {
+        // Module-scoped enums should be registered with both qualified and unqualified names
+        // so that arity checking works inside module functions.
+        let a = check(r#"
+            mod shapes {
+                enum Shape {
+                    Circle(radius),
+                    Rect(w, h),
+                }
+                fn make_circle() {
+                    Shape::Circle(10)
+                }
+                fn bad_circle() {
+                    Shape::Circle(10, 20)
+                }
+            }
+        "#);
+        let e = errors(&a);
+        // The bad_circle function constructs Circle with wrong arity (2 instead of 1)
+        assert!(e.iter().any(|d| d.message.contains("expects 1 arguments, got 2")),
+            "Expected arity error for wrong enum construction, got: {:?}", e);
+    }
+
+    #[test]
+    fn test_module_scoped_enum_pattern_check() {
+        // Module-scoped enum pattern matching should validate variant arity.
+        let a = check(r#"
+            mod colors {
+                enum Color {
+                    Red,
+                    Green,
+                    Blue,
+                }
+                fn is_red(c) {
+                    match c {
+                        Color::Red() => true,
+                        Color::Green() => false,
+                        Color::Blue() => false,
+                    }
+                }
+            }
+        "#);
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors for correct pattern, got: {:?}", e);
+    }
+
+    #[test]
+    fn test_module_scoped_struct_registered() {
+        // Module-scoped structs should be registered so field validation works.
+        let a = check(r#"
+            mod geo {
+                struct Point {
+                    x: float64,
+                    y: float64,
+                }
+                fn make_point() {
+                    Point { x: 1.0, y: 2.0 }
+                }
+            }
+        "#);
+        let e = errors(&a);
+        assert!(e.is_empty(), "Expected no errors for correct struct, got: {:?}", e);
     }
 
 }

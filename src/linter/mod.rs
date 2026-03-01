@@ -62,14 +62,32 @@ impl<'a> LintContext<'a> {
         }
     }
 
-    fn check_program(&mut self, program: &Program) {
-        // First pass: collect enum definitions for exhaustiveness checks
-        for stmt in &program.statements {
-            if let StatementKind::EnumDef { name, variants } = &stmt.kind {
-                let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                self.enum_defs.push((name.clone(), variant_names));
+    fn collect_enum_defs_recursive(
+        statements: &[Statement],
+        enum_defs: &mut Vec<(String, Vec<String>)>,
+    ) {
+        for stmt in statements {
+            match &stmt.kind {
+                StatementKind::EnumDef { name, variants } => {
+                    let variant_names: Vec<String> =
+                        variants.iter().map(|v| v.name.clone()).collect();
+                    if !enum_defs.iter().any(|(n, _)| n == name) {
+                        enum_defs.push((name.clone(), variant_names));
+                    }
+                }
+                StatementKind::ModuleDef { body, .. } => {
+                    Self::collect_enum_defs_recursive(&body.statements, enum_defs);
+                }
+                _ => {}
             }
         }
+    }
+
+    fn check_program(&mut self, program: &Program) {
+        // First pass: collect enum definitions for exhaustiveness checks
+        // Recurse into module bodies so module-level enums are available
+        // before any match expressions are checked in the second pass.
+        Self::collect_enum_defs_recursive(&program.statements, &mut self.enum_defs);
 
         // Second pass: lint all statements
         for stmt in &program.statements {
@@ -238,7 +256,7 @@ impl<'a> LintContext<'a> {
                 self.check_block(catch_block);
                 if let Some(fb) = finally_block {
                     // W212: return/break/continue/throw in finally
-                    let diags = rules::check_return_in_finally(fb, stmt.span);
+                    let diags = rules::check_control_flow_in_finally(fb);
                     self.emit_all(diags);
                     self.check_block(fb);
                 }
@@ -254,11 +272,19 @@ impl<'a> LintContext<'a> {
                 }
                 self.check_expression(value);
             }
-            StatementKind::ModuleDef { body, .. } => {
+            StatementKind::ModuleDef { name, body } => {
+                if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                    self.emit(d);
+                }
                 self.check_block(body);
             }
             StatementKind::TestDef { body, .. } => {
                 self.check_block(body);
+            }
+            StatementKind::Use { alias: Some(alias_name), .. } => {
+                if let Some(d) = rules::check_naming_snake_case(alias_name, stmt.span) {
+                    self.emit(d);
+                }
             }
             _ => {}
         }
@@ -311,6 +337,48 @@ impl<'a> LintContext<'a> {
         }
     }
 
+    /// Collect variable names bound by a match pattern and lint them for snake_case (W200).
+    fn check_pattern_naming(&mut self, pattern: &Pattern, span: Span) {
+        match pattern {
+            Pattern::Variable(name) => {
+                if let Some(d) = rules::check_naming_snake_case(name, span) {
+                    self.emit(d);
+                }
+            }
+            Pattern::Array(sub_patterns) => {
+                for sub in sub_patterns {
+                    self.check_pattern_naming(sub, span);
+                }
+            }
+            Pattern::Map(entries) => {
+                for (_, sub) in entries {
+                    self.check_pattern_naming(sub, span);
+                }
+            }
+            Pattern::Or(alternatives) => {
+                for alt in alternatives {
+                    self.check_pattern_naming(alt, span);
+                }
+            }
+            Pattern::Rest(Some(name)) => {
+                if let Some(d) = rules::check_naming_snake_case(name, span) {
+                    self.emit(d);
+                }
+            }
+            Pattern::EnumPattern { bindings, .. } => {
+                for sub in bindings {
+                    self.check_pattern_naming(sub, span);
+                }
+            }
+            Pattern::TypePattern { name, .. } => {
+                if let Some(d) = rules::check_naming_snake_case(name, span) {
+                    self.emit(d);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn check_expression(&mut self, expr: &Expression) {
         match &expr.kind {
             ExpressionKind::IfElse {
@@ -338,6 +406,8 @@ impl<'a> LintContext<'a> {
             ExpressionKind::Match { value, arms } => {
                 self.check_expression(value);
                 for arm in arms {
+                    // W200: check pattern variable names for snake_case
+                    self.check_pattern_naming(&arm.pattern, arm.span);
                     self.check_block(&arm.body);
                     if let Some(guard) = &arm.guard {
                         self.check_expression(guard);
@@ -349,7 +419,7 @@ impl<'a> LintContext<'a> {
                 self.emit_all(diags);
 
                 // Check exhaustiveness
-                let diags = rules::check_match_exhaustiveness(arms, &self.enum_defs);
+                let diags = rules::check_match_exhaustiveness(arms, &self.enum_defs, expr.span);
                 self.emit_all(diags);
             }
             ExpressionKind::Block(block) => {
@@ -358,7 +428,10 @@ impl<'a> LintContext<'a> {
                 }
                 self.check_block(block);
             }
-            ExpressionKind::BinaryOp { left, right, .. } => {
+            ExpressionKind::BinaryOp { op, left, right } => {
+                if let Some(d) = rules::check_self_comparison(op, left, right, expr.span) {
+                    self.emit(d);
+                }
                 self.check_expression(left);
                 self.check_expression(right);
             }
@@ -425,7 +498,7 @@ impl<'a> LintContext<'a> {
                 self.check_block(catch_block);
                 if let Some(finally) = finally_block {
                     // W212: return/break/continue/throw in finally
-                    let diags = rules::check_return_in_finally(finally, expr.span);
+                    let diags = rules::check_control_flow_in_finally(finally);
                     self.emit_all(diags);
                     self.check_block(finally);
                 }
@@ -440,6 +513,9 @@ impl<'a> LintContext<'a> {
                 self.check_expression(inner);
                 self.check_expression(iterable);
                 if let Some(cond) = condition {
+                    if let Some(d) = rules::check_constant_condition(cond, None) {
+                        self.emit(d);
+                    }
                     self.check_expression(cond);
                 }
             }
@@ -455,6 +531,9 @@ impl<'a> LintContext<'a> {
                 self.check_expression(value_expr);
                 self.check_expression(iterable);
                 if let Some(cond) = condition {
+                    if let Some(d) = rules::check_constant_condition(cond, None) {
+                        self.emit(d);
+                    }
                     self.check_expression(cond);
                 }
             }
@@ -1049,6 +1128,75 @@ fn foo(x) {
 "#);
         assert!(codes.contains(&"W212".to_string()),
             "return in if-block inside finally should warn: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w212_return_in_try_inside_loop_inside_finally() {
+        // return in a try/catch inside a for-loop inside a finally block
+        // should still fire W212 since return escapes the finally
+        let codes = lint_codes(r#"
+fn foo() {
+    try { 1 } catch e { 2 } finally {
+        for x in [1, 2, 3] {
+            try { return 99; } catch e { 0 }
+        }
+    }
+}
+"#);
+        assert!(codes.contains(&"W212".to_string()),
+            "return in try/catch inside loop inside finally should warn: {:?}", codes);
+    }
+
+    // ── W205: Self-comparison ──
+
+    #[test]
+    fn test_w205_variable_self_comparison_eq() {
+        let codes = lint_codes("let x = 5;\nlet b = x == x;");
+        assert!(codes.contains(&"W205".to_string()),
+            "expected W205 for x == x, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w205_variable_self_comparison_neq() {
+        let codes = lint_codes("let x = 5;\nlet b = x != x;");
+        assert!(codes.contains(&"W205".to_string()),
+            "expected W205 for x != x, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w205_variable_self_comparison_lt() {
+        let codes = lint_codes("let x = 5;\nlet b = x < x;");
+        assert!(codes.contains(&"W205".to_string()),
+            "expected W205 for x < x, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w205_different_variables_no_warning() {
+        let codes = lint_codes("let x = 5;\nlet y = 10;\nlet b = x == y;");
+        assert!(!codes.contains(&"W205".to_string()),
+            "should not warn for x == y: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w205_field_access_self_comparison() {
+        let codes = lint_codes("struct Foo { x: int64 }\nlet f = Foo { x: 1 };\nlet b = f.x == f.x;");
+        assert!(codes.contains(&"W205".to_string()),
+            "expected W205 for f.x == f.x, got {:?}", codes);
+    }
+
+    #[test]
+    fn test_w205_non_comparison_no_warning() {
+        // Arithmetic operators should not trigger W205
+        let codes = lint_codes("let x = 5;\nlet b = x + x;");
+        assert!(!codes.contains(&"W205".to_string()),
+            "should not warn for x + x: {:?}", codes);
+    }
+
+    #[test]
+    fn test_w205_literal_self_comparison() {
+        let codes = lint_codes("let b = 42 == 42;");
+        assert!(codes.contains(&"W205".to_string()),
+            "expected W205 for 42 == 42, got {:?}", codes);
     }
 
 }

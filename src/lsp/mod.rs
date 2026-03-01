@@ -147,7 +147,12 @@ impl LanguageServer for MagiLanguageServer {
             Some(s) => s,
             None => return Ok(None),
         };
-        Ok(hover::handle_hover(state, &params))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hover::handle_hover(state, &params)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn goto_definition(
@@ -160,7 +165,12 @@ impl LanguageServer for MagiLanguageServer {
             Some(s) => s,
             None => return Ok(None),
         };
-        Ok(definition::handle_goto_definition(state, &params, uri))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            definition::handle_goto_definition(state, &params, uri)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -170,7 +180,12 @@ impl LanguageServer for MagiLanguageServer {
             Some(s) => s,
             None => return Ok(None),
         };
-        Ok(Some(completion::handle_completion(state, &params)))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            completion::handle_completion(state, &params)
+        })) {
+            Ok(result) => Ok(Some(result)),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
@@ -180,7 +195,12 @@ impl LanguageServer for MagiLanguageServer {
             Some(s) => s,
             None => return Ok(None),
         };
-        Ok(signature_help::handle_signature_help(state, &params))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            signature_help::handle_signature_help(state, &params)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn document_symbol(
@@ -193,7 +213,12 @@ impl LanguageServer for MagiLanguageServer {
             Some(s) => s,
             None => return Ok(None),
         };
-        Ok(document_symbols::handle_document_symbols(state, uri))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            document_symbols::handle_document_symbols(state, uri)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -203,44 +228,48 @@ impl LanguageServer for MagiLanguageServer {
             Some(s) => s,
             None => return Ok(None),
         };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let program = match &state.program {
+                Some(p) => p,
+                None => return None,
+            };
 
-        let program = match &state.program {
-            Some(p) => p,
-            None => return Ok(None),
-        };
+            let config = crate::formatter::FormatConfig {
+                indent_width: (params.options.tab_size as usize).clamp(1, 16),
+                ..Default::default()
+            };
 
-        let config = crate::formatter::FormatConfig {
-            indent_width: params.options.tab_size as usize,
-            ..Default::default()
-        };
+            let formatted = crate::formatter::format_program(program, &config);
+            // Calculate end position of the source document.
+            // LSP uses 0-based line numbers. str::lines() omits trailing empty line.
+            let lines: Vec<&str> = state.source.lines().collect();
+            let (last_line, last_line_len) = if state.source.ends_with('\n') {
+                (lines.len() as u32, 0u32)
+            } else if lines.is_empty() {
+                (0u32, 0u32)
+            } else {
+                let last = lines.last().unwrap_or(&"");
+                let utf16_len: u32 = last.chars().map(|c| c.len_utf16() as u32).sum();
+                ((lines.len().saturating_sub(1)) as u32, utf16_len)
+            };
 
-        let formatted = crate::formatter::format_program(program, &config);
-        // Calculate end position of the source document.
-        // LSP uses 0-based line numbers. str::lines() omits trailing empty line.
-        let lines: Vec<&str> = state.source.lines().collect();
-        let (last_line, last_line_len) = if state.source.ends_with('\n') {
-            (lines.len() as u32, 0u32)
-        } else if lines.is_empty() {
-            (0u32, 0u32)
-        } else {
-            let last = lines.last().unwrap_or(&"");
-            let utf16_len: u32 = last.chars().map(|c| c.len_utf16() as u32).sum();
-            ((lines.len().saturating_sub(1)) as u32, utf16_len)
-        };
-
-        Ok(Some(vec![TextEdit {
-            range: Range {
-                start: Position {
-                    line: 0,
-                    character: 0,
+            Some(vec![TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: last_line,
+                        character: last_line_len,
+                    },
                 },
-                end: Position {
-                    line: last_line,
-                    character: last_line_len,
-                },
-            },
-            new_text: formatted,
-        }]))
+                new_text: formatted,
+            }])
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
     }
 }
 

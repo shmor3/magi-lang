@@ -24,7 +24,7 @@ pub enum ErrorCode {
     E101,
     /// Expected Array for iteration (for..in)
     E102,
-    /// Invalid argument type for operation
+    /// Arithmetic overflow or invalid argument type
     E103,
     /// Division/modulo by zero
     E104,
@@ -44,8 +44,6 @@ pub enum ErrorCode {
     E202,
     /// Module not found
     E203,
-    /// Item not found in module
-    E204,
 
     // Control flow (E3xx)
     /// `break` outside loop
@@ -86,15 +84,9 @@ pub enum ErrorCode {
     W100,
     /// Unused import
     W101,
-    /// Variable shadowing
-    W102,
     /// Unused function
     W103,
-    /// Empty loop body
-    W104,
-    /// Infinite loop (literal true)
-    W105,
-    /// Redundant operation (self-comparison, double negation, etc.)
+    /// Redundant operation (double negation, boolean literal comparison)
     W106,
     /// Suspicious arithmetic (modulo by 1, multiply by 0, etc.)
     W107,
@@ -122,7 +114,7 @@ pub enum ErrorCode {
     W203,
     /// Constant condition in if/while
     W204,
-    /// Unnecessary parentheses (reserved)
+    /// Self-comparison (comparing a value to itself)
     W205,
     /// Empty block body
     W206,
@@ -132,8 +124,6 @@ pub enum ErrorCode {
     W208,
     /// Shadowed variable in same scope
     W209,
-    /// Unused function parameter (deprecated — use W109 instead)
-    W211,
     /// Return/break/continue/throw in finally block
     W212,
 }
@@ -153,7 +143,6 @@ impl fmt::Display for ErrorCode {
             ErrorCode::E201 => "E201",
             ErrorCode::E202 => "E202",
             ErrorCode::E203 => "E203",
-            ErrorCode::E204 => "E204",
             ErrorCode::E300 => "E300",
             ErrorCode::E301 => "E301",
             ErrorCode::E302 => "E302",
@@ -171,10 +160,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::E409 => "E409",
             ErrorCode::W100 => "W100",
             ErrorCode::W101 => "W101",
-            ErrorCode::W102 => "W102",
             ErrorCode::W103 => "W103",
-            ErrorCode::W104 => "W104",
-            ErrorCode::W105 => "W105",
             ErrorCode::W106 => "W106",
             ErrorCode::W107 => "W107",
             ErrorCode::W108 => "W108",
@@ -193,7 +179,6 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W207 => "W207",
             ErrorCode::W208 => "W208",
             ErrorCode::W209 => "W209",
-            ErrorCode::W211 => "W211",
             ErrorCode::W212 => "W212",
         };
         write!(f, "{}", code)
@@ -208,7 +193,7 @@ impl ErrorCode {
             ErrorCode::E100 => "A value of the wrong type was used where a specific type was expected. Check the types of your variables and ensure they match what the operation or function expects.",
             ErrorCode::E101 => "Conditions in `if`, `while`, `&&`, `||`, `!`, and match guards must be boolean (`true`/`false`). If you have a number or string, compare it explicitly: `x != 0` or `s != \"\"`.",
             ErrorCode::E102 => "The `for..in` loop requires an iterable (array, map, or string). Use `range(start, end)` for numeric loops, or ensure the value is iterable.",
-            ErrorCode::E103 => "The operation received an argument of the wrong type. Check the operation's expected input types.",
+            ErrorCode::E103 => "An arithmetic operation overflowed or received an argument of the wrong type. Check values are within bounds.",
             ErrorCode::E104 => "Division or modulo by zero is undefined. Check that your divisor is not zero before the operation.",
             ErrorCode::E105 => "Array indices must be non-negative integers. Use `len(arr) - 1` to access the last element, or use slice syntax `arr[-1..]` for negative offsets.",
             ErrorCode::E106 => "Attempted to index into an empty array literal. Ensure the array has elements before indexing.",
@@ -219,7 +204,6 @@ impl ErrorCode {
             ErrorCode::E201 => "The function has not been defined. Check spelling and ensure the function is defined before it is called.",
             ErrorCode::E202 => "The operation or method name is not recognized. Check spelling, verify the method exists on the receiver type, or use `use std::module::*` to import standard library functions.",
             ErrorCode::E203 => "The module does not exist. Available standard library modules: math, cmp, logic, bits, str, convert, array, map, bytes, json, time, hash, io, control, rand, fs, env, net, tcp, udp, ws, sse, http_server, path, yaml, csv, toml, regex, uuid, crypto, compress, fmt, stats, text, encode, reflect, collections, sort, cert.",
-            ErrorCode::E204 => "The item was not found in the specified module. Check the module's available exports.",
 
             // Control flow
             ErrorCode::E300 => "`break` can only be used inside a `for`, `while`, or `loop` block.",
@@ -243,11 +227,8 @@ impl ErrorCode {
             // Warnings
             ErrorCode::W100 => "This variable is declared but never used. Prefix it with `_` to suppress this warning, or remove it.",
             ErrorCode::W101 => "This import is not used anywhere in the code. Remove the unused import.",
-            ErrorCode::W102 => "A variable with the same name already exists in this scope. The new declaration shadows the previous one, which may be unintentional.",
             ErrorCode::W103 => "This function is defined but never called. Remove it if it's not needed.",
-            ErrorCode::W104 => "The loop body is empty. This loop will either run forever or do nothing.",
-            ErrorCode::W105 => "This loop has a literal `true` condition and no `break` statement, creating an infinite loop.",
-            ErrorCode::W106 => "This operation is redundant (e.g., comparing a value to itself, double negation). Simplify the expression.",
+            ErrorCode::W106 => "This operation is redundant (e.g., double negation `--x`, comparing to a boolean literal `x == true`). Simplify the expression.",
             ErrorCode::W107 => "This arithmetic operation has a suspicious pattern (e.g., modulo by 1 always returns 0, multiply by 0 always returns 0).",
             ErrorCode::W108 => "The `return` keyword is unnecessary in tail position. The last expression in a block is already the return value.",
             ErrorCode::W109 => "This function parameter is never used. Prefix it with `_` to suppress this warning, or remove it.",
@@ -262,12 +243,11 @@ impl ErrorCode {
             ErrorCode::W202 => "Code after `return`, `break`, `continue`, or `throw` is unreachable and will never execute. Remove the dead code.",
             ErrorCode::W203 => "This match expression may not cover all possible cases. Add missing arms or a wildcard `_` arm.",
             ErrorCode::W204 => "The condition is always `true` or `false`. This makes the branch unconditional or dead code.",
-            ErrorCode::W205 => "These parentheses are unnecessary and can be removed for cleaner code.",
+            ErrorCode::W205 => "Comparing a value to itself is always `true` (for `==`) or `false` (for `!=`, `<`, `>`). This is likely a bug — did you mean to compare to a different value?",
             ErrorCode::W206 => "This block body is empty. Add statements or remove the block.",
             ErrorCode::W207 => "This match arm is unreachable because a previous wildcard or variable pattern already matches all values.",
             ErrorCode::W208 => "This import path has already been imported. Remove the duplicate import.",
             ErrorCode::W209 => "A variable with the same name is already declared in this scope. This shadows the previous binding. Use a different name or remove the redundant declaration.",
-            ErrorCode::W211 => "Deprecated: unused function parameters are now reported as W109 by the type checker.",
             ErrorCode::W212 => "Using `return`, `break`, `continue`, or `throw` in a `finally` block overrides the result from `try`/`catch`. This is almost always a bug.",
         }
     }
@@ -330,19 +310,18 @@ mod tests {
             ErrorCode::E100, ErrorCode::E101, ErrorCode::E102, ErrorCode::E103,
             ErrorCode::E104, ErrorCode::E105, ErrorCode::E106, ErrorCode::E107,
             ErrorCode::E200, ErrorCode::E201, ErrorCode::E202, ErrorCode::E203,
-            ErrorCode::E204,
             ErrorCode::E300, ErrorCode::E301, ErrorCode::E302, ErrorCode::E303,
             ErrorCode::E304,
             ErrorCode::E400, ErrorCode::E401, ErrorCode::E402, ErrorCode::E403,
             ErrorCode::E404, ErrorCode::E405, ErrorCode::E406, ErrorCode::E407,
             ErrorCode::E408, ErrorCode::E409,
-            ErrorCode::W100, ErrorCode::W101, ErrorCode::W102, ErrorCode::W103,
-            ErrorCode::W104, ErrorCode::W105, ErrorCode::W106, ErrorCode::W107,
+            ErrorCode::W100, ErrorCode::W101, ErrorCode::W103,
+            ErrorCode::W106, ErrorCode::W107,
             ErrorCode::W108, ErrorCode::W109, ErrorCode::W110, ErrorCode::W111,
             ErrorCode::W112, ErrorCode::W113,
             ErrorCode::W200, ErrorCode::W201, ErrorCode::W202, ErrorCode::W203,
             ErrorCode::W204, ErrorCode::W205, ErrorCode::W206, ErrorCode::W207,
-            ErrorCode::W208, ErrorCode::W209, ErrorCode::W211, ErrorCode::W212,
+            ErrorCode::W208, ErrorCode::W209, ErrorCode::W212,
         ];
         for code in codes {
             let help = code.help();

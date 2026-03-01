@@ -8,8 +8,7 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
     match op {
         // Arithmetic — output depends on inputs (Null = polymorphic)
         Add | Subtract | Multiply | Modulo | Power | Sqrt | Negate | Abs | Min | Max | Round
-        | Floor | Ceil => ChannelType::Null,
-        Divide => ChannelType::Float64,
+        | Floor | Ceil | Divide => ChannelType::Null,
 
         // Comparison → bool
         Equal | NotEqual | Greater | Less | GreaterEq | LessEq => ChannelType::Bool,
@@ -150,7 +149,8 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         FsExists | FsIsFile | FsIsDir => ChannelType::Bool,
         FsList => ChannelType::Array,
         FsMkdir | FsRemove => ChannelType::Bool,
-        FsCopy | FsMove => ChannelType::Bool,
+        FsCopy => ChannelType::Int64,
+        FsMove => ChannelType::Bool,
         FsSize => ChannelType::Int64,
 
         // Environment
@@ -230,7 +230,8 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         UuidNil => ChannelType::String,
 
         // Crypto Extended
-        HashSha512 | HashCrc32 => ChannelType::String,
+        HashSha512 => ChannelType::String,
+        HashCrc32 => ChannelType::Int64,
         HmacSha256 => ChannelType::String,
         ConstantTimeEq => ChannelType::Bool,
 
@@ -248,7 +249,7 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         // Time Extended
         Duration | AddDuration | SubDuration | Elapsed => ChannelType::Int64,
         TimeSleep => ChannelType::Null,
-        TimeDiff => ChannelType::Map,
+        TimeDiff => ChannelType::Int64,
         StartOf | EndOf => ChannelType::Int64,
 
         // Stats
@@ -319,10 +320,12 @@ pub fn op_input_types(op: OperationType) -> Vec<(&'static str, ChannelType)> {
         StartsWith => vec![("input", String), ("prefix", String)],
         EndsWith => vec![("input", String), ("suffix", String)],
         IndexOf | StringCount => vec![("input", String), ("search", String)],
-        RegexReplace => vec![("input", String), ("replacement", String)],
+        RegexReplace => vec![("input", String), ("replacement", String), ("pattern", String)],
         Substring | Length | ToUpper | ToLower | Trim | TrimStart | TrimEnd | CharAt | PadStart
-        | PadEnd | RegexMatch | StringReverse | StringRepeat | StringLines | StringWords
-        | RegexExtract => vec![("input", String)],
+        | PadEnd | StringReverse | StringRepeat | StringLines | StringWords => {
+            vec![("input", String)]
+        }
+        RegexMatch | RegexExtract => vec![("input", String), ("pattern", String)],
         StringFormat => vec![("template", String), ("values", Map)],
         StringJoin => vec![("array", Array)],
         StringTemplate => vec![("template", String), ("values", Array)],
@@ -375,7 +378,7 @@ pub fn op_input_types(op: OperationType) -> Vec<(&'static str, ChannelType)> {
         MapKeys | MapValues | MapEntries | MapSize => vec![("map", Map)],
         MapMerge => vec![("a", Map), ("b", Map)],
         MapFromEntries => vec![("array", Array)],
-        MapUpdate => vec![("map", Map), ("key", String)],
+        MapUpdate => vec![("map", Map), ("key", String), ("value", Null)],
 
         // Bytes ops
         BytesLength | BytesSlice => vec![("input", Bytes)],
@@ -433,7 +436,8 @@ pub fn op_input_types(op: OperationType) -> Vec<(&'static str, ChannelType)> {
         Sin | Cos | Tan | Asin | Acos | Atan | Sinh | Cosh | Tanh | Ln | Log2 | Log10 | Exp
         | ToRadians | ToDegrees | Sign | IsNan | IsInfinite | IsFinite => vec![("value", Null)],
         Log => vec![("value", Null), ("base", Null)],
-        Atan2 | Gcd | Lcm | ApproxEq => vec![("a", Null), ("b", Null)],
+        Atan2 | Gcd | Lcm => vec![("a", Null), ("b", Null)],
+        ApproxEq => vec![("a", Null), ("b", Null), ("epsilon", Null)],
         Clamp => vec![("value", Null), ("min", Null), ("max", Null)],
         Lerp => vec![("a", Null), ("b", Null), ("t", Null)],
         Remap => vec![
@@ -561,7 +565,7 @@ pub fn op_input_types(op: OperationType) -> Vec<(&'static str, ChannelType)> {
         TimeSleep => vec![("duration", Null)],
         AddDuration | SubDuration => vec![("timestamp", Null), ("duration", Null)],
         TimeDiff => vec![("a", Null), ("b", Null)],
-        StartOf | EndOf => vec![("timestamp", Null)],
+        StartOf | EndOf => vec![("input", Null)],
 
         // Stats
         StatsMean | StatsMedian | StatsMode | StatsVariance | StatsStdDev | StatsSum => {
@@ -615,8 +619,8 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
 
         // Unary: input (string + type conversion)
         Substring | Length | ToUpper | ToLower | Trim | TrimStart | TrimEnd | CharAt | PadStart
-        | PadEnd | RegexMatch | StringReverse | StringRepeat | StringLines | StringWords
-        | RegexExtract | ToString | ToInt64 | ToFloat64 | ToBool | ToBytes | FromBytes
+        | PadEnd | StringReverse | StringRepeat | StringLines | StringWords
+        | ToString | ToInt64 | ToFloat64 | ToBool | ToBytes | FromBytes
         | ParseJson | ToJson => &["input"],
 
         // String ops with specific ports
@@ -626,7 +630,8 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         StartsWith => &["input", "prefix"],
         EndsWith => &["input", "suffix"],
         IndexOf | StringCount => &["input", "search"],
-        RegexReplace => &["input", "replacement"],
+        RegexMatch | RegexExtract => &["input", "pattern"],
+        RegexReplace => &["input", "replacement", "pattern"],
         StringJoin => &["array"],
         StringTemplate => &["template", "values"],
 
@@ -661,7 +666,7 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         MapKeys | MapValues | MapEntries | MapSize => &["map"],
         MapMerge => &["a", "b"],
         MapFromEntries => &["array"],
-        MapUpdate => &["map", "key"],
+        MapUpdate => &["map", "key", "value"],
 
         // Bytes
         BytesLength => &["input"],
@@ -731,7 +736,8 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         Sin | Cos | Tan | Asin | Acos | Atan | Sinh | Cosh | Tanh | Ln | Log2 | Log10 | Exp
         | ToRadians | ToDegrees | Sign | IsNan | IsInfinite | IsFinite => &["value"],
         Log => &["value", "base"],
-        Atan2 | Gcd | Lcm | ApproxEq => &["a", "b"],
+        Atan2 | Gcd | Lcm => &["a", "b"],
+        ApproxEq => &["a", "b", "epsilon"],
         Clamp => &["value", "min", "max"],
         Lerp => &["a", "b", "t"],
         Remap => &["value", "in_min", "in_max", "out_min", "out_max"],
@@ -836,7 +842,7 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         TimeSleep => &["duration"],
         AddDuration | SubDuration => &["timestamp", "duration"],
         TimeDiff => &["a", "b"],
-        StartOf | EndOf => &["timestamp"],
+        StartOf | EndOf => &["input"],
 
         // Stats
         StatsMean | StatsMedian | StatsMode | StatsVariance | StatsStdDev | StatsSum => {
@@ -876,4 +882,50 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         AsyncSpawn | AsyncAwait => &["input"],
         LoopGroup => &[],
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::OperationType;
+
+    #[test]
+    fn test_op_input_ports_and_types_same_length() {
+        for &op in OperationType::ALL {
+            let ports = op_input_ports(op);
+            let types = op_input_types(op);
+            assert_eq!(
+                ports.len(),
+                types.len(),
+                "op_input_ports and op_input_types disagree on port count for {:?}: ports={:?}, types={:?}",
+                op,
+                ports,
+                types.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_op_input_ports_and_types_same_names() {
+        for &op in OperationType::ALL {
+            let ports = op_input_ports(op);
+            let types = op_input_types(op);
+            for (i, ((name, _), &port)) in types.iter().zip(ports.iter()).enumerate() {
+                assert_eq!(
+                    *name, port,
+                    "op_input_ports and op_input_types disagree on port name #{} for {:?}: ports has {:?}, types has {:?}",
+                    i, op, port, name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_op_output_type_all_variants() {
+        // Ensures every variant produces a valid ChannelType (compiler guarantees exhaustive match)
+        for &op in OperationType::ALL {
+            let _ = op_output_type(op);
+        }
+    }
+
 }

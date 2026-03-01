@@ -154,14 +154,7 @@ impl DataType {
             DataType::Uint64(u) => *u != 0,
             DataType::Float32(f) => *f != 0.0 && !f.is_nan(),
             DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
-            DataType::String(s) => {
-                let t = s.trim();
-                !(t.is_empty()
-                    || t.eq_ignore_ascii_case("false")
-                    || t == "0"
-                    || t.eq_ignore_ascii_case("no")
-                    || t.eq_ignore_ascii_case("off"))
-            }
+            DataType::String(s) => !s.is_empty(),
             DataType::Null => false,
             DataType::Bytes(b) => !b.is_empty(),
             DataType::Array(a) => !a.is_empty(),
@@ -606,7 +599,7 @@ mod tests {
         assert!(DataType::Uint32(1).to_bool());
         assert!(!DataType::Uint32(0).to_bool());
         assert!(DataType::String("true".into()).to_bool());
-        assert!(!DataType::String("false".into()).to_bool());
+        assert!(DataType::String("false".into()).to_bool()); // non-empty string is truthy
         assert!(!DataType::Null.to_bool());
     }
 

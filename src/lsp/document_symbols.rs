@@ -169,19 +169,22 @@ fn find_variant_range(source: &str, def_line: u32, name: &str) -> Range {
         if line_idx >= lines.len() {
             break;
         }
-        if let Some(byte_offset) = lines[line_idx].find(name) {
-            // Verify word boundary (check for alphanumeric or underscore)
+        let line = lines[line_idx];
+        let mut search_start = 0;
+        while let Some(rel_offset) = line[search_start..].find(name) {
+            let byte_offset = search_start + rel_offset;
+            // Verify word boundary (Unicode-aware, consistent with analysis.rs)
             let before_ok = byte_offset == 0
-                || !lines[line_idx].as_bytes().get(byte_offset - 1)
-                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
+                || !line[..byte_offset].chars().next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
             let after_pos = byte_offset + name.len();
-            let after_ok = after_pos >= lines[line_idx].len()
-                || !lines[line_idx].as_bytes().get(after_pos)
-                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
+            let after_ok = after_pos >= line.len()
+                || !line[after_pos..].chars().next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
             if before_ok && after_ok {
-                let char_col = lines[line_idx][..byte_offset].chars().count() as u32;
-                let start_utf16 = char_col_to_utf16(lines[line_idx], char_col);
-                let end_utf16 = char_col_to_utf16(lines[line_idx], char_col + name.chars().count() as u32);
+                let char_col = line[..byte_offset].chars().count() as u32;
+                let start_utf16 = char_col_to_utf16(line, char_col);
+                let end_utf16 = char_col_to_utf16(line, char_col + name.chars().count() as u32);
                 return Range {
                     start: Position {
                         line: line_idx as u32,
@@ -193,6 +196,8 @@ fn find_variant_range(source: &str, def_line: u32, name: &str) -> Range {
                     },
                 };
             }
+            // Advance past this match and try again
+            search_start = after_pos;
         }
     }
 

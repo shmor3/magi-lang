@@ -1,6 +1,6 @@
 //! Completion provider for the MAGI LSP.
 
-use super::analysis::{find_dot_receiver_at_position, find_variable_struct_type, utf16_to_char_col, DocumentState};
+use super::analysis::{find_dot_receiver_at_position, find_variable_struct_type, is_ident_char, utf16_to_char_col, DocumentState};
 use tower_lsp::lsp_types::*;
 
 /// MAGI language keywords.
@@ -15,11 +15,13 @@ const KEYWORDS: &[&str] = &[
 const BUILTINS: &[&str] = &[
     "len", "range", "assert", "assert_eq", "assert_ne", "assert_throws",
     "print", "println", "debug_log", "typeof",
-    "to_string", "to_int64", "to_float64", "to_bool", "to_json",
+    "to_string", "to_int64", "to_float64", "to_float32", "to_bool", "to_json",
     "parse_int", "parse_float",
     "abs", "round", "floor", "ceil", "sqrt", "pow", "min", "max", "clamp",
-    "sin", "cos", "tan", "ln", "log2", "log10", "exp",
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+    "ln", "log2", "log10", "exp",
     "is_null", "is_string", "is_number", "is_array", "is_map", "is_bool", "is_bytes",
+    "is_finite",
 ];
 
 /// Find the word prefix (text before cursor only) at a given position.
@@ -35,7 +37,7 @@ fn find_prefix_at_position(source: &str, line: u32, character: u32) -> Option<St
 
     // Scan backwards only for start of identifier
     let mut start = col;
-    while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') {
+    while start > 0 && is_ident_char(chars[start - 1]) {
         start -= 1;
     }
 
@@ -58,7 +60,7 @@ fn find_double_colon_context(source: &str, line: u32, character: u32) -> Option<
 
     // Walk backwards: skip any partial identifier the user is typing
     let mut pos = col;
-    while pos > 0 && (chars[pos - 1].is_ascii_alphanumeric() || chars[pos - 1] == '_') {
+    while pos > 0 && is_ident_char(chars[pos - 1]) {
         pos -= 1;
     }
 
@@ -71,7 +73,7 @@ fn find_double_colon_context(source: &str, line: u32, character: u32) -> Option<
     // Scan backwards for the enum name
     let name_end = pos;
     let mut name_start = name_end;
-    while name_start > 0 && (chars[name_start - 1].is_ascii_alphanumeric() || chars[name_start - 1] == '_') {
+    while name_start > 0 && is_ident_char(chars[name_start - 1]) {
         name_start -= 1;
     }
 
@@ -85,6 +87,7 @@ fn find_double_colon_context(source: &str, line: u32, character: u32) -> Option<
 /// Common method names for array types.
 const ARRAY_METHODS: &[(&str, &str)] = &[
     ("len", "Returns the length of the array"),
+    ("length", "Returns the length of the array (alias)"),
     ("push", "Appends an element to the array"),
     ("pop", "Removes and returns the last element"),
     ("shift", "Removes and returns the first element"),
@@ -136,6 +139,7 @@ const ARRAY_METHODS: &[(&str, &str)] = &[
 /// Common method names for string types.
 const STRING_METHODS: &[(&str, &str)] = &[
     ("len", "Returns the length of the string"),
+    ("length", "Returns the length of the string (alias)"),
     ("is_empty", "Returns true if the string is empty"),
     ("is_numeric", "Returns true if the string is a valid number"),
     ("is_alphabetic", "Returns true if all characters are alphabetic"),
@@ -146,7 +150,9 @@ const STRING_METHODS: &[(&str, &str)] = &[
     ("trim_start", "Removes leading whitespace"),
     ("trim_end", "Removes trailing whitespace"),
     ("to_uppercase", "Converts to uppercase"),
+    ("to_upper", "Converts to uppercase (alias)"),
     ("to_lowercase", "Converts to lowercase"),
+    ("to_lower", "Converts to lowercase (alias)"),
     ("split", "Splits the string by delimiter"),
     ("replace", "Replaces all occurrences of a substring"),
     ("substring", "Returns a substring by index range"),
@@ -177,6 +183,8 @@ const MAP_METHODS: &[(&str, &str)] = &[
     ("delete", "Removes a key-value pair"),
     ("has", "Checks if a key exists"),
     ("len", "Returns the number of entries"),
+    ("length", "Returns the number of entries (alias)"),
+    ("size", "Returns the number of entries (alias)"),
     ("keys", "Returns array of keys"),
     ("values", "Returns array of values"),
     ("entries", "Returns array of [key, value] pairs"),
@@ -192,6 +200,7 @@ const MAP_METHODS: &[(&str, &str)] = &[
 /// Common method names for bytes types.
 const BYTES_METHODS: &[(&str, &str)] = &[
     ("len", "Returns the byte length"),
+    ("length", "Returns the byte length (alias)"),
     ("slice", "Returns a sub-slice of bytes"),
     ("concat", "Concatenates two byte sequences"),
     ("contains", "Checks if bytes contain a subsequence"),
@@ -211,8 +220,12 @@ const INT_METHODS: &[(&str, &str)] = &[
     ("max", "Returns the larger of two values"),
     ("clamp", "Clamps between a minimum and maximum"),
     ("to_string", "Converts to string representation"),
+    ("to_int32", "Converts to 32-bit integer"),
     ("to_int64", "Converts to 64-bit integer"),
+    ("to_uint32", "Converts to 32-bit unsigned integer"),
+    ("to_uint64", "Converts to 64-bit unsigned integer"),
     ("to_float64", "Converts to 64-bit float"),
+    ("to_bool", "Converts to boolean"),
     ("to_json", "Converts to JSON string"),
     ("typeof", "Returns the type name"),
 ];
@@ -231,15 +244,24 @@ const FLOAT_METHODS: &[(&str, &str)] = &[
     ("clamp", "Clamps between a minimum and maximum"),
     ("is_nan", "Returns true if the value is NaN"),
     ("is_infinite", "Returns true if the value is infinite"),
+    ("is_finite", "Returns true if the value is finite (not NaN or Inf)"),
     ("ln", "Returns the natural logarithm"),
     ("log2", "Returns the base-2 logarithm"),
     ("log10", "Returns the base-10 logarithm"),
+    ("exp", "Computes e^x (exponential function)"),
     ("sin", "Returns the sine"),
     ("cos", "Returns the cosine"),
     ("tan", "Returns the tangent"),
+    ("asin", "Returns the arcsine"),
+    ("acos", "Returns the arccosine"),
+    ("atan", "Returns the arctangent"),
+    ("sinh", "Returns the hyperbolic sine"),
+    ("cosh", "Returns the hyperbolic cosine"),
+    ("tanh", "Returns the hyperbolic tangent"),
     ("to_string", "Converts to string representation"),
     ("to_int64", "Converts to 64-bit integer"),
     ("to_float64", "Converts to 64-bit float"),
+    ("to_float32", "Converts to 32-bit float"),
     ("to_json", "Converts to JSON string"),
     ("typeof", "Returns the type name"),
 ];
@@ -401,8 +423,8 @@ pub fn handle_completion(
         } else if var.type_annotation.as_deref() == Some("module") {
             format!("mod {}", name)
         } else if let Some(ref ta) = var.type_annotation {
-            if ta.starts_with("import(") && ta.ends_with(')') && ta.len() > 8 {
-                format!("use {}", &ta[7..ta.len() - 1])
+            if let Some(inner) = ta.strip_prefix("import(").and_then(|s| s.strip_suffix(')')) {
+                format!("use {}", inner)
             } else if var.constant {
                 format!("const {}: {}", name, ta)
             } else if var.mutable {

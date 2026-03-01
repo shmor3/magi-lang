@@ -96,12 +96,12 @@ pub enum ValType {
 
 /// Stack-based instructions for the MAGI IR.
 ///
-/// The IR uses a tagged value representation where each value is a 64-bit integer:
-/// - Bits 56-63: type tag (0=null, 1=bool, 2=i64, 3=f64, 4=string_ref, 5=array_ref, 6=map_ref)
-/// - Bits 0-55: payload (value or heap pointer)
+/// The IR uses a NaN-boxing tagged value representation where each value is a 64-bit integer:
+/// - Float64 values are stored as raw IEEE 754 bits (unmodified)
+/// - Non-float values are stored in the quiet NaN space: `0xFFF8 | (tag << 48) | payload`
+///   where tag is 3 bits (0-7) and payload is 48 bits
 ///
-/// For numeric-heavy code, the compiler can use unboxed I64/F64 locals and
-/// only box when needed (e.g., storing in arrays).
+/// See `tag` module for full encoding details.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     // ── Constants ──────────────────────────────────────────────
@@ -272,15 +272,59 @@ pub enum Instruction {
     RuntimeCall { name: u32, arg_count: u32 },
 }
 
-/// Type tags for the tagged value representation.
+/// Type tags for the NaN-boxing tagged value representation.
+///
+/// ## NaN-Boxing Scheme
+///
+/// All values are represented as a single i64 (reinterpreted as f64 bits):
+///
+/// - **Float64**: Stored as raw IEEE 754 f64 bits, completely unmodified.
+///   Any i64 that is NOT a quiet NaN with our tag signature is a float.
+///   Real NaN values are canonicalized to `CANON_NAN`.
+///
+/// - **Non-float values**: Encoded using the quiet NaN space:
+///   `0xFFF8_TTTT_PPPP_PPPP` where:
+///   - Bits 63-51: `0xFFF8 >> 1` = quiet NaN prefix (all exponent + quiet bit)
+///   - Bits 50-48: Type tag (3 bits, values 0-7)
+///   - Bits 47-0: Payload (48 bits — pointers, small integers, booleans)
+///
+/// Detection: `(val & NANBOX_MASK) == NANBOX_SIG` → tagged non-float.
+///
+/// ## Tag Values
+///
+/// Tags are stored in bits 50-48 of the NaN payload.
 pub mod tag {
+    /// Canonical NaN used for real NaN values (quiet NaN with zero payload).
+    pub const CANON_NAN: i64 = 0x7FF8_0000_0000_0000_u64 as i64;
+
+    /// Mask to detect NaN-boxed values: check bits 63-51 (sign=1, exp=all-1, quiet=1).
+    pub const NANBOX_MASK: i64 = 0xFFF8_0000_0000_0000_u64 as i64;
+    /// Signature for NaN-boxed values (negative quiet NaN space).
+    pub const NANBOX_SIG: i64 = 0xFFF8_0000_0000_0000_u64 as i64;
+
+    /// Mask to extract 48-bit payload.
+    pub const PAYLOAD_MASK: i64 = 0x0000_FFFF_FFFF_FFFF_u64 as i64;
+    /// Mask to extract 3-bit tag from bits 50-48.
+    pub const TAG_MASK: i64 = 0x0007_0000_0000_0000_u64 as i64;
+    /// Bit shift for tag extraction (bits 48-50).
+    pub const TAG_SHIFT: i64 = 48;
+
+    // Tag values (3 bits: 0-7) for NaN-boxed types
     pub const NULL: u8 = 0;
     pub const BOOL: u8 = 1;
     pub const I64: u8 = 2;
-    pub const F64: u8 = 3;
-    pub const STRING: u8 = 4;
-    pub const ARRAY: u8 = 5;
-    pub const MAP: u8 = 6;
-    pub const I32: u8 = 7;
-    pub const F32: u8 = 8;
+    pub const STRING: u8 = 3;
+    pub const ARRAY: u8 = 4;
+    pub const MAP: u8 = 5;
+    pub const I32: u8 = 6;
+    pub const F32: u8 = 7;
+    /// Sentinel tag for Float64. F64 values are NOT NaN-boxed (stored as raw bits),
+    /// but GetTag returns this sentinel (8) when it detects a non-NaN-boxed value.
+    /// This value is outside the 3-bit range (0-7) so it never collides with real tags.
+    pub const F64: u8 = 8;
+
+    /// Build a tagged value from tag and payload: `NANBOX_SIG | (tag << 48) | payload`.
+    pub const fn encode(tag: u8, payload: i64) -> i64 {
+        NANBOX_SIG | ((tag as i64) << TAG_SHIFT) | (payload & PAYLOAD_MASK)
+    }
 }
