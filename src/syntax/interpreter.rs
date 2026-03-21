@@ -5365,7 +5365,41 @@ impl<'a> Interpreter<'a> {
                         FutureState::Pending(ref task_id) => {
                             // Join the spawned thread and retrieve its result
                             match task_join(task_id) {
-                                Ok(Ok(val)) => Ok(val),
+                                Ok(Ok(val)) => {
+                                    // Recursively unwrap if the thread returned a Future
+                                    match val {
+                                        DataType::Future(inner_state) => match *inner_state {
+                                            FutureState::Resolved(resolved) => Ok(*resolved),
+                                            FutureState::Rejected(err) => Err(InterpError::EvalError {
+                                                error: EvalError::TypeError {
+                                                    expected: "resolved future".to_string(),
+                                                    actual: format!("rejected: {}", err),
+                                                    context: "await".to_string(),
+                                                },
+                                                span: expr.span,
+                                            }),
+                                            FutureState::Pending(ref inner_tid) => {
+                                                // Nested pending: join the inner task too
+                                                match task_join(inner_tid) {
+                                                    Ok(Ok(v)) => Ok(v),
+                                                    Ok(Err(e)) => Err(InterpError::EvalError {
+                                                        error: EvalError::InvalidInput(
+                                                            format!("spawned task failed: {}", e),
+                                                        ),
+                                                        span: expr.span,
+                                                    }),
+                                                    Err(e) => Err(InterpError::EvalError {
+                                                        error: EvalError::InvalidInput(
+                                                            format!("spawned task panicked: {}", e),
+                                                        ),
+                                                        span: expr.span,
+                                                    }),
+                                                }
+                                            }
+                                        },
+                                        other => Ok(other),
+                                    }
+                                }
                                 Ok(Err(err_msg)) => Err(InterpError::EvalError {
                                     error: EvalError::InvalidInput(
                                         format!("spawned task failed: {}", err_msg),
