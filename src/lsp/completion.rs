@@ -1,7 +1,7 @@
 //! Completion provider for the MAGI LSP.
 
 use super::analysis::{find_dot_receiver_at_position, find_variable_struct_type, is_ident_char, utf16_to_char_col, DocumentState};
-use strsim::levenshtein;
+use crate::util::levenshtein;
 use tower_lsp::lsp_types::*;
 
 /// MAGI language keywords.

@@ -8,7 +8,7 @@
 
 use super::analysis::DocumentState;
 use crate::syntax::interpreter::{std_module_ops, STD_MODULE_NAMES};
-use heck::ToSnakeCase;
+use crate::util::to_snake_case;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
 
@@ -168,7 +168,7 @@ fn snake_case_fix_action(
     uri: &Url,
 ) -> Option<CodeAction> {
     let ident = extract_naming_identifier(&diag.message)?;
-    let snake = ident.to_snake_case();
+    let snake = to_snake_case(ident);
 
     if snake == ident || snake.is_empty() {
         return None;

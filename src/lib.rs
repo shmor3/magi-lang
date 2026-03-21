@@ -54,5 +54,7 @@ pub mod syntax;
 pub mod telemetry;
 /// Data types, channel types, and operation type enums.
 pub mod types;
+/// Own implementations replacing external crates.
+pub mod util;
 /// Semantic versioning and feature tracking.
 pub mod version;

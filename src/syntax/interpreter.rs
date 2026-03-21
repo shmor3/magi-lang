@@ -6459,12 +6459,12 @@ impl<'a> Interpreter<'a> {
                                 span: expr.span,
                             }),
                         };
-                        let paths: Vec<DataType> = glob::glob(&pattern_str)
+                        let paths: Vec<DataType> = crate::util::glob_match(&pattern_str)
                             .map_err(|e| InterpError::EvalError {
                                 error: EvalError::InvalidInput(format!("glob: {}", e)),
                                 span: expr.span,
                             })?
-                            .filter_map(|entry| entry.ok())
+                            .into_iter()
                             .map(|p| DataType::String(p.to_string_lossy().to_string()))
                             .collect();
                         return Ok(DataType::Array(paths));

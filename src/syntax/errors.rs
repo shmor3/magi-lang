@@ -322,7 +322,7 @@ pub fn suggest_name(name: &str, available: &[&str]) -> Option<String> {
             continue;
         }
 
-        let dist = strsim::levenshtein(name, candidate);
+        let dist = crate::util::levenshtein(name, candidate);
         if dist > 0 && dist <= max_distance {
             match best {
                 None => best = Some((candidate, dist)),
@@ -383,26 +383,26 @@ mod tests {
 
     #[test]
     fn test_levenshtein_identical() {
-        assert_eq!(strsim::levenshtein("hello", "hello"), 0);
+        assert_eq!(crate::util::levenshtein("hello", "hello"), 0);
     }
 
     #[test]
     fn test_levenshtein_empty() {
-        assert_eq!(strsim::levenshtein("", "abc"), 3);
-        assert_eq!(strsim::levenshtein("abc", ""), 3);
-        assert_eq!(strsim::levenshtein("", ""), 0);
+        assert_eq!(crate::util::levenshtein("", "abc"), 3);
+        assert_eq!(crate::util::levenshtein("abc", ""), 3);
+        assert_eq!(crate::util::levenshtein("", ""), 0);
     }
 
     #[test]
     fn test_levenshtein_one_edit() {
-        assert_eq!(strsim::levenshtein("cat", "hat"), 1); // substitution
-        assert_eq!(strsim::levenshtein("cat", "cats"), 1); // insertion
-        assert_eq!(strsim::levenshtein("cats", "cat"), 1); // deletion
+        assert_eq!(crate::util::levenshtein("cat", "hat"), 1); // substitution
+        assert_eq!(crate::util::levenshtein("cat", "cats"), 1); // insertion
+        assert_eq!(crate::util::levenshtein("cats", "cat"), 1); // deletion
     }
 
     #[test]
     fn test_levenshtein_multiple_edits() {
-        assert_eq!(strsim::levenshtein("kitten", "sitting"), 3);
+        assert_eq!(crate::util::levenshtein("kitten", "sitting"), 3);
     }
 
     #[test]

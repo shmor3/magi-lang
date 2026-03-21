@@ -2861,7 +2861,7 @@ impl OperationEvaluator for FullEvaluator {
                                 "hex_encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
                             )));
                         }
-                        Ok(DataType::String(hex::encode(b)))
+                        Ok(DataType::String(magi_lang::util::hex_encode(b)))
                     }
                     DataType::String(s) => {
                         if s.len() * 2 > MAX_STRING_OUTPUT {
@@ -2869,7 +2869,7 @@ impl OperationEvaluator for FullEvaluator {
                                 "hex_encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
                             )));
                         }
-                        Ok(DataType::String(hex::encode(s.as_bytes())))
+                        Ok(DataType::String(magi_lang::util::hex_encode(s.as_bytes())))
                     }
                     _ => Err(EvalError::TypeError {
                         expected: "String or Bytes".to_string(),
@@ -2883,7 +2883,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let s = s.trim();
                         let s = s.strip_prefix("0x").or(s.strip_prefix("0X")).unwrap_or(s);
-                        match hex::decode(s) {
+                        match magi_lang::util::hex_decode(s) {
                             Ok(bytes) => Ok(DataType::Bytes(bytes)),
                             Err(e) => Err(EvalError::InvalidInput(format!("hex_decode: {}", e))),
                         }
@@ -2898,8 +2898,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlEncode => {
                 match &input {
                     DataType::String(s) => {
-                        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-                        let result = utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+                        let result = magi_lang::util::percent_encode(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("UrlEncode output exceeds {} bytes", MAX_STRING_OUTPUT)));
                         }
@@ -2911,10 +2910,8 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlDecode => {
                 match &input {
                     DataType::String(s) => {
-                        use percent_encoding::percent_decode_str;
-                        let s = s.replace('+', " ");
-                        match percent_decode_str(&s).decode_utf8() {
-                            Ok(decoded) => Ok(DataType::String(decoded.into_owned())),
+                        match magi_lang::util::percent_decode(s) {
+                            Ok(decoded) => Ok(DataType::String(decoded)),
                             Err(_) => Err(EvalError::InvalidInput("url_decode: invalid UTF-8".to_string())),
                         }
                     }
@@ -2932,7 +2929,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 let data = data_to_bytes(&input);
                 let hash = Sha256::digest(&data);
-                Ok(DataType::String(hex::encode(hash)))
+                Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
 
             // ================================================================
@@ -2946,7 +2943,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 let data = data_to_bytes(&input);
                 let hash = Md5::digest(&data);
-                Ok(DataType::String(hex::encode(hash)))
+                Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
 
             // ================================================================
@@ -3887,7 +3884,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSlug => {
                 match &input {
                     DataType::String(s) => {
-                        let result = slug::slugify(s);
+                        let result = magi_lang::util::slugify(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "text_slug: output would exceed {} byte limit", MAX_STRING_OUTPUT
@@ -3901,8 +3898,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextCamelCase => {
                 match &input {
                     DataType::String(s) => {
-                        use heck::ToLowerCamelCase;
-                        let result = s.to_lower_camel_case();
+                        let result = magi_lang::util::to_lower_camel_case(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "camel_case output exceeds {} byte limit", MAX_STRING_OUTPUT
@@ -3916,8 +3912,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextSnakeCase => {
                 match &input {
                     DataType::String(s) => {
-                        use heck::ToSnakeCase;
-                        let result = s.to_snake_case();
+                        let result = magi_lang::util::to_snake_case(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "snake_case output exceeds {} byte limit", MAX_STRING_OUTPUT)));
@@ -3930,8 +3925,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextTitleCase => {
                 match &input {
                     DataType::String(s) => {
-                        use heck::ToTitleCase;
-                        let result = s.to_title_case();
+                        let result = magi_lang::util::to_title_case(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "title_case output exceeds {} byte limit", MAX_STRING_OUTPUT)));
@@ -3981,7 +3975,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlEscape => {
                 match &input {
                     DataType::String(s) => {
-                        let result = html_escape::encode_text(s).into_owned();
+                        let result = magi_lang::util::html_encode(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("HtmlEscape output exceeds {} bytes", MAX_STRING_OUTPUT)));
                         }
@@ -3993,7 +3987,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HtmlUnescape => {
                 match &input {
                     DataType::String(s) => {
-                        let result = html_escape::decode_html_entities(s).into_owned();
+                        let result = magi_lang::util::html_decode(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("HtmlUnescape output exceeds {} byte limit", MAX_STRING_OUTPUT)));
                         }
@@ -4494,8 +4488,8 @@ impl OperationEvaluator for FullEvaluator {
                                 }
                             }
                             OperationType::StatsMode => {
-                                use ordered_float::OrderedFloat;
-                                let mut counts: std::collections::HashMap<OrderedFloat<f64>, usize> = std::collections::HashMap::new();
+                                use magi_lang::util::OrderedFloat;
+                                let mut counts: std::collections::HashMap<OrderedFloat, usize> = std::collections::HashMap::new();
                                 for n in &nums {
                                     *counts.entry(OrderedFloat(*n)).or_insert(0) += 1;
                                 }
@@ -5060,14 +5054,14 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 let data = data_to_bytes(&input);
                 let hash = Sha512::digest(&data);
-                Ok(DataType::String(hex::encode(hash)))
+                Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
             OperationType::HashCrc32 => {
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashCrc32".to_string() });
                 }
                 let data = data_to_bytes(&input);
-                let crc = crc32fast::hash(&data);
+                let crc = magi_lang::util::crc32(&data);
                 Ok(DataType::Int64(crc as i64))
             }
             OperationType::HmacSha256 => {
@@ -5089,7 +5083,7 @@ impl OperationEvaluator for FullEvaluator {
                     .map_err(|e| EvalError::InvalidInput(format!("hmac_sha256: {}", e)))?;
                 mac.update(&data);
                 let result = mac.finalize();
-                Ok(DataType::String(hex::encode(result.into_bytes())))
+                Ok(DataType::String(magi_lang::util::hex_encode(&result.into_bytes())))
             }
             OperationType::ConstantTimeEq => {
                 use subtle::ConstantTimeEq;
@@ -5122,12 +5116,12 @@ impl OperationEvaluator for FullEvaluator {
                         "Base32Encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
                     )));
                 }
-                Ok(DataType::String(data_encoding::BASE32.encode(&data)))
+                Ok(DataType::String(magi_lang::util::base32_encode(&data)))
             }
             OperationType::Base32Decode => {
                 match &input {
                     DataType::String(s) => {
-                        match data_encoding::BASE32.decode(s.as_bytes()) {
+                        match magi_lang::util::base32_decode(s) {
                             Ok(decoded) => Ok(DataType::Bytes(decoded)),
                             Err(e) => Err(EvalError::InvalidInput(format!("Base32Decode: invalid base32 input: {}", e))),
                         }
@@ -7738,7 +7732,7 @@ fn main_inner() {
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Sha256, Digest};
     let hash = Sha256::digest(data);
-    hex::encode(hash)
+    magi_lang::util::hex_encode(&hash)
 }
 
 /// Lock file entry for a resolved package.

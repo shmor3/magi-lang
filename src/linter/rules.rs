@@ -8,8 +8,7 @@ use crate::eval::DiagnosticSeverity;
 /// Convert a name to snake_case, handling acronyms correctly.
 /// e.g. "HTTPServer" → "http_server", "myFunc" → "my_func"
 fn to_snake_case(name: &str) -> String {
-    use heck::ToSnakeCase;
-    name.to_snake_case()
+    crate::util::to_snake_case(name)
 }
 
 /// Check that a name uses snake_case (for functions and variables).
