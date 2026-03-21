@@ -3777,6 +3777,10 @@ impl<'a> Interpreter<'a> {
             ExpressionKind::Literal(lit) => self.eval_literal(lit),
 
             ExpressionKind::Variable(name) => {
+                // Built-in constant: None
+                if name == "None" {
+                    return Ok(DataType::Null);
+                }
                 let addr = match self.lookup(name) {
                     Some(entry) => entry.addr,
                     None => {

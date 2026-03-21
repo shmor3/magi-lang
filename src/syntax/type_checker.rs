@@ -1566,6 +1566,10 @@ impl TypeChecker {
             // Variable reference
             // -----------------------------------------------------------------
             ExpressionKind::Variable(name) => {
+                // Built-in constant: None (#78)
+                if name == "None" {
+                    return ChannelType::Null;
+                }
                 // Use const-propagated type if available (more precise than scope lookup).
                 let const_type = self.const_values.get(name.as_str()).copied();
                 // Copy out what we need before the mutable borrow.
@@ -1886,6 +1890,13 @@ impl TypeChecker {
                         // Args already inferred at arg_types collection above
                         return ChannelType::Null;
                     }
+                    // Option/Result constructors and helpers (#78)
+                    "Some" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
+                    "None" => return ChannelType::Null,
+                    "Ok" | "Err" => return ChannelType::Map,
+                    "is_some" | "is_none" | "is_ok" | "is_err" => return ChannelType::Bool,
+                    "unwrap" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
+                    "unwrap_or" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
                     _ => {}
                 }
 
@@ -2683,7 +2694,14 @@ impl TypeChecker {
                 // Check for duplicate field names and infer field types
                 let mut seen = HashSet::new();
                 let mut field_types: HashMap<&str, ChannelType> = HashMap::new();
+                let mut has_spread = false;
                 for (field_name, field_expr) in fields {
+                    // Skip spread entries (__spread is the struct update syntax marker)
+                    if field_name == "__spread" {
+                        has_spread = true;
+                        self.infer_expr(field_expr);
+                        continue;
+                    }
                     if !seen.insert(field_name.as_str()) {
                         let code = super::errors::ErrorCode::E107;
                         self.diagnostics.push(AstDiagnostic {
@@ -2702,11 +2720,13 @@ impl TypeChecker {
                 }
                 // Validate fields against struct definition
                 if let Some(def_fields) = self.struct_defs.get(name.as_str()).cloned() {
-                    let provided: HashSet<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+                    let provided: HashSet<&str> = fields.iter()
+                        .filter(|(f, _)| f != "__spread")
+                        .map(|(f, _)| f.as_str()).collect();
                     let defined: HashSet<&str> = def_fields.iter().map(|(f, _)| f.as_str()).collect();
                     let def_names: Vec<&str> = def_fields.iter().map(|(f, _)| f.as_str()).collect();
-                    // Field count mismatch warning
-                    if provided.len() != def_fields.len() {
+                    // Field count mismatch warning (skip if spread is present or defaults exist)
+                    if !has_spread && provided.len() != def_fields.len() {
                         self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
@@ -2721,6 +2741,7 @@ impl TypeChecker {
                     }
                     // Check for unknown fields
                     for (field_name, _) in fields {
+                        if field_name == "__spread" { continue; }
                         if !defined.contains(field_name.as_str()) {
                             let suggestion = super::errors::suggest_name(field_name, &def_names);
                             self.emit_coded(
@@ -2736,20 +2757,22 @@ impl TypeChecker {
                             );
                         }
                     }
-                    // Check for missing fields
-                    for (def_field, _) in &def_fields {
-                        if !provided.contains(def_field.as_str()) {
-                            self.emit_coded(
-                                expr.span.start_line,
-                                expr.span.start_col,
-                                format!(
-                                    "missing field '{}' in struct '{}' constructor",
-                                    def_field, name,
-                                ),
-                                DiagnosticSeverity::Warning,
-                                super::errors::ErrorCode::E100,
-                                None,
-                            );
+                    // Check for missing fields (skip if spread is present since spread may fill them)
+                    if !has_spread {
+                        for (def_field, _) in &def_fields {
+                            if !provided.contains(def_field.as_str()) {
+                                self.emit_coded(
+                                    expr.span.start_line,
+                                    expr.span.start_col,
+                                    format!(
+                                        "missing field '{}' in struct '{}' constructor",
+                                        def_field, name,
+                                    ),
+                                    DiagnosticSeverity::Warning,
+                                    super::errors::ErrorCode::E100,
+                                    None,
+                                );
+                            }
                         }
                     }
                     // Validate field types against annotations

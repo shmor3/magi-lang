@@ -289,7 +289,6 @@ fn compat_map_literal() {
 
 #[test]
 fn compat_map_insert_and_access() {
-    // Use a non-empty initial map to avoid type issues with empty map assignment
     let out = run_program(
         "let mut m = {\"x\": 1}\nm[\"key\"] = \"value\"\noutput m[\"key\"]",
     );
