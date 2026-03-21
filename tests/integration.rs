@@ -20268,3 +20268,144 @@ fn test_function_with_typed_params() {
         output multiply(6, 7);
     "#), DataType::Int64(42));
 }
+
+// ── Real concurrency: spawn + channels ──────────────────────────────
+
+#[test]
+fn test_spawn_runs_concurrently() {
+    // spawn creates a real thread; await joins it
+    assert_eq!(run(r#"
+        fn compute(x) { x * 10 }
+        let t = spawn compute(5);
+        await t
+    "#), DataType::Int64(50));
+}
+
+#[test]
+fn test_channel_send_recv() {
+    // channel() returns [sender, receiver]
+    // chan_send sends a value, chan_recv receives it
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        chan_send(tx, 42);
+        chan_recv(rx)
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_channel_multiple_values() {
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        chan_send(tx, 1);
+        chan_send(tx, 2);
+        chan_send(tx, 3);
+        let a = chan_recv(rx);
+        let b = chan_recv(rx);
+        let c = chan_recv(rx);
+        [a, b, c]
+    "#), DataType::Array(vec![
+        DataType::Int64(1),
+        DataType::Int64(2),
+        DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_chan_try_recv_empty() {
+    assert_eq!(run(r#"
+        let ch = channel();
+        let rx = ch[1];
+        chan_try_recv(rx)
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_chan_try_recv_with_value() {
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        chan_send(tx, "hello");
+        chan_try_recv(rx)
+    "#), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_chan_close() {
+    // After closing sender, recv returns error (caught by try)
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        chan_send(tx, 99);
+        chan_close(tx);
+        chan_recv(rx)
+    "#), DataType::Int64(99));
+}
+
+#[test]
+fn test_spawn_with_channel_communication() {
+    // Producer-consumer pattern using spawn + channels
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        fn producer(sender) {
+            chan_send(sender, 10);
+            chan_send(sender, 20);
+            chan_send(sender, 30);
+        }
+        let t = spawn producer(tx);
+        let a = chan_recv(rx);
+        let b = chan_recv(rx);
+        let c = chan_recv(rx);
+        await t;
+        a + b + c
+    "#), DataType::Int64(60));
+}
+
+#[test]
+fn test_spawn_captures_outer_variables() {
+    // Spawned tasks capture outer scope variables by value
+    assert_eq!(run(r#"
+        let x = 100;
+        let t = spawn { x + 1 };
+        await t
+    "#), DataType::Int64(101));
+}
+
+#[test]
+fn test_multiple_spawns_concurrent() {
+    // Multiple spawns run independently
+    assert_eq!(run(r#"
+        fn double(x) { x * 2 }
+        fn triple(x) { x * 3 }
+        let t1 = spawn double(5);
+        let t2 = spawn triple(5);
+        let r1 = await t1;
+        let r2 = await t2;
+        [r1, r2]
+    "#), DataType::Array(vec![DataType::Int64(10), DataType::Int64(15)]));
+}
+
+#[test]
+fn test_bounded_channel() {
+    // channel(capacity) creates a bounded channel
+    assert_eq!(run(r#"
+        let ch = channel(2);
+        let tx = ch[0];
+        let rx = ch[1];
+        chan_send(tx, "a");
+        chan_send(tx, "b");
+        let v1 = chan_recv(rx);
+        let v2 = chan_recv(rx);
+        [v1, v2]
+    "#), DataType::Array(vec![
+        DataType::String("a".to_string()),
+        DataType::String("b".to_string()),
+    ]));
+}

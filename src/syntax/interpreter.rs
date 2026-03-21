@@ -86,8 +86,9 @@ struct ChannelSyncSender {
 }
 
 /// A receiver endpoint stored in the channel registry.
+/// Uses Arc so we can clone the handle, drop the registry lock, then recv.
 struct ChannelReceiver {
-    rx: Mutex<std::sync::mpsc::Receiver<DataType>>,
+    rx: Arc<Mutex<std::sync::mpsc::Receiver<DataType>>>,
 }
 
 /// Global channel registry: sender and receiver handles keyed by channel ID.
@@ -4891,7 +4892,7 @@ impl<'a> Interpreter<'a> {
                             channel_store(
                                 &rx_id,
                                 ChannelReceiver {
-                                    rx: Mutex::new(rx),
+                                    rx: Arc::new(Mutex::new(rx)),
                                 },
                             )
                             .map_err(|e| InterpError::EvalError {
@@ -4914,7 +4915,7 @@ impl<'a> Interpreter<'a> {
                         channel_store(
                             &rx_id,
                             ChannelReceiver {
-                                rx: Mutex::new(rx),
+                                rx: Arc::new(Mutex::new(rx)),
                             },
                         )
                         .map_err(|e| InterpError::EvalError {
@@ -5016,38 +5017,35 @@ impl<'a> Interpreter<'a> {
                             }
                         };
 
-                        let map = CHANNEL_REGISTRY
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        let entry = map.get(&rx_id_str).ok_or_else(|| {
-                            InterpError::EvalError {
-                                error: EvalError::InvalidInput(format!(
-                                    "receiver not found: {}",
-                                    rx_id_str
-                                )),
-                                span: expr.span,
-                            }
-                        })?;
-                        let receiver =
-                            entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                        // Clone the Arc<Mutex<Receiver>> so we can drop the
+                        // registry lock before blocking on recv.
+                        let rx_arc = {
+                            let map = CHANNEL_REGISTRY
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let entry = map.get(&rx_id_str).ok_or_else(|| {
                                 InterpError::EvalError {
                                     error: EvalError::InvalidInput(format!(
-                                        "not a receiver: {}",
+                                        "receiver not found: {}",
                                         rx_id_str
                                     )),
                                     span: expr.span,
                                 }
                             })?;
-                        let rx_guard =
-                            receiver.rx.lock().unwrap_or_else(|e| e.into_inner());
-                        // Release the registry lock before blocking on recv
-                        // We need to restructure: get a reference to rx,
-                        // drop the registry lock, then recv.
-                        // Since ChannelReceiver holds Mutex<Receiver>, and we
-                        // hold a &ChannelReceiver from the registry, we need
-                        // the registry lock held while we access rx. However,
-                        // the recv itself may block, so we use try_recv in a
-                        // loop or just accept the hold (mpsc recv is typically fast).
+                            let receiver =
+                                entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                                    InterpError::EvalError {
+                                        error: EvalError::InvalidInput(format!(
+                                            "not a receiver: {}",
+                                            rx_id_str
+                                        )),
+                                        span: expr.span,
+                                    }
+                                })?;
+                            Arc::clone(&receiver.rx)
+                        };
+                        // Registry lock is now released; safe to block.
+                        let rx_guard = rx_arc.lock().unwrap_or_else(|e| e.into_inner());
                         let result = rx_guard.recv().map_err(|_| InterpError::EvalError {
                             error: EvalError::InvalidInput(
                                 "channel closed (all senders dropped)".to_string(),
@@ -5079,30 +5077,32 @@ impl<'a> Interpreter<'a> {
                             }
                         };
 
-                        let map = CHANNEL_REGISTRY
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        let entry = map.get(&rx_id_str).ok_or_else(|| {
-                            InterpError::EvalError {
-                                error: EvalError::InvalidInput(format!(
-                                    "receiver not found: {}",
-                                    rx_id_str
-                                )),
-                                span: expr.span,
-                            }
-                        })?;
-                        let receiver =
-                            entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                        let rx_arc = {
+                            let map = CHANNEL_REGISTRY
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let entry = map.get(&rx_id_str).ok_or_else(|| {
                                 InterpError::EvalError {
                                     error: EvalError::InvalidInput(format!(
-                                        "not a receiver: {}",
+                                        "receiver not found: {}",
                                         rx_id_str
                                     )),
                                     span: expr.span,
                                 }
                             })?;
-                        let rx_guard =
-                            receiver.rx.lock().unwrap_or_else(|e| e.into_inner());
+                            let receiver =
+                                entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                                    InterpError::EvalError {
+                                        error: EvalError::InvalidInput(format!(
+                                            "not a receiver: {}",
+                                            rx_id_str
+                                        )),
+                                        span: expr.span,
+                                    }
+                                })?;
+                            Arc::clone(&receiver.rx)
+                        };
+                        let rx_guard = rx_arc.lock().unwrap_or_else(|e| e.into_inner());
                         return match rx_guard.try_recv() {
                             Ok(val) => Ok(val),
                             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(DataType::Null),
@@ -8618,5 +8618,103 @@ mod tests {
         );
         assert!(msg.contains("got 0"), "should show actual: {}", msg);
         assert!(msg.contains("map"), "should show method name: {}", msg);
+    }
+
+    // =========================================================================
+    // Concurrency: task registry + channel registry
+    // =========================================================================
+
+    #[test]
+    fn test_task_store_and_join() {
+        let tid = task_id();
+        let handle = std::thread::spawn(|| Ok(DataType::Int64(42)));
+        task_store(&tid, handle).unwrap();
+        let result = task_join(&tid).unwrap().unwrap();
+        assert_eq!(result, DataType::Int64(42));
+    }
+
+    #[test]
+    fn test_task_join_not_found() {
+        let result = task_join("nonexistent:0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_channel_store_send_recv() {
+        let (tx_id, rx_id) = channel_ids();
+        let (tx, rx) = std::sync::mpsc::channel();
+        channel_store(&tx_id, ChannelSender { tx }).unwrap();
+        channel_store(
+            &rx_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx)),
+            },
+        )
+        .unwrap();
+
+        // Send via the registry
+        {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            let entry = map.get(&tx_id).unwrap();
+            let sender = entry.downcast_ref::<ChannelSender>().unwrap();
+            sender.tx.send(DataType::String("hello".into())).unwrap();
+        }
+
+        // Recv via the registry
+        {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            let entry = map.get(&rx_id).unwrap();
+            let receiver = entry.downcast_ref::<ChannelReceiver>().unwrap();
+            let rx_guard = receiver.rx.lock().unwrap();
+            let val = rx_guard.recv().unwrap();
+            assert_eq!(val, DataType::String("hello".into()));
+        }
+
+        // Cleanup
+        channel_remove(&tx_id).unwrap();
+        channel_remove(&rx_id).unwrap();
+    }
+
+    #[test]
+    fn test_channel_remove_not_found() {
+        let result = channel_remove("nonexistent:0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_concurrent_module_in_std_modules() {
+        assert!(STD_MODULE_NAMES.contains(&"concurrent"));
+    }
+
+    #[test]
+    fn test_concurrent_module_ops() {
+        let ops = std_module_ops("concurrent");
+        assert!(ops.contains(&"channel"));
+        assert!(ops.contains(&"chan_send"));
+        assert!(ops.contains(&"chan_recv"));
+        assert!(ops.contains(&"chan_try_recv"));
+        assert!(ops.contains(&"chan_close"));
+    }
+
+    #[test]
+    fn test_spawn_evaluator_basic_arithmetic() {
+        let inputs = HashMap::from([
+            ("a".to_string(), DataType::Int64(3)),
+            ("b".to_string(), DataType::Int64(4)),
+        ]);
+        let config = HashMap::new();
+        let result = spawn_eval_operation(OperationType::Add, &inputs, &config).unwrap();
+        assert_eq!(result, DataType::Int64(7));
+    }
+
+    #[test]
+    fn test_spawn_evaluator_comparison() {
+        let inputs = HashMap::from([
+            ("a".to_string(), DataType::Int64(3)),
+            ("b".to_string(), DataType::Int64(4)),
+        ]);
+        let config = HashMap::new();
+        let result = spawn_eval_operation(OperationType::Less, &inputs, &config).unwrap();
+        assert_eq!(result, DataType::Bool(true));
     }
 }
