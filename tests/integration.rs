@@ -19919,3 +19919,219 @@ fn test_function_return_type_annotation() {
         output add(3, 4);
     "#), DataType::Int64(7));
 }
+
+// =========================================================================
+// Maturity tests — comprehensive coverage for all new features
+// =========================================================================
+
+#[test]
+fn test_defer_with_println() {
+    // defer takes a function call expression
+    assert_eq!(run(r#"
+        let mut x = 0;
+        defer println(x);
+        x = 42;
+        output x;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_c_style_for_loop() {
+    assert_eq!(run(r#"
+        let mut sum = 0;
+        for (let mut i = 0; i < 5; i += 1) {
+            sum = sum + i;
+        }
+        output sum;
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_c_style_for_loop_break() {
+    assert_eq!(run(r#"
+        let mut last = 0;
+        for (let mut i = 0; i < 100; i += 1) {
+            if i == 5 { break; }
+            last = i;
+        }
+        output last;
+    "#), DataType::Int64(4));
+}
+
+#[test]
+fn test_in_operator_array() {
+    assert_eq!(run(r#"output 3 in [1, 2, 3, 4];"#), DataType::Bool(true));
+    assert_eq!(run(r#"output 5 in [1, 2, 3, 4];"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_in_operator_map() {
+    assert_eq!(run(r#"output "a" in {"a": 1, "b": 2};"#), DataType::Bool(true));
+    assert_eq!(run(r#"output "c" in {"a": 1, "b": 2};"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_in_operator_string() {
+    assert_eq!(run(r#"output "lo" in "hello";"#), DataType::Bool(true));
+    assert_eq!(run(r#"output "xyz" in "hello";"#), DataType::Bool(false));
+}
+
+#[test]
+fn test_string_multiply() {
+    assert_eq!(run(r#"output "ha" * 3;"#), DataType::String("hahaha".to_string()));
+    assert_eq!(run(r#"output "x" * 0;"#), DataType::String("".to_string()));
+}
+
+#[test]
+fn test_optional_some_none() {
+    assert_eq!(run(r#"output is_some(Some(42));"#), DataType::Bool(true));
+    assert_eq!(run(r#"output is_none(None);"#), DataType::Bool(true));
+    assert_eq!(run(r#"output unwrap(Some(42));"#), DataType::Int64(42));
+    assert_eq!(run(r#"output unwrap_or(None, 99);"#), DataType::Int64(99));
+}
+
+#[test]
+fn test_result_ok_err() {
+    assert_eq!(run(r#"output is_ok(Ok(42));"#), DataType::Bool(true));
+    assert_eq!(run(r#"output is_err(Err("fail"));"#), DataType::Bool(true));
+    assert_eq!(run(r#"output unwrap(Ok(42));"#), DataType::Int64(42));
+}
+
+#[test]
+fn test_struct_default_values() {
+    assert_eq!(run(r#"
+        struct Config { timeout: int64 = 30, retries: int64 = 3 }
+        let c = Config {};
+        output c.timeout;
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_struct_default_override() {
+    assert_eq!(run(r#"
+        struct Config { timeout: int64 = 30, retries: int64 = 3 }
+        let c = Config { timeout: 60 };
+        output c.timeout + c.retries;
+    "#), DataType::Int64(63));
+}
+
+#[test]
+fn test_struct_update_syntax() {
+    assert_eq!(run(r#"
+        struct Point { x: int64, y: int64 }
+        let p1 = Point { x: 1, y: 2 };
+        let p2 = Point { ...p1, x: 10 };
+        output p2.x + p2.y;
+    "#), DataType::Int64(12));
+}
+
+#[test]
+fn test_match_as_switch() {
+    // match serves as switch statement
+    assert_eq!(run(r#"
+        let x = 2;
+        let result = match x {
+            1 => "one",
+            2 => "two",
+            _ => "other",
+        };
+        output result;
+    "#), DataType::String("two".to_string()));
+}
+
+#[test]
+fn test_deprecation_runs() {
+    // Deprecated functions should still work, just produce warnings
+    assert_eq!(run(r#"
+        #[deprecated]
+        fn old_add(a, b) { a + b }
+        output old_add(3, 4);
+    "#), DataType::Int64(7));
+}
+
+#[test]
+fn test_use_std_math() {
+    assert_eq!(run(r#"
+        use std::math::*;
+        output abs(-5);
+    "#), DataType::Int64(5));
+}
+
+#[test]
+fn test_use_specific_function() {
+    // use std::math::abs imports just abs — test with integer abs
+    assert_eq!(run(r#"
+        use std::math::abs;
+        output abs(-42);
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_set_operations() {
+    assert_eq!(run(r#"
+        let s = Set(1, 2, 3);
+        output s.contains(2);
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_set_union() {
+    assert_eq!(run(r#"
+        let a = Set(1, 2);
+        let b = Set(2, 3);
+        let c = a.union(b);
+        output c.len();
+    "#), DataType::Int64(3));
+}
+
+#[test]
+fn test_tuple_construction() {
+    assert_eq!(run(r#"
+        let t = Tuple(1, "hello", true);
+        output typeof(t);
+    "#), DataType::String("tuple".to_string()));
+}
+
+#[test]
+fn test_date_now_returns_string() {
+    let result = run(r#"output typeof(date_now());"#);
+    assert_eq!(result, DataType::String("string".to_string()));
+}
+
+#[test]
+fn test_duration_helpers() {
+    assert_eq!(run(r#"output duration_secs(5);"#), DataType::Int64(5000));
+    assert_eq!(run(r#"output duration_mins(2);"#), DataType::Int64(120000));
+    assert_eq!(run(r#"output duration_hours(1);"#), DataType::Int64(3600000));
+}
+
+#[test]
+fn test_encode_utf8() {
+    assert_eq!(run(r#"output typeof(encode("hello", "utf8"));"#), DataType::String("bytes".to_string()));
+}
+
+#[test]
+fn test_impl_with_multiple_methods() {
+    assert_eq!(run(r#"
+        struct Rect { w: int64, h: int64 }
+        impl Rect {
+            fn area(self) { self.w * self.h }
+            fn perimeter(self) { 2 * (self.w + self.h) }
+        }
+        let r = Rect { w: 3, h: 4 };
+        output r.area() + r.perimeter();
+    "#), DataType::Int64(26));
+}
+
+#[test]
+fn test_operator_overload_eq() {
+    assert_eq!(run(r#"
+        struct Vec2 { x: int64, y: int64 }
+        impl Vec2 {
+            fn __eq__(self, other) { self.x == other.x && self.y == other.y }
+        }
+        let a = Vec2 { x: 1, y: 2 };
+        let b = Vec2 { x: 1, y: 2 };
+        output a == b;
+    "#), DataType::Bool(true));
+}
