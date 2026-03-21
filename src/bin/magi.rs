@@ -66,7 +66,6 @@ static CONNECTIONS: LazyLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Store a connection in the global registry.
-#[allow(dead_code)]
 fn conn_store<T: Send + 'static>(id: &str, conn: T) -> Result<(), EvalError> {
     let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
     if map.contains_key(id) {
@@ -86,7 +85,6 @@ fn conn_store<T: Send + 'static>(id: &str, conn: T) -> Result<(), EvalError> {
 }
 
 /// Execute a closure with mutable access to a typed connection.
-#[allow(dead_code)]
 fn conn_with<T: Send + 'static, R>(
     id: &str,
     f: impl FnOnce(&mut T) -> Result<R, EvalError>,
@@ -102,7 +100,6 @@ fn conn_with<T: Send + 'static, R>(
 }
 
 /// Remove a connection from the global registry.
-#[allow(dead_code)]
 fn conn_remove(id: &str) -> Result<(), EvalError> {
     let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
     map.remove(id)
@@ -111,7 +108,6 @@ fn conn_remove(id: &str) -> Result<(), EvalError> {
 }
 
 /// Generate a UUID-based connection ID with the given prefix.
-#[allow(dead_code)]
 fn conn_id(prefix: &str) -> String {
     format!("{}:{}", prefix, uuid::Uuid::new_v4())
 }
@@ -122,7 +118,6 @@ fn conn_id(prefix: &str) -> String {
 
 /// Check whether an IP address is in a private / loopback / link-local /
 /// CGNAT range that should be blocked for outbound requests.
-#[allow(dead_code)]
 fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -197,7 +192,6 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 
 /// Validate that a URL uses an allowed scheme (http/https/ws/wss) and does
 /// not target a blocked host.
-#[allow(dead_code)]
 fn validate_url(url_str: &str) -> Result<(), EvalError> {
     let parsed = url::Url::parse(url_str)
         .map_err(|e| EvalError::InvalidInput(format!("Invalid URL: {}", e)))?;
@@ -216,7 +210,6 @@ fn validate_url(url_str: &str) -> Result<(), EvalError> {
 }
 
 /// Validate that a hostname is not a blocked internal name.
-#[allow(dead_code)]
 fn validate_host(host: &str) -> Result<(), EvalError> {
     let lower = host.to_ascii_lowercase();
 
@@ -250,7 +243,6 @@ fn validate_host(host: &str) -> Result<(), EvalError> {
 /// IP addresses are not in blocked ranges. This mitigates DNS rebinding
 /// attacks where `validate_url` only checks the hostname string but the DNS
 /// can resolve to a private/internal IP.
-#[allow(dead_code)]
 fn validate_url_with_dns(url_str: &str) -> Result<(), EvalError> {
     validate_url(url_str)?;
 
@@ -301,7 +293,6 @@ fn validate_url_with_dns(url_str: &str) -> Result<(), EvalError> {
 // ---------------------------------------------------------------------------
 
 /// Extract a port number from an input map.
-#[allow(dead_code)]
 fn get_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalError> {
     get_port_range(inputs, key, 1)
 }
@@ -388,7 +379,6 @@ fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
 }
 
 /// Extract a string reference from an input map.
-#[allow(dead_code)]
 fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'a str, EvalError> {
     match inputs.get(key) {
         Some(DataType::String(s)) => Ok(s.as_str()),
@@ -405,13 +395,32 @@ fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'
 }
 
 /// Convert a `DataType` value to a byte vector.
-#[allow(dead_code)]
 fn data_to_bytes(data: &DataType) -> Vec<u8> {
     match data {
         DataType::Bytes(b) => b.clone(),
         DataType::String(s) => s.as_bytes().to_vec(),
         other => other.to_string().into_bytes(),
     }
+}
+
+/// Sleep in 100ms chunks, capped at 1 hour.
+/// Chunking allows future cancellation support without blocking for the full duration.
+fn sleep_chunked(inputs: &HashMap<String, DataType>) -> Result<(), EvalError> {
+    const MAX_SLEEP_MS: i64 = 3_600_000; // 1 hour max
+    const CHUNK_MS: u64 = 100;
+    let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
+    if let Some(ms) = duration.to_i64() {
+        if ms > 0 {
+            let total = ms.min(MAX_SLEEP_MS) as u64;
+            let mut remaining = total;
+            while remaining > 0 {
+                let chunk = remaining.min(CHUNK_MS);
+                std::thread::sleep(std::time::Duration::from_millis(chunk));
+                remaining -= chunk;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read a .magi source file, stripping BOM and validating the contents.
@@ -2369,20 +2378,7 @@ impl OperationEvaluator for FullEvaluator {
             // Sleep: sleep for duration ms (no-op in sync evaluator, just returns null)
             // ================================================================
             OperationType::Sleep => {
-                const MAX_SLEEP_MS: i64 = 3_600_000; // 1 hour max
-                const CHUNK_MS: u64 = 100; // check cancel every 100ms
-                let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
-                if let Some(ms) = duration.to_i64() {
-                    if ms > 0 {
-                        let total = ms.min(MAX_SLEEP_MS) as u64;
-                        let mut remaining = total;
-                        while remaining > 0 {
-                            let chunk = remaining.min(CHUNK_MS);
-                            std::thread::sleep(std::time::Duration::from_millis(chunk));
-                            remaining -= chunk;
-                        }
-                    }
-                }
+                sleep_chunked(inputs)?;
                 Ok(DataType::Null)
             }
 
@@ -4464,20 +4460,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::TimeSleep => {
-                const MAX_SLEEP_MS: i64 = 3_600_000; // 1 hour max
-                const CHUNK_MS: u64 = 100; // check cancel every 100ms
-                let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
-                if let Some(ms) = duration.to_i64() {
-                    if ms > 0 {
-                        let total = ms.min(MAX_SLEEP_MS) as u64;
-                        let mut remaining = total;
-                        while remaining > 0 {
-                            let chunk = remaining.min(CHUNK_MS);
-                            std::thread::sleep(std::time::Duration::from_millis(chunk));
-                            remaining -= chunk;
-                        }
-                    }
-                }
+                sleep_chunked(inputs)?;
                 Ok(DataType::Null)
             }
             OperationType::AddDuration | OperationType::SubDuration => {

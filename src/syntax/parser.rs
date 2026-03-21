@@ -2032,6 +2032,10 @@ impl Parser {
             self.expect(&TokenKind::FatArrow)?;
 
             // Arm body: either a block, a statement keyword, or a single expression
+            // Reset no_struct_literal for match arm bodies — struct literals
+            // should be allowed even when the match is inside an `if` condition.
+            let saved_no_struct = self.no_struct_literal;
+            self.no_struct_literal = false;
             let body = if self.at(&TokenKind::LBrace) {
                 self.parse_block()?
             } else if matches!(
@@ -2055,6 +2059,7 @@ impl Parser {
                     span,
                 }
             };
+            self.no_struct_literal = saved_no_struct;
 
             let arm_end = body.span;
             arms.push(MatchArm {
@@ -2622,7 +2627,12 @@ impl Parser {
         let params = self.parse_function_params(&TokenKind::Bar)?;
         self.expect(&TokenKind::Bar)?;
 
-        // Body: either a block or a single expression
+        // Body: either a block or a single expression.
+        // Reset no_struct_literal — lambdas create a new syntactic context,
+        // so struct literals inside a lambda body should be allowed even when
+        // the lambda appears inside an `if` condition.
+        let saved_no_struct = self.no_struct_literal;
+        self.no_struct_literal = false;
         let body = if self.at(&TokenKind::LBrace) {
             let block = self.parse_block()?;
             Expression {
@@ -2632,6 +2642,7 @@ impl Parser {
         } else {
             self.parse_expression()?
         };
+        self.no_struct_literal = saved_no_struct;
 
         let span = start.merge(body.span);
         Ok(Expression {

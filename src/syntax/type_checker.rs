@@ -2821,7 +2821,7 @@ impl TypeChecker {
         op: BinOp,
         left: ChannelType,
         right: ChannelType,
-        span: Span,
+        _span: Span,
     ) -> ChannelType {
         match op {
             // Comparison operators always return Bool.
@@ -2829,37 +2829,10 @@ impl TypeChecker {
                 ChannelType::Bool
             }
 
-            // Logical operators: both sides should be Bool.
+            // Logical operators: accept any truthy/falsy value (&&/|| use truthiness).
+            // Short-circuit: && returns lhs if falsy, else rhs; || returns lhs if truthy, else rhs.
             BinOp::And | BinOp::Or => {
-                if left != ChannelType::Bool && left != ChannelType::Null {
-                    self.emit_coded(
-                        span.start_line,
-                        span.start_col,
-                        format!(
-                            "left operand of '{}' should be bool, got {}",
-                            op,
-                            left.as_str()
-                        ),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::E101,
-                        None,
-                    );
-                }
-                if right != ChannelType::Bool && right != ChannelType::Null {
-                    self.emit_coded(
-                        span.start_line,
-                        span.start_col,
-                        format!(
-                            "right operand of '{}' should be bool, got {}",
-                            op,
-                            right.as_str()
-                        ),
-                        DiagnosticSeverity::Warning,
-                        super::errors::ErrorCode::E101,
-                        None,
-                    );
-                }
-                ChannelType::Bool
+                ChannelType::Null
             }
 
             // Arithmetic operators: use the operation's typing rules.
@@ -3758,22 +3731,24 @@ output x;"#,
     }
 
     #[test]
-    fn test_logical_and_returns_bool() {
+    fn test_logical_and_returns_any() {
+        // &&/|| use truthiness and return either operand, so type is polymorphic (Null = any)
         let a = check("let x = true;\nlet y = false;\nlet r = x && y;\noutput r;");
-        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
     }
 
     #[test]
-    fn test_logical_or_returns_bool() {
+    fn test_logical_or_returns_any() {
         let a = check("let x = true;\nlet y = false;\nlet r = x || y;\noutput r;");
-        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
     }
 
     #[test]
-    fn test_logical_non_bool_warns() {
+    fn test_logical_non_bool_no_warning() {
+        // &&/|| accept any truthy/falsy value — no warning for non-bool operands
         let a = check("let x = 10;\nlet y = 20;\nlet r = x && y;\noutput r;");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("should be bool")));
+        assert!(!w.iter().any(|d| d.message.contains("should be bool")));
     }
 
     // =========================================================================
@@ -5665,15 +5640,16 @@ test "reads outer" { let r = x + 1; output r; }"#,
     }
 
     #[test]
-    fn test_binop_and_returns_bool() {
+    fn test_binop_and_returns_any() {
+        // &&/|| use truthiness and return either operand, so type is polymorphic (Null = any)
         let a = check("let x = true && false;\noutput x;");
-        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Null));
     }
 
     #[test]
-    fn test_binop_or_returns_bool() {
+    fn test_binop_or_returns_any() {
         let a = check("let x = true || false;\noutput x;");
-        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Null));
     }
 
     // =========================================================================
