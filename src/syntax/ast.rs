@@ -294,6 +294,10 @@ pub struct FunctionDef {
     pub return_type: Option<TypeAnnotation>,
     pub body: Block,
     pub span: Span,
+    /// Whether this method is a property getter (`get field() { ... }`).
+    pub is_getter: bool,
+    /// Whether this method is a property setter (`set field(value) { ... }`).
+    pub is_setter: bool,
 }
 
 // =============================================================================

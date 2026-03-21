@@ -1004,6 +1004,8 @@ impl Parser {
                 return_type,
                 body,
                 span: full_span,
+                is_getter: false,
+                is_setter: false,
             }),
         })
     }
@@ -1043,6 +1045,8 @@ impl Parser {
                 return_type,
                 body,
                 span: full_span,
+                is_getter: false,
+                is_setter: false,
             }),
         })
     }
@@ -2960,11 +2964,27 @@ impl Parser {
         let mut methods = Vec::new();
         let mut seen = std::collections::HashSet::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
-            if !self.at(&TokenKind::Fn) {
-                return Err(SyntaxError { line: self.peek().span.start_line as usize, column: self.peek().span.start_col as usize, message: "Expected 'fn' in impl block".into(), code: None });
+            // Check for getter/setter: `get name() { ... }` or `set name(value) { ... }`
+            let mut is_getter = false;
+            let mut is_setter = false;
+            if self.at(&TokenKind::Ident) && (self.peek().text == "get" || self.peek().text == "set") {
+                // Look ahead: if next token is an identifier (not `(` or `{`), it's a getter/setter
+                let is_accessor = matches!(self.peek_next_kind(), TokenKind::Ident);
+                if is_accessor {
+                    let accessor = self.advance().text.clone();
+                    is_getter = accessor == "get";
+                    is_setter = accessor == "set";
+                }
             }
+
+            if !is_getter && !is_setter {
+                if !self.at(&TokenKind::Fn) {
+                    return Err(SyntaxError { line: self.peek().span.start_line as usize, column: self.peek().span.start_col as usize, message: "Expected 'fn', 'get', or 'set' in impl block".into(), code: None });
+                }
+                self.advance(); // consume 'fn'
+            }
+
             let fn_start = self.peek().span;
-            self.advance();
             let name_tok = self.expect_identifier()?;
             let name = name_tok.text;
             if !seen.insert(name.clone()) {
@@ -2976,7 +2996,7 @@ impl Parser {
             let return_type = if self.eat(&TokenKind::Arrow) { Some(self.parse_type_annotation()?) } else { None };
             let body = self.parse_block()?;
             let full_span = fn_start.merge(body.span);
-            methods.push(FunctionDef { name, params, return_type, body, span: full_span });
+            methods.push(FunctionDef { name, params, return_type, body, span: full_span, is_getter, is_setter });
         }
         Ok(methods)
     }

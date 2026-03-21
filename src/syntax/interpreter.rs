@@ -401,9 +401,14 @@ impl<'a> Interpreter<'a> {
 
     /// Collect an error in keep-going mode. Returns true if execution should continue,
     /// false if the max_errors limit has been reached.
+    /// `max_errors = Some(0)` means unlimited; `Some(n)` caps at n errors.
     fn collect_error_keep_going(&mut self, error: InterpError) -> bool {
         self.collected_errors.push(error);
-        !self.max_errors.is_some_and(|m| self.collected_errors.len() >= m)
+        match self.max_errors {
+            Some(0) => true, // unlimited
+            Some(max) => self.collected_errors.len() < max,
+            None => false, // should not happen but treat as immediate abort
+        }
     }
 
     /// Add a resolved package to the interpreter.
@@ -4608,6 +4613,8 @@ impl<'a> Interpreter<'a> {
                     return_type: None,
                     body: func_body,
                     span: expr.span,
+                    is_getter: false,
+                    is_setter: false,
                 };
                 self.functions.insert(name.clone(), func_def);
                 Ok(DataType::String(name))
