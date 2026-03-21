@@ -19481,3 +19481,98 @@ fn test_array_unique_preserves_order() {
         DataType::Int64(3), DataType::Int64(1), DataType::Int64(2),
     ]));
 }
+
+// =========================================================================
+// Edge case tests from audit rounds 11-14
+// =========================================================================
+
+#[test]
+fn test_field_assignment_new_field() {
+    // Assigning a new field to a map should add it (#7)
+    let result = run(r#"
+        let mut m = {"x": 1};
+        m.y = 2;
+        output m;
+    "#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("x"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("y"), Some(&DataType::Int64(2)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_map_defaults_no_overwrite() {
+    // defaults should not overwrite existing keys (#114)
+    let result = run(r#"output {"a": 1, "b": 2}.defaults({"a": 99, "c": 3});"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("b"), Some(&DataType::Int64(2)));
+            assert_eq!(m.get("c"), Some(&DataType::Int64(3)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_string_capitalize_empty() {
+    assert_eq!(run(r#"output "".capitalize();"#), DataType::String("".to_string()));
+}
+
+#[test]
+fn test_string_truncate_shorter_than_limit() {
+    assert_eq!(run(r#"output "hi".truncate(10);"#), DataType::String("hi".to_string()));
+}
+
+#[test]
+fn test_array_combinations_k_greater_than_n() {
+    assert_eq!(run(r#"output [1, 2].combinations(3);"#), DataType::Array(vec![]));
+}
+
+#[test]
+fn test_array_rotate_empty() {
+    assert_eq!(run(r#"output [].rotate_left(1);"#), DataType::Array(vec![]));
+}
+
+#[test]
+fn test_map_invert_non_string_values() {
+    // Non-string values should be converted to string keys
+    let result = run(r#"output {"a": 1, "b": 2}.invert();"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("1"), Some(&DataType::String("a".to_string())));
+            assert_eq!(m.get("2"), Some(&DataType::String("b".to_string())));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_map_flatten_keys_custom_separator() {
+    let result = run(r#"output {"a": {"b": 1}}.flatten_keys("/");"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a/b"), Some(&DataType::Int64(1)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_factorial_zero() {
+    assert_eq!(run("output factorial(0);"), DataType::Int64(1));
+}
+
+#[test]
+fn test_fibonacci_large() {
+    assert_eq!(run("output fibonacci(20);"), DataType::Int64(6765));
+}
+
+#[test]
+fn test_is_prime_large() {
+    assert_eq!(run("output is_prime(997);"), DataType::Bool(true));
+    assert_eq!(run("output is_prime(999);"), DataType::Bool(false));
+}
