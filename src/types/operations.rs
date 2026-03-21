@@ -137,13 +137,31 @@ pub enum OperationType {
     MapFromEntries,
     MapSize,
 
-    // Bytes (6)
+    // Bytes (17)
     BytesLength,
     BytesSlice,
     BytesConcat,
     BytesContains,
     Base64Encode,
     Base64Decode,
+    BytesCompare,
+    BytesEqual,
+    BytesHasPrefix,
+    BytesHasSuffix,
+    BytesIndex,
+    BytesJoin,
+    BytesRepeat,
+    BytesSplit,
+    BytesTrim,
+    BytesFromString,
+    BytesToString,
+
+    // Errors (5)
+    ErrorNew,
+    ErrorWrap,
+    ErrorUnwrap,
+    ErrorIs,
+    ErrorChain,
 
     // Iteration (2)
     Range,
@@ -643,6 +661,22 @@ impl OperationType {
             OperationType::BytesContains => "bytes_contains",
             OperationType::Base64Encode => "base64_encode",
             OperationType::Base64Decode => "base64_decode",
+            OperationType::BytesCompare => "bytes_compare",
+            OperationType::BytesEqual => "bytes_equal",
+            OperationType::BytesHasPrefix => "bytes_has_prefix",
+            OperationType::BytesHasSuffix => "bytes_has_suffix",
+            OperationType::BytesIndex => "bytes_index",
+            OperationType::BytesJoin => "bytes_join",
+            OperationType::BytesRepeat => "bytes_repeat",
+            OperationType::BytesSplit => "bytes_split",
+            OperationType::BytesTrim => "bytes_trim",
+            OperationType::BytesFromString => "bytes_from_string",
+            OperationType::BytesToString => "bytes_to_string",
+            OperationType::ErrorNew => "error_new",
+            OperationType::ErrorWrap => "error_wrap",
+            OperationType::ErrorUnwrap => "error_unwrap",
+            OperationType::ErrorIs => "error_is",
+            OperationType::ErrorChain => "error_chain",
             OperationType::Range => "range",
             OperationType::Reduce => "reduce",
             // JSON
@@ -1093,6 +1127,22 @@ impl OperationType {
             "bytes_contains" => Some(OperationType::BytesContains),
             "base64_encode" => Some(OperationType::Base64Encode),
             "base64_decode" => Some(OperationType::Base64Decode),
+            "bytes_compare" => Some(OperationType::BytesCompare),
+            "bytes_equal" => Some(OperationType::BytesEqual),
+            "bytes_has_prefix" => Some(OperationType::BytesHasPrefix),
+            "bytes_has_suffix" => Some(OperationType::BytesHasSuffix),
+            "bytes_index" => Some(OperationType::BytesIndex),
+            "bytes_join" => Some(OperationType::BytesJoin),
+            "bytes_repeat" => Some(OperationType::BytesRepeat),
+            "bytes_split" => Some(OperationType::BytesSplit),
+            "bytes_trim" => Some(OperationType::BytesTrim),
+            "bytes_from_string" => Some(OperationType::BytesFromString),
+            "bytes_to_string" => Some(OperationType::BytesToString),
+            "error_new" => Some(OperationType::ErrorNew),
+            "error_wrap" => Some(OperationType::ErrorWrap),
+            "error_unwrap" => Some(OperationType::ErrorUnwrap),
+            "error_is" => Some(OperationType::ErrorIs),
+            "error_chain" => Some(OperationType::ErrorChain),
             "range" => Some(OperationType::Range),
             "reduce" => Some(OperationType::Reduce),
             // JSON
@@ -1541,6 +1591,22 @@ impl OperationType {
         OperationType::BytesContains,
         OperationType::Base64Encode,
         OperationType::Base64Decode,
+        OperationType::BytesCompare,
+        OperationType::BytesEqual,
+        OperationType::BytesHasPrefix,
+        OperationType::BytesHasSuffix,
+        OperationType::BytesIndex,
+        OperationType::BytesJoin,
+        OperationType::BytesRepeat,
+        OperationType::BytesSplit,
+        OperationType::BytesTrim,
+        OperationType::BytesFromString,
+        OperationType::BytesToString,
+        OperationType::ErrorNew,
+        OperationType::ErrorWrap,
+        OperationType::ErrorUnwrap,
+        OperationType::ErrorIs,
+        OperationType::ErrorChain,
         OperationType::Range,
         OperationType::Reduce,
         // JSON (6)
@@ -1897,7 +1963,7 @@ mod tests {
 
     #[test]
     fn test_operation_type_all_count() {
-        assert_eq!(OperationType::ALL.len(), 396);
+        assert_eq!(OperationType::ALL.len(), 412);
     }
 
     #[test]

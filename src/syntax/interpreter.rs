@@ -2876,6 +2876,77 @@ impl<'a> Interpreter<'a> {
                     "clear" => Ok(Some(DataType::Map(indexmap::IndexMap::new()))),
                     // is_empty() — check if map has no entries
                     "is_empty" => Ok(Some(DataType::Bool(map.is_empty()))),
+                    // update_entry(key, fn) — applies fn to the value at key if it exists
+                    "update_entry" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "update_entry".into(), expected: "2".into(), actual: args.len(), span }); }
+                        let key = match self.eval_expr(&args[0])? {
+                            DataType::String(s) => s,
+                            other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "update_entry key".into(), span }),
+                        };
+                        let mut result = map.clone();
+                        if let Some(old_val) = result.get(&key).cloned() {
+                            let new_val = self.call_lambda_with_args(&args[1], &[old_val], span)?;
+                            result.insert(key, new_val);
+                        }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    // get_or_default(key, default) — returns value at key or default
+                    "get_or_default" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "get_or_default".into(), expected: "2".into(), actual: args.len(), span }); }
+                        let key = match self.eval_expr(&args[0])? {
+                            DataType::String(s) => s,
+                            other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "get_or_default key".into(), span }),
+                        };
+                        match map.get(&key) {
+                            Some(val) => Ok(Some(val.clone())),
+                            None => {
+                                let default = self.eval_expr(&args[1])?;
+                                Ok(Some(default))
+                            }
+                        }
+                    }
+                    // retain(fn) — returns new map keeping entries where fn(key, value) is truthy
+                    "retain" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "retain".into(), expected: "1".into(), actual: 0, span }); }
+                        let mut result = indexmap::IndexMap::new();
+                        for (k, v) in map {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            let keep = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
+                            if keep.to_bool() {
+                                result.insert(k.clone(), v.clone());
+                                if result.len() >= MAX_ARRAY_ELEMENTS {
+                                    return Err(InterpError::ResourceLimit {
+                                        limit: format!("{} entries", MAX_ARRAY_ELEMENTS),
+                                        actual: format!("{} entries", result.len()),
+                                        context: "retain".to_string(),
+                                        span,
+                                    });
+                                }
+                            }
+                        }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            DataType::String(s) => {
+                match method {
+                    "char_map" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_map".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        let mut result = String::with_capacity(s.len());
+                        for ch in s.chars() {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            let mapped = self.call_lambda_with_args(&args[0], &[DataType::String(ch.to_string())], span)?;
+                            match mapped {
+                                DataType::String(ms) => result.push_str(&ms),
+                                other => result.push_str(&other.to_string_lossy()),
+                            }
+                            if result.len() > MAX_STRING_OUTPUT {
+                                return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result.len()), context: "char_map result".to_string(), span });
+                            }
+                        }
+                        Ok(Some(DataType::String(result)))
+                    }
                     _ => Ok(None),
                 }
             }
@@ -3533,6 +3604,38 @@ impl<'a> Interpreter<'a> {
                     else { Ok(Some(DataType::String(s.chars().enumerate().filter(|(i, _)| *i != actual_idx).map(|(_, c)| c).collect()))) }
                 }
                 "clear" => Ok(Some(DataType::String(String::new()))),
+                "fields" => {
+                    let parts: Vec<DataType> = s.split_whitespace()
+                        .take(MAX_ARRAY_ELEMENTS + 1)
+                        .map(|p| DataType::String(p.to_string()))
+                        .collect();
+                    if parts.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("more than {}", MAX_ARRAY_ELEMENTS), context: "fields".into(), span });
+                    }
+                    Ok(Some(DataType::Array(parts)))
+                }
+                "quote" => {
+                    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+                    Ok(Some(DataType::String(format!("\"{}\"", escaped))))
+                }
+                "unquote" => {
+                    let trimmed = s.trim();
+                    let inner = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+                        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                    {
+                        &trimmed[1..trimmed.len()-1]
+                    } else {
+                        trimmed
+                    };
+                    let unescaped = inner
+                        .replace("\\\"", "\"")
+                        .replace("\\'", "'")
+                        .replace("\\\\", "\\")
+                        .replace("\\n", "\n")
+                        .replace("\\t", "\t")
+                        .replace("\\r", "\r");
+                    Ok(Some(DataType::String(unescaped)))
+                }
                 _ => Ok(None),
             },
             // Array methods (direct, no OperationEvaluator needed)
@@ -3980,6 +4083,73 @@ impl<'a> Interpreter<'a> {
                         if result.to_bool() { cnt += 1; }
                     }
                     Ok(Some(DataType::Int64(cnt)))
+                }
+                // swap(i, j) — returns new array with elements at i and j swapped
+                "swap" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "swap".into(), expected: "2".into(), actual: args.len(), span }); }
+                    let i = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "swap index i".into(), span })? as usize;
+                    let j = self.eval_expr(&args[1])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "swap index j".into(), span })? as usize;
+                    if i >= arr.len() || j >= arr.len() {
+                        return Err(InterpError::EvalError { error: EvalError::InvalidInput(format!("swap: index out of bounds (len {})", arr.len())), span });
+                    }
+                    let mut result = arr.clone();
+                    result.swap(i, j);
+                    Ok(Some(DataType::Array(result)))
+                }
+                // fill(value) — returns new array with all elements set to value
+                "fill" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "fill".into(), expected: "1".into(), actual: 0, span }); }
+                    let value = self.eval_expr(&args[0])?;
+                    Ok(Some(DataType::Array(vec![value; arr.len()])))
+                }
+                // resize(n, default) — returns array resized to n elements
+                "resize" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "resize".into(), expected: "2".into(), actual: args.len(), span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "resize length".into(), span })?.max(0) as usize;
+                    if n > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", n), context: "resize".into(), span }); }
+                    let default = self.eval_expr(&args[1])?;
+                    let mut result = arr.clone();
+                    result.resize(n, default);
+                    Ok(Some(DataType::Array(result)))
+                }
+                // intersperse(separator) — inserts separator between each element
+                "intersperse" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "intersperse".into(), expected: "1".into(), actual: 0, span }); }
+                    let sep = self.eval_expr(&args[0])?;
+                    if arr.is_empty() { return Ok(Some(DataType::Array(Vec::new()))); }
+                    let result_len = arr.len() * 2 - 1;
+                    if result_len > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", result_len), context: "intersperse".into(), span }); }
+                    let mut result = Vec::with_capacity(result_len);
+                    for (i, item) in arr.iter().enumerate() {
+                        if i > 0 { result.push(sep.clone()); }
+                        result.push(item.clone());
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                // unzip() — given array of [a, b] pairs, returns [[all_a], [all_b]]
+                "unzip" => {
+                    let mut left = Vec::with_capacity(arr.len());
+                    let mut right = Vec::with_capacity(arr.len());
+                    for item in arr {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        match item {
+                            DataType::Array(pair) if pair.len() >= 2 => {
+                                left.push(pair[0].clone());
+                                right.push(pair[1].clone());
+                            }
+                            _ => return Err(InterpError::EvalError { error: EvalError::InvalidInput("unzip: each element must be an array of at least 2 elements".to_string()), span }),
+                        }
+                    }
+                    Ok(Some(DataType::Array(vec![DataType::Array(left), DataType::Array(right)])))
+                }
+                // step_by(n) — takes every nth element
+                "step_by" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "step_by".into(), expected: "1".into(), actual: 0, span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "step_by count".into(), span })?;
+                    if n <= 0 { return Err(InterpError::EvalError { error: EvalError::InvalidInput("step_by: step must be positive".to_string()), span }); }
+                    let n = n as usize;
+                    let result: Vec<DataType> = arr.iter().step_by(n).cloned().collect();
+                    Ok(Some(DataType::Array(result)))
                 }
                 _ => Ok(None),
             },
@@ -4975,6 +5145,16 @@ impl<'a> Interpreter<'a> {
                         for i in 0..(r as u64) { result = result.saturating_mul((n as u64 - i) as i64); }
                         return Ok(DataType::Int64(result));
                     }
+                    // Math constants
+                    "math_pi" => { return Ok(DataType::Float64(std::f64::consts::PI)); }
+                    "math_e" => { return Ok(DataType::Float64(std::f64::consts::E)); }
+                    "math_inf" => { return Ok(DataType::Float64(f64::INFINITY)); }
+                    "math_neg_inf" => { return Ok(DataType::Float64(f64::NEG_INFINITY)); }
+                    "math_nan" => { return Ok(DataType::Float64(f64::NAN)); }
+                    "math_tau" => { return Ok(DataType::Float64(std::f64::consts::TAU)); }
+                    "math_ln2" => { return Ok(DataType::Float64(std::f64::consts::LN_2)); }
+                    "math_ln10" => { return Ok(DataType::Float64(std::f64::consts::LN_10)); }
+                    "math_sqrt2" => { return Ok(DataType::Float64(std::f64::consts::SQRT_2)); }
                     // String encode builtin (#103)
                     "encode" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "encode".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span }); }
@@ -5866,6 +6046,96 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     // ========================================================
+                    // Functional: option_map, result_map, result_map_err
+                    // ========================================================
+                    "option_map" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "option_map".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        if matches!(val, DataType::Null) {
+                            return Ok(DataType::Null);
+                        }
+                        let result = self.call_lambda_with_args(&args[1], &[val], expr.span)?;
+                        return Ok(result);
+                    }
+                    "result_map" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "result_map".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        // Result is represented as a map with either "Ok" or "Err" key
+                        if let DataType::Map(ref map) = val {
+                            if let Some(ok_val) = map.get("Ok") {
+                                let mapped = self.call_lambda_with_args(&args[1], &[ok_val.clone()], expr.span)?;
+                                let mut result_map = IndexMap::new();
+                                result_map.insert("Ok".to_string(), mapped);
+                                return Ok(DataType::Map(result_map));
+                            }
+                            if map.contains_key("Err") {
+                                return Ok(val);
+                            }
+                        }
+                        // If not a Result-like map, treat as Ok value
+                        let mapped = self.call_lambda_with_args(&args[1], &[val], expr.span)?;
+                        let mut result_map = IndexMap::new();
+                        result_map.insert("Ok".to_string(), mapped);
+                        return Ok(DataType::Map(result_map));
+                    }
+                    "result_map_err" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "result_map_err".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        if let DataType::Map(ref map) = val {
+                            if let Some(err_val) = map.get("Err") {
+                                let mapped = self.call_lambda_with_args(&args[1], &[err_val.clone()], expr.span)?;
+                                let mut result_map = IndexMap::new();
+                                result_map.insert("Err".to_string(), mapped);
+                                return Ok(DataType::Map(result_map));
+                            }
+                            if map.contains_key("Ok") {
+                                return Ok(val);
+                            }
+                        }
+                        // Not a Result-like map, pass through
+                        return Ok(val);
+                    }
+                    // ========================================================
+                    // sync.Once primitives
+                    // ========================================================
+                    "once_new" => {
+                        use std::sync::atomic::Ordering as AtomicOrdering;
+                        static ONCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let id = format!("once_{}", ONCE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed));
+                        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        once_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), flag);
+                        return Ok(DataType::String(id));
+                    }
+                    "once_call" => {
+                        use std::sync::atomic::Ordering as AtomicOrdering;
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "once_call".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let id_val = self.eval_expr(&args[0])?;
+                        let id = match &id_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: id_val.type_name().to_string(), context: "once_call(id)".to_string(), span: expr.span }),
+                        };
+                        let flag = {
+                            let registry = once_registry().lock().unwrap_or_else(|e| e.into_inner());
+                            registry.get(&id).cloned()
+                        };
+                        match flag {
+                            Some(f) => {
+                                // compare_exchange: only call fn if flag was false
+                                if f.compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst).is_ok() {
+                                    let result = self.call_lambda_with_args(&args[1], &[], expr.span)?;
+                                    return Ok(result);
+                                }
+                                return Ok(DataType::Null);
+                            }
+                            None => {
+                                return Err(InterpError::EvalError {
+                                    error: EvalError::InvalidInput(format!("once_call: unknown once id '{}'", id)),
+                                    span: expr.span,
+                                });
+                            }
+                        }
+                    }
+                    // ========================================================
                     // Process / runtime builtins
                     // ========================================================
                     "exit" => {
@@ -5953,6 +6223,78 @@ impl<'a> Interpreter<'a> {
                             }
                         })?;
                         return Ok(DataType::Null);
+                    }
+                    // Path operations: abs, rel, walk
+                    "path_abs" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "path_abs".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let path_val = self.eval_expr(&args[0])?;
+                        let path_str = match &path_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: path_val.type_name().to_string(), context: "path_abs(path)".to_string(), span: expr.span }),
+                        };
+                        let abs = std::fs::canonicalize(&path_str).map_err(|e| {
+                            InterpError::EvalError { error: EvalError::InvalidInput(format!("path_abs: {}", e)), span: expr.span }
+                        })?;
+                        return Ok(DataType::String(abs.to_string_lossy().to_string()));
+                    }
+                    "path_rel" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "path_rel".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let path_val = self.eval_expr(&args[0])?;
+                        let base_val = self.eval_expr(&args[1])?;
+                        let path_str = match &path_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: path_val.type_name().to_string(), context: "path_rel(path)".to_string(), span: expr.span }),
+                        };
+                        let base_str = match &base_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: base_val.type_name().to_string(), context: "path_rel(base)".to_string(), span: expr.span }),
+                        };
+                        let path = std::path::Path::new(&path_str);
+                        let base = std::path::Path::new(&base_str);
+                        // Compute relative path by stripping common prefix
+                        let result = match path.strip_prefix(base) {
+                            Ok(rel) => rel.to_string_lossy().to_string(),
+                            Err(_) => {
+                                // Manual relative path computation
+                                let path_comps: Vec<_> = path.components().collect();
+                                let base_comps: Vec<_> = base.components().collect();
+                                let common = path_comps.iter().zip(base_comps.iter()).take_while(|(a, b)| a == b).count();
+                                let ups = base_comps.len() - common;
+                                let mut parts: Vec<String> = std::iter::repeat("..".to_string()).take(ups).collect();
+                                for comp in &path_comps[common..] {
+                                    parts.push(comp.as_os_str().to_string_lossy().to_string());
+                                }
+                                if parts.is_empty() { ".".to_string() } else { parts.join(&std::path::MAIN_SEPARATOR.to_string()) }
+                            }
+                        };
+                        return Ok(DataType::String(result));
+                    }
+                    "path_walk" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "path_walk".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let dir_val = self.eval_expr(&args[0])?;
+                        let dir_str = match &dir_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: dir_val.type_name().to_string(), context: "path_walk(dir)".to_string(), span: expr.span }),
+                        };
+                        fn walk_dir_recursive(dir: &std::path::Path, results: &mut Vec<DataType>, max: usize) -> Result<(), std::io::Error> {
+                            if results.len() >= max { return Ok(()); }
+                            let entries = std::fs::read_dir(dir)?;
+                            for entry in entries {
+                                if results.len() >= max { break; }
+                                let entry = entry?;
+                                let path = entry.path();
+                                results.push(DataType::String(path.to_string_lossy().to_string()));
+                                if path.is_dir() {
+                                    walk_dir_recursive(&path, results, max)?;
+                                }
+                            }
+                            Ok(())
+                        }
+                        let mut results = Vec::new();
+                        walk_dir_recursive(std::path::Path::new(&dir_str), &mut results, MAX_ARRAY_ELEMENTS).map_err(|e| {
+                            InterpError::EvalError { error: EvalError::InvalidInput(format!("path_walk: {}", e)), span: expr.span }
+                        })?;
+                        return Ok(DataType::Array(results));
                     }
                     "temp_dir" => {
                         let dir = std::env::temp_dir();
@@ -8054,7 +8396,7 @@ pub const STD_MODULE_NAMES: &[&str] = &[
     "yaml", "csv", "toml", "regex", "uuid", "crypto", "compress",
     "fmt", "stats", "text", "encode", "reflect", "collections", "sort",
     "cert", "concurrent", "itertools", "template", "flag",
-    "process",
+    "process", "errors",
 ];
 
 /// Get the list of operation names in a standard library module.
@@ -8115,6 +8457,15 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "npr",
             "combinations",
             "permutations",
+            "math_pi",
+            "math_e",
+            "math_inf",
+            "math_neg_inf",
+            "math_nan",
+            "math_tau",
+            "math_ln2",
+            "math_ln10",
+            "math_sqrt2",
         ],
         "cmp" => vec![
             "equal",
@@ -8230,6 +8581,24 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "bytes_contains",
             "base64_encode",
             "base64_decode",
+            "bytes_compare",
+            "bytes_equal",
+            "bytes_has_prefix",
+            "bytes_has_suffix",
+            "bytes_index",
+            "bytes_join",
+            "bytes_repeat",
+            "bytes_split",
+            "bytes_trim",
+            "bytes_from_string",
+            "bytes_to_string",
+        ],
+        "errors" => vec![
+            "error_new",
+            "error_wrap",
+            "error_unwrap",
+            "error_is",
+            "error_chain",
         ],
         "json" => vec![
             "json_get",
@@ -8282,7 +8651,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "constant_time_eq",
         ],
         "io" => vec!["debug_log", "assert", "error"],
-        "control" => vec!["if_else", "switch", "coalesce", "try_catch", "error"],
+        "control" => vec!["if_else", "switch", "coalesce", "try_catch", "error", "option_map", "result_map", "result_map_err"],
         "rand" => vec![
             "random_int",
             "random_float",
@@ -8377,6 +8746,9 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "path_parent",
             "cwd",
             "chdir",
+            "path_abs",
+            "path_rel",
+            "path_walk",
         ],
         "yaml" => vec![
             "yaml_parse",
@@ -8492,6 +8864,8 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "chan_try_recv",
             "chan_close",
             "select",
+            "once_new",
+            "once_call",
         ],
         "itertools" => vec![
             "iter_chain",
@@ -8512,6 +8886,12 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
         ],
         _ => vec![],
     }
+}
+
+/// Global registry for sync.Once flags, shared between once_new and once_call.
+fn once_registry() -> &'static std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 // =============================================================================
@@ -8760,6 +9140,8 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
                 "unique", "insert", "remove", "filter_nulls", "window"]);
             // Go/Rust-inspired methods
             methods.extend_from_slice(&["take", "skip", "chain", "rev", "cycle", "append", "clear", "position", "count"]);
+            // Additional array methods
+            methods.extend_from_slice(&["swap", "fill", "resize", "intersperse", "unzip", "step_by"]);
         }
         DataType::String(_) => {
             // Direct methods
@@ -8774,7 +9156,8 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
                 "words", "count"]);
             // Go/Rust-inspired methods
             methods.extend_from_slice(&["splitn", "replacen", "rfind", "last_index_of", "find",
-                "bytes", "as_bytes", "push_str", "insert", "remove", "clear"]);
+                "bytes", "as_bytes", "push_str", "insert", "remove", "clear",
+                "fields", "char_map", "quote", "unquote"]);
         }
         DataType::Int64(_) => {
             methods.extend_from_slice(&["abs", "sign", "pow", "min", "max", "clamp"]);
@@ -8807,6 +9190,8 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
                 "clear", "is_empty"]);
             // HOF methods
             methods.extend_from_slice(&["filter_entries", "map_values", "map_keys", "map_entries"]);
+            // Additional map methods
+            methods.extend_from_slice(&["update_entry", "get_or_default", "retain"]);
         }
         DataType::Bytes(_) => {
             methods.extend_from_slice(&["len", "length", "slice", "concat", "contains",

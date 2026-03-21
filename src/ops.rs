@@ -75,10 +75,19 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
 
         // Bytes → various
         BytesLength => ChannelType::Int64,
-        BytesSlice | BytesConcat => ChannelType::Bytes,
-        BytesContains => ChannelType::Bool,
+        BytesSlice | BytesConcat | BytesJoin | BytesRepeat | BytesTrim | BytesFromString => ChannelType::Bytes,
+        BytesContains | BytesEqual | BytesHasPrefix | BytesHasSuffix => ChannelType::Bool,
+        BytesCompare | BytesIndex => ChannelType::Int64,
+        BytesSplit => ChannelType::Array,
+        BytesToString => ChannelType::String,
         Base64Encode | HexEncode => ChannelType::String,
         Base64Decode | HexDecode => ChannelType::Bytes,
+
+        // Errors → various
+        ErrorNew | ErrorWrap => ChannelType::Map,
+        ErrorUnwrap => ChannelType::Null,
+        ErrorIs => ChannelType::Bool,
+        ErrorChain => ChannelType::Array,
 
         // JSON → various
         JsonGet => ChannelType::Null,
@@ -411,11 +420,25 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         MapUpdate => &[("map", Map), ("key", String), ("value", Null)],
 
         // Bytes ops
-        BytesLength | BytesSlice => &[("input", Bytes)],
+        BytesLength | BytesSlice | BytesTrim => &[("input", Bytes)],
         BytesConcat => &[("a", Bytes), ("b", Bytes)],
         BytesContains => &[("input", Bytes), ("search", Bytes)],
+        BytesCompare | BytesEqual => &[("a", Bytes), ("b", Bytes)],
+        BytesHasPrefix | BytesHasSuffix => &[("input", Bytes), ("prefix", Bytes)],
+        BytesIndex => &[("input", Bytes), ("needle", Bytes)],
+        BytesJoin => &[("array", Array), ("separator", Bytes)],
+        BytesRepeat => &[("input", Bytes), ("count", Int64)],
+        BytesSplit => &[("input", Bytes), ("separator", Bytes)],
+        BytesFromString => &[("input", String)],
+        BytesToString => &[("input", Bytes)],
         Base64Encode => &[("input", Bytes)],
         Base64Decode => &[("input", String)],
+
+        // Error ops
+        ErrorNew => &[("message", String)],
+        ErrorWrap => &[("inner", Map), ("message", String)],
+        ErrorUnwrap | ErrorChain => &[("error", Map)],
+        ErrorIs => &[("error", Map), ("target", String)],
 
         // JSON
         JsonGet => &[("value", Null), ("path", String)],
@@ -728,11 +751,23 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         MapUpdate => &["map", "key", "value"],
 
         // Bytes
-        BytesLength => &["input"],
-        BytesSlice => &["input"],
+        BytesLength | BytesSlice | BytesTrim => &["input"],
         BytesConcat => &["a", "b"],
         BytesContains => &["input", "search"],
+        BytesCompare | BytesEqual => &["a", "b"],
+        BytesHasPrefix | BytesHasSuffix => &["input", "prefix"],
+        BytesIndex => &["input", "needle"],
+        BytesJoin => &["array", "separator"],
+        BytesRepeat => &["input", "count"],
+        BytesSplit => &["input", "separator"],
+        BytesFromString | BytesToString => &["input"],
         Base64Encode | Base64Decode => &["input"],
+
+        // Errors
+        ErrorNew => &["message"],
+        ErrorWrap => &["inner", "message"],
+        ErrorUnwrap | ErrorChain => &["error"],
+        ErrorIs => &["error", "target"],
 
         // Iteration
         Range => &["start", "end"],

@@ -1833,6 +1833,263 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
+            // Extended Bytes operations
+            OperationType::BytesCompare => {
+                match (&a, &b) {
+                    (DataType::Bytes(a_bytes), DataType::Bytes(b_bytes)) => {
+                        Ok(DataType::Int64(match a_bytes.cmp(b_bytes) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "bytes_compare".to_string() }),
+                }
+            },
+            OperationType::BytesEqual => {
+                match (&a, &b) {
+                    (DataType::Bytes(a_bytes), DataType::Bytes(b_bytes)) => {
+                        Ok(DataType::Bool(a_bytes == b_bytes))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "bytes_equal".to_string() }),
+                }
+            },
+            OperationType::BytesHasPrefix => {
+                let prefix_val = inputs.get("prefix").cloned().unwrap_or(DataType::Null);
+                match (&input, &prefix_val) {
+                    (DataType::Bytes(haystack), DataType::Bytes(prefix)) => {
+                        Ok(DataType::Bool(haystack.starts_with(prefix.as_slice())))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_has_prefix".to_string() }),
+                }
+            },
+            OperationType::BytesHasSuffix => {
+                let suffix_val = inputs.get("prefix").cloned().unwrap_or(DataType::Null);
+                match (&input, &suffix_val) {
+                    (DataType::Bytes(haystack), DataType::Bytes(suffix)) => {
+                        Ok(DataType::Bool(haystack.ends_with(suffix.as_slice())))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_has_suffix".to_string() }),
+                }
+            },
+            OperationType::BytesIndex => {
+                let needle_val = inputs.get("needle").cloned().unwrap_or(DataType::Null);
+                match (&input, &needle_val) {
+                    (DataType::Bytes(haystack), DataType::Bytes(needle)) => {
+                        if needle.is_empty() {
+                            return Ok(DataType::Int64(0));
+                        }
+                        let pos = haystack.windows(needle.len())
+                            .position(|w| w == needle.as_slice())
+                            .map(|p| p as i64)
+                            .unwrap_or(-1);
+                        Ok(DataType::Int64(pos))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_index".to_string() }),
+                }
+            },
+            OperationType::BytesJoin => {
+                let array_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
+                let sep_val = inputs.get("separator").cloned().unwrap_or(DataType::Bytes(vec![]));
+                match (&array_val, &sep_val) {
+                    (DataType::Array(arr), DataType::Bytes(sep)) => {
+                        let mut result: Vec<u8> = Vec::new();
+                        for (i, item) in arr.iter().enumerate() {
+                            if let DataType::Bytes(b) = item {
+                                if i > 0 {
+                                    result.extend_from_slice(sep);
+                                }
+                                result.extend_from_slice(b);
+                                if result.len() > MAX_STRING_OUTPUT {
+                                    return Err(EvalError::InvalidInput(format!(
+                                        "bytes_join: result would exceed {} byte limit", MAX_STRING_OUTPUT
+                                    )));
+                                }
+                            } else {
+                                return Err(EvalError::TypeError { expected: "bytes".to_string(), actual: item.type_name().to_string(), context: "bytes_join array element".to_string() });
+                            }
+                        }
+                        Ok(DataType::Bytes(result))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "array, bytes".to_string(), actual: format!("{}, {}", array_val.type_name(), sep_val.type_name()), context: "bytes_join".to_string() }),
+                }
+            },
+            OperationType::BytesRepeat => {
+                let count_val = inputs.get("count").cloned().unwrap_or(DataType::Null);
+                match (&input, &count_val) {
+                    (DataType::Bytes(b), DataType::Int64(count)) => {
+                        if *count < 0 {
+                            return Err(EvalError::InvalidInput("bytes_repeat: count must be non-negative".to_string()));
+                        }
+                        let total = b.len().saturating_mul(*count as usize);
+                        if total > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "bytes_repeat: result would be {} bytes (max {})", total, MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::Bytes(b.repeat(*count as usize)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes, int64".to_string(), actual: format!("{}, {}", input.type_name(), count_val.type_name()), context: "bytes_repeat".to_string() }),
+                }
+            },
+            OperationType::BytesSplit => {
+                let sep_val = inputs.get("separator").cloned().unwrap_or(DataType::Null);
+                match (&input, &sep_val) {
+                    (DataType::Bytes(haystack), DataType::Bytes(sep)) => {
+                        if sep.is_empty() {
+                            // Split into individual bytes
+                            let parts: Vec<DataType> = haystack.iter().map(|b| DataType::Bytes(vec![*b])).collect();
+                            if parts.len() > MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "bytes_split: result would have {} elements (max {})", parts.len(), MAX_ARRAY_ELEMENTS
+                                )));
+                            }
+                            return Ok(DataType::Array(parts));
+                        }
+                        let mut parts: Vec<DataType> = Vec::new();
+                        let mut start = 0;
+                        while start <= haystack.len() {
+                            if let Some(pos) = haystack[start..].windows(sep.len()).position(|w| w == sep.as_slice()) {
+                                parts.push(DataType::Bytes(haystack[start..start + pos].to_vec()));
+                                start = start + pos + sep.len();
+                            } else {
+                                parts.push(DataType::Bytes(haystack[start..].to_vec()));
+                                break;
+                            }
+                            if parts.len() > MAX_ARRAY_ELEMENTS {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "bytes_split: result would exceed {} elements", MAX_ARRAY_ELEMENTS
+                                )));
+                            }
+                        }
+                        Ok(DataType::Array(parts))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_split".to_string() }),
+                }
+            },
+            OperationType::BytesTrim => {
+                match &input {
+                    DataType::Bytes(b) => {
+                        let start = b.iter().position(|&byte| !byte.is_ascii_whitespace()).unwrap_or(b.len());
+                        let end = b.iter().rposition(|&byte| !byte.is_ascii_whitespace()).map(|p| p + 1).unwrap_or(0);
+                        if start >= end {
+                            Ok(DataType::Bytes(vec![]))
+                        } else {
+                            Ok(DataType::Bytes(b[start..end].to_vec()))
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_trim".to_string() }),
+                }
+            },
+            OperationType::BytesFromString => {
+                match &input {
+                    DataType::String(s) => {
+                        if s.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!(
+                                "bytes_from_string: input string is {} bytes (max {})", s.len(), MAX_STRING_OUTPUT
+                            )));
+                        }
+                        Ok(DataType::Bytes(s.as_bytes().to_vec()))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "bytes_from_string".to_string() }),
+                }
+            },
+            OperationType::BytesToString => {
+                match &input {
+                    DataType::Bytes(b) => {
+                        match std::str::from_utf8(b) {
+                            Ok(s) => Ok(DataType::String(s.to_string())),
+                            Err(e) => Err(EvalError::InvalidInput(format!("bytes_to_string: invalid UTF-8: {}", e))),
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "bytes_to_string".to_string() }),
+                }
+            },
+
+            // Error wrapping/chain operations
+            OperationType::ErrorNew => {
+                let msg_val = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let msg = match msg_val {
+                    DataType::String(s) => s,
+                    other => other.to_string_lossy(),
+                };
+                let mut map = indexmap::IndexMap::new();
+                map.insert("message".to_string(), DataType::String(msg));
+                map.insert("cause".to_string(), DataType::Null);
+                Ok(DataType::Map(map))
+            },
+            OperationType::ErrorWrap => {
+                let inner = inputs.get("inner").cloned().unwrap_or(DataType::Null);
+                let msg_val = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let msg = match msg_val {
+                    DataType::String(s) => s,
+                    other => other.to_string_lossy(),
+                };
+                let mut map = indexmap::IndexMap::new();
+                map.insert("message".to_string(), DataType::String(msg));
+                map.insert("cause".to_string(), inner);
+                Ok(DataType::Map(map))
+            },
+            OperationType::ErrorUnwrap => {
+                let err = inputs.get("error").cloned().unwrap_or(DataType::Null);
+                match err {
+                    DataType::Map(m) => {
+                        Ok(m.get("cause").cloned().unwrap_or(DataType::Null))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "map (error)".to_string(), actual: err.type_name().to_string(), context: "error_unwrap".to_string() }),
+                }
+            },
+            OperationType::ErrorIs => {
+                let err = inputs.get("error").cloned().unwrap_or(DataType::Null);
+                let target = inputs.get("target").cloned().unwrap_or(DataType::Null);
+                let target_msg = match target {
+                    DataType::String(s) => s,
+                    other => other.to_string_lossy(),
+                };
+                // Walk the cause chain
+                let mut current = err;
+                loop {
+                    match current {
+                        DataType::Map(ref m) => {
+                            if let Some(DataType::String(msg)) = m.get("message") {
+                                if *msg == target_msg {
+                                    return Ok(DataType::Bool(true));
+                                }
+                            }
+                            match m.get("cause") {
+                                Some(DataType::Null) | None => break,
+                                Some(next) => { current = next.clone(); }
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(DataType::Bool(false))
+            },
+            OperationType::ErrorChain => {
+                let err = inputs.get("error").cloned().unwrap_or(DataType::Null);
+                let mut chain: Vec<DataType> = Vec::new();
+                let mut current = err;
+                loop {
+                    match current {
+                        DataType::Map(ref m) => {
+                            if let Some(msg) = m.get("message") {
+                                chain.push(msg.clone());
+                            }
+                            match m.get("cause") {
+                                Some(DataType::Null) | None => break,
+                                Some(next) => { current = next.clone(); }
+                            }
+                        }
+                        _ => break,
+                    }
+                    if chain.len() > MAX_ARRAY_ELEMENTS {
+                        return Err(EvalError::InvalidInput("error_chain: chain depth exceeds limit".to_string()));
+                    }
+                }
+                Ok(DataType::Array(chain))
+            },
+
             // Logical Xor
             OperationType::Xor => {
                 let a_bool = a.to_bool();
