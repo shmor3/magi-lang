@@ -1,6 +1,6 @@
 [package]
 name = "magi-lang"
-version = "00.04.00"
+version = "0.4.0"
 edition = "2021"
 description = "MAGI programming language — parser, AST, interpreter, and type checker"
 

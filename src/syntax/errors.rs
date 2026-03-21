@@ -144,6 +144,10 @@ pub enum ErrorCode {
     W234,
     /// Duplicate enum variant name
     W235,
+    /// TODO/FIXME comment found
+    W236,
+    /// Magic number in code
+    W237,
 }
 
 impl fmt::Display for ErrorCode {
@@ -207,6 +211,8 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W233 => "W233",
             ErrorCode::W234 => "W234",
             ErrorCode::W235 => "W235",
+            ErrorCode::W236 => "W236",
+            ErrorCode::W237 => "W237",
         };
         write!(f, "{}", code)
     }
@@ -285,6 +291,8 @@ impl ErrorCode {
             ErrorCode::W233 => "This code is deeply nested (5+ levels). Consider extracting inner blocks into functions for readability.",
             ErrorCode::W234 => "This struct has duplicate field names. Each field name must be unique within a struct definition.",
             ErrorCode::W235 => "This enum has duplicate variant names. Each variant name must be unique within an enum definition.",
+            ErrorCode::W236 => "A TODO or FIXME comment was found. These are reminders of incomplete work.",
+            ErrorCode::W237 => "A magic number was used directly in code. Consider extracting it into a named constant for clarity.",
         }
     }
 }

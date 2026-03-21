@@ -19113,3 +19113,179 @@ fn test_function_accesses_global_let() {
         get_greeting()
     "#), DataType::String("hello".to_string()));
 }
+
+// =========================================================================
+// New string methods (#96-102)
+// =========================================================================
+
+#[test]
+fn test_string_capitalize() {
+    assert_eq!(run(r#"output "hello".capitalize();"#), DataType::String("Hello".to_string()));
+}
+
+#[test]
+fn test_string_uncapitalize() {
+    assert_eq!(run(r#"output "Hello".uncapitalize();"#), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_string_pad_center() {
+    assert_eq!(run(r#"output "hi".pad_center(6);"#), DataType::String("  hi  ".to_string()));
+}
+
+#[test]
+fn test_string_pad_center_custom_char() {
+    assert_eq!(run(r#"output "hi".pad_center(6, "-");"#), DataType::String("--hi--".to_string()));
+}
+
+#[test]
+fn test_string_truncate_with_ellipsis() {
+    assert_eq!(run(r#"output "hello world".truncate(8);"#), DataType::String("hello...".to_string()));
+}
+
+#[test]
+fn test_string_count_words() {
+    assert_eq!(run(r#"output "hello beautiful world".count_words();"#), DataType::Int64(3));
+}
+
+#[test]
+fn test_string_strip_prefix() {
+    assert_eq!(run(r#"output "hello world".strip_prefix("hello ");"#), DataType::String("world".to_string()));
+}
+
+#[test]
+fn test_string_strip_suffix() {
+    assert_eq!(run(r#"output "hello world".strip_suffix(" world");"#), DataType::String("hello".to_string()));
+}
+
+#[test]
+fn test_string_byte_length() {
+    assert_eq!(run(r#"output "hello".byte_length();"#), DataType::Int64(5));
+}
+
+// =========================================================================
+// New array methods (#104-111)
+// =========================================================================
+
+#[test]
+fn test_array_flatten_depth() {
+    assert_eq!(run(r#"output [[1, [2]], [3]].flatten(1);"#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Array(vec![DataType::Int64(2)]), DataType::Int64(3)
+    ]));
+}
+
+#[test]
+fn test_array_rotate_left() {
+    assert_eq!(run(r#"output [1, 2, 3, 4].rotate_left(1);"#), DataType::Array(vec![
+        DataType::Int64(2), DataType::Int64(3), DataType::Int64(4), DataType::Int64(1)
+    ]));
+}
+
+#[test]
+fn test_array_rotate_right() {
+    assert_eq!(run(r#"output [1, 2, 3, 4].rotate_right(1);"#), DataType::Array(vec![
+        DataType::Int64(4), DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)
+    ]));
+}
+
+#[test]
+fn test_array_interleave() {
+    assert_eq!(run(r#"output [1, 2, 3].interleave([4, 5, 6]);"#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(4), DataType::Int64(2), DataType::Int64(5), DataType::Int64(3), DataType::Int64(6)
+    ]));
+}
+
+#[test]
+fn test_array_dedup() {
+    assert_eq!(run(r#"output [1, 1, 2, 2, 3, 1].dedup();"#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3), DataType::Int64(1)
+    ]));
+}
+
+#[test]
+fn test_array_transpose() {
+    assert_eq!(run(r#"output [[1, 2], [3, 4]].transpose();"#), DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(3)]),
+        DataType::Array(vec![DataType::Int64(2), DataType::Int64(4)]),
+    ]));
+}
+
+#[test]
+fn test_array_combinations() {
+    assert_eq!(run(r#"output [1, 2, 3].combinations(2);"#), DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]),
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(3)]),
+        DataType::Array(vec![DataType::Int64(2), DataType::Int64(3)]),
+    ]));
+}
+
+// =========================================================================
+// New map methods (#113-120)
+// =========================================================================
+
+#[test]
+fn test_map_invert() {
+    let result = run(r#"output {"a": "1", "b": "2"}.invert();"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("1"), Some(&DataType::String("a".to_string())));
+            assert_eq!(m.get("2"), Some(&DataType::String("b".to_string())));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_map_pick() {
+    let result = run(r#"output {"a": 1, "b": 2, "c": 3}.pick(["a", "c"]);"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 2);
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("c"), Some(&DataType::Int64(3)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_map_omit() {
+    let result = run(r#"output {"a": 1, "b": 2, "c": 3}.omit(["b"]);"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 2);
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("c"), Some(&DataType::Int64(3)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_map_flatten_keys() {
+    let result = run(r#"output {"a": {"b": 1, "c": 2}}.flatten_keys();"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a.b"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("a.c"), Some(&DataType::Int64(2)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_map_deep_merge() {
+    let result = run(r#"output {"a": {"x": 1}}.deep_merge({"a": {"y": 2}});"#);
+    match result {
+        DataType::Map(m) => {
+            match m.get("a") {
+                Some(DataType::Map(inner)) => {
+                    assert_eq!(inner.get("x"), Some(&DataType::Int64(1)));
+                    assert_eq!(inner.get("y"), Some(&DataType::Int64(2)));
+                }
+                _ => panic!("Expected nested map"),
+            }
+        }
+        _ => panic!("Expected map"),
+    }
+}

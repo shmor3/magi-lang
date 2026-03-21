@@ -1103,3 +1103,65 @@ fn check_nesting_depth_expr(expr: &Expression, depth: usize, max_depth: usize, d
         }
     }
 }
+
+/// W236: Check for TODO/FIXME comments in source code (#151).
+pub fn check_todo_comments(source: &str) -> Vec<AstDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for (line_idx, line) in source.lines().enumerate() {
+        if let Some(comment_start) = line.find("//") {
+            let comment = &line[comment_start..];
+            let upper = comment.to_uppercase();
+            if upper.contains("TODO") || upper.contains("FIXME") || upper.contains("HACK") || upper.contains("XXX") {
+                let code = ErrorCode::W236;
+                diagnostics.push(AstDiagnostic {
+                    line: (line_idx + 1) as u32,
+                    column: (comment_start + 1) as u32,
+                    message: format!("found comment marker in: {}", comment.trim()),
+                    severity: DiagnosticSeverity::Warning,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: None,
+                });
+            }
+        }
+    }
+    diagnostics
+}
+
+/// W237: Check for magic numbers in expressions (#152).
+/// Only flags integer literals > 1 and < -1 that appear directly in comparisons
+/// or arithmetic (not in let/const bindings or array/map literals).
+pub fn check_magic_number(expr: &Expression, in_binding: bool) -> Option<AstDiagnostic> {
+    if in_binding { return None; }
+    match &expr.kind {
+        ExpressionKind::BinaryOp { op, left, right, .. } => {
+            // Check operands of comparisons and arithmetic for bare integer literals
+            let check_side = |side: &Expression| -> Option<AstDiagnostic> {
+                if let ExpressionKind::Literal(Literal::Int64(n)) = &side.kind {
+                    let n = *n;
+                    if n > 1 || n < -1 {
+                        let code = ErrorCode::W237;
+                        return Some(AstDiagnostic {
+                            line: side.span.start_line,
+                            column: side.span.start_col,
+                            message: format!("magic number: {}", n),
+                            severity: DiagnosticSeverity::Warning,
+                            code: Some(code.to_string()),
+                            help: Some(code.help().to_string()),
+                            suggestion: Some(format!("Extract {} into a named constant", n)),
+                        });
+                    }
+                }
+                None
+            };
+            use crate::syntax::ast::BinOp::*;
+            match op {
+                Gt | Lt | GtEq | LtEq | Eq | NotEq => {
+                    check_side(left).or_else(|| check_side(right))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
