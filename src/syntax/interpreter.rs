@@ -3006,6 +3006,34 @@ impl<'a> Interpreter<'a> {
                     }
                     Ok(Some(DataType::Array(result)))
                 }
+                "window" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "window".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let n = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "window size".to_string(), span })?;
+                    if n <= 0 {
+                        return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("window size must be > 0".to_string()), span });
+                    }
+                    let n = n as usize;
+                    if n > arr.len() { return Ok(Some(DataType::Array(vec![]))); }
+                    let mut result = Vec::with_capacity(arr.len() - n + 1);
+                    for i in 0..=(arr.len() - n) {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        result.push(DataType::Array(arr[i..i + n].to_vec()));
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                "unique" => {
+                    let mut seen = std::collections::HashSet::new();
+                    let mut result = Vec::new();
+                    for item in arr {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        let key = format!("{:?}", item);
+                        if seen.insert(key) {
+                            result.push(item.clone());
+                        }
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -3391,6 +3419,13 @@ impl<'a> Interpreter<'a> {
                             return Ok(DataType::String(val.type_name().to_string()));
                         }
                         return Ok(DataType::String("null".to_string()));
+                    }
+                    "stdin_read" | "input" => {
+                        use std::io::BufRead;
+                        let mut line = String::new();
+                        std::io::stdin().lock().read_line(&mut line).ok();
+                        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                        return Ok(DataType::String(trimmed.to_string()));
                     }
                     "len" => {
                         if let Some(arg) = args.first() {

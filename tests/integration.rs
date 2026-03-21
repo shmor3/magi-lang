@@ -19447,3 +19447,37 @@ fn test_npr() {
     assert_eq!(run("output npr(5, 2);"), DataType::Int64(20));
     assert_eq!(run("output npr(10, 3);"), DataType::Int64(720));
 }
+
+// =========================================================================
+// Array window and unique (#362, #364)
+// =========================================================================
+
+#[test]
+fn test_array_window() {
+    assert_eq!(run(r#"output [1, 2, 3, 4].window(2);"#), DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2)]),
+        DataType::Array(vec![DataType::Int64(2), DataType::Int64(3)]),
+        DataType::Array(vec![DataType::Int64(3), DataType::Int64(4)]),
+    ]));
+}
+
+#[test]
+fn test_array_window_full() {
+    assert_eq!(run(r#"output [1, 2, 3].window(3);"#), DataType::Array(vec![
+        DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]),
+    ]));
+}
+
+#[test]
+fn test_array_unique_direct_method() {
+    assert_eq!(run(r#"output [1, 2, 1, 3, 2, 3].unique();"#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3),
+    ]));
+}
+
+#[test]
+fn test_array_unique_preserves_order() {
+    assert_eq!(run(r#"output [3, 1, 2, 1, 3].unique();"#), DataType::Array(vec![
+        DataType::Int64(3), DataType::Int64(1), DataType::Int64(2),
+    ]));
+}

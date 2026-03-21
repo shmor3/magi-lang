@@ -8,7 +8,11 @@ use std::fs;
 use std::io::Read as _;
 use std::net::IpAddr;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
+
+/// When true, filesystem and network operations are forbidden.
+static SANDBOX_MODE: AtomicBool = AtomicBool::new(false);
 
 use rand::Rng;
 
@@ -488,6 +492,60 @@ impl OperationEvaluator for FullEvaluator {
         let value = inputs.get("value").cloned().unwrap_or(DataType::Null);
         let map = inputs.get("map").cloned().unwrap_or(DataType::Null);
         let key = inputs.get("key").cloned().unwrap_or(DataType::Null);
+
+        // Sandbox mode: reject filesystem and network operations.
+        if SANDBOX_MODE.load(Ordering::Relaxed) {
+            match op {
+                OperationType::FsRead
+                | OperationType::FsWrite
+                | OperationType::FsAppend
+                | OperationType::FsExists
+                | OperationType::FsList
+                | OperationType::FsMkdir
+                | OperationType::FsRemove
+                | OperationType::FsIsFile
+                | OperationType::FsIsDir
+                | OperationType::FsSize
+                | OperationType::FsCopy
+                | OperationType::FsMove
+                | OperationType::HttpGet
+                | OperationType::HttpPost
+                | OperationType::HttpPut
+                | OperationType::HttpDelete
+                | OperationType::HttpRequest
+                | OperationType::HttpHead
+                | OperationType::HttpOptions
+                | OperationType::HttpPatch
+                | OperationType::TcpConnect
+                | OperationType::TcpWrite
+                | OperationType::TcpRead
+                | OperationType::TcpClose
+                | OperationType::TcpBind
+                | OperationType::TcpAccept
+                | OperationType::TcpServerClose
+                | OperationType::UdpBind
+                | OperationType::UdpSendTo
+                | OperationType::UdpRecvFrom
+                | OperationType::UdpClose
+                | OperationType::WsConnect
+                | OperationType::WsSend
+                | OperationType::WsReceive
+                | OperationType::WsClose
+                | OperationType::SseConnect
+                | OperationType::SseReadEvent
+                | OperationType::SseClose
+                | OperationType::HttpServerStart
+                | OperationType::HttpServerReceive
+                | OperationType::HttpServerRespond
+                | OperationType::HttpServerStop => {
+                    return Err(EvalError::InvalidInput(format!(
+                        "operation {:?} is not allowed in sandbox mode",
+                        op
+                    )));
+                }
+                _ => {}
+            }
+        }
 
         match op {
             // Arithmetic
@@ -6495,6 +6553,11 @@ fn print_usage() {
     eprintln!("  --write, -w                 Write formatted output back to file");
     eprintln!("  --check, -c                 Check formatting without modifying (exit 1 if unformatted)");
     eprintln!();
+    eprintln!("Run options:");
+    eprintln!("  --timeout <seconds>         Abort execution after N seconds");
+    eprintln!("  --sandbox                   Disable filesystem and network operations");
+    eprintln!("  --json                      Output diagnostics as JSON");
+    eprintln!();
     eprintln!("Flags:");
     eprintln!("  --help, -h                  Show this help message");
     eprintln!("  --version, -V               Show version");
@@ -6528,18 +6591,40 @@ fn main() {
         }
         "run" => {
             let mut json_output = false;
+            let mut sandbox = false;
+            let mut timeout_secs: u64 = 0;
             let mut file_path = None;
-            for arg in &args[2..] {
-                match arg.as_str() {
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
                     "--json" => json_output = true,
-                    _ => file_path = Some(arg.as_str()),
+                    "--sandbox" => sandbox = true,
+                    "--timeout" => {
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("error: --timeout requires a value in seconds");
+                            process::exit(1);
+                        }
+                        timeout_secs = match args[i].parse::<u64>() {
+                            Ok(v) if v > 0 => v,
+                            _ => {
+                                eprintln!("error: --timeout value must be a positive integer");
+                                process::exit(1);
+                            }
+                        };
+                    }
+                    _ => file_path = Some(args[i].as_str()),
                 }
+                i += 1;
+            }
+            if sandbox {
+                SANDBOX_MODE.store(true, Ordering::Relaxed);
             }
             match file_path {
-                Some(path) => cmd_run(path, json_output),
+                Some(path) => cmd_run(path, json_output, timeout_secs),
                 None => {
                     eprintln!("error: missing file argument");
-                    eprintln!("Usage: magi run [--json] <file.magi>");
+                    eprintln!("Usage: magi run [--json] [--timeout <seconds>] [--sandbox] <file.magi>");
                     process::exit(1);
                 }
             }
@@ -6647,7 +6732,7 @@ fn main() {
         _ => {
             // If first arg is a .magi file, run it directly.
             if args[1].ends_with(".magi") {
-                cmd_run(&args[1], false);
+                cmd_run(&args[1], false, 0);
             } else {
                 eprintln!("error: unknown command '{}'", args[1]);
                 print_usage();
@@ -6967,7 +7052,7 @@ fn cmd_lsp() {
     }
 }
 
-fn cmd_run(path: &str, json_output: bool) {
+fn cmd_run(path: &str, json_output: bool, timeout_secs: u64) {
     let source = read_source(path);
 
     let program = match parse_v2(&source) {
@@ -6987,38 +7072,87 @@ fn cmd_run(path: &str, json_output: bool) {
         }
     };
 
-    let evaluator = FullEvaluator;
-    let file_path = std::path::Path::new(path);
-    let packages = resolve_dependencies(file_path);
-    let mut interp = Interpreter::new(&evaluator).with_packages(packages);
-
-    match interp.execute(&program) {
-        Ok(_) => {}
-        Err(e) => {
-            // Print any logs collected before the error
-            if !json_output {
-                for log in &interp.logs {
-                    println!("{}", log.message);
+    if timeout_secs > 0 {
+        let path_owned = path.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let evaluator = FullEvaluator;
+            let file_path = std::path::Path::new(&path_owned);
+            let packages = resolve_dependencies(file_path);
+            let mut interp = Interpreter::new(&evaluator).with_packages(packages);
+            let result = interp.execute(&program);
+            let logs: Vec<String> = interp.logs.iter().map(|l| l.message.clone()).collect();
+            let _ = tx.send((result, logs));
+        });
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        match rx.recv_timeout(timeout) {
+            Ok((result, logs)) => {
+                match result {
+                    Ok(_) => {
+                        for msg in &logs {
+                            println!("{}", msg);
+                        }
+                    }
+                    Err(e) => {
+                        if !json_output {
+                            for msg in &logs {
+                                println!("{}", msg);
+                            }
+                        }
+                        if json_output {
+                            let span = e.span();
+                            let diag = serde_json::json!({
+                                "error": format!("{}", e),
+                                "line": span.map(|s| s.start_line),
+                                "column": span.map(|s| s.start_col),
+                            });
+                            println!("{}", diag);
+                        } else {
+                            eprintln!("{}: runtime error: {}", path, e);
+                        }
+                        process::exit(1);
+                    }
                 }
             }
-            if json_output {
-                let span = e.span();
-                let diag = serde_json::json!({
-                    "error": format!("{}", e),
-                    "line": span.map(|s| s.start_line),
-                    "column": span.map(|s| s.start_col),
-                });
-                println!("{}", diag);
-            } else {
-                eprintln!("{}: runtime error: {}", path, e);
+            Err(_) => {
+                eprintln!("error: execution timed out after {} seconds", timeout_secs);
+                process::exit(1);
             }
-            process::exit(1);
         }
-    }
+    } else {
+        let evaluator = FullEvaluator;
+        let file_path = std::path::Path::new(path);
+        let packages = resolve_dependencies(file_path);
+        let mut interp = Interpreter::new(&evaluator).with_packages(packages);
 
-    // Print all output/log messages
-    for log in &interp.logs {
-        println!("{}", log.message);
+        match interp.execute(&program) {
+            Ok(_) => {}
+            Err(e) => {
+                // Print any logs collected before the error
+                if !json_output {
+                    for log in &interp.logs {
+                        println!("{}", log.message);
+                    }
+                }
+                if json_output {
+                    let span = e.span();
+                    let diag = serde_json::json!({
+                        "error": format!("{}", e),
+                        "line": span.map(|s| s.start_line),
+                        "column": span.map(|s| s.start_col),
+                    });
+                    println!("{}", diag);
+                } else {
+                    eprintln!("{}: runtime error: {}", path, e);
+                }
+                process::exit(1);
+            }
+        }
+
+        // Print all output/log messages
+        for log in &interp.logs {
+            println!("{}", log.message);
+        }
     }
 }
 
