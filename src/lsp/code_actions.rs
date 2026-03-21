@@ -253,6 +253,77 @@ fn find_identifier_edits_for_rename(source: &str, name: &str, new_name: &str) ->
     edits
 }
 
+/// Build a code action that sorts all `use` statements alphabetically.
+///
+/// Returns `None` if there are fewer than 2 `use` statements or they are
+/// already sorted.
+fn organize_imports_action(
+    state: &DocumentState,
+    uri: &Url,
+) -> Option<CodeAction> {
+    // Collect all use statement lines with their text
+    let mut use_lines: Vec<(u32, String)> = Vec::new();
+
+    for (idx, line) in state.source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("use ") {
+            use_lines.push((idx as u32, line.to_string()));
+        }
+    }
+
+    if use_lines.len() < 2 {
+        return None;
+    }
+
+    // Check if already sorted
+    let sorted_texts: Vec<String> = {
+        let mut texts: Vec<String> = use_lines.iter().map(|(_, t)| t.clone()).collect();
+        texts.sort_by(|a, b| {
+            let a_trimmed = a.trim();
+            let b_trimmed = b.trim();
+            a_trimmed.cmp(b_trimmed)
+        });
+        texts
+    };
+
+    let current_texts: Vec<&String> = use_lines.iter().map(|(_, t)| t).collect();
+    let is_sorted = current_texts.iter().zip(sorted_texts.iter()).all(|(a, b)| *a == b);
+
+    if is_sorted {
+        return None;
+    }
+
+    // Build text edits to replace each use line with the sorted version
+    let mut edits = Vec::new();
+    for (i, (line_num, _)) in use_lines.iter().enumerate() {
+        let original_line = state.source.lines().nth(*line_num as usize).unwrap_or("");
+        let original_len: u32 = original_line.chars().map(|c| c.len_utf16() as u32).sum();
+
+        edits.push(TextEdit {
+            range: Range {
+                start: Position { line: *line_num, character: 0 },
+                end: Position { line: *line_num, character: original_len },
+            },
+            new_text: sorted_texts[i].clone(),
+        });
+    }
+
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), edits);
+
+    Some(CodeAction {
+        title: "Organize imports".to_string(),
+        kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(false),
+        ..Default::default()
+    })
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -579,5 +650,77 @@ mod tests {
         let source = "use std::math;\n\nlet x = 1;";
         // The blank line separates the import block from code; insert after imports
         assert_eq!(find_import_insert_line(source), 1);
+    }
+
+    // =========================================================================
+    // Organize imports tests
+    // =========================================================================
+
+    #[test]
+    fn test_organize_imports_sorts_alphabetically() {
+        let source = "use std::str::*;\nuse std::math::*;\nlet x = 1;";
+        let state = make_state(source);
+        let uri = Url::parse("file:///test.magi").unwrap();
+
+        let action = organize_imports_action(&state, &uri);
+        assert!(action.is_some());
+        let action = action.unwrap();
+        assert_eq!(action.title, "Organize imports");
+        assert_eq!(action.kind, Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS));
+
+        let edit = action.edit.unwrap();
+        let changes = edit.changes.unwrap();
+        let edits = changes.get(&uri).unwrap();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].new_text, "use std::math::*;");
+        assert_eq!(edits[1].new_text, "use std::str::*;");
+    }
+
+    #[test]
+    fn test_organize_imports_already_sorted() {
+        let source = "use std::math::*;\nuse std::str::*;\nlet x = 1;";
+        let state = make_state(source);
+        let uri = Url::parse("file:///test.magi").unwrap();
+
+        let action = organize_imports_action(&state, &uri);
+        assert!(action.is_none(), "already sorted imports should not produce an action");
+    }
+
+    #[test]
+    fn test_organize_imports_single_import() {
+        let source = "use std::math::*;\nlet x = 1;";
+        let state = make_state(source);
+        let uri = Url::parse("file:///test.magi").unwrap();
+
+        let action = organize_imports_action(&state, &uri);
+        assert!(action.is_none(), "single import should not produce an action");
+    }
+
+    #[test]
+    fn test_organize_imports_no_imports() {
+        let source = "let x = 1;";
+        let state = make_state(source);
+        let uri = Url::parse("file:///test.magi").unwrap();
+
+        let action = organize_imports_action(&state, &uri);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_organize_imports_in_code_actions() {
+        let source = "use std::str::*;\nuse std::math::*;\nlet x = 1;";
+        let state = make_state(source);
+        let (params, uri) = make_params(vec![]);
+
+        let actions = handle_code_actions(&state, &params, &uri);
+        // Should contain the organize imports action
+        let organize = actions.iter().find(|a| {
+            if let CodeActionOrCommand::CodeAction(ca) = a {
+                ca.kind == Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS)
+            } else {
+                false
+            }
+        });
+        assert!(organize.is_some());
     }
 }

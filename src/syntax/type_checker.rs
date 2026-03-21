@@ -140,6 +140,8 @@ struct TypeChecker {
     function_depth: usize,
     /// Declared return type of the current function (for return statement validation).
     current_return_type: ChannelType,
+    /// Collected return statement types for the current function (for return type inference).
+    collected_return_types: Vec<ChannelType>,
     /// Known enum definitions: enum_name → list of (variant_name, field_count).
     enum_variants: HashMap<String, Vec<(String, usize)>>,
     /// Known struct definitions: struct_name → list of (field_name, type_annotation).
@@ -173,6 +175,7 @@ impl TypeChecker {
             loop_depth: 0,
             function_depth: 0,
             current_return_type: ChannelType::Null,
+            collected_return_types: Vec::new(),
         }
     }
 
@@ -725,6 +728,7 @@ impl TypeChecker {
                 self.function_depth += 1;
                 let saved_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
+                let saved_return_types = std::mem::take(&mut self.collected_return_types);
                 let resolved_return = def.return_type.as_ref()
                     .and_then(|ta| self.resolve_type(&ta.to_string()))
                     .unwrap_or(ChannelType::Null);
@@ -811,6 +815,25 @@ impl TypeChecker {
                         );
                     }
                 }
+                // Infer return type (#66): if no explicit return type, unify body type
+                // with collected return statement types and store in function_sigs
+                if declared_return == ChannelType::Null {
+                    let mut all_types = std::mem::take(&mut self.collected_return_types);
+                    if body_type != ChannelType::Null {
+                        all_types.push(body_type);
+                    }
+                    let inferred_return = if all_types.is_empty() {
+                        ChannelType::Null
+                    } else {
+                        unify_types(&all_types)
+                    };
+                    if inferred_return != ChannelType::Null {
+                        if let Some(sig) = self.function_sigs.get_mut(&def.name) {
+                            sig.return_type = inferred_return;
+                        }
+                    }
+                }
+                self.collected_return_types = saved_return_types;
                 self.function_depth -= 1;
                 self.loop_depth = saved_loop_depth;
                 self.current_return_type = prev_return_type;
@@ -859,6 +882,8 @@ impl TypeChecker {
                 }
                 if let Some(expr) = val_expr {
                     let ret_type = self.infer_expr(expr);
+                    // Collect return type for inference (#66)
+                    self.collected_return_types.push(ret_type);
                     // Validate return value against declared return type
                     if self.current_return_type != ChannelType::Null
                         && ret_type != ChannelType::Null
@@ -877,6 +902,9 @@ impl TypeChecker {
                             None,
                         );
                     }
+                } else {
+                    // `return;` with no value returns Null
+                    self.collected_return_types.push(ChannelType::Null);
                 }
             }
 
@@ -1907,7 +1935,22 @@ impl TypeChecker {
                     );
                 }
 
-                let then_ty = self.infer_block(then_block);
+                // Type narrowing (#67): if condition is `typeof(x) == "type_name"`,
+                // narrow x's type in the then-block
+                let narrowing = extract_typeof_narrowing(condition);
+                let then_ty = if let Some((ref var_name, narrowed_type)) = narrowing {
+                    self.push_scope();
+                    // Narrow the variable's type in the then-block scope
+                    self.define_var(var_name, narrowed_type, false, condition.span.start_line, condition.span.start_col);
+                    if let Some(info) = self.lookup_mut(var_name) {
+                        info.used = true; // Don't warn about this shadow
+                    }
+                    let ty = self.infer_block_no_scope(then_block);
+                    self.pop_scope();
+                    ty
+                } else {
+                    self.infer_block(then_block)
+                };
                 let else_ty = if let Some(else_blk) = else_block {
                     self.infer_block(else_blk)
                 } else {
@@ -3716,6 +3759,44 @@ fn unify_types(types: &[ChannelType]) -> ChannelType {
         } else {
             ChannelType::Null
         }
+    }
+}
+
+/// Extract type narrowing info from an `if` condition.
+/// Recognizes patterns like `typeof(x) == "string"` or `"string" == typeof(x)`.
+/// Returns `Some((variable_name, narrowed_type))` if the pattern matches.
+fn extract_typeof_narrowing(condition: &Expression) -> Option<(String, ChannelType)> {
+    if let ExpressionKind::BinaryOp { op: BinOp::Eq, left, right } = &condition.kind {
+        // typeof(x) == "type_name"
+        if let (Some(var_name), Some(type_name)) = (extract_typeof_var(left), extract_string_literal(right)) {
+            return ChannelType::parse(&type_name).map(|ct| (var_name, ct));
+        }
+        // "type_name" == typeof(x)
+        if let (Some(type_name), Some(var_name)) = (extract_string_literal(left), extract_typeof_var(right)) {
+            return ChannelType::parse(&type_name).map(|ct| (var_name, ct));
+        }
+    }
+    None
+}
+
+/// Extract the variable name from a `typeof(x)` call expression.
+fn extract_typeof_var(expr: &Expression) -> Option<String> {
+    if let ExpressionKind::Call { name, args, .. } = &expr.kind {
+        if name == "typeof" && args.len() == 1 {
+            if let ExpressionKind::Variable(var_name) = &args[0].kind {
+                return Some(var_name.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Extract a string literal value from an expression.
+fn extract_string_literal(expr: &Expression) -> Option<String> {
+    if let ExpressionKind::Literal(Literal::String(s)) = &expr.kind {
+        Some(s.clone())
+    } else {
+        None
     }
 }
 
@@ -5905,8 +5986,8 @@ test "reads outer" { let r = x + 1; output r; }"#,
     }
 
     #[test]
-    fn test_fn_without_return_type_returns_null_at_callsite() {
-        // Without a declared return type, call site gets Null (unknown)
+    fn test_fn_without_return_type_infers_at_callsite() {
+        // Return type inference (#66): inferred from body tail expression
         let a = check(r#"
             fn foo(x: bool) {
                 if x { 1 } else { 2.5 }
@@ -5914,8 +5995,8 @@ test "reads outer" { let r = x + 1; output r; }"#,
             let r = foo(true);
             output r;
         "#);
-        // Two-pass limitation: undeclared return type means Null at call site
-        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
+        // With return type inference, the body type (Float64) is now used at call site
+        assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Float64));
     }
 
     #[test]

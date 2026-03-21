@@ -498,6 +498,10 @@ impl<'a> Formatter<'a> {
                         self.write(": ");
                         self.write(&ty.to_string());
                     }
+                    if let Some(ref default_expr) = field.default {
+                        self.write(" = ");
+                        self.fmt_expression(default_expr);
+                    }
                     if i < fields.len() - 1 {
                         self.write(",");
                     }

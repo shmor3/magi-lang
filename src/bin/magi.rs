@@ -43,6 +43,9 @@ const MAX_INSPECT_OUTPUT: usize = 1_048_576;
 /// UTF-8 BOM (byte order mark).
 const UTF8_BOM: &str = "\u{FEFF}";
 
+/// Maximum file write size (#274): 100 MB.
+const MAX_FILE_WRITE_SIZE: usize = 100 * 1024 * 1024;
+
 /// Maximum number of compiled regexes held in the thread-local LRU cache.
 const REGEX_CACHE_CAPACITY: usize = 128;
 
@@ -2896,10 +2899,14 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("input_1").or(inputs.get("pattern")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => Ok(DataType::Bool(re.is_match(s))),
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_match: {}", e))),
-                        }
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => Ok(DataType::Bool(re.is_match(&s))),
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_match: {}", e))),
+                            }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexMatch".to_string() }),
                 }
@@ -2908,10 +2915,14 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => Ok(DataType::Bool(re.is_match(s))),
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_test: {}", e))),
-                        }
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => Ok(DataType::Bool(re.is_match(&s))),
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_test: {}", e))),
+                            }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexTest".to_string() }),
                 }
@@ -2921,18 +2932,23 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern, &replacement) {
                     (DataType::String(s), DataType::String(pat), DataType::String(rep)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => {
-                                let result = re.replace_all(s, rep.as_str()).to_string();
-                                if result.len() > MAX_STRING_OUTPUT {
-                                    return Err(EvalError::InvalidInput(format!(
-                                        "regex_replace result exceeds {} byte limit", MAX_STRING_OUTPUT
-                                    )));
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        let rep = rep.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => {
+                                    let result = re.replace_all(&s, rep.as_str()).to_string();
+                                    if result.len() > MAX_STRING_OUTPUT {
+                                        return Err(EvalError::InvalidInput(format!(
+                                            "regex_replace result exceeds {} byte limit", MAX_STRING_OUTPUT
+                                        )));
+                                    }
+                                    Ok(DataType::String(result))
                                 }
-                                Ok(DataType::String(result))
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_replace: {}", e))),
                             }
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_replace: {}", e))),
-                        }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String, String)".to_string(), actual: format!("({}, {}, {})", input.type_name(), pattern.type_name(), replacement.type_name()), context: "RegexReplace".to_string() }),
                 }
@@ -2941,27 +2957,29 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => match re.captures(s) {
-                                Some(caps) => {
-                                    if caps.len() > 1 {
-                                        // Has capture groups — return array of groups
-                                        let groups: Vec<DataType> = caps.iter().skip(1)
-                                            .map(|m| match m {
-                                                Some(m) => DataType::String(m.as_str().to_string()),
-                                                None => DataType::Null,
-                                            })
-                                            .collect();
-                                        Ok(DataType::Array(groups))
-                                    } else {
-                                        // No capture groups — return full match
-                                        Ok(DataType::String(caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()))
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => match re.captures(&s) {
+                                    Some(caps) => {
+                                        if caps.len() > 1 {
+                                            let groups: Vec<DataType> = caps.iter().skip(1)
+                                                .map(|m| match m {
+                                                    Some(m) => DataType::String(m.as_str().to_string()),
+                                                    None => DataType::Null,
+                                                })
+                                                .collect();
+                                            Ok(DataType::Array(groups))
+                                        } else {
+                                            Ok(DataType::String(caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()))
+                                        }
                                     }
-                                }
-                                None => Ok(DataType::Null),
-                            },
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_extract: {}", e))),
-                        }
+                                    None => Ok(DataType::Null),
+                                },
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_extract: {}", e))),
+                            }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexExtract".to_string() }),
                 }
@@ -2970,21 +2988,25 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => {
-                                let parts: Vec<DataType> = re.split(s)
-                                    .take(MAX_ARRAY_ELEMENTS + 1)
-                                    .map(|p| DataType::String(p.to_string()))
-                                    .collect();
-                                if parts.len() > MAX_ARRAY_ELEMENTS {
-                                    return Err(EvalError::InvalidInput(format!(
-                                        "regex_split result exceeds {} element limit", MAX_ARRAY_ELEMENTS
-                                    )));
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => {
+                                    let parts: Vec<DataType> = re.split(&s)
+                                        .take(MAX_ARRAY_ELEMENTS + 1)
+                                        .map(|p| DataType::String(p.to_string()))
+                                        .collect();
+                                    if parts.len() > MAX_ARRAY_ELEMENTS {
+                                        return Err(EvalError::InvalidInput(format!(
+                                            "regex_split result exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                                        )));
+                                    }
+                                    Ok(DataType::Array(parts))
                                 }
-                                Ok(DataType::Array(parts))
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_split: {}", e))),
                             }
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_split: {}", e))),
-                        }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexSplit".to_string() }),
                 }
@@ -3005,21 +3027,25 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => match re.captures(s) {
-                                Some(caps) => {
-                                    let groups: Vec<DataType> = caps.iter()
-                                        .map(|m| match m {
-                                            Some(m) => DataType::String(m.as_str().to_string()),
-                                            None => DataType::Null,
-                                        })
-                                        .collect();
-                                    Ok(DataType::Array(groups))
-                                }
-                                None => Ok(DataType::Array(vec![])),
-                            },
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_captures: {}", e))),
-                        }
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => match re.captures(&s) {
+                                    Some(caps) => {
+                                        let groups: Vec<DataType> = caps.iter()
+                                            .map(|m| match m {
+                                                Some(m) => DataType::String(m.as_str().to_string()),
+                                                None => DataType::Null,
+                                            })
+                                            .collect();
+                                        Ok(DataType::Array(groups))
+                                    }
+                                    None => Ok(DataType::Array(vec![])),
+                                },
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_captures: {}", e))),
+                            }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexCaptures".to_string() }),
                 }
@@ -3028,21 +3054,25 @@ impl OperationEvaluator for FullEvaluator {
                 let pattern = inputs.get("pattern").cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
                     (DataType::String(s), DataType::String(pat)) => {
-                        match compile_regex(pat) {
-                            Ok(re) => {
-                                let matches: Vec<DataType> = re.find_iter(s)
-                                    .take(MAX_ARRAY_ELEMENTS + 1)
-                                    .map(|m| DataType::String(m.as_str().to_string()))
-                                    .collect();
-                                if matches.len() > MAX_ARRAY_ELEMENTS {
-                                    return Err(EvalError::InvalidInput(format!(
-                                        "regex_find_all result exceeds {} element limit", MAX_ARRAY_ELEMENTS
-                                    )));
+                        let s = s.clone();
+                        let pat = pat.clone();
+                        regex_with_timeout(move || {
+                            match compile_regex(&pat) {
+                                Ok(re) => {
+                                    let matches: Vec<DataType> = re.find_iter(&s)
+                                        .take(MAX_ARRAY_ELEMENTS + 1)
+                                        .map(|m| DataType::String(m.as_str().to_string()))
+                                        .collect();
+                                    if matches.len() > MAX_ARRAY_ELEMENTS {
+                                        return Err(EvalError::InvalidInput(format!(
+                                            "regex_find_all result exceeds {} element limit", MAX_ARRAY_ELEMENTS
+                                        )));
+                                    }
+                                    Ok(DataType::Array(matches))
                                 }
-                                Ok(DataType::Array(matches))
+                                Err(e) => Err(EvalError::InvalidInput(format!("regex_find_all: {}", e))),
                             }
-                            Err(e) => Err(EvalError::InvalidInput(format!("regex_find_all: {}", e))),
-                        }
+                        })
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", input.type_name(), pattern.type_name()), context: "RegexFindAll".to_string() }),
                 }
@@ -3073,14 +3103,14 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::FsWrite => {
-                const MAX_FILE_WRITE: usize = 100 * 1024 * 1024; // 100 MB (#274)
+                // Use module-level MAX_FILE_WRITE_SIZE (#274)
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 let content = inputs.get("content").cloned().unwrap_or(DataType::Null);
                 match (&path, &content) {
                     (DataType::String(p), DataType::String(c)) => {
-                        if c.len() > MAX_FILE_WRITE {
+                        if c.len() > MAX_FILE_WRITE_SIZE {
                             return Err(EvalError::InvalidInput(format!(
-                                "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE
+                                "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE_SIZE
                             )));
                         }
                         if let Some(parent) = std::path::Path::new(p.as_str()).parent() {
@@ -3096,9 +3126,9 @@ impl OperationEvaluator for FullEvaluator {
                         }
                     }
                     (DataType::String(p), DataType::Bytes(b)) => {
-                        if b.len() > MAX_FILE_WRITE {
+                        if b.len() > MAX_FILE_WRITE_SIZE {
                             return Err(EvalError::InvalidInput(format!(
-                                "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE
+                                "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE_SIZE
                             )));
                         }
                         if let Some(parent) = std::path::Path::new(p.as_str()).parent() {
@@ -3117,15 +3147,15 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::FsAppend => {
-                const MAX_FILE_WRITE: usize = 100 * 1024 * 1024; // 100 MB (#274)
+                // Use module-level MAX_FILE_WRITE_SIZE (#274)
                 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024; // 256 MB max resulting file
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 let content = inputs.get("content").cloned().unwrap_or(DataType::Null);
                 match (&path, &content) {
                     (DataType::String(p), DataType::String(c)) => {
-                        if c.len() > MAX_FILE_WRITE {
+                        if c.len() > MAX_FILE_WRITE_SIZE {
                             return Err(EvalError::InvalidInput(format!(
-                                "fs_append: content exceeds {} byte limit", MAX_FILE_WRITE
+                                "fs_append: content exceeds {} byte limit", MAX_FILE_WRITE_SIZE
                             )));
                         }
                         use std::io::Write;
@@ -3149,9 +3179,9 @@ impl OperationEvaluator for FullEvaluator {
                         }
                     }
                     (DataType::String(p), DataType::Bytes(b)) => {
-                        if b.len() > MAX_FILE_WRITE {
+                        if b.len() > MAX_FILE_WRITE_SIZE {
                             return Err(EvalError::InvalidInput(format!(
-                                "fs_append: content exceeds {} byte limit", MAX_FILE_WRITE
+                                "fs_append: content exceeds {} byte limit", MAX_FILE_WRITE_SIZE
                             )));
                         }
                         use std::io::Write;

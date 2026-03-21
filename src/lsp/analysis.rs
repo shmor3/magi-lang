@@ -526,12 +526,12 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
         message.push_str(suggestion);
     }
 
-    // #206: Tag unused/deprecated diagnostics so IDEs can render them with fade-out
+    // #206/#207: Tag unused/deprecated diagnostics so IDEs can render them with fade-out
     let tags = d.code.as_deref().and_then(|code| match code {
         "W100" | "W101" | "W103" | "W109" | "W110" | "W202" => {
             Some(vec![DiagnosticTag::UNNECESSARY])
         }
-        "W111" => Some(vec![DiagnosticTag::DEPRECATED]),
+        "W111" | "W114" => Some(vec![DiagnosticTag::DEPRECATED]),
         _ => None,
     });
 
@@ -1476,6 +1476,62 @@ mod tests {
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::DEPRECATED]));
+    }
+
+    #[test]
+    fn test_deprecated_item_has_deprecated_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "deprecated item".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W114".to_string()),
+            help: None, suggestion: None,
+            source_file: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::DEPRECATED]));
+    }
+
+    #[test]
+    fn test_unused_function_has_unnecessary_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "unused function".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W103".to_string()),
+            help: None, suggestion: None,
+            source_file: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[test]
+    fn test_unused_param_has_unnecessary_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "unused parameter".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W109".to_string()),
+            help: None, suggestion: None,
+            source_file: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[test]
+    fn test_unnecessary_let_mut_has_unnecessary_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "unnecessary let mut".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W110".to_string()),
+            help: None, suggestion: None,
+            source_file: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
     }
 
     #[test]

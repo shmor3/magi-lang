@@ -1,15 +1,19 @@
 //! Language Server Protocol implementation for the MAGI language.
 //!
 //! Provides diagnostics, hover, go-to-definition, completion, signature help,
-//! document symbols, code lens, workspace symbols, selection ranges, and formatting.
+//! document symbols, code lens, workspace symbols, selection ranges, formatting,
+//! linked editing ranges, document links, and call hierarchy.
 
 pub mod analysis;
+pub mod call_hierarchy;
 pub mod code_actions;
 pub mod code_lens;
 pub mod completion;
 pub mod definition;
+pub mod document_links;
 pub mod document_symbols;
 pub mod hover;
+pub mod linked_editing;
 pub mod selection_range;
 pub mod signature_help;
 pub mod workspace_symbols;
@@ -107,6 +111,14 @@ impl LanguageServer for MagiLanguageServer {
                 }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                linked_editing_range_provider: Some(
+                    LinkedEditingRangeServerCapabilities::Simple(true),
+                ),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                }),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -363,6 +375,103 @@ impl LanguageServer for MagiLanguageServer {
         })) {
             Ok(ranges) if ranges.is_empty() => Ok(None),
             Ok(ranges) => Ok(Some(ranges)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn linked_editing_range(
+        &self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            linked_editing::handle_linked_editing_range(state, &params)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            document_links::handle_document_links(state, &uri_clone)
+        })) {
+            Ok(links) if links.is_empty() => Ok(None),
+            Ok(links) => Ok(Some(links)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            call_hierarchy::handle_prepare_call_hierarchy(state, &params, &uri_clone)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let uri = &params.item.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            call_hierarchy::handle_incoming_calls(state, &params, &uri_clone)
+        })) {
+            Ok(calls) if calls.is_empty() => Ok(None),
+            Ok(calls) => Ok(Some(calls)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let uri = &params.item.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            call_hierarchy::handle_outgoing_calls(state, &params, &uri_clone)
+        })) {
+            Ok(calls) if calls.is_empty() => Ok(None),
+            Ok(calls) => Ok(Some(calls)),
             Err(_) => Ok(None),
         }
     }
