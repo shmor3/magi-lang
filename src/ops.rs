@@ -48,6 +48,8 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         FromBytes => ChannelType::String,
         ParseJson => ChannelType::Null,
         ToJson => ChannelType::String,
+        CharFromCode => ChannelType::String,
+        CharCode => ChannelType::Int64,
         Typeof => ChannelType::String,
         Default => ChannelType::Null,
 
@@ -372,7 +374,8 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         LoopGroup => &[],
 
         // Type conversion — accepts anything
-        ToString | ToInt64 | ToFloat64 | ToBool | ToBytes | ToJson | Typeof => {
+        ToString | ToInt64 | ToFloat64 | ToBool | ToBytes | ToJson | Typeof
+        | CharFromCode | CharCode => {
             &[("input", Null)]
         }
         FromBytes => &[("input", Bytes)],
@@ -677,7 +680,7 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         Substring | Length | ToUpper | ToLower | Trim | TrimStart | TrimEnd | CharAt | PadStart
         | PadEnd | StringReverse | StringRepeat | StringLines | StringWords
         | ToString | ToInt64 | ToFloat64 | ToBool | ToBytes | FromBytes
-        | ParseJson | ToJson => &["input"],
+        | ParseJson | ToJson | CharFromCode | CharCode => &["input"],
 
         // String ops with specific ports
         Split => &["input", "delimiter"],

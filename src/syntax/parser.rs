@@ -149,7 +149,8 @@ impl Parser {
                 | TokenKind::Defer
                 | TokenKind::Impl
                 | TokenKind::Trait
-                | TokenKind::Output => return,
+                | TokenKind::Output
+                | TokenKind::Go => return,
                 _ => {
                     self.advance();
                 }
@@ -480,6 +481,22 @@ impl Parser {
                     }),
                 }
             }
+            TokenKind::Go => {
+                // `go expr` is an alias for `spawn expr`
+                self.advance(); // consume 'go'
+                let expr = self.parse_expression()?;
+                let end = expr.span;
+                self.eat(&TokenKind::Semicolon);
+                Ok(Statement {
+                    kind: StatementKind::ExprStatement(Expression {
+                        kind: ExpressionKind::Spawn(Box::new(expr)),
+                        span: start.merge(end),
+                    }),
+                    span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                })
+            }
             TokenKind::Ident => {
                 // Could be assignment (x = ...), compound assign (x += ...), or expression
                 self.parse_assignment_or_expr_statement(start)
@@ -608,6 +625,21 @@ impl Parser {
             return self.parse_let_destructure_tuple(start, is_mut);
         }
 
+        // Blank identifier: `let _ = expr;` discards the value
+        if self.at(&TokenKind::Underscore) {
+            self.advance(); // consume '_'
+            self.expect(&TokenKind::Eq)?;
+            let value = self.parse_expression()?;
+            let end = self.peek().span;
+            self.eat(&TokenKind::Semicolon);
+            return Ok(Statement {
+                kind: StatementKind::ExprStatement(value),
+                span: start.merge(end),
+                leading_comments: Vec::new(),
+                trailing_comment: None,
+            });
+        }
+
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
 
@@ -667,6 +699,9 @@ impl Parser {
                 let rest_name = self.expect_identifier()?;
                 elements.push(DestructureElement::Rest(rest_name.text));
                 has_rest = true;
+            } else if self.at(&TokenKind::Underscore) {
+                let tok = self.advance().clone();
+                elements.push(DestructureElement::Name(tok.text));
             } else {
                 let name = self.expect_identifier()?;
                 elements.push(DestructureElement::Name(name.text));
@@ -788,6 +823,9 @@ impl Parser {
                     let rest_tok = self.expect_identifier()?;
                     elements.push(DestructureElement::Rest(rest_tok.text));
                     has_rest = true;
+                } else if self.at(&TokenKind::Underscore) {
+                    let tok = self.advance().clone();
+                    elements.push(DestructureElement::Name(tok.text));
                 } else {
                     let name_tok = self.expect_identifier()?;
                     elements.push(DestructureElement::Name(name_tok.text));
@@ -803,7 +841,11 @@ impl Parser {
             self.advance(); // consume {
             let mut entries = Vec::new();
             while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
-                let key_tok = self.expect_identifier()?;
+                let key_tok = if self.at(&TokenKind::Underscore) {
+                    self.advance().clone()
+                } else {
+                    self.expect_identifier()?
+                };
                 let alias = if self.eat(&TokenKind::Colon) {
                     let alias_tok = self.expect_identifier()?;
                     Some(alias_tok.text)
@@ -817,6 +859,10 @@ impl Parser {
             }
             self.expect(&TokenKind::RBrace)?;
             ForPattern::MapDestructure(entries)
+        } else if self.at(&TokenKind::Underscore) {
+            // Blank identifier: `for _ in ...` discards the loop variable
+            let tok = self.advance().clone();
+            ForPattern::Single(tok.text)
         } else {
             let var_tok = self.expect_identifier()?;
             ForPattern::Single(var_tok.text)
@@ -892,6 +938,27 @@ impl Parser {
                 let end = value.span;
                 return Ok(Statement {
                     kind: StatementKind::CompoundAssign { name: name_tok.text, op, value },
+                    span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                });
+            }
+            // Post-increment/decrement in C-style for update: i++ / i--
+            if self.at(&TokenKind::PlusPlus) {
+                let end = self.peek().span;
+                self.advance();
+                return Ok(Statement {
+                    kind: StatementKind::Increment { name: name_tok.text },
+                    span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                });
+            }
+            if self.at(&TokenKind::MinusMinus) {
+                let end = self.peek().span;
+                self.advance();
+                return Ok(Statement {
+                    kind: StatementKind::Decrement { name: name_tok.text },
                     span: start.merge(end),
                     leading_comments: Vec::new(),
                     trailing_comment: None,
@@ -1456,6 +1523,50 @@ impl Parser {
                 });
             }
 
+            // Short variable declaration: name := expr (Go-style, desugars to let mut)
+            if self.at(&TokenKind::ColonEq) {
+                self.advance(); // consume ':='
+                let value = self.parse_expression()?;
+                let end = self.peek().span;
+                self.eat(&TokenKind::Semicolon);
+                return Ok(Statement {
+                    kind: StatementKind::LetMut {
+                        name: name_tok.text,
+                        type_annotation: None,
+                        value,
+                    },
+                    span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                });
+            }
+
+            // Post-increment: name++
+            if self.at(&TokenKind::PlusPlus) {
+                let end = self.peek().span;
+                self.advance(); // consume '++'
+                self.eat(&TokenKind::Semicolon);
+                return Ok(Statement {
+                    kind: StatementKind::Increment { name: name_tok.text },
+                    span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                });
+            }
+
+            // Post-decrement: name--
+            if self.at(&TokenKind::MinusMinus) {
+                let end = self.peek().span;
+                self.advance(); // consume '--'
+                self.eat(&TokenKind::Semicolon);
+                return Ok(Statement {
+                    kind: StatementKind::Decrement { name: name_tok.text },
+                    span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                });
+            }
+
             // Compound assignment: name += expr, name -= expr, etc.
             let compound_op = match self.peek_kind() {
                 TokenKind::PlusEq => Some(BinOp::Add),
@@ -1862,10 +1973,10 @@ impl Parser {
             });
         }
 
-        if self.at(&TokenKind::Spawn) {
+        if self.at(&TokenKind::Spawn) || self.at(&TokenKind::Go) {
             self.advance();
             let operand = if self.at(&TokenKind::LBrace) {
-                // spawn { block }
+                // spawn { block } / go { block }
                 let block = self.parse_block()?;
                 Expression {
                     span: block.span,

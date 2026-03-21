@@ -1149,6 +1149,40 @@ impl TypeChecker {
                 }
             }
 
+            // name++ / name-- (increment/decrement)
+            StatementKind::Increment { name } | StatementKind::Decrement { name } => {
+                let (exists, is_mutable) = match self.lookup(name) {
+                    Some(info) => (true, info.mutable),
+                    None => (false, false),
+                };
+
+                if !exists {
+                    let suggestion = self.suggest_variable(name);
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        format!("undefined variable '{}'", name),
+                        DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E200,
+                        suggestion,
+                    );
+                } else if !is_mutable {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        format!("cannot assign to immutable variable '{}'", name),
+                        DiagnosticSeverity::Error,
+                        super::errors::ErrorCode::E404,
+                        None,
+                    );
+                }
+
+                if let Some(info) = self.lookup_mut(name) {
+                    info.used = true;
+                    info.mutated = true;
+                }
+            }
+
             // Field assignment: obj.field = value (#7)
             StatementKind::FieldAssignment { object, field: _, value } => {
                 self.infer_expr(object);
@@ -4979,7 +5013,8 @@ output r;"#,
 
     #[test]
     fn test_double_negation_warns() {
-        let a = check("let x = 5;\nlet r = --x;\noutput r;");
+        // With ++/-- operators, `--x` is now decrement; use `-(-x)` for double negation
+        let a = check("let x = 5;\nlet r = -(-x);\noutput r;");
         let w = warnings(&a);
         assert!(w
             .iter()

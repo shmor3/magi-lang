@@ -301,6 +301,10 @@ pub enum StatementKind {
         names: Vec<String>,
         value: Expression,
     },
+    /// `name++;` — post-increment statement (desugars to `name += 1`)
+    Increment { name: String },
+    /// `name--;` — post-decrement statement (desugars to `name -= 1`)
+    Decrement { name: String },
 }
 
 /// Pattern for for-loop iteration variable binding.

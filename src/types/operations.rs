@@ -94,7 +94,7 @@ pub enum OperationType {
     StringJoin,
     StringTemplate,
 
-    // Type Conversion (8)
+    // Type Conversion (10)
     ToString,
     ToInt64,
     ToFloat64,
@@ -103,6 +103,8 @@ pub enum OperationType {
     FromBytes,
     ParseJson,
     ToJson,
+    CharFromCode,
+    CharCode,
 
     // Array (17)
     ArrayGet,
@@ -606,6 +608,8 @@ impl OperationType {
             OperationType::FromBytes => "from_bytes",
             OperationType::ParseJson => "parse_json",
             OperationType::ToJson => "to_json",
+            OperationType::CharFromCode => "char_from_code",
+            OperationType::CharCode => "char_code",
             OperationType::ArrayGet => "array_get",
             OperationType::ArraySet => "array_set",
             OperationType::ArrayPush => "array_push",
@@ -1054,6 +1058,8 @@ impl OperationType {
             "from_bytes" => Some(OperationType::FromBytes),
             "parse_json" => Some(OperationType::ParseJson),
             "to_json" => Some(OperationType::ToJson),
+            "char_from_code" => Some(OperationType::CharFromCode),
+            "char_code" => Some(OperationType::CharCode),
             "array_get" => Some(OperationType::ArrayGet),
             "array_set" => Some(OperationType::ArraySet),
             "array_push" => Some(OperationType::ArrayPush),

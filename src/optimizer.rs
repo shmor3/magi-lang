@@ -68,6 +68,9 @@ fn fold_statement(stmt: &mut Statement) {
         StatementKind::TupleAssignment { value, .. } => {
             fold_expr(value);
         }
+        StatementKind::Increment { .. } | StatementKind::Decrement { .. } => {
+            // No sub-expressions to fold
+        }
         StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
             for param in &mut fdef.params {
                 if let Some(default) = &mut param.default {

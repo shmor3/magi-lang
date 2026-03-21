@@ -1147,6 +1147,7 @@ impl<'a> Interpreter<'a> {
 
         // Pass 2: determine execution mode
         let has_main = self.functions.contains_key("main");
+        let has_init = self.functions.contains_key("init");
 
         if has_main {
             // Process imports, use statements, and top-level declarations, then call main()
@@ -1172,7 +1173,19 @@ impl<'a> Interpreter<'a> {
                 .map(|(name, entry)| (name.clone(), self.heap.read(entry.addr).cloned().unwrap_or(DataType::Null), entry.mutable))
                 .collect();
             if !globals.is_empty() {
-                self.closure_captures.insert("main".to_string(), globals);
+                self.closure_captures.insert("main".to_string(), globals.clone());
+                if has_init {
+                    self.closure_captures.insert("init".to_string(), globals);
+                }
+            }
+            // Run init() before main() if it exists (Go-style initialization)
+            if has_init {
+                let init_span = self
+                    .functions
+                    .get("init")
+                    .map(|f| f.span)
+                    .unwrap_or_default();
+                self.call_function("init", &[], init_span)?;
             }
             let main_span = self
                 .functions
@@ -1678,6 +1691,94 @@ impl<'a> Interpreter<'a> {
                         span: stmt.span,
                     }
                 })?;
+                self.heap.write(addr, result.clone());
+                Ok(result)
+            }
+
+            // Post-increment: name++ (desugars to name += 1)
+            StatementKind::Increment { name } => {
+                let (addr, mutable) = match self.lookup(name) {
+                    Some(entry) => (entry.addr, entry.mutable),
+                    None => {
+                        let suggestion = self.suggest_variable(name);
+                        return Err(InterpError::UndefinedVariable {
+                            name: name.clone(),
+                            span: stmt.span,
+                            suggestion,
+                        });
+                    }
+                };
+                if !mutable {
+                    return Err(InterpError::ImmutableAssignment {
+                        name: name.clone(),
+                        span: stmt.span,
+                    });
+                }
+                let current = self.heap.read(addr).cloned().ok_or_else(|| {
+                    InterpError::UndefinedVariable {
+                        name: name.clone(),
+                        span: stmt.span,
+                        suggestion: None,
+                    }
+                })?;
+                let result = match current {
+                    DataType::Int64(n) => DataType::Int64(n.wrapping_add(1)),
+                    DataType::Float64(n) => DataType::Float64(n + 1.0),
+                    DataType::Int32(n) => DataType::Int32(n.wrapping_add(1)),
+                    DataType::Uint32(n) => DataType::Uint32(n.wrapping_add(1)),
+                    DataType::Uint64(n) => DataType::Uint64(n.wrapping_add(1)),
+                    DataType::Float32(n) => DataType::Float32(n + 1.0),
+                    _ => return Err(InterpError::TypeError {
+                        expected: "number".to_string(),
+                        actual: current.type_name().to_string(),
+                        context: "increment (++)".to_string(),
+                        span: stmt.span,
+                    }),
+                };
+                self.heap.write(addr, result.clone());
+                Ok(result)
+            }
+
+            // Post-decrement: name-- (desugars to name -= 1)
+            StatementKind::Decrement { name } => {
+                let (addr, mutable) = match self.lookup(name) {
+                    Some(entry) => (entry.addr, entry.mutable),
+                    None => {
+                        let suggestion = self.suggest_variable(name);
+                        return Err(InterpError::UndefinedVariable {
+                            name: name.clone(),
+                            span: stmt.span,
+                            suggestion,
+                        });
+                    }
+                };
+                if !mutable {
+                    return Err(InterpError::ImmutableAssignment {
+                        name: name.clone(),
+                        span: stmt.span,
+                    });
+                }
+                let current = self.heap.read(addr).cloned().ok_or_else(|| {
+                    InterpError::UndefinedVariable {
+                        name: name.clone(),
+                        span: stmt.span,
+                        suggestion: None,
+                    }
+                })?;
+                let result = match current {
+                    DataType::Int64(n) => DataType::Int64(n.wrapping_sub(1)),
+                    DataType::Float64(n) => DataType::Float64(n - 1.0),
+                    DataType::Int32(n) => DataType::Int32(n.wrapping_sub(1)),
+                    DataType::Uint32(n) => DataType::Uint32(n.wrapping_sub(1)),
+                    DataType::Uint64(n) => DataType::Uint64(n.wrapping_sub(1)),
+                    DataType::Float32(n) => DataType::Float32(n - 1.0),
+                    _ => return Err(InterpError::TypeError {
+                        expected: "number".to_string(),
+                        actual: current.type_name().to_string(),
+                        context: "decrement (--)".to_string(),
+                        span: stmt.span,
+                    }),
+                };
                 self.heap.write(addr, result.clone());
                 Ok(result)
             }
@@ -2771,6 +2872,10 @@ impl<'a> Interpreter<'a> {
                         flatten_map(map, "", &separator, &mut result);
                         Ok(Some(DataType::Map(result)))
                     }
+                    // clear() — returns empty map
+                    "clear" => Ok(Some(DataType::Map(indexmap::IndexMap::new()))),
+                    // is_empty() — check if map has no entries
+                    "is_empty" => Ok(Some(DataType::Bool(map.is_empty()))),
                     _ => Ok(None),
                 }
             }
@@ -3369,6 +3474,65 @@ impl<'a> Interpreter<'a> {
                 "byte_length" | "byte_len" => {
                     Ok(Some(DataType::Int64(s.len() as i64)))
                 }
+                "splitn" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "splitn".into(), expected: "2".into(), actual: args.len(), span }); }
+                    let sep = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "splitn separator".into(), span }) };
+                    let n = self.eval_expr(&args[1])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "splitn count".into(), span })?.max(0) as usize;
+                    if sep.is_empty() { return Err(InterpError::TypeError { expected: "non-empty separator".into(), actual: "empty string".into(), context: "splitn separator".into(), span }); }
+                    let parts: Vec<DataType> = s.splitn(n, &sep).map(|p| DataType::String(p.to_string())).collect();
+                    Ok(Some(DataType::Array(parts)))
+                }
+                "replacen" => {
+                    if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "replacen".into(), expected: "3".into(), actual: args.len(), span }); }
+                    let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "replacen pattern".into(), span }) };
+                    let to = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "replacen replacement".into(), span }) };
+                    let count = self.eval_expr(&args[2])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "replacen count".into(), span })?.max(0) as usize;
+                    let result = s.replacen(&from, &to, count);
+                    if result.len() > MAX_STRING_OUTPUT { return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result.len()), context: "replacen".into(), span }); }
+                    Ok(Some(DataType::String(result)))
+                }
+                "rfind" | "last_index_of" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "rfind".into(), expected: "1".into(), actual: 0, span }); }
+                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "rfind argument".into(), span }) };
+                    Ok(Some(match s.rfind(&needle) { Some(byte_idx) => DataType::Int64(s[..byte_idx].chars().count() as i64), None => DataType::Null }))
+                }
+                "find" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find".into(), expected: "1".into(), actual: 0, span }); }
+                    let needle = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "find argument".into(), span }) };
+                    Ok(Some(match s.find(&needle) { Some(byte_idx) => DataType::Int64(s[..byte_idx].chars().count() as i64), None => DataType::Null }))
+                }
+                "bytes" | "as_bytes" => {
+                    if s.len() > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", s.len()), context: "bytes".into(), span }); }
+                    Ok(Some(DataType::Bytes(s.as_bytes().to_vec())))
+                }
+                "push_str" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "push_str".into(), expected: "1".into(), actual: 0, span }); }
+                    let suffix = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => other.to_string_lossy() };
+                    let result = format!("{}{}", s, suffix);
+                    if result.len() > MAX_STRING_OUTPUT { return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result.len()), context: "push_str".into(), span }); }
+                    Ok(Some(DataType::String(result)))
+                }
+                "insert" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "insert".into(), expected: "2".into(), actual: args.len(), span }); }
+                    let idx = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "insert index".into(), span })?.max(0) as usize;
+                    let substr = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => other.to_string_lossy() };
+                    let char_len = s.chars().count();
+                    let insert_at = idx.min(char_len);
+                    let prefix: String = s.chars().take(insert_at).collect();
+                    let tail: String = s.chars().skip(insert_at).collect();
+                    let result = format!("{}{}{}", prefix, substr, tail);
+                    if result.len() > MAX_STRING_OUTPUT { return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result.len()), context: "insert".into(), span }); }
+                    Ok(Some(DataType::String(result)))
+                }
+                "remove" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "remove".into(), expected: "1".into(), actual: 0, span }); }
+                    let idx = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "remove index".into(), span })?;
+                    let char_len = s.chars().count() as i64;
+                    let actual_idx = if idx < 0 { (char_len + idx).max(0) as usize } else { idx as usize };
+                    if actual_idx >= char_len as usize { Ok(Some(DataType::String(s.to_string()))) }
+                    else { Ok(Some(DataType::String(s.chars().enumerate().filter(|(i, _)| *i != actual_idx).map(|(_, c)| c).collect()))) }
+                }
+                "clear" => Ok(Some(DataType::String(String::new()))),
                 _ => Ok(None),
             },
             // Array methods (direct, no OperationEvaluator needed)
@@ -3744,6 +3908,78 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     Ok(Some(DataType::Array(result)))
+                }
+                // take(n) — first n elements (like Rust iter.take)
+                "take" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "take".into(), expected: "1".into(), actual: 0, span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "take count".into(), span })?.max(0) as usize;
+                    Ok(Some(DataType::Array(arr.iter().take(n).cloned().collect())))
+                }
+                // skip(n) — skip first n elements (like Rust iter.skip)
+                "skip" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "skip".into(), expected: "1".into(), actual: 0, span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "skip count".into(), span })?.max(0) as usize;
+                    Ok(Some(DataType::Array(arr.iter().skip(n).cloned().collect())))
+                }
+                // chain(other) — concatenate two arrays (like Rust iter.chain)
+                "chain" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "chain".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_arr = match other { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".into(), actual: other.type_name().into(), context: "chain argument".into(), span }) };
+                    let total = arr.len() + other_arr.len();
+                    if total > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", total), context: "chain".into(), span }); }
+                    let mut result = arr.clone();
+                    result.extend(other_arr);
+                    Ok(Some(DataType::Array(result)))
+                }
+                // rev() — reverse (alias, like Rust iter.rev)
+                "rev" => {
+                    let mut reversed = arr.clone();
+                    reversed.reverse();
+                    Ok(Some(DataType::Array(reversed)))
+                }
+                // cycle(n) — repeat array n times (like Rust iter.cycle().take())
+                "cycle" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cycle".into(), expected: "1".into(), actual: 0, span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "cycle count".into(), span })?.max(0) as usize;
+                    let total = arr.len().saturating_mul(n);
+                    if total > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", total), context: "cycle".into(), span }); }
+                    let mut result = Vec::with_capacity(total);
+                    for _ in 0..n { result.extend_from_slice(arr); }
+                    Ok(Some(DataType::Array(result)))
+                }
+                // append(...values) — like Go append
+                "append" => {
+                    let mut result = arr.clone();
+                    for arg in args {
+                        let val = self.eval_expr(arg)?;
+                        result.push(val);
+                    }
+                    if result.len() > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", result.len()), context: "append".into(), span }); }
+                    Ok(Some(DataType::Array(result)))
+                }
+                // clear() — return empty array
+                "clear" => Ok(Some(DataType::Array(Vec::new()))),
+                // position(fn) — like Rust iter.position (alias for find_index)
+                "position" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "position".into(), expected: "1".into(), actual: 0, span }); }
+                    for (i, item) in arr.iter().enumerate() {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        let result = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                        if result.to_bool() { return Ok(Some(DataType::Int64(i as i64))); }
+                    }
+                    Ok(Some(DataType::Null))
+                }
+                // count(fn?) — like Rust iter.count; with fn counts matching
+                "count" => {
+                    if args.is_empty() { return Ok(Some(DataType::Int64(arr.len() as i64))); }
+                    let mut cnt: i64 = 0;
+                    for item in arr {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        let result = self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                        if result.to_bool() { cnt += 1; }
+                    }
+                    Ok(Some(DataType::Int64(cnt)))
                 }
                 _ => Ok(None),
             },
@@ -4748,6 +4984,263 @@ impl<'a> Interpreter<'a> {
                             other => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("encode: unsupported encoding '{}' (supported: utf8, utf16-le, utf16-be, ascii)", other)), span: expr.span }),
                         };
                         return Ok(DataType::Bytes(bytes));
+                    }
+                    // ---- Go/Rust-inspired built-in functions ----
+                    // panic(msg) — halt with error (like Go panic / Rust panic!)
+                    "panic" => {
+                        let msg = if let Some(arg) = args.first() {
+                            let val = self.eval_expr(arg)?;
+                            datatype_to_display(&val)
+                        } else {
+                            "explicit panic".to_string()
+                        };
+                        return Err(InterpError::ThrownError {
+                            value: DataType::String(format!("panic: {}", msg)),
+                            span: expr.span,
+                        });
+                    }
+                    // recover() — used inside catch block to get panic value (identity in MAGI)
+                    "recover" => {
+                        // In MAGI, recover is a no-op outside catch — returns null
+                        // Inside a catch block, the error is already captured in the catch variable
+                        return Ok(DataType::Null);
+                    }
+                    // append(array, ...values) — like Go append, returns new array
+                    "append" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "append".to_string(), expected: "2+".to_string(), actual: 0, span: expr.span }); }
+                        let base = self.eval_expr(&args[0])?;
+                        let mut arr = match base { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "append".to_string(), span: expr.span }) };
+                        for arg in &args[1..] {
+                            let val = self.eval_expr(arg)?;
+                            // If appending an array with spread semantics like Go, flatten it
+                            arr.push(val);
+                        }
+                        if arr.len() > MAX_ARRAY_ELEMENTS {
+                            return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", arr.len()), context: "append".to_string(), span: expr.span });
+                        }
+                        return Ok(DataType::Array(arr));
+                    }
+                    // copy(dst, src) — like Go copy, copies elements from src into dst, returns count copied
+                    "copy" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "copy".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let dst = self.eval_expr(&args[0])?;
+                        let src = self.eval_expr(&args[1])?;
+                        match (&dst, &src) {
+                            (DataType::Array(d), DataType::Array(s)) => {
+                                let count = d.len().min(s.len());
+                                let mut result = d.clone();
+                                for i in 0..count {
+                                    result[i] = s[i].clone();
+                                }
+                                return Ok(DataType::Array(result));
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "Array, Array".to_string(), actual: format!("{}, {}", dst.type_name(), src.type_name()), context: "copy".to_string(), span: expr.span }),
+                        }
+                    }
+                    // delete(map, key) — like Go delete, removes key from map
+                    "delete" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "delete".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let map_val = self.eval_expr(&args[0])?;
+                        let key_val = self.eval_expr(&args[1])?;
+                        match (map_val, key_val) {
+                            (DataType::Map(mut m), DataType::String(k)) => {
+                                m.shift_remove(&k);
+                                return Ok(DataType::Map(m));
+                            }
+                            (DataType::Map(_), other) => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "delete key".to_string(), span: expr.span }),
+                            (other, _) => return Err(InterpError::TypeError { expected: "Map".to_string(), actual: other.type_name().to_string(), context: "delete".to_string(), span: expr.span }),
+                        }
+                    }
+                    // clear(collection) — like Go clear, returns empty version of same type
+                    "clear" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "clear".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match val {
+                            DataType::Array(_) => Ok(DataType::Array(Vec::new())),
+                            DataType::Map(_) => Ok(DataType::Map(IndexMap::new())),
+                            DataType::Set(_) => Ok(DataType::Set(Vec::new())),
+                            DataType::String(_) => Ok(DataType::String(String::new())),
+                            DataType::Bytes(_) => Ok(DataType::Bytes(Vec::new())),
+                            other => Err(InterpError::TypeError { expected: "Array, Map, Set, String, or Bytes".to_string(), actual: other.type_name().to_string(), context: "clear".to_string(), span: expr.span }),
+                        };
+                    }
+                    // cap(collection) — like Go cap, returns capacity (for MAGI, same as len)
+                    "cap" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cap".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match &val {
+                            DataType::Array(a) => Ok(DataType::Int64(a.len() as i64)),
+                            DataType::String(s) => Ok(DataType::Int64(s.len() as i64)),
+                            DataType::Bytes(b) => Ok(DataType::Int64(b.len() as i64)),
+                            other => Err(InterpError::TypeError { expected: "Array, String, or Bytes".to_string(), actual: other.type_name().to_string(), context: "cap".to_string(), span: expr.span }),
+                        };
+                    }
+                    // make(type_str, size?) — like Go make, creates collection of given type
+                    "make" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "make".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span }); }
+                        let type_val = self.eval_expr(&args[0])?;
+                        let type_name = match &type_val { DataType::String(s) => s.clone(), other => other.to_string_lossy() };
+                        let size = if args.len() > 1 {
+                            let s = self.eval_expr(&args[1])?;
+                            s.to_i64().unwrap_or(0).max(0) as usize
+                        } else { 0 };
+                        if size > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", size), context: "make".to_string(), span: expr.span }); }
+                        return match type_name.as_str() {
+                            "array" | "Array" => Ok(DataType::Array(vec![DataType::Null; size])),
+                            "map" | "Map" => Ok(DataType::Map(IndexMap::new())),
+                            "set" | "Set" => Ok(DataType::Set(Vec::new())),
+                            "bytes" | "Bytes" => Ok(DataType::Bytes(vec![0u8; size])),
+                            "string" | "String" => Ok(DataType::String(String::new())),
+                            _ => Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("make: unknown type '{}' (supported: array, map, set, bytes, string)", type_name)), span: expr.span }),
+                        };
+                    }
+                    // min(a, b, ...) — variadic min, like Go min
+                    "min" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1+".to_string(), actual: 0, span: expr.span }); }
+                        // If single arg is array, delegate to array.min()
+                        if args.len() == 1 {
+                            let val = self.eval_expr(&args[0])?;
+                            if let DataType::Array(arr) = &val {
+                                if arr.is_empty() { return Ok(DataType::Null); }
+                                let mut min = arr[0].clone();
+                                for item in &arr[1..] {
+                                    if let (Some(a), Some(b)) = (min.to_f64(), item.to_f64()) {
+                                        if b < a || a.is_nan() { min = item.clone(); }
+                                    }
+                                }
+                                return Ok(min);
+                            }
+                            return Ok(val);
+                        }
+                        let mut min_val = self.eval_expr(&args[0])?;
+                        for arg in &args[1..] {
+                            let val = self.eval_expr(arg)?;
+                            match (&min_val, &val) {
+                                (DataType::String(a), DataType::String(b)) => { if b < a { min_val = val; } }
+                                _ => {
+                                    if let (Some(a), Some(b)) = (min_val.to_f64(), val.to_f64()) {
+                                        if b < a || a.is_nan() { min_val = val; }
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(min_val);
+                    }
+                    // max(a, b, ...) — variadic max, like Go max
+                    "max" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1+".to_string(), actual: 0, span: expr.span }); }
+                        if args.len() == 1 {
+                            let val = self.eval_expr(&args[0])?;
+                            if let DataType::Array(arr) = &val {
+                                if arr.is_empty() { return Ok(DataType::Null); }
+                                let mut max = arr[0].clone();
+                                for item in &arr[1..] {
+                                    if let (Some(a), Some(b)) = (max.to_f64(), item.to_f64()) {
+                                        if b > a || a.is_nan() { max = item.clone(); }
+                                    }
+                                }
+                                return Ok(max);
+                            }
+                            return Ok(val);
+                        }
+                        let mut max_val = self.eval_expr(&args[0])?;
+                        for arg in &args[1..] {
+                            let val = self.eval_expr(arg)?;
+                            match (&max_val, &val) {
+                                (DataType::String(a), DataType::String(b)) => { if b > a { max_val = val; } }
+                                _ => {
+                                    if let (Some(a), Some(b)) = (max_val.to_f64(), val.to_f64()) {
+                                        if b > a || a.is_nan() { max_val = val; }
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(max_val);
+                    }
+                    // expect(value, msg) — like Rust .expect(), unwraps or panics with message
+                    "expect" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "expect".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let msg = if args.len() > 1 {
+                            let m = self.eval_expr(&args[1])?;
+                            datatype_to_display(&m)
+                        } else {
+                            "called expect on None/Err value".to_string()
+                        };
+                        return match val {
+                            DataType::Null => Err(InterpError::ThrownError { value: DataType::String(msg), span: expr.span }),
+                            DataType::Map(ref m) if m.contains_key("ok") => Ok(m.get("ok").cloned().unwrap_or(DataType::Null)),
+                            DataType::Map(ref m) if m.contains_key("err") => Err(InterpError::ThrownError { value: DataType::String(msg), span: expr.span }),
+                            other => Ok(other),
+                        };
+                    }
+                    // map_err(result, fn) — like Rust .map_err(), transforms the error value
+                    "map_err" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "map_err".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match val {
+                            DataType::Map(ref m) if m.contains_key("err") => {
+                                let err_val = m.get("err").cloned().unwrap_or(DataType::Null);
+                                let mapped = self.call_lambda_with_args(&args[1], &[err_val], expr.span)?;
+                                let mut result = IndexMap::new();
+                                result.insert("err".to_string(), mapped);
+                                Ok(DataType::Map(result))
+                            }
+                            other => Ok(other), // Pass through Ok/non-Result values unchanged
+                        };
+                    }
+                    // and_then(result, fn) — like Rust .and_then(), chains on Ok
+                    "and_then" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "and_then".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match val {
+                            DataType::Null => Ok(DataType::Null),
+                            DataType::Map(ref m) if m.contains_key("err") => Ok(val),
+                            DataType::Map(ref m) if m.contains_key("ok") => {
+                                let ok_val = m.get("ok").cloned().unwrap_or(DataType::Null);
+                                self.call_lambda_with_args(&args[1], &[ok_val], expr.span)
+                            }
+                            other => self.call_lambda_with_args(&args[1], &[other], expr.span),
+                        };
+                    }
+                    // or_else(result, fn) — like Rust .or_else(), chains on Err
+                    "or_else" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "or_else".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match val {
+                            DataType::Null => self.call_lambda_with_args(&args[1], &[DataType::Null], expr.span),
+                            DataType::Map(ref m) if m.contains_key("err") => {
+                                let err_val = m.get("err").cloned().unwrap_or(DataType::Null);
+                                self.call_lambda_with_args(&args[1], &[err_val], expr.span)
+                            }
+                            other => Ok(other), // Pass through Ok values unchanged
+                        };
+                    }
+                    // ok_or(value, err_value) — like Rust .ok_or(), wraps non-null in Ok, null in Err
+                    "ok_or" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ok_or".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let err_val = self.eval_expr(&args[1])?;
+                        return match val {
+                            DataType::Null => {
+                                let mut m = IndexMap::new();
+                                m.insert("err".to_string(), err_val);
+                                Ok(DataType::Map(m))
+                            }
+                            other => {
+                                let mut m = IndexMap::new();
+                                m.insert("ok".to_string(), other);
+                                Ok(DataType::Map(m))
+                            }
+                        };
+                    }
+                    // close(channel_id) — alias for chan_close (Go close)
+                    "close" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "close".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let id_val = self.eval_expr(&args[0])?;
+                        let id = match &id_val { DataType::String(s) => s.clone(), other => return Err(InterpError::TypeError { expected: "String (channel ID)".to_string(), actual: other.type_name().to_string(), context: "close".to_string(), span: expr.span }) };
+                        channel_remove(&id).map_err(|e| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span })?;
+                        return Ok(DataType::Null);
                     }
                     // Array binary_search_by builtin (#112)
                     "binary_search_by" => {
@@ -6538,10 +7031,13 @@ impl<'a> Interpreter<'a> {
                 let evaluated_args: Vec<DataType> = args.iter()
                     .map(|a| self.eval_expr(a))
                     .collect::<Result<_, _>>()?;
+                // Compute iota (variant ordinal position)
+                let iota = variants.iter().position(|v| v.name == *variant).unwrap_or(0) as i64;
                 let mut map = indexmap::IndexMap::new();
                 map.insert("__enum".to_string(), DataType::String(enum_name.clone()));
                 map.insert("__variant".to_string(), DataType::String(variant.clone()));
                 map.insert("__data".to_string(), DataType::Array(evaluated_args));
+                map.insert("__iota".to_string(), DataType::Int64(iota));
                 Ok(DataType::Map(map))
             }
 
@@ -7664,6 +8160,8 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "is_map",
             "is_bool",
             "is_bytes",
+            "char_from_code",
+            "char_code",
         ],
         "array" => vec![
             "array_get",
@@ -8175,6 +8673,7 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
             "pad_start" => Some(OperationType::PadStart),
             "pad_end" => Some(OperationType::PadEnd),
             "char_at" => Some(OperationType::CharAt),
+            "char_code" => Some(OperationType::CharCode),
             _ => None,
         },
         DataType::Map(_) => match method {
@@ -8212,6 +8711,8 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
         "to_bool" => Some(OperationType::ToBool),
         "to_json" => Some(OperationType::ToJson),
         "typeof" => Some(OperationType::Typeof),
+        "char_from_code" => Some(OperationType::CharFromCode),
+        "char_code" => Some(OperationType::CharCode),
         _ => None,
     })
 }
@@ -8232,6 +8733,8 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
             methods.extend_from_slice(&["push", "pop", "shift", "len", "length", "get", "set",
                 "slice", "contains", "sort", "reverse", "concat",
                 "unique", "insert", "remove", "filter_nulls", "window"]);
+            // Go/Rust-inspired methods
+            methods.extend_from_slice(&["take", "skip", "chain", "rev", "cycle", "append", "clear", "position", "count"]);
         }
         DataType::String(_) => {
             // Direct methods
@@ -8244,6 +8747,9 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
             // Evaluator methods
             methods.extend_from_slice(&["split", "contains", "replace", "starts_with", "ends_with",
                 "words", "count"]);
+            // Go/Rust-inspired methods
+            methods.extend_from_slice(&["splitn", "replacen", "rfind", "last_index_of", "find",
+                "bytes", "as_bytes", "push_str", "insert", "remove", "clear"]);
         }
         DataType::Int64(_) => {
             methods.extend_from_slice(&["abs", "sign", "pow", "min", "max", "clamp"]);
@@ -8272,7 +8778,8 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
         DataType::Map(_) => {
             methods.extend_from_slice(&["get", "set", "delete", "has", "keys", "values", "entries",
                 "merge", "len", "length", "size",
-                "invert", "defaults", "pick", "omit", "deep_merge", "flatten_keys"]);
+                "invert", "defaults", "pick", "omit", "deep_merge", "flatten_keys",
+                "clear", "is_empty"]);
             // HOF methods
             methods.extend_from_slice(&["filter_entries", "map_values", "map_keys", "map_entries"]);
         }

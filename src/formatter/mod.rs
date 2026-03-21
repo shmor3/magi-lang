@@ -566,6 +566,14 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression(value);
                 self.write(";");
             }
+            StatementKind::Increment { name } => {
+                self.write(name);
+                self.write("++;");
+            }
+            StatementKind::Decrement { name } => {
+                self.write(name);
+                self.write("--;");
+            }
         }
     }
 
@@ -593,6 +601,14 @@ impl<'a> Formatter<'a> {
                 self.write(name);
                 self.write(&format!(" {}= ", op));
                 self.fmt_expression(value);
+            }
+            StatementKind::Increment { name } => {
+                self.write(name);
+                self.write("++");
+            }
+            StatementKind::Decrement { name } => {
+                self.write(name);
+                self.write("--");
             }
             StatementKind::ExprStatement(expr) => {
                 self.fmt_expression(expr);
@@ -729,7 +745,18 @@ impl<'a> Formatter<'a> {
                     self.write("(");
                 }
                 self.write(&op.to_string());
+                // Avoid ambiguity: `--x` is now decrement, so `-(-x)` must keep parens
+                let inner_needs_parens = matches!(
+                    (&op, &operand.kind),
+                    (UnOp::Neg, ExpressionKind::UnaryOp { op: UnOp::Neg, .. })
+                );
+                if inner_needs_parens {
+                    self.write("(");
+                }
                 self.fmt_expression_prec(operand, 7); // High precedence for unary
+                if inner_needs_parens {
+                    self.write(")");
+                }
                 if needs_parens {
                     self.write(")");
                 }

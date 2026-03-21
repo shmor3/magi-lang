@@ -863,6 +863,36 @@ impl Compiler {
                     }
                 }
             }
+
+            StatementKind::Increment { name } => {
+                if let Some(idx) = self.resolve_local(name) {
+                    self.emit(Instruction::LocalGet(idx));
+                    self.emit(Instruction::PushI64(1));
+                    self.emit(Instruction::I64Add);
+                    self.emit(Instruction::LocalSet(idx));
+                } else {
+                    return Err(CompileError::at(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        &format!("undefined variable in increment: {}", name),
+                    ));
+                }
+            }
+
+            StatementKind::Decrement { name } => {
+                if let Some(idx) = self.resolve_local(name) {
+                    self.emit(Instruction::LocalGet(idx));
+                    self.emit(Instruction::PushI64(1));
+                    self.emit(Instruction::I64Sub);
+                    self.emit(Instruction::LocalSet(idx));
+                } else {
+                    return Err(CompileError::at(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        &format!("undefined variable in decrement: {}", name),
+                    ));
+                }
+            }
         }
         Ok(())
     }

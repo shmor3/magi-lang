@@ -83,6 +83,8 @@ pub enum TokenKind {
     // do-while and defer
     Do,
     Defer,
+    // Go keyword (alias for spawn)
+    Go,
     /// A reserved keyword that cannot be used as an identifier.
     Reserved,
 
@@ -127,6 +129,9 @@ pub enum TokenKind {
     DotDotEq,         // ..=
     DotDotDot,        // ...
     Question,         // ? (standalone, error propagation)
+    PlusPlus,         // ++ (post-increment)
+    MinusMinus,       // -- (post-decrement)
+    ColonEq,          // := (short variable declaration)
 
     // Delimiters
     LParen,     // (
@@ -191,6 +196,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Trait => "trait",
             TokenKind::Do => "do",
             TokenKind::Defer => "defer",
+            TokenKind::Go => "go",
             TokenKind::Reserved => "reserved keyword",
             TokenKind::IntLiteral => "integer",
             TokenKind::FloatLiteral => "float",
@@ -227,6 +233,9 @@ impl fmt::Display for TokenKind {
             TokenKind::DotDotEq => "..=",
             TokenKind::DotDotDot => "...",
             TokenKind::Question => "?",
+            TokenKind::PlusPlus => "++",
+            TokenKind::MinusMinus => "--",
+            TokenKind::ColonEq => ":=",
             TokenKind::LParen => "(",
             TokenKind::RParen => ")",
             TokenKind::LBracket => "[",
@@ -523,6 +532,14 @@ impl<'a> Lexer<'a> {
                         text: "+=".to_string(),
                     });
                 }
+                if self.peek() == Some(b'+') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::PlusPlus,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "++".to_string(),
+                    });
+                }
                 return Ok(Token {
                     kind: TokenKind::Plus,
                     span: self.span_point(start_line, start_col),
@@ -585,6 +602,14 @@ impl<'a> Lexer<'a> {
                         kind: TokenKind::ColonColon,
                         span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "::".to_string(),
+                    });
+                }
+                if self.peek() == Some(b'=') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::ColonEq,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: ":=".to_string(),
                     });
                 }
                 return Ok(Token {
@@ -784,6 +809,14 @@ impl<'a> Lexer<'a> {
                         kind: TokenKind::MinusEq,
                         span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "-=".to_string(),
+                    });
+                }
+                if self.peek() == Some(b'-') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::MinusMinus,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "--".to_string(),
                     });
                 }
                 return Ok(Token {
@@ -1555,6 +1588,7 @@ impl<'a> Lexer<'a> {
             "trait" => TokenKind::Trait,
             "do" => TokenKind::Do,
             "defer" => TokenKind::Defer,
+            "go" => TokenKind::Go,
             s if is_reserved_keyword(s) => TokenKind::Reserved,
             _ => TokenKind::Ident,
         };

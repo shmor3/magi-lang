@@ -1569,6 +1569,35 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(s))
             },
 
+            // CharFromCode: int → single-char string (like Go's string(65) → "A")
+            OperationType::CharFromCode => {
+                let code = input.to_i64().ok_or_else(|| EvalError::TypeError {
+                    expected: "integer".to_string(),
+                    actual: input.type_name().to_string(),
+                    context: "char_from_code".to_string(),
+                })?;
+                let ch = char::from_u32(code as u32).ok_or_else(|| {
+                    EvalError::InvalidInput(format!("char_from_code: {} is not a valid Unicode code point", code))
+                })?;
+                Ok(DataType::String(ch.to_string()))
+            },
+
+            // CharCode: single-char string → int (like Go's int('A') → 65)
+            OperationType::CharCode => {
+                let s = match &input {
+                    DataType::String(s) => s.clone(),
+                    _ => return Err(EvalError::TypeError {
+                        expected: "string".to_string(),
+                        actual: input.type_name().to_string(),
+                        context: "char_code".to_string(),
+                    }),
+                };
+                let ch = s.chars().next().ok_or_else(|| {
+                    EvalError::InvalidInput("char_code: empty string".to_string())
+                })?;
+                Ok(DataType::Int64(ch as i64))
+            },
+
             // Bitwise operations
             OperationType::BitAnd => {
                 match (&a, &b) {
