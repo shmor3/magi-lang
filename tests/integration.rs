@@ -19821,3 +19821,103 @@ fn test_map_flatten_keys_nested_3_levels() {
         _ => panic!("Expected map"),
     }
 }
+
+// =========================================================================
+// Do-while loop (#71)
+// =========================================================================
+
+#[test]
+fn test_do_while_basic() {
+    assert_eq!(run(r#"
+        let mut i = 0;
+        do {
+            i = i + 1;
+        } while i < 5;
+        output i;
+    "#), DataType::Int64(5));
+}
+
+#[test]
+fn test_do_while_executes_at_least_once() {
+    assert_eq!(run(r#"
+        let mut ran = false;
+        do {
+            ran = true;
+        } while false;
+        output ran;
+    "#), DataType::Bool(true));
+}
+
+// =========================================================================
+// Impl blocks and traits (#84-86)
+// =========================================================================
+
+#[test]
+fn test_impl_block_method() {
+    assert_eq!(run(r#"
+        struct Point { x: int64, y: int64 }
+        impl Point {
+            fn magnitude(self) {
+                self.x * self.x + self.y * self.y
+            }
+        }
+        let p = Point { x: 3, y: 4 };
+        output p.magnitude();
+    "#), DataType::Int64(25));
+}
+
+#[test]
+fn test_trait_def_and_impl() {
+    assert_eq!(run(r#"
+        struct Circle { radius: float64 }
+        trait HasArea {
+            fn area(self);
+        }
+        impl HasArea for Circle {
+            fn area(self) {
+                3.14159 * self.radius * self.radius
+            }
+        }
+        let c = Circle { radius: 5.0 };
+        output c.area();
+    "#), DataType::Float64(78.53975));
+}
+
+#[test]
+fn test_operator_overloading_add() {
+    assert_eq!(run(r#"
+        struct Vec2 { x: int64, y: int64 }
+        impl Vec2 {
+            fn __add__(self, other) {
+                Vec2 { x: self.x + other.x, y: self.y + other.y }
+            }
+        }
+        let a = Vec2 { x: 1, y: 2 };
+        let b = Vec2 { x: 3, y: 4 };
+        let c = a + b;
+        output c.x;
+    "#), DataType::Int64(4));
+}
+
+// =========================================================================
+// Type annotations (#61-65)
+// =========================================================================
+
+#[test]
+fn test_simple_type_annotation() {
+    // Simple type annotations should work
+    assert_eq!(run(r#"
+        let arr: array = [1, 2, 3];
+        output len(arr);
+    "#), DataType::Int64(3));
+}
+
+#[test]
+fn test_function_return_type_annotation() {
+    assert_eq!(run(r#"
+        fn add(a: int64, b: int64) -> int64 {
+            a + b
+        }
+        output add(3, 4);
+    "#), DataType::Int64(7));
+}
