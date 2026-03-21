@@ -468,6 +468,72 @@ impl WasmCodegen {
         f.instruction(&WasmInst::End);
     }
 
+    /// Emit instructions to convert a tagged value (in local `src`) to f64 on the WASM stack.
+    ///
+    /// If the value is a raw f64 (not NaN-boxed), reinterpret its bits as f64.
+    /// If the value is a NaN-boxed integer, sign-extend from 48 bits and convert to f64.
+    fn emit_to_f64(f: &mut wasm_encoder::Function, src: u32) {
+        // Check: is_nanboxed = (val & NANBOX_MASK) == NANBOX_SIG
+        f.instruction(&WasmInst::LocalGet(src));
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+        f.instruction(&WasmInst::I64And);
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+        f.instruction(&WasmInst::I64Eq);
+        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::F64)));
+        // NaN-boxed: untag as i64 (sign-extend from 48 bits) and convert to f64
+        f.instruction(&WasmInst::LocalGet(src));
+        f.instruction(&WasmInst::I64Const(16));
+        f.instruction(&WasmInst::I64Shl);
+        f.instruction(&WasmInst::I64Const(16));
+        f.instruction(&WasmInst::I64ShrS);
+        f.instruction(&WasmInst::F64ConvertI64S);
+        f.instruction(&WasmInst::Else);
+        // Raw f64: just reinterpret bits
+        f.instruction(&WasmInst::LocalGet(src));
+        f.instruction(&WasmInst::F64ReinterpretI64);
+        f.instruction(&WasmInst::End);
+    }
+
+    /// Emit instructions to tag an f64 on the WASM stack as a NaN-boxed i64 value.
+    ///
+    /// Reinterprets f64 bits to i64. If the result collides with the NaN-box tag
+    /// space (negative quiet NaN), replaces it with canonical NaN.
+    fn emit_tag_f64_result(f: &mut wasm_encoder::Function, tmp: u32) {
+        f.instruction(&WasmInst::I64ReinterpretF64);
+        f.instruction(&WasmInst::LocalTee(tmp));
+        // Check if the f64 bits collide with NaN-box tag space
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+        f.instruction(&WasmInst::I64And);
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+        f.instruction(&WasmInst::I64Eq);
+        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+        // Collides with tag space: replace with canonical NaN
+        f.instruction(&WasmInst::I64Const(tag::CANON_NAN));
+        f.instruction(&WasmInst::Else);
+        // Safe f64 bits: use as-is
+        f.instruction(&WasmInst::LocalGet(tmp));
+        f.instruction(&WasmInst::End);
+    }
+
+    /// Emit instructions to check if either of two locals holds a raw f64 (not NaN-boxed).
+    /// Pushes an i32 boolean onto the stack: 1 if either is f64, 0 if both are NaN-boxed.
+    fn emit_either_is_f64(f: &mut wasm_encoder::Function, t0: u32, t1: u32) {
+        // left_is_f64 = (t0 & NANBOX_MASK) != NANBOX_SIG
+        f.instruction(&WasmInst::LocalGet(t0));
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+        f.instruction(&WasmInst::I64And);
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+        f.instruction(&WasmInst::I64Ne);
+        // right_is_f64 = (t1 & NANBOX_MASK) != NANBOX_SIG
+        f.instruction(&WasmInst::LocalGet(t1));
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+        f.instruction(&WasmInst::I64And);
+        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+        f.instruction(&WasmInst::I64Ne);
+        // either_float = left_is_f64 | right_is_f64
+        f.instruction(&WasmInst::I32Or);
+    }
+
     fn emit_instruction(
         &self,
         f: &mut wasm_encoder::Function,
@@ -2901,7 +2967,16 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalSet(t2));
 
                         f.instruction(&WasmInst::Else);
-                        // Numeric add path: sign-extend untag both from 48 bits, add, retag
+                        // Numeric add path with int/float dispatch
+                        Self::emit_either_is_f64(f, t0, t1);
+                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        // Float path: convert both to f64, add, tag result
+                        Self::emit_to_f64(f, t0);
+                        Self::emit_to_f64(f, t1);
+                        f.instruction(&WasmInst::F64Add);
+                        Self::emit_tag_f64_result(f, t0);
+                        f.instruction(&WasmInst::Else);
+                        // Integer path: sign-extend, add, retag
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64Shl);
@@ -2917,29 +2992,73 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
+                        f.instruction(&WasmInst::End); // close float/int dispatch
                         f.instruction(&WasmInst::LocalSet(t2));
-                        f.instruction(&WasmInst::End);
+                        f.instruction(&WasmInst::End); // close string/numeric dispatch
 
                         // Push result
                         f.instruction(&WasmInst::LocalGet(t2));
                     }
                     ("__sub", 2) | ("__mul", 2) | ("__div", 2) | ("__mod", 2) => {
                         // Dynamic arithmetic with int/float dispatch.
-                        // Integer path: untag, operate, retag.
-                        // Float not supported yet at integer-only compile level —
-                        // treated as integer operation (alpha limitation).
+                        // If either operand is a raw f64, use f64 arithmetic.
+                        // Otherwise, use i64 integer arithmetic.
                         let t0 = temp_base;     // left
                         let t1 = temp_base + 1; // right
                         f.instruction(&WasmInst::LocalSet(t1));
                         f.instruction(&WasmInst::LocalSet(t0));
 
+                        // Check if either operand is a raw f64
+                        Self::emit_either_is_f64(f, t0, t1);
+                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+
+                        // ── Float path ──
+                        // Convert both operands to f64 (handling int→f64 promotion)
+                        Self::emit_to_f64(f, t0);
+                        Self::emit_to_f64(f, t1);
+                        if fn_name == "__mod" {
+                            // f64 modulo: a - trunc(a/b) * b
+                            // WASM has no fmod instruction, so compute manually.
+                            // Stack: [a: f64, b: f64]
+                            // Store b, then a, via reinterpret to i64 locals
+                            f.instruction(&WasmInst::I64ReinterpretF64);
+                            f.instruction(&WasmInst::LocalSet(t1));
+                            f.instruction(&WasmInst::I64ReinterpretF64);
+                            f.instruction(&WasmInst::LocalSet(t0));
+                            // Compute: a - trunc(a/b) * b
+                            f.instruction(&WasmInst::LocalGet(t0));
+                            f.instruction(&WasmInst::F64ReinterpretI64); // a
+                            f.instruction(&WasmInst::LocalGet(t0));
+                            f.instruction(&WasmInst::F64ReinterpretI64); // a
+                            f.instruction(&WasmInst::LocalGet(t1));
+                            f.instruction(&WasmInst::F64ReinterpretI64); // b
+                            f.instruction(&WasmInst::F64Div);            // a/b
+                            f.instruction(&WasmInst::F64Trunc);          // trunc(a/b)
+                            f.instruction(&WasmInst::LocalGet(t1));
+                            f.instruction(&WasmInst::F64ReinterpretI64); // b
+                            f.instruction(&WasmInst::F64Mul);            // trunc(a/b)*b
+                            f.instruction(&WasmInst::F64Sub);            // a - trunc(a/b)*b
+                        } else {
+                            match fn_name {
+                                "__sub" => { f.instruction(&WasmInst::F64Sub); }
+                                "__mul" => { f.instruction(&WasmInst::F64Mul); }
+                                "__div" => { f.instruction(&WasmInst::F64Div); }
+                                other => return Err(CompileError::Internal(format!("unexpected binop in float path: {}", other))),
+                            };
+                        }
+                        // Tag the f64 result (reinterpret to i64, check NaN collision)
+                        Self::emit_tag_f64_result(f, t0);
+
+                        f.instruction(&WasmInst::Else);
+
+                        // ── Integer path ──
                         // Untag left (sign-extend from 48 bits)
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64Shl);
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64ShrS);
-                        f.instruction(&WasmInst::LocalSet(t0)); // t0 = untagged left
+                        f.instruction(&WasmInst::LocalSet(t0));
 
                         // Untag right
                         f.instruction(&WasmInst::LocalGet(t1));
@@ -2947,7 +3066,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Shl);
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64ShrS);
-                        f.instruction(&WasmInst::LocalSet(t1)); // t1 = untagged right
+                        f.instruction(&WasmInst::LocalSet(t1));
 
                         if fn_name == "__div" || fn_name == "__mod" {
                             // Guard: if right == 0, return tagged null
@@ -2960,7 +3079,6 @@ impl WasmCodegen {
 
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::LocalGet(t1));
-                        // Integer operation
                         match fn_name {
                             "__sub" => f.instruction(&WasmInst::I64Sub),
                             "__mul" => f.instruction(&WasmInst::I64Mul),
@@ -2977,6 +3095,8 @@ impl WasmCodegen {
                         if fn_name == "__div" || fn_name == "__mod" {
                             f.instruction(&WasmInst::End); // close zero-check if/else
                         }
+
+                        f.instruction(&WasmInst::End); // close float/int dispatch if/else
                     }
                     ("__eq", 2) | ("__ne", 2) => {
                         // Equality/inequality: compare raw tagged values.
@@ -2991,12 +3111,33 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Or);
                     }
                     ("__gt", 2) | ("__lt", 2) | ("__ge", 2) | ("__le", 2) => {
-                        // Ordered comparison: untag both, compare as signed i64.
+                        // Ordered comparison with int/float dispatch.
                         let t0 = temp_base;
                         let t1 = temp_base + 1;
                         f.instruction(&WasmInst::LocalSet(t1));
                         f.instruction(&WasmInst::LocalSet(t0));
 
+                        // Check if either operand is a raw f64
+                        Self::emit_either_is_f64(f, t0, t1);
+                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+
+                        // ── Float path ──
+                        Self::emit_to_f64(f, t0);
+                        Self::emit_to_f64(f, t1);
+                        match fn_name {
+                            "__gt" => f.instruction(&WasmInst::F64Gt),
+                            "__lt" => f.instruction(&WasmInst::F64Lt),
+                            "__ge" => f.instruction(&WasmInst::F64Ge),
+                            "__le" => f.instruction(&WasmInst::F64Le),
+                            other => return Err(CompileError::Internal(format!("unexpected comparison op in float path: {}", other))),
+                        };
+                        f.instruction(&WasmInst::I64ExtendI32U);
+                        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::BOOL as i64) << tag::TAG_SHIFT)));
+                        f.instruction(&WasmInst::I64Or);
+
+                        f.instruction(&WasmInst::Else);
+
+                        // ── Integer path ──
                         // Untag left (sign-extend from 48 bits)
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(16));
@@ -3020,6 +3161,8 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64ExtendI32U);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::BOOL as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
+
+                        f.instruction(&WasmInst::End); // close float/int dispatch
                     }
                     ("__array_push", 2) => {
                         // Alias for array_push — used by list comprehensions.
@@ -4679,16 +4822,23 @@ mod tests {
     }
 
     // ── E2E: Float output ───────────────────────────────────────────
-    //
-    // NOTE: Float output is unreliable due to the known NaN-boxing issue
-    // (top 8 bits of IEEE 754 f64 are stripped). See the NaN-boxing
-    // section below for details.
 
     #[test]
     fn test_e2e_output_float_zero() {
-        // 0.0 has all bits zero, so NaN-boxing preserves it.
         let r = compile_and_run("output 0.0;");
         assert_eq!(r.printed, vec!["0.0"]);
+    }
+
+    #[test]
+    fn test_e2e_output_positive_float() {
+        let r = compile_and_run("output 2.718;");
+        assert_eq!(r.printed, vec!["2.718"]);
+    }
+
+    #[test]
+    fn test_e2e_output_negative_float() {
+        let r = compile_and_run("output -1.0;");
+        assert_eq!(r.printed, vec!["-1.0"]);
     }
 
     // ── E2E: If/else ────────────────────────────────────────────────
@@ -5104,52 +5254,95 @@ mod tests {
         assert_eq!(result_str(&r), "null");
     }
 
-    // ── Known NaN-boxing issues (documented) ────────────────────────
+    // ── E2E: Float precision ─────────────────────────────────────
     //
-    // The WASM compiler uses NaN-boxing with 56-bit payloads, which means
-    // the top 8 bits of IEEE 754 f64 values are lost. This causes:
-    //
-    // 1. Negative floats: sign bit (bit 63) is stripped, so all negative
-    //    floats become positive. E.g., -3.14 becomes some positive value.
-    //
-    // 2. Large floats: exponent bits are truncated, so values with large
-    //    exponents lose precision.
-    //
-    // 3. NaN/Infinity values: the special IEEE 754 patterns in the top
-    //    8 bits are stripped.
-    //
-    // These are known systemic issues documented in MEMORY.md and
-    // cataloged as HIGH priority items. The tests below document the
-    // current (broken) behavior.
+    // NaN-boxing stores f64 values as raw IEEE 754 bits (no tagging).
+    // Only non-float values use NaN payloads. This preserves full f64
+    // precision for all float values including negatives and large exponents.
 
     #[test]
-    fn test_e2e_nan_boxing_negative_float_known_issue() {
-        // -3.14 in IEEE 754: sign=1, top byte = 0xC0.
-        // After NaN-boxing: top 8 bits are stripped, replaced with F64 tag (0x03).
-        // When decoded, the sign bit is gone → the value is NOT -3.14.
-        // Negation of a float goes through the runtime, which we stub.
+    fn test_e2e_nan_boxing_negative_float() {
+        // -3.14 is parsed as UnaryOp::Neg(3.14).
+        // The negation path: UntagF64 (reinterpret), F64Neg, TagF64 (reinterpret back).
+        // Full f64 precision is preserved.
         let r = compile_and_run("output -3.14;");
-        // The output is wrong (positive or null) due to NaN-boxing.
-        // We just verify no crash.
-        assert_eq!(r.printed.len(), 1);
+        assert_eq!(r.printed, vec!["-3.14"]);
     }
 
     #[test]
-    fn test_e2e_nan_boxing_positive_float_known_issue() {
-        // Even positive floats like 3.14 (= 0x40091EB851EB851F) have
-        // important data in the top byte (0x40). After stripping,
-        // the reconstructed float is wrong.
+    fn test_e2e_nan_boxing_positive_float() {
+        // Positive float 3.14 stored as raw IEEE 754 bits.
         let r = compile_and_run("output 3.14;");
-        assert_eq!(r.printed.len(), 1);
-        // The value won't be "3.14" due to NaN-boxing precision loss.
-        // 0.0 is the only float that survives NaN-boxing correctly.
+        assert_eq!(r.printed, vec!["3.14"]);
     }
 
     #[test]
-    fn test_e2e_nan_boxing_float_zero_works() {
-        // 0.0 has all bits zero, so NaN-boxing preserves it perfectly.
+    fn test_e2e_nan_boxing_float_zero() {
         let r = compile_and_run("output 0.0;");
         assert_eq!(r.printed, vec!["0.0"]);
+    }
+
+    #[test]
+    fn test_e2e_float_addition() {
+        let r = compile_and_run("output (1.5 + 2.5);");
+        assert_eq!(r.printed, vec!["4.0"]);
+    }
+
+    #[test]
+    fn test_e2e_float_subtraction() {
+        let r = compile_and_run("output (5.5 - 2.0);");
+        assert_eq!(r.printed, vec!["3.5"]);
+    }
+
+    #[test]
+    fn test_e2e_float_multiplication() {
+        let r = compile_and_run("output (3.0 * 2.5);");
+        assert_eq!(r.printed, vec!["7.5"]);
+    }
+
+    #[test]
+    fn test_e2e_float_division() {
+        let r = compile_and_run("output (7.5 / 2.5);");
+        assert_eq!(r.printed, vec!["3.0"]);
+    }
+
+    #[test]
+    fn test_e2e_float_modulo() {
+        let r = compile_and_run("output (7.5 % 2.0);");
+        assert_eq!(r.printed, vec!["1.5"]);
+    }
+
+    #[test]
+    fn test_e2e_float_comparison_gt() {
+        let r = compile_and_run("output (3.14 > 2.71);");
+        assert_eq!(r.printed, vec!["true"]);
+    }
+
+    #[test]
+    fn test_e2e_float_comparison_lt() {
+        let r = compile_and_run("output (2.71 < 3.14);");
+        assert_eq!(r.printed, vec!["true"]);
+    }
+
+    #[test]
+    fn test_e2e_mixed_int_float_add() {
+        // int + float should promote to float
+        let r = compile_and_run("output (1 + 2.5);");
+        assert_eq!(r.printed, vec!["3.5"]);
+    }
+
+    #[test]
+    fn test_e2e_negative_float_arithmetic() {
+        let r = compile_and_run("output (-1.5 + -2.5);");
+        assert_eq!(r.printed, vec!["-4.0"]);
+    }
+
+    #[test]
+    fn test_e2e_large_float() {
+        let r = compile_and_run("output 1.0e10;");
+        assert_eq!(r.printed.len(), 1);
+        let val: f64 = r.printed[0].parse().expect("should be valid float");
+        assert!((val - 1.0e10).abs() < 1.0, "expected ~1e10, got {}", val);
     }
 
     // ── E2E: Integer arithmetic ────────────────────────────────────

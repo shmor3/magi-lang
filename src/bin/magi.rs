@@ -6683,7 +6683,12 @@ fn main() {
             print_usage();
         }
         "--version" | "-V" | "version" => {
-            println!("MAGI Language v{}", magi_lang::version::version_string());
+            println!(
+                "MAGI Language v{} (built {} for {})",
+                magi_lang::version::version_string(),
+                env!("MAGI_BUILD_DATE"),
+                env!("MAGI_BUILD_TARGET"),
+            );
         }
         "run" => {
             let mut json_output = false;

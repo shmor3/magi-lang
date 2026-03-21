@@ -135,17 +135,16 @@ fn collect_statement_folding_ranges(stmt: &Statement, ranges: &mut Vec<FoldingRa
             collect_expression_folding_ranges(expr, ranges);
         }
 
-        StatementKind::Return(Some(expr)) | StatementKind::Break(Some(expr)) => {
+        StatementKind::Return(Some(expr)) => {
             collect_expression_folding_ranges(expr, ranges);
         }
 
-        // Leaf statements with no foldable children.
-        StatementKind::Import(_)
-        | StatementKind::Use { .. }
-        | StatementKind::TypeAlias { .. }
-        | StatementKind::Continue
-        | StatementKind::Return(None)
-        | StatementKind::Break(None) => {}
+        StatementKind::Break { value: Some(expr), .. } => {
+            collect_expression_folding_ranges(expr, ranges);
+        }
+
+        // Leaf statements and other kinds with no foldable children.
+        _ => {}
     }
 }
 
@@ -191,9 +190,9 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
         }
 
         // ---- Loop expression ----
-        ExpressionKind::Loop(block) => {
+        ExpressionKind::Loop { body, .. } => {
             push_range(ranges, &expr.span, FoldingRangeKind::Region);
-            collect_block_folding_ranges(block, ranges);
+            collect_block_folding_ranges(body, ranges);
         }
 
         // ---- Try/catch expression ----

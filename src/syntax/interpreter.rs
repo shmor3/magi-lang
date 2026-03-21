@@ -2474,7 +2474,7 @@ impl<'a> Interpreter<'a> {
                 let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                 Ok(val.max(lo).min(hi))
             }
-            _ => unreachable!(),
+            _ => Err(InterpError::TypeError { expected: "min, max, or clamp".to_string(), actual: method.to_string(), context: "integer method".to_string(), span }),
         }
     }
 
@@ -2507,7 +2507,7 @@ impl<'a> Interpreter<'a> {
                 let (lo, hi) = if min_val <= max_val { (min_val, max_val) } else { (max_val, min_val) };
                 Ok(val.max(lo).min(hi))
             }
-            _ => unreachable!(),
+            _ => Err(InterpError::TypeError { expected: "min, max, or clamp".to_string(), actual: method.to_string(), context: "float method".to_string(), span }),
         }
     }
 

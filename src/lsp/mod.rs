@@ -12,9 +12,14 @@ pub mod completion;
 pub mod definition;
 pub mod document_links;
 pub mod document_symbols;
+pub mod folding;
 pub mod hover;
+pub mod inlay_hints;
 pub mod linked_editing;
+pub mod references;
+pub mod rename;
 pub mod selection_range;
+pub mod semantic_tokens;
 pub mod signature_help;
 pub mod workspace_symbols;
 
@@ -119,6 +124,28 @@ impl LanguageServer for MagiLanguageServer {
                     work_done_progress_options: Default::default(),
                 }),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                inlay_hint_provider: Some(OneOf::Right(
+                    InlayHintServerCapabilities::Options(InlayHintOptions {
+                        resolve_provider: Some(false),
+                        work_done_progress_options: Default::default(),
+                    }),
+                )),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
+                                token_modifiers: semantic_tokens::TOKEN_MODIFIERS.to_vec(),
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            work_done_progress_options: Default::default(),
+                        },
+                    ),
+                ),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -472,6 +499,89 @@ impl LanguageServer for MagiLanguageServer {
         })) {
             Ok(calls) if calls.is_empty() => Ok(None),
             Ok(calls) => Ok(Some(calls)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            references::handle_references(state, &params, &uri_clone)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rename::handle_rename(state, &params, &uri_clone)
+        })) {
+            Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let range = params.range;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inlay_hints::handle_inlay_hints(state, &range)
+        })) {
+            Ok(hints) if hints.is_empty() => Ok(None),
+            Ok(hints) => Ok(Some(hints)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            semantic_tokens::handle_semantic_tokens_full(state)
+        })) {
+            Ok(result) => Ok(Some(result)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            folding::handle_folding_ranges(state)
+        })) {
+            Ok(ranges) if ranges.is_empty() => Ok(None),
+            Ok(ranges) => Ok(Some(ranges)),
             Err(_) => Ok(None),
         }
     }

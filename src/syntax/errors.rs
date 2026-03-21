@@ -249,7 +249,7 @@ impl ErrorCode {
             ErrorCode::E304 => "Each stage of a pipe expression must be a function or operation call.",
 
             // Runtime
-            ErrorCode::E400 => "The loop has run for too many iterations (limit: 10,000). This usually indicates an infinite loop. Check your loop condition.",
+            ErrorCode::E400 => "The loop has run for too many iterations (limit: 10,000,000). This usually indicates an infinite loop. Check your loop condition.",
             ErrorCode::E401 => "Function call depth exceeded the limit (48 levels). This usually indicates infinite recursion. Add a base case to your recursive function.",
             ErrorCode::E402 => "An assertion failed. The condition evaluated to `false`. Check the expected values.",
             ErrorCode::E403 => "An error was thrown with `throw` and not caught by a `try`/`catch` block.",
