@@ -210,10 +210,10 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 /// Validate that a URL uses an allowed scheme (http/https/ws/wss) and does
 /// not target a blocked host.
 fn validate_url(url_str: &str) -> Result<(), EvalError> {
-    let parsed = url::Url::parse(url_str)
+    let parsed = magi_lang::util::UrlParts::parse(url_str)
         .map_err(|e| EvalError::InvalidInput(format!("Invalid URL: {}", e)))?;
 
-    match parsed.scheme() {
+    match parsed.scheme.as_str() {
         "http" | "https" | "ws" | "wss" => {}
         scheme => return Err(EvalError::InvalidInput(
             format!("URL scheme must be http, https, ws, or wss, got: {}", scheme)
@@ -263,7 +263,7 @@ fn validate_host(host: &str) -> Result<(), EvalError> {
 fn validate_url_with_dns(url_str: &str) -> Result<(), EvalError> {
     validate_url(url_str)?;
 
-    let parsed = url::Url::parse(url_str)
+    let parsed = magi_lang::util::UrlParts::parse(url_str)
         .map_err(|e| EvalError::InvalidInput(format!("Invalid URL: {}", e)))?;
 
     let host = match parsed.host_str() {
@@ -2758,7 +2758,7 @@ impl OperationEvaluator for FullEvaluator {
             // NowTimestamp: current time in milliseconds
             // ================================================================
             OperationType::NowTimestamp => {
-                Ok(DataType::Int64(chrono::Utc::now().timestamp_millis()))
+                Ok(DataType::Int64(magi_lang::util::now_millis()))
             }
 
             // ================================================================
@@ -2768,8 +2768,8 @@ impl OperationEvaluator for FullEvaluator {
                 match promote_numeric(&input) {
                     Some(v) => {
                         let ms = match v { Ok(i) => i, Err(f) => f as i64 };
-                        match chrono::DateTime::from_timestamp_millis(ms) {
-                            Some(dt) => Ok(DataType::String(dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())),
+                        match magi_lang::util::format_timestamp_millis(ms) {
+                            Some(s) => Ok(DataType::String(s)),
                             None => Err(EvalError::InvalidInput(format!("format_timestamp: invalid timestamp {}", ms))),
                         }
                     }
@@ -2820,29 +2820,10 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::ParseTimestamp => {
                 match &input {
                     DataType::String(s) => {
-                        let s = s.trim();
-                        // Try RFC 3339 (with timezone)
-                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                            return Ok(DataType::Int64(dt.timestamp_millis()));
+                        match magi_lang::util::parse_timestamp_to_millis(s) {
+                            Ok(ms) => Ok(DataType::Int64(ms)),
+                            Err(_) => Err(EvalError::InvalidInput(format!("ParseTimestamp: unrecognized format: {}", s.trim()))),
                         }
-                        // Try ISO 8601 without timezone (assume UTC)
-                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
-                            return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
-                        }
-                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-                            return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
-                        }
-                        // Try space-separated datetime
-                        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                            return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
-                        }
-                        // Try date-only
-                        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                            if let Some(dt) = d.and_hms_opt(0, 0, 0) {
-                                return Ok(DataType::Int64(dt.and_utc().timestamp_millis()));
-                            }
-                        }
-                        Err(EvalError::InvalidInput(format!("ParseTimestamp: unrecognized format: {}", s)))
                     }
                     _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "ParseTimestamp".to_string() }),
                 }
@@ -4974,27 +4955,27 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UrlParse => {
                 match &input {
                     DataType::String(url_str) => {
-                        match url::Url::parse(url_str) {
+                        match magi_lang::util::UrlParts::parse(url_str) {
                             Ok(parsed) => {
                                 let mut m = indexmap::IndexMap::new();
                                 m.insert("raw".into(), DataType::String(url_str.clone()));
-                                m.insert("protocol".into(), DataType::String(parsed.scheme().to_string()));
-                                m.insert("host".into(), DataType::String(parsed.host_str().unwrap_or("").to_string()));
-                                if let Some(port) = parsed.port() {
+                                m.insert("protocol".into(), DataType::String(parsed.scheme.clone()));
+                                m.insert("host".into(), DataType::String(parsed.host.clone()));
+                                if let Some(port) = parsed.port {
                                     m.insert("port".into(), DataType::Int64(port as i64));
                                 }
-                                m.insert("path".into(), DataType::String(parsed.path().to_string()));
-                                if let Some(q) = parsed.query() {
-                                    m.insert("query".into(), DataType::String(q.to_string()));
+                                m.insert("path".into(), DataType::String(parsed.path.clone()));
+                                if let Some(ref q) = parsed.query {
+                                    m.insert("query".into(), DataType::String(q.clone()));
                                 }
-                                if let Some(f) = parsed.fragment() {
-                                    m.insert("fragment".into(), DataType::String(f.to_string()));
+                                if let Some(ref f) = parsed.fragment {
+                                    m.insert("fragment".into(), DataType::String(f.clone()));
                                 }
-                                if !parsed.username().is_empty() {
-                                    m.insert("username".into(), DataType::String(parsed.username().to_string()));
+                                if !parsed.username.is_empty() {
+                                    m.insert("username".into(), DataType::String(parsed.username.clone()));
                                 }
-                                if let Some(pw) = parsed.password() {
-                                    m.insert("password".into(), DataType::String(pw.to_string()));
+                                if !parsed.password.is_empty() {
+                                    m.insert("password".into(), DataType::String(parsed.password.clone()));
                                 }
                                 Ok(DataType::Map(m))
                             }
@@ -5013,9 +4994,9 @@ impl OperationEvaluator for FullEvaluator {
                 let path_val = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match (&base_val, &path_val) {
                     (DataType::String(b), DataType::String(p)) => {
-                        match url::Url::parse(b) {
+                        match magi_lang::util::UrlParts::parse(b) {
                             Ok(base_url) => match base_url.join(p) {
-                                Ok(joined) => Ok(DataType::String(joined.to_string())),
+                                Ok(joined) => Ok(DataType::String(joined)),
                                 Err(_) => {
                                     let bt = b.trim_end_matches('/');
                                     let pt = p.trim_start_matches('/');
@@ -5122,7 +5103,7 @@ impl OperationEvaluator for FullEvaluator {
             }
 
             // ================================================================
-            // TOML operations (we have the toml crate)
+            // TOML operations
             // ================================================================
             OperationType::TomlParse => {
                 match &input {
@@ -5130,8 +5111,8 @@ impl OperationEvaluator for FullEvaluator {
                         if s.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("toml_parse: input exceeds {} byte limit", MAX_STRING_OUTPUT)));
                         }
-                        match s.parse::<toml::Table>() {
-                            Ok(table) => Ok(toml_value_to_datatype(&toml::Value::Table(table))),
+                        match magi_lang::util::toml_parse(s) {
+                            Ok(table) => Ok(toml_value_to_datatype(&magi_lang::util::TomlValue::Table(table))),
                             Err(e) => Err(EvalError::InvalidInput(format!("toml_parse: {}", e))),
                         }
                     }
@@ -5139,42 +5120,43 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::TomlStringify => {
-                fn datatype_to_toml(val: &DataType, depth: usize) -> toml::Value {
+                fn datatype_to_toml(val: &DataType, depth: usize) -> magi_lang::util::TomlValue {
+                    use magi_lang::util::TomlValue;
                     const MAX_DEPTH: usize = 64;
                     if depth > MAX_DEPTH {
-                        return toml::Value::String("[max depth]".to_string());
+                        return TomlValue::String("[max depth]".to_string());
                     }
                     match val {
-                        DataType::Null => toml::Value::String("null".to_string()),
-                        DataType::Bool(b) => toml::Value::Boolean(*b),
-                        DataType::Int32(n) => toml::Value::Integer(*n as i64),
-                        DataType::Int64(n) => toml::Value::Integer(*n),
-                        DataType::Uint32(n) => toml::Value::Integer(*n as i64),
+                        DataType::Null => TomlValue::String("null".to_string()),
+                        DataType::Bool(b) => TomlValue::Boolean(*b),
+                        DataType::Int32(n) => TomlValue::Integer(*n as i64),
+                        DataType::Int64(n) => TomlValue::Integer(*n),
+                        DataType::Uint32(n) => TomlValue::Integer(*n as i64),
                         DataType::Uint64(n) => {
                             if *n > i64::MAX as u64 {
-                                toml::Value::String(n.to_string())
+                                TomlValue::String(n.to_string())
                             } else {
-                                toml::Value::Integer(*n as i64)
+                                TomlValue::Integer(*n as i64)
                             }
                         }
-                        DataType::Float32(f) => toml::Value::Float(*f as f64),
-                        DataType::Float64(f) => toml::Value::Float(*f),
-                        DataType::String(s) => toml::Value::String(s.clone()),
+                        DataType::Float32(f) => TomlValue::Float(*f as f64),
+                        DataType::Float64(f) => TomlValue::Float(*f),
+                        DataType::String(s) => TomlValue::String(s.clone()),
                         DataType::Array(arr) => {
-                            toml::Value::Array(arr.iter().map(|v| datatype_to_toml(v, depth + 1)).collect())
+                            TomlValue::Array(arr.iter().map(|v| datatype_to_toml(v, depth + 1)).collect())
                         }
                         DataType::Map(m) => {
-                            let table: toml::map::Map<String, toml::Value> = m.iter()
+                            let table: magi_lang::util::TomlTable = m.iter()
                                 .filter(|(k, _)| !k.starts_with("__"))
                                 .map(|(k, v)| (k.clone(), datatype_to_toml(v, depth + 1)))
                                 .collect();
-                            toml::Value::Table(table)
+                            TomlValue::Table(table)
                         }
-                        _ => toml::Value::String(val.to_string_lossy()),
+                        _ => TomlValue::String(val.to_string_lossy()),
                     }
                 }
                 let toml_val = datatype_to_toml(&input, 0);
-                match toml::to_string_pretty(&toml_val) {
+                match magi_lang::util::toml_to_string_pretty(&toml_val) {
                     Ok(s) => {
                         if s.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
@@ -5708,7 +5690,7 @@ impl OperationEvaluator for FullEvaluator {
                 let result = match x509_parser::pem::parse_x509_pem(pem.as_bytes()) {
                     Ok((_, pem_block)) => match pem_block.parse_x509() {
                         Ok(cert) => {
-                            let now = chrono::Utc::now().timestamp();
+                            let now = magi_lang::util::now_secs();
                             let not_before = cert.validity().not_before.timestamp();
                             let not_after = cert.validity().not_after.timestamp();
                             if now < not_before {
@@ -5977,12 +5959,12 @@ impl OperationEvaluator for FullEvaluator {
                 use std::net::ToSocketAddrs;
                 let url_str = get_string(inputs, "url")?;
                 validate_url(url_str)?;
-                let parsed_url = url::Url::parse(url_str)
+                let parsed_url = magi_lang::util::UrlParts::parse(url_str)
                     .map_err(|e| EvalError::InvalidInput(format!("ws_connect: invalid URL: {}", e)))?;
                 let host = parsed_url.host_str()
                     .ok_or_else(|| EvalError::InvalidInput("ws_connect: URL has no host".to_string()))?;
                 let port = parsed_url.port_or_known_default()
-                    .unwrap_or(if parsed_url.scheme() == "wss" { 443 } else { 80 });
+                    .unwrap_or(if parsed_url.scheme == "wss" { 443 } else { 80 });
                 let addr = format!("{}:{}", host, port);
                 // Single DNS resolution + SSRF IP check (no TOCTOU)
                 let sock_addr = addr.to_socket_addrs()
@@ -6001,7 +5983,7 @@ impl OperationEvaluator for FullEvaluator {
                 let timeout = std::time::Duration::from_secs(30);
                 let _ = tcp_stream.set_read_timeout(Some(timeout));
                 let _ = tcp_stream.set_write_timeout(Some(timeout));
-                let stream: tungstenite::stream::MaybeTlsStream<std::net::TcpStream> = if parsed_url.scheme() == "wss" {
+                let stream: tungstenite::stream::MaybeTlsStream<std::net::TcpStream> = if parsed_url.scheme == "wss" {
                     let connector = native_tls::TlsConnector::new()
                         .map_err(|e| EvalError::InvalidInput(format!("ws_connect: TLS init failed: {}", e)))?;
                     let tls_stream = connector.connect(host, tcp_stream)
@@ -6226,7 +6208,7 @@ impl OperationEvaluator for FullEvaluator {
                     listener.set_nonblocking(false).ok();
                     result
                 })?;
-                // Parse HTTP request from the accepted stream using httparse
+                // Parse HTTP request from the accepted stream
                 use std::io::Read as _;
                 let timeout = Some(std::time::Duration::from_secs(30));
                 let _ = stream.set_read_timeout(timeout);
@@ -6261,24 +6243,20 @@ impl OperationEvaluator for FullEvaluator {
                         break;
                     }
                 }
-                // Parse with httparse
-                let mut parsed_headers = [httparse::EMPTY_HEADER; 256];
-                let mut req = httparse::Request::new(&mut parsed_headers);
-                let status = req.parse(&buf[..header_end])
+                // Parse the HTTP request
+                let parsed_req = magi_lang::util::parse_http_request(&buf[..header_end])
                     .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
-                if status.is_partial() {
-                    return Err(EvalError::InvalidInput(
-                        "http_server_receive: incomplete HTTP request".to_string()
-                    ));
-                }
-                let method = req.method.unwrap_or("GET").to_string();
-                let path = req.path.unwrap_or("/").to_string();
+                let parsed_req = parsed_req.ok_or_else(|| EvalError::InvalidInput(
+                    "http_server_receive: incomplete HTTP request".to_string()
+                ))?;
+                let method = parsed_req.method;
+                let path = parsed_req.path;
                 let mut headers = indexmap::IndexMap::new();
                 let mut content_length: usize = 0;
                 let mut seen_content_length = false;
-                for h in req.headers.iter() {
+                for h in parsed_req.headers.iter() {
                     let key = h.name.to_lowercase();
-                    let value = String::from_utf8_lossy(h.value).to_string();
+                    let value = String::from_utf8_lossy(&h.value).to_string();
                     if key == "content-length" {
                         let len: usize = value.trim().parse().map_err(|_| {
                             EvalError::InvalidInput(format!(
@@ -6347,10 +6325,7 @@ impl OperationEvaluator for FullEvaluator {
                         "http_server_respond: body exceeds {} byte limit", MAX_STRING_OUTPUT
                     )));
                 }
-                let reason = http::StatusCode::from_u16(status as u16)
-                    .ok()
-                    .and_then(|s| s.canonical_reason())
-                    .unwrap_or("Unknown");
+                let reason = magi_lang::util::http_status_reason(status as u16);
                 let response = format!(
                     "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
                     status, reason, body.len(), body
@@ -6538,25 +6513,25 @@ impl OperationEvaluator for FullEvaluator {
             // ================================================================
             OperationType::LogInfo => {
                 let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let now = magi_lang::util::local_datetime_string();
                 eprintln!("[{}] [INFO] {}", now, msg.to_string_lossy());
                 Ok(DataType::Null)
             }
             OperationType::LogWarn => {
                 let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let now = magi_lang::util::local_datetime_string();
                 eprintln!("[{}] [WARN] {}", now, msg.to_string_lossy());
                 Ok(DataType::Null)
             }
             OperationType::LogError => {
                 let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let now = magi_lang::util::local_datetime_string();
                 eprintln!("[{}] [ERROR] {}", now, msg.to_string_lossy());
                 Ok(DataType::Null)
             }
             OperationType::LogDebug => {
                 let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let now = magi_lang::util::local_datetime_string();
                 eprintln!("[{}] [DEBUG] {}", now, msg.to_string_lossy());
                 Ok(DataType::Null)
             }
@@ -6935,26 +6910,26 @@ fn total_cmp_values(a: &DataType, b: &DataType) -> std::cmp::Ordering {
     }
 }
 
-fn toml_value_to_datatype(val: &toml::Value) -> DataType {
+fn toml_value_to_datatype(val: &magi_lang::util::TomlValue) -> DataType {
     toml_value_to_datatype_depth(val, 0)
 }
 
-fn toml_value_to_datatype_depth(val: &toml::Value, depth: usize) -> DataType {
+fn toml_value_to_datatype_depth(val: &magi_lang::util::TomlValue, depth: usize) -> DataType {
+    use magi_lang::util::TomlValue;
     const MAX_DEPTH: usize = 64;
     if depth > MAX_DEPTH { return DataType::Null; }
     match val {
-        toml::Value::String(s) => DataType::String(s.clone()),
-        toml::Value::Integer(n) => DataType::Int64(*n),
-        toml::Value::Float(f) => DataType::Float64(*f),
-        toml::Value::Boolean(b) => DataType::Bool(*b),
-        toml::Value::Array(arr) => DataType::Array(arr.iter().map(|v| toml_value_to_datatype_depth(v, depth + 1)).collect()),
-        toml::Value::Table(t) => {
+        TomlValue::String(s) => DataType::String(s.clone()),
+        TomlValue::Integer(n) => DataType::Int64(*n),
+        TomlValue::Float(f) => DataType::Float64(*f),
+        TomlValue::Boolean(b) => DataType::Bool(*b),
+        TomlValue::Array(arr) => DataType::Array(arr.iter().map(|v| toml_value_to_datatype_depth(v, depth + 1)).collect()),
+        TomlValue::Table(t) => {
             let m: indexmap::IndexMap<String, DataType> = t.iter()
                 .map(|(k, v)| (k.clone(), toml_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
         }
-        toml::Value::Datetime(dt) => DataType::String(dt.to_string()),
     }
 }
 
@@ -7653,7 +7628,7 @@ fn main_inner() {
                 eprintln!("error: cannot read {}: {}", toml_path.display(), e);
                 process::exit(1);
             });
-            let table: toml::Table = match toml_str.parse() {
+            let table = match magi_lang::util::toml_parse(&toml_str) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("error: failed to parse {}: {}", toml_path.display(), e);
@@ -7745,7 +7720,7 @@ fn check_lock_file(dir: &std::path::Path) -> bool {
         Err(_) => return false,
     };
 
-    let table: toml::Table = match lock_str.parse() {
+    let table = match magi_lang::util::toml_parse(&lock_str) {
         Ok(t) => t,
         Err(_) => return false,
     };
@@ -7784,7 +7759,7 @@ fn check_lock_file(dir: &std::path::Path) -> bool {
 }
 
 /// Validate that exported functions listed in magi.toml actually exist in the resolved package.
-fn validate_package_exports(table: &toml::Table, packages: &[ResolvedPackage]) {
+fn validate_package_exports(table: &magi_lang::util::TomlTable, packages: &[ResolvedPackage]) {
     let pkg_section = match table.get("package").and_then(|p| p.as_table()) {
         Some(p) => p,
         None => return,
@@ -7892,7 +7867,7 @@ fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage
         Err(_) => return Vec::new(),
     };
 
-    let table: toml::Table = match toml_str.parse() {
+    let table = match magi_lang::util::toml_parse(&toml_str) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Warning: failed to parse {}: {}", toml_path.display(), e);
@@ -8047,7 +8022,7 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let table: toml::Table = match toml_str.parse() {
+    let table = match magi_lang::util::toml_parse(&toml_str) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Warning: failed to parse {}: {}", toml_path.display(), e);
@@ -9278,7 +9253,7 @@ fn cmd_test_all() {
         }
     };
 
-    let table: toml::Table = match toml_str.parse() {
+    let table = match magi_lang::util::toml_parse(&toml_str) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: failed to parse magispace.toml: {}", e);

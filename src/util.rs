@@ -4,6 +4,8 @@
 //! heck, ordered-float, strsim, crc32fast, glob.
 //!
 //! Phase 2: uuid, subtle, semver, textwrap, base64, hmac, md-5.
+//!
+//! Phase 3: chrono, url, http, httparse, toml.
 
 // ---------------------------------------------------------------------------
 // hex encode/decode (replaces `hex` crate)
@@ -1255,5 +1257,1381 @@ mod tests {
         assert_eq!(hex_encode(&md5_hash(b"hello")), "5d41402abc4b2a76b9719d911017c592");
         assert_eq!(hex_encode(&md5_hash(b"The quick brown fox jumps over the lazy dog")),
                    "9e107d9d372bb6826bd81d3542a419d6");
+    }
+}
+
+// ===========================================================================
+// Phase 3: chrono, url, http, httparse, toml replacements
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// date/time (replaces `chrono` crate)
+// ---------------------------------------------------------------------------
+
+/// Get current UTC time in milliseconds since Unix epoch.
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// Get current UTC time in seconds since Unix epoch.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Date/time components.
+#[derive(Debug, Clone, Copy)]
+pub struct DateTime {
+    pub year: i64,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    pub millis: u32,
+}
+
+/// Convert days since Unix epoch to (year, month, day) using Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { (mp + 3) as u32 } else { (mp - 9) as u32 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Convert (year, month, day) to days since Unix epoch using Hinnant's algorithm.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let m = m as i64;
+    let d = d as i64;
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64;
+    let m_adj = if m <= 2 { m + 9 } else { m - 3 } as u64;
+    let doy = (153 * m_adj + 2) / 5 + d as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe as i64 - 719468
+}
+
+/// Convert a Unix timestamp in milliseconds to DateTime (UTC).
+pub fn datetime_from_millis(ms: i64) -> Option<DateTime> {
+    // Support range roughly -292277..292277 years
+    let total_secs = ms.div_euclid(1000);
+    let millis_part = ms.rem_euclid(1000) as u32;
+    let days = total_secs.div_euclid(86400);
+    let day_secs = total_secs.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    Some(DateTime {
+        year: y,
+        month: m,
+        day: d,
+        hour: (day_secs / 3600) as u32,
+        minute: ((day_secs % 3600) / 60) as u32,
+        second: (day_secs % 60) as u32,
+        millis: millis_part,
+    })
+}
+
+/// Format a Unix timestamp (millis) as ISO 8601 string with milliseconds.
+/// E.g. "2024-01-15T09:30:00.000Z"
+pub fn format_timestamp_millis(ms: i64) -> Option<String> {
+    let dt = datetime_from_millis(ms)?;
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.millis
+    ))
+}
+
+/// Parse an ISO 8601 / RFC 3339 date-time string to Unix millis.
+/// Supports:
+///  - "2024-01-15T09:30:00Z"
+///  - "2024-01-15T09:30:00+05:30"
+///  - "2024-01-15T09:30:00.123Z"
+///  - "2024-01-15T09:30:00.123456Z"  (sub-ms truncated)
+///  - "2024-01-15T09:30:00"          (assumed UTC)
+///  - "2024-01-15 09:30:00"          (assumed UTC)
+///  - "2024-01-15"                   (date only, midnight UTC)
+pub fn parse_timestamp_to_millis(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    // Date-only: "YYYY-MM-DD"
+    if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
+        let y: i64 = s[..4].parse().map_err(|_| "invalid year".to_string())?;
+        let m: u32 = s[5..7].parse().map_err(|_| "invalid month".to_string())?;
+        let d: u32 = s[8..10].parse().map_err(|_| "invalid day".to_string())?;
+        if m < 1 || m > 12 || d < 1 || d > 31 {
+            return Err("invalid date".to_string());
+        }
+        return Ok(days_from_civil(y, m, d) * 86400 * 1000);
+    }
+    // Full datetime: split on T or space
+    let sep_pos = s.find('T').or_else(|| s.find(' '));
+    let (date_part, time_part) = match sep_pos {
+        Some(pos) => (&s[..pos], &s[pos + 1..]),
+        None => return Err("unrecognized datetime format".to_string()),
+    };
+    // Parse date
+    let date_parts: Vec<&str> = date_part.split('-').collect();
+    if date_parts.len() != 3 {
+        return Err("invalid date format".to_string());
+    }
+    let y: i64 = date_parts[0].parse().map_err(|_| "invalid year".to_string())?;
+    let m: u32 = date_parts[1].parse().map_err(|_| "invalid month".to_string())?;
+    let d: u32 = date_parts[2].parse().map_err(|_| "invalid day".to_string())?;
+    if m < 1 || m > 12 || d < 1 || d > 31 {
+        return Err("invalid date".to_string());
+    }
+    // Parse time and timezone
+    // time_part could be "09:30:00", "09:30:00Z", "09:30:00.123Z", "09:30:00+05:30", etc.
+    let (time_str, tz_offset_secs) = parse_timezone_suffix(time_part)?;
+    // Parse HH:MM:SS[.fff]
+    let time_parts: Vec<&str> = time_str.split(':').collect();
+    if time_parts.len() < 2 {
+        return Err("invalid time format".to_string());
+    }
+    let hour: u32 = time_parts[0].parse().map_err(|_| "invalid hour".to_string())?;
+    let min: u32 = time_parts[1].parse().map_err(|_| "invalid minute".to_string())?;
+    let (sec, millis) = if time_parts.len() >= 3 {
+        parse_seconds_millis(time_parts[2])?
+    } else {
+        (0, 0)
+    };
+    let days = days_from_civil(y, m, d);
+    let total_secs = days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64 - tz_offset_secs;
+    Ok(total_secs * 1000 + millis as i64)
+}
+
+/// Parse timezone suffix from time string. Returns (time_without_tz, offset_in_seconds).
+fn parse_timezone_suffix(time: &str) -> Result<(&str, i64), String> {
+    // Check for Z suffix
+    if let Some(t) = time.strip_suffix('Z') {
+        return Ok((t, 0));
+    }
+    // Check for +HH:MM or -HH:MM at the end
+    let bytes = time.as_bytes();
+    if bytes.len() >= 6 {
+        let sign_pos = bytes.len() - 6;
+        if (bytes[sign_pos] == b'+' || bytes[sign_pos] == b'-') && bytes[sign_pos + 3] == b':' {
+            let sign = if bytes[sign_pos] == b'+' { 1i64 } else { -1 };
+            let hh: i64 = time[sign_pos + 1..sign_pos + 3]
+                .parse()
+                .map_err(|_| "invalid tz hours".to_string())?;
+            let mm: i64 = time[sign_pos + 4..sign_pos + 6]
+                .parse()
+                .map_err(|_| "invalid tz minutes".to_string())?;
+            return Ok((&time[..sign_pos], sign * (hh * 3600 + mm * 60)));
+        }
+    }
+    // No timezone: assume UTC
+    Ok((time, 0))
+}
+
+/// Parse "SS" or "SS.fff..." returning (seconds, millis).
+fn parse_seconds_millis(s: &str) -> Result<(u32, u32), String> {
+    if let Some(dot_pos) = s.find('.') {
+        let sec: u32 = s[..dot_pos].parse().map_err(|_| "invalid seconds".to_string())?;
+        let frac = &s[dot_pos + 1..];
+        // Pad or truncate to 3 digits for millis
+        let millis = if frac.len() >= 3 {
+            frac[..3].parse().map_err(|_| "invalid fractional seconds".to_string())?
+        } else {
+            let padded = format!("{:0<3}", frac);
+            padded.parse().map_err(|_| "invalid fractional seconds".to_string())?
+        };
+        Ok((sec, millis))
+    } else {
+        let sec: u32 = s.parse().map_err(|_| "invalid seconds".to_string())?;
+        Ok((sec, 0))
+    }
+}
+
+/// Format local time as "YYYY-MM-DD HH:MM:SS".
+/// Uses the C library's localtime_r on Unix to get the local timezone offset.
+pub fn local_datetime_string() -> String {
+    let now_ms = now_millis();
+    let secs = now_ms / 1000;
+    #[cfg(unix)]
+    let offset_secs = {
+        // Use C library directly without a crate dependency.
+        #[repr(C)]
+        struct CTm {
+            tm_sec: i32,
+            tm_min: i32,
+            tm_hour: i32,
+            tm_mday: i32,
+            tm_mon: i32,
+            tm_year: i32,
+            tm_wday: i32,
+            tm_yday: i32,
+            tm_isdst: i32,
+            tm_gmtoff: i64,
+            tm_zone: *const i8,
+        }
+        extern "C" {
+            fn localtime_r(timep: *const i64, result: *mut CTm) -> *mut CTm;
+        }
+        let mut tm: CTm = unsafe { std::mem::zeroed() };
+        let t: i64 = secs;
+        unsafe { localtime_r(&t, &mut tm) };
+        tm.tm_gmtoff
+    };
+    #[cfg(not(unix))]
+    let offset_secs = 0i64;
+    let local_ms = now_ms + offset_secs * 1000;
+    let dt = datetime_from_millis(local_ms).unwrap_or(DateTime {
+        year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, millis: 0,
+    });
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+    )
+}
+
+// ---------------------------------------------------------------------------
+// URL parsing (replaces `url` crate)
+// ---------------------------------------------------------------------------
+
+/// Parsed URL components.
+#[derive(Debug, Clone, Default)]
+pub struct UrlParts {
+    pub scheme: String,
+    pub username: String,
+    pub password: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub path: String,
+    pub query: Option<String>,
+    pub fragment: Option<String>,
+}
+
+impl UrlParts {
+    /// Parse a URL string into its components.
+    pub fn parse(url: &str) -> Result<UrlParts, String> {
+        let mut rest = url;
+        // 1. Parse scheme
+        let scheme_end = rest.find("://").ok_or("missing scheme")?;
+        let scheme = rest[..scheme_end].to_lowercase();
+        rest = &rest[scheme_end + 3..];
+
+        // 2. Split off fragment (#...)
+        let (rest_no_frag, fragment) = match rest.rfind('#') {
+            Some(pos) => (&rest[..pos], Some(rest[pos + 1..].to_string())),
+            None => (rest, None),
+        };
+        rest = rest_no_frag;
+
+        // 3. Split off query (?...)
+        let (rest_no_query, query) = match rest.find('?') {
+            Some(pos) => (&rest[..pos], Some(rest[pos + 1..].to_string())),
+            None => (rest, None),
+        };
+        rest = rest_no_query;
+
+        // 4. Split authority from path
+        let (authority, path) = match rest.find('/') {
+            Some(pos) => (&rest[..pos], rest[pos..].to_string()),
+            None => (rest, "/".to_string()),
+        };
+
+        // 5. Parse userinfo@host:port from authority
+        let (userinfo, hostport) = match authority.rfind('@') {
+            Some(pos) => (&authority[..pos], &authority[pos + 1..]),
+            None => ("", authority),
+        };
+
+        let (username, password) = if !userinfo.is_empty() {
+            match userinfo.find(':') {
+                Some(pos) => (
+                    percent_decode(&userinfo[..pos]).unwrap_or_default(),
+                    percent_decode(&userinfo[pos + 1..]).unwrap_or_default(),
+                ),
+                None => (percent_decode(userinfo).unwrap_or_default(), String::new()),
+            }
+        } else {
+            (String::new(), String::new())
+        };
+
+        // 6. Parse host:port (handle IPv6 [::1]:port)
+        let (host, port) = if hostport.starts_with('[') {
+            // IPv6
+            match hostport.find(']') {
+                Some(bracket_end) => {
+                    let h = &hostport[..bracket_end + 1];
+                    let after = &hostport[bracket_end + 1..];
+                    let p = if let Some(colon_rest) = after.strip_prefix(':') {
+                        Some(colon_rest.parse::<u16>().map_err(|_| "invalid port")?)
+                    } else {
+                        None
+                    };
+                    (h.to_string(), p)
+                }
+                None => (hostport.to_string(), None),
+            }
+        } else {
+            // Check for host:port
+            match hostport.rfind(':') {
+                Some(pos) => {
+                    let maybe_port = &hostport[pos + 1..];
+                    if let Ok(p) = maybe_port.parse::<u16>() {
+                        (hostport[..pos].to_string(), Some(p))
+                    } else {
+                        (hostport.to_string(), None)
+                    }
+                }
+                None => (hostport.to_string(), None),
+            }
+        };
+
+        Ok(UrlParts {
+            scheme,
+            username,
+            password,
+            host,
+            port,
+            path,
+            query,
+            fragment,
+        })
+    }
+
+    /// Get the port or the default port for the scheme.
+    pub fn port_or_known_default(&self) -> Option<u16> {
+        self.port.or_else(|| match self.scheme.as_str() {
+            "http" | "ws" => Some(80),
+            "https" | "wss" => Some(443),
+            "ftp" => Some(21),
+            _ => None,
+        })
+    }
+
+    /// Get the host string (without brackets for IPv6).
+    pub fn host_str(&self) -> Option<&str> {
+        if self.host.is_empty() {
+            None
+        } else {
+            Some(&self.host)
+        }
+    }
+
+    /// Join a relative path onto this URL.
+    pub fn join(&self, relative: &str) -> Result<String, String> {
+        if relative.contains("://") {
+            // Absolute URL, return as-is
+            return Ok(relative.to_string());
+        }
+        let base_path = if relative.starts_with('/') {
+            relative.to_string()
+        } else {
+            // Resolve relative to the directory of self.path
+            let dir = match self.path.rfind('/') {
+                Some(pos) => &self.path[..pos + 1],
+                None => "/",
+            };
+            format!("{}{}", dir, relative)
+        };
+        let mut result = format!("{}://{}", self.scheme, self.host);
+        if let Some(p) = self.port {
+            result.push_str(&format!(":{}", p));
+        }
+        result.push_str(&base_path);
+        Ok(result)
+    }
+
+    /// Reconstruct the full URL string.
+    pub fn to_string(&self) -> String {
+        let mut s = format!("{}://", self.scheme);
+        if !self.username.is_empty() {
+            s.push_str(&self.username);
+            if !self.password.is_empty() {
+                s.push(':');
+                s.push_str(&self.password);
+            }
+            s.push('@');
+        }
+        s.push_str(&self.host);
+        if let Some(p) = self.port {
+            s.push_str(&format!(":{}", p));
+        }
+        s.push_str(&self.path);
+        if let Some(ref q) = self.query {
+            s.push('?');
+            s.push_str(q);
+        }
+        if let Some(ref f) = self.fragment {
+            s.push('#');
+            s.push_str(f);
+        }
+        s
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP status codes (replaces `http` crate)
+// ---------------------------------------------------------------------------
+
+/// Get the canonical reason phrase for an HTTP status code.
+pub fn http_status_reason(code: u16) -> &'static str {
+    match code {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        102 => "Processing",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        203 => "Non-Authoritative Information",
+        204 => "No Content",
+        205 => "Reset Content",
+        206 => "Partial Content",
+        207 => "Multi-Status",
+        300 => "Multiple Choices",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Payload Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        418 => "I'm a Teapot",
+        422 => "Unprocessable Entity",
+        425 => "Too Early",
+        426 => "Upgrade Required",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        451 => "Unavailable For Legal Reasons",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        _ => "Unknown",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP request parsing (replaces `httparse` crate)
+// ---------------------------------------------------------------------------
+
+/// A parsed HTTP header.
+#[derive(Debug, Clone)]
+pub struct HttpHeader {
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
+/// A parsed HTTP request.
+#[derive(Debug)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub version: u8, // 0 for HTTP/1.0, 1 for HTTP/1.1
+    pub headers: Vec<HttpHeader>,
+}
+
+/// Parse an HTTP/1.x request from a byte buffer.
+/// Returns `Ok(Some(request))` on success, `Ok(None)` if incomplete, `Err` on malformed.
+pub fn parse_http_request(buf: &[u8]) -> Result<Option<HttpRequest>, String> {
+    let s = std::str::from_utf8(buf).map_err(|_| "invalid UTF-8 in HTTP request".to_string())?;
+    // Find end of request line
+    let first_line_end = match s.find("\r\n") {
+        Some(pos) => pos,
+        None => match s.find('\n') {
+            Some(pos) => pos,
+            None => return Ok(None), // incomplete
+        },
+    };
+    let request_line = &s[..first_line_end];
+    let parts: Vec<&str> = request_line.splitn(3, ' ').collect();
+    if parts.len() < 2 {
+        return Err("malformed request line".to_string());
+    }
+    let method = parts[0].to_string();
+    let path = parts[1].to_string();
+    let version = if parts.len() >= 3 {
+        if parts[2].contains("1.1") { 1 } else { 0 }
+    } else {
+        1
+    };
+
+    // Parse headers
+    let header_start = if s.as_bytes()[first_line_end] == b'\r' {
+        first_line_end + 2
+    } else {
+        first_line_end + 1
+    };
+    let rest = &s[header_start..];
+    let mut headers = Vec::new();
+    for line in rest.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        if let Some(colon_pos) = line.find(':') {
+            let name = line[..colon_pos].trim().to_string();
+            let value = line[colon_pos + 1..].trim().as_bytes().to_vec();
+            headers.push(HttpHeader { name, value });
+        }
+    }
+
+    Ok(Some(HttpRequest {
+        method,
+        path,
+        version,
+        headers,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// TOML parser (replaces `toml` crate)
+// ---------------------------------------------------------------------------
+
+/// A TOML value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TomlValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    Array(Vec<TomlValue>),
+    Table(TomlTable),
+}
+
+/// A TOML table (ordered map of key-value pairs).
+pub type TomlTable = indexmap::IndexMap<String, TomlValue>;
+
+impl TomlValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            TomlValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            TomlValue::Integer(n) => Some(*n),
+            _ => None,
+        }
+    }
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            TomlValue::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            TomlValue::Boolean(b) => Some(*b),
+            _ => None,
+        }
+    }
+    pub fn as_array(&self) -> Option<&Vec<TomlValue>> {
+        match self {
+            TomlValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+    pub fn as_table(&self) -> Option<&TomlTable> {
+        match self {
+            TomlValue::Table(t) => Some(t),
+            _ => None,
+        }
+    }
+    pub fn get(&self, key: &str) -> Option<&TomlValue> {
+        match self {
+            TomlValue::Table(t) => t.get(key),
+            _ => None,
+        }
+    }
+}
+
+/// Parse a TOML string into a table.
+pub fn toml_parse(input: &str) -> Result<TomlTable, String> {
+    let mut root = TomlTable::new();
+    let mut current_section: Vec<String> = Vec::new();
+    let mut array_of_tables: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+
+    for (line_no, raw_line) in input.lines().enumerate() {
+        let line = raw_line.trim();
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Array of tables: [[section]]
+        if line.starts_with("[[") && line.ends_with("]]") {
+            let section_name = line[2..line.len() - 2].trim().to_string();
+            current_section = section_name.split('.').map(|s| s.trim().to_string()).collect();
+            array_of_tables.insert(section_name.clone(), true);
+            // Ensure the array exists and add a new table
+            ensure_array_of_tables(&mut root, &current_section);
+            continue;
+        }
+        // Table header: [section]
+        if line.starts_with('[') && line.ends_with(']') {
+            let section_name = line[1..line.len() - 1].trim().to_string();
+            current_section = section_name.split('.').map(|s| s.trim().to_string()).collect();
+            // Ensure all parent tables exist
+            ensure_table_path(&mut root, &current_section);
+            continue;
+        }
+        // Key = value
+        let eq_pos = match line.find('=') {
+            Some(pos) => pos,
+            None => return Err(format!("line {}: expected key = value", line_no + 1)),
+        };
+        let key = line[..eq_pos].trim().trim_matches('"').to_string();
+        let value_str = line[eq_pos + 1..].trim();
+        let value = parse_toml_value(value_str, input, line_no)?;
+
+        // Get the table to insert into
+        let is_aot = current_section.len() > 0 && {
+            let full = current_section.join(".");
+            array_of_tables.contains_key(&full)
+        };
+        if is_aot {
+            // Insert into the last element of the array of tables
+            let table = get_last_array_table_mut(&mut root, &current_section);
+            table.insert(key, value);
+        } else if current_section.is_empty() {
+            root.insert(key, value);
+        } else {
+            let table = get_or_create_table_mut(&mut root, &current_section);
+            table.insert(key, value);
+        }
+    }
+    Ok(root)
+}
+
+fn ensure_table_path(root: &mut TomlTable, path: &[String]) {
+    let mut current = root;
+    for key in path {
+        if !current.contains_key(key) {
+            current.insert(key.clone(), TomlValue::Table(TomlTable::new()));
+        }
+        match current.get_mut(key) {
+            Some(TomlValue::Table(t)) => current = t,
+            _ => return,
+        }
+    }
+}
+
+fn ensure_array_of_tables(root: &mut TomlTable, path: &[String]) {
+    let mut current = root;
+    for (i, key) in path.iter().enumerate() {
+        if i == path.len() - 1 {
+            // Last segment: create or append to array
+            if !current.contains_key(key) {
+                current.insert(key.clone(), TomlValue::Array(vec![TomlValue::Table(TomlTable::new())]));
+            } else if let Some(TomlValue::Array(arr)) = current.get_mut(key) {
+                arr.push(TomlValue::Table(TomlTable::new()));
+            }
+        } else {
+            if !current.contains_key(key) {
+                current.insert(key.clone(), TomlValue::Table(TomlTable::new()));
+            }
+            match current.get_mut(key) {
+                Some(TomlValue::Table(t)) => current = t,
+                _ => return,
+            }
+        }
+    }
+}
+
+fn get_last_array_table_mut<'a>(root: &'a mut TomlTable, path: &[String]) -> &'a mut TomlTable {
+    // Navigate to the last table in the array-of-tables at the given path.
+    // Use raw pointer tricks to satisfy the borrow checker for in-place navigation.
+    let mut current: *mut TomlTable = root;
+    for (i, key) in path.iter().enumerate() {
+        unsafe {
+            if i == path.len() - 1 {
+                if let Some(TomlValue::Array(arr)) = (*current).get_mut(key) {
+                    if let Some(TomlValue::Table(t)) = arr.last_mut() {
+                        return &mut *t;
+                    }
+                }
+                return &mut *current;
+            }
+            match (*current).get_mut(key) {
+                Some(TomlValue::Table(t)) => current = t as *mut TomlTable,
+                _ => return &mut *current,
+            }
+        }
+    }
+    unsafe { &mut *current }
+}
+
+fn get_or_create_table_mut<'a>(root: &'a mut TomlTable, path: &[String]) -> &'a mut TomlTable {
+    let mut current: *mut TomlTable = root;
+    for key in path {
+        unsafe {
+            if !(*current).contains_key(key) {
+                (*current).insert(key.clone(), TomlValue::Table(TomlTable::new()));
+            }
+            match (*current).get_mut(key) {
+                Some(TomlValue::Table(t)) => current = t as *mut TomlTable,
+                _ => return &mut *current,
+            }
+        }
+    }
+    unsafe { &mut *current }
+}
+
+fn parse_toml_value(s: &str, _full: &str, _line: usize) -> Result<TomlValue, String> {
+    let s = s.trim();
+    // Remove trailing comment (not inside a string)
+    let s = strip_toml_comment(s);
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty value".to_string());
+    }
+    // Boolean
+    if s == "true" { return Ok(TomlValue::Boolean(true)); }
+    if s == "false" { return Ok(TomlValue::Boolean(false)); }
+    // String: basic ("...") or literal ('...')
+    if s.starts_with('"') && s.len() >= 2 {
+        return parse_toml_basic_string(s);
+    }
+    if s.starts_with('\'') && s.len() >= 2 {
+        // Literal string: no escapes
+        if let Some(end) = s[1..].find('\'') {
+            return Ok(TomlValue::String(s[1..1 + end].to_string()));
+        }
+        return Err("unterminated literal string".to_string());
+    }
+    // Array
+    if s.starts_with('[') {
+        return parse_toml_array(s);
+    }
+    // Inline table
+    if s.starts_with('{') {
+        return parse_toml_inline_table(s);
+    }
+    // Number (integer or float)
+    // Try integer first
+    if let Ok(n) = s.replace('_', "").parse::<i64>() {
+        return Ok(TomlValue::Integer(n));
+    }
+    // Hex/oct/bin integers
+    if s.starts_with("0x") || s.starts_with("0X") {
+        if let Ok(n) = i64::from_str_radix(&s[2..].replace('_', ""), 16) {
+            return Ok(TomlValue::Integer(n));
+        }
+    }
+    if s.starts_with("0o") || s.starts_with("0O") {
+        if let Ok(n) = i64::from_str_radix(&s[2..].replace('_', ""), 8) {
+            return Ok(TomlValue::Integer(n));
+        }
+    }
+    if s.starts_with("0b") || s.starts_with("0B") {
+        if let Ok(n) = i64::from_str_radix(&s[2..].replace('_', ""), 2) {
+            return Ok(TomlValue::Integer(n));
+        }
+    }
+    // Float
+    if s == "inf" || s == "+inf" { return Ok(TomlValue::Float(f64::INFINITY)); }
+    if s == "-inf" { return Ok(TomlValue::Float(f64::NEG_INFINITY)); }
+    if s == "nan" || s == "+nan" || s == "-nan" { return Ok(TomlValue::Float(f64::NAN)); }
+    if let Ok(f) = s.replace('_', "").parse::<f64>() {
+        return Ok(TomlValue::Float(f));
+    }
+    // Datetime (store as string)
+    if s.contains('T') || (s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')) {
+        return Ok(TomlValue::String(s.to_string()));
+    }
+    // Bare string (shouldn't happen in valid TOML, but be lenient)
+    Ok(TomlValue::String(s.to_string()))
+}
+
+fn strip_toml_comment(s: &str) -> &str {
+    let mut in_string = false;
+    let mut escape = false;
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if b == b'#' && !in_string {
+            return s[..i].trim_end();
+        }
+    }
+    s
+}
+
+fn parse_toml_basic_string(s: &str) -> Result<TomlValue, String> {
+    // Multi-line basic string """..."""
+    if s.starts_with("\"\"\"") {
+        let end = s[3..].find("\"\"\"").ok_or("unterminated multi-line string")?;
+        return Ok(TomlValue::String(unescape_toml_string(&s[3..3 + end])));
+    }
+    // Single-line basic string
+    let end = find_string_end(&s[1..]).ok_or("unterminated string")?;
+    Ok(TomlValue::String(unescape_toml_string(&s[1..1 + end])))
+}
+
+fn find_string_end(s: &str) -> Option<usize> {
+    let mut escape = false;
+    for (i, c) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn unescape_toml_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(n) {
+                            result.push(c);
+                        }
+                    }
+                }
+                Some('U') => {
+                    let hex: String = chars.by_ref().take(8).collect();
+                    if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(n) {
+                            result.push(c);
+                        }
+                    }
+                }
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn parse_toml_array(s: &str) -> Result<TomlValue, String> {
+    // Find matching ]
+    let end = find_matching_bracket(s, 1)?;
+    let inner = s[1..end].trim();
+    if inner.is_empty() {
+        return Ok(TomlValue::Array(Vec::new()));
+    }
+    let mut items = Vec::new();
+    for item in split_toml_elements(inner) {
+        let item = item.trim();
+        if item.is_empty() { continue; }
+        items.push(parse_toml_value(item, "", 0)?);
+    }
+    Ok(TomlValue::Array(items))
+}
+
+fn parse_toml_inline_table(s: &str) -> Result<TomlValue, String> {
+    let end = find_matching_brace(s, 1)?;
+    let inner = s[1..end].trim();
+    let mut table = TomlTable::new();
+    if inner.is_empty() {
+        return Ok(TomlValue::Table(table));
+    }
+    for item in split_toml_elements(inner) {
+        let item = item.trim();
+        if item.is_empty() { continue; }
+        let eq_pos = item.find('=').ok_or("inline table: missing =")?;
+        let key = item[..eq_pos].trim().trim_matches('"').to_string();
+        let val = parse_toml_value(item[eq_pos + 1..].trim(), "", 0)?;
+        table.insert(key, val);
+    }
+    Ok(TomlValue::Table(table))
+}
+
+fn find_matching_bracket(s: &str, start: usize) -> Result<usize, String> {
+    let mut depth = 1i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, c) in s[start..].char_indices() {
+        if escape { escape = false; continue; }
+        if c == '\\' && in_string { escape = true; continue; }
+        if c == '"' { in_string = !in_string; continue; }
+        if in_string { continue; }
+        if c == '[' { depth += 1; }
+        if c == ']' {
+            depth -= 1;
+            if depth == 0 { return Ok(start + i); }
+        }
+    }
+    Err("unterminated array".to_string())
+}
+
+fn find_matching_brace(s: &str, start: usize) -> Result<usize, String> {
+    let mut depth = 1i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, c) in s[start..].char_indices() {
+        if escape { escape = false; continue; }
+        if c == '\\' && in_string { escape = true; continue; }
+        if c == '"' { in_string = !in_string; continue; }
+        if in_string { continue; }
+        if c == '{' { depth += 1; }
+        if c == '}' {
+            depth -= 1;
+            if depth == 0 { return Ok(start + i); }
+        }
+    }
+    Err("unterminated inline table".to_string())
+}
+
+fn split_toml_elements(s: &str) -> Vec<&str> {
+    let mut results = Vec::new();
+    let mut depth_bracket = 0i32;
+    let mut depth_brace = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        if escape { escape = false; continue; }
+        if c == '\\' && in_string { escape = true; continue; }
+        if c == '"' { in_string = !in_string; continue; }
+        if in_string { continue; }
+        match c {
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket -= 1,
+            '{' => depth_brace += 1,
+            '}' => depth_brace -= 1,
+            ',' if depth_bracket == 0 && depth_brace == 0 => {
+                results.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < s.len() {
+        results.push(&s[start..]);
+    }
+    results
+}
+
+/// Serialize a TomlValue to a pretty TOML string.
+pub fn toml_to_string_pretty(value: &TomlValue) -> Result<String, String> {
+    match value {
+        TomlValue::Table(t) => {
+            let mut out = String::new();
+            serialize_table(&mut out, t, &[]);
+            Ok(out)
+        }
+        _ => Err("top-level value must be a table".to_string()),
+    }
+}
+
+fn serialize_table(out: &mut String, table: &TomlTable, prefix: &[String]) {
+    // First pass: emit simple key-value pairs
+    for (key, value) in table {
+        let is_subtable = matches!(value, TomlValue::Table(_));
+        let is_array_of_tables = if let TomlValue::Array(arr) = value {
+            arr.first().map(|v| matches!(v, TomlValue::Table(_))).unwrap_or(false)
+        } else {
+            false
+        };
+        if is_subtable || is_array_of_tables {
+            // Skip tables and array-of-tables for second pass
+            continue;
+        }
+        out.push_str(&toml_key_escape(key));
+        out.push_str(" = ");
+        serialize_value(out, value);
+        out.push('\n');
+    }
+    // Second pass: emit sub-tables
+    for (key, value) in table {
+        if let TomlValue::Table(sub) = value {
+            let mut full_key = prefix.to_vec();
+            full_key.push(key.clone());
+            if !out.is_empty() && !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            out.push('[');
+            out.push_str(&full_key.join("."));
+            out.push_str("]\n");
+            serialize_table(out, sub, &full_key);
+        } else if let TomlValue::Array(arr) = value {
+            let is_aot = arr.first().map(|v| matches!(v, TomlValue::Table(_))).unwrap_or(false);
+            if is_aot {
+                let mut full_key = prefix.to_vec();
+                full_key.push(key.clone());
+                for item in arr {
+                    if let TomlValue::Table(sub) = item {
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            out.push('\n');
+                        }
+                        out.push_str("[[");
+                        out.push_str(&full_key.join("."));
+                        out.push_str("]]\n");
+                        serialize_table(out, sub, &full_key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn serialize_value(out: &mut String, value: &TomlValue) {
+    match value {
+        TomlValue::String(s) => {
+            out.push('"');
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+        }
+        TomlValue::Integer(n) => out.push_str(&n.to_string()),
+        TomlValue::Float(f) => {
+            if f.is_infinite() {
+                if *f > 0.0 { out.push_str("inf"); } else { out.push_str("-inf"); }
+            } else if f.is_nan() {
+                out.push_str("nan");
+            } else {
+                let s = format!("{}", f);
+                out.push_str(&s);
+                // Ensure there's a decimal point
+                if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                    out.push_str(".0");
+                }
+            }
+        }
+        TomlValue::Boolean(b) => out.push_str(if *b { "true" } else { "false" }),
+        TomlValue::Array(arr) => {
+            out.push('[');
+            for (i, item) in arr.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                serialize_value(out, item);
+            }
+            out.push(']');
+        }
+        TomlValue::Table(t) => {
+            // Inline table
+            out.push('{');
+            for (i, (k, v)) in t.iter().enumerate() {
+                if i > 0 { out.push_str(", "); }
+                out.push_str(&toml_key_escape(k));
+                out.push_str(" = ");
+                serialize_value(out, v);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn toml_key_escape(key: &str) -> String {
+    if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        key.to_string()
+    } else {
+        format!("\"{}\"", key.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+#[cfg(test)]
+mod phase3_tests {
+    use super::*;
+
+    // -- chrono replacement tests --
+    #[test]
+    fn test_now_millis() {
+        let ms = now_millis();
+        // Should be after 2020-01-01 and before 2100-01-01
+        assert!(ms > 1577836800_000);
+        assert!(ms < 4102444800_000);
+    }
+
+    #[test]
+    fn test_datetime_from_millis_epoch() {
+        let dt = datetime_from_millis(0).unwrap();
+        assert_eq!(dt.year, 1970);
+        assert_eq!(dt.month, 1);
+        assert_eq!(dt.day, 1);
+        assert_eq!(dt.hour, 0);
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        assert_eq!(
+            format_timestamp_millis(0).unwrap(),
+            "1970-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            format_timestamp_millis(1705311000_123).unwrap(),
+            "2024-01-15T09:30:00.123Z"
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_rfc3339() {
+        let ms = parse_timestamp_to_millis("2024-01-15T09:30:00Z").unwrap();
+        assert_eq!(ms, 1705311000_000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_with_tz() {
+        let ms = parse_timestamp_to_millis("2024-01-15T15:00:00+05:30").unwrap();
+        assert_eq!(ms, 1705311000_000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_date_only() {
+        let ms = parse_timestamp_to_millis("2024-01-15").unwrap();
+        assert_eq!(ms, 1705276800_000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_space_sep() {
+        let ms = parse_timestamp_to_millis("2024-01-15 09:30:00").unwrap();
+        assert_eq!(ms, 1705311000_000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_with_frac() {
+        let ms = parse_timestamp_to_millis("2024-01-15T09:30:00.123Z").unwrap();
+        assert_eq!(ms, 1705311000_123);
+    }
+
+    #[test]
+    fn test_days_round_trip() {
+        // Verify Hinnant round-trip for a range of dates
+        for days in -10000..10000 {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
+    }
+
+    // -- URL replacement tests --
+    #[test]
+    fn test_url_parse_basic() {
+        let u = UrlParts::parse("https://example.com/path?q=1#frag").unwrap();
+        assert_eq!(u.scheme, "https");
+        assert_eq!(u.host, "example.com");
+        assert_eq!(u.path, "/path");
+        assert_eq!(u.query.as_deref(), Some("q=1"));
+        assert_eq!(u.fragment.as_deref(), Some("frag"));
+        assert_eq!(u.port, None);
+    }
+
+    #[test]
+    fn test_url_parse_with_port() {
+        let u = UrlParts::parse("http://localhost:8080/api").unwrap();
+        assert_eq!(u.host, "localhost");
+        assert_eq!(u.port, Some(8080));
+        assert_eq!(u.path, "/api");
+    }
+
+    #[test]
+    fn test_url_parse_with_userinfo() {
+        let u = UrlParts::parse("https://user:pass@example.com/path").unwrap();
+        assert_eq!(u.username, "user");
+        assert_eq!(u.password, "pass");
+        assert_eq!(u.host, "example.com");
+    }
+
+    #[test]
+    fn test_url_port_or_known_default() {
+        let u = UrlParts::parse("https://example.com/").unwrap();
+        assert_eq!(u.port_or_known_default(), Some(443));
+        let u = UrlParts::parse("http://example.com/").unwrap();
+        assert_eq!(u.port_or_known_default(), Some(80));
+    }
+
+    #[test]
+    fn test_url_join() {
+        let u = UrlParts::parse("https://example.com/base/path").unwrap();
+        let joined = u.join("other").unwrap();
+        assert_eq!(joined, "https://example.com/base/other");
+        let joined = u.join("/abs").unwrap();
+        assert_eq!(joined, "https://example.com/abs");
+    }
+
+    // -- HTTP status tests --
+    #[test]
+    fn test_http_status_reason() {
+        assert_eq!(http_status_reason(200), "OK");
+        assert_eq!(http_status_reason(404), "Not Found");
+        assert_eq!(http_status_reason(500), "Internal Server Error");
+        assert_eq!(http_status_reason(999), "Unknown");
+    }
+
+    // -- httparse replacement tests --
+    #[test]
+    fn test_parse_http_request() {
+        let buf = b"GET /path HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n";
+        let req = parse_http_request(buf).unwrap().unwrap();
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/path");
+        assert_eq!(req.version, 1);
+        assert_eq!(req.headers.len(), 2);
+        assert_eq!(req.headers[0].name, "Host");
+        assert_eq!(std::str::from_utf8(&req.headers[0].value).unwrap(), "example.com");
+    }
+
+    // -- TOML replacement tests --
+    #[test]
+    fn test_toml_parse_basic() {
+        let input = r#"
+name = "test"
+version = 123
+enabled = true
+ratio = 1.5
+"#;
+        let table = toml_parse(input).unwrap();
+        assert_eq!(table.get("name").unwrap().as_str(), Some("test"));
+        assert_eq!(table.get("version").unwrap().as_integer(), Some(123));
+        assert_eq!(table.get("enabled").unwrap().as_bool(), Some(true));
+        assert_eq!(table.get("ratio").unwrap().as_float(), Some(1.5));
+    }
+
+    #[test]
+    fn test_toml_parse_sections() {
+        let input = r#"
+[package]
+name = "myapp"
+magi = ">=0.9.0"
+
+[dependencies]
+foo = "bar"
+"#;
+        let table = toml_parse(input).unwrap();
+        let pkg = table.get("package").unwrap().as_table().unwrap();
+        assert_eq!(pkg.get("name").unwrap().as_str(), Some("myapp"));
+        let deps = table.get("dependencies").unwrap().as_table().unwrap();
+        assert_eq!(deps.get("foo").unwrap().as_str(), Some("bar"));
+    }
+
+    #[test]
+    fn test_toml_parse_array() {
+        let input = r#"
+[lint]
+disabled = ["W200", "W201"]
+"#;
+        let table = toml_parse(input).unwrap();
+        let lint = table.get("lint").unwrap().as_table().unwrap();
+        let disabled = lint.get("disabled").unwrap().as_array().unwrap();
+        assert_eq!(disabled.len(), 2);
+        assert_eq!(disabled[0].as_str(), Some("W200"));
+    }
+
+    #[test]
+    fn test_toml_parse_array_of_tables() {
+        let input = r#"
+[[package]]
+id = "foo"
+path = "/tmp/foo"
+
+[[package]]
+id = "bar"
+path = "/tmp/bar"
+"#;
+        let table = toml_parse(input).unwrap();
+        let packages = table.get("package").unwrap().as_array().unwrap();
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].as_table().unwrap().get("id").unwrap().as_str(), Some("foo"));
+        assert_eq!(packages[1].as_table().unwrap().get("id").unwrap().as_str(), Some("bar"));
+    }
+
+    #[test]
+    fn test_toml_parse_inline_table() {
+        let input = r#"
+dep = {git = "https://github.com/foo", branch = "main"}
+"#;
+        let table = toml_parse(input).unwrap();
+        let dep = table.get("dep").unwrap().as_table().unwrap();
+        assert_eq!(dep.get("git").unwrap().as_str(), Some("https://github.com/foo"));
+        assert_eq!(dep.get("branch").unwrap().as_str(), Some("main"));
+    }
+
+    #[test]
+    fn test_toml_stringify() {
+        let mut table = TomlTable::new();
+        table.insert("name".to_string(), TomlValue::String("test".to_string()));
+        table.insert("count".to_string(), TomlValue::Integer(42));
+        let output = toml_to_string_pretty(&TomlValue::Table(table)).unwrap();
+        assert!(output.contains("name = \"test\""));
+        assert!(output.contains("count = 42"));
+    }
+
+    #[test]
+    fn test_toml_comment_handling() {
+        let input = r#"
+name = "test" # this is a comment
+# full line comment
+count = 42
+"#;
+        let table = toml_parse(input).unwrap();
+        assert_eq!(table.get("name").unwrap().as_str(), Some("test"));
+        assert_eq!(table.get("count").unwrap().as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_toml_escaped_strings() {
+        let input = r#"
+path = "C:\\Users\\test"
+msg = "hello\nworld"
+"#;
+        let table = toml_parse(input).unwrap();
+        assert_eq!(table.get("path").unwrap().as_str(), Some("C:\\Users\\test"));
+        assert_eq!(table.get("msg").unwrap().as_str(), Some("hello\nworld"));
     }
 }

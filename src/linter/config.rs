@@ -33,7 +33,7 @@ pub fn load_lint_config(dir: &Path) -> Vec<String> {
 /// disabled = ["W200", "W201"]
 /// ```
 fn parse_lint_config(content: &str) -> Vec<String> {
-    let table: toml::Table = match content.parse() {
+    let table = match crate::util::toml_parse(content) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
