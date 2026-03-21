@@ -4712,6 +4712,9 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TomlParse => {
                 match &input {
                     DataType::String(s) => {
+                        if s.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("toml_parse: input exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
                         match s.parse::<toml::Table>() {
                             Ok(table) => Ok(toml_value_to_datatype(&toml::Value::Table(table))),
                             Err(e) => Err(EvalError::InvalidInput(format!("toml_parse: {}", e))),
@@ -4894,6 +4897,9 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::YamlParse => {
                 match &input {
                     DataType::String(s) => {
+                        if s.len() > MAX_STRING_OUTPUT {
+                            return Err(EvalError::InvalidInput(format!("yaml_parse: input exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                        }
                         let yaml_val: serde_yaml_ng::Value = serde_yaml_ng::from_str(s)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_parse: {}", e)))?;
                         Ok(yaml_value_to_datatype(&yaml_val))
