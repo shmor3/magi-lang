@@ -1317,6 +1317,9 @@ impl Compiler {
                 self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
             BinOp::And | BinOp::Or => return Err(CompileError::at(0, 0, "And/Or should be handled as short-circuit in compile_expr".to_string())),
+            BinOp::In => {
+                self.emit(Instruction::PushNull);
+            }
         }
         Ok(())
     }

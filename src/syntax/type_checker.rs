@@ -411,7 +411,7 @@ impl TypeChecker {
                     })
                     .collect();
                 let has_rest = def.params.iter().any(|p| p.rest);
-                let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
+                let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest && !p.kwargs).count();
                 let return_type = def
                     .return_type
                     .as_ref()
@@ -449,7 +449,7 @@ impl TypeChecker {
                             })
                             .collect();
                         let has_rest = def.params.iter().any(|p| p.rest);
-                        let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
+                        let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest && !p.kwargs).count();
                         let return_type = def
                             .return_type
                             .as_ref()
@@ -2916,6 +2916,9 @@ impl TypeChecker {
             BinOp::Eq | BinOp::NotEq | BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq => {
                 ChannelType::Bool
             }
+
+            // Containment operator always returns Bool.
+            BinOp::In => ChannelType::Bool,
 
             // Logical operators: accept any truthy/falsy value (&&/|| use truthiness).
             // Short-circuit: && returns lhs if falsy, else rhs; || returns lhs if truthy, else rhs.
@@ -6343,6 +6346,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
                 type_annotation: None,
                 default: None,
                 rest: false,
+                kwargs: false,
                 span: Span::new(1, (5 + i * 3) as u32, 1, (7 + i * 3) as u32),
             }
         }).collect();

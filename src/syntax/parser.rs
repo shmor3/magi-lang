@@ -910,7 +910,15 @@ impl Parser {
         let mut seen_names = std::collections::HashSet::new();
         while !self.at(end_token) && !self.at(&TokenKind::Eof) {
             let param_start = self.peek().span;
-            let is_rest = self.eat(&TokenKind::DotDotDot);
+            // Check for **kwargs parameter
+            let is_kwargs = if self.at(&TokenKind::Star) && self.peek_next_kind() == &TokenKind::Star {
+                self.advance(); // consume first *
+                self.advance(); // consume second *
+                true
+            } else {
+                false
+            };
+            let is_rest = if !is_kwargs { self.eat(&TokenKind::DotDotDot) } else { false };
             let param_tok = self.expect_identifier()?;
             if !seen_names.insert(param_tok.text.clone()) {
                 return Err(SyntaxError {
@@ -925,7 +933,7 @@ impl Parser {
             } else {
                 None
             };
-            let default = if !is_rest && self.eat(&TokenKind::Eq) {
+            let default = if !is_rest && !is_kwargs && self.eat(&TokenKind::Eq) {
                 Some(self.parse_expression()?)
             } else {
                 None
@@ -936,8 +944,21 @@ impl Parser {
                 type_annotation,
                 default,
                 rest: is_rest,
+                kwargs: is_kwargs,
                 span: param_start.merge(param_end),
             });
+            if is_kwargs {
+                // kwargs param must be last
+                if self.at(&TokenKind::Comma) {
+                    return Err(SyntaxError {
+                        line: param_start.start_line as usize,
+                        column: param_start.start_col as usize,
+                        message: "Keyword arguments parameter must be the last parameter".to_string(),
+                        code: None,
+                    });
+                }
+                break;
+            }
             if is_rest {
                 // Rest param must be last
                 if self.at(&TokenKind::Comma) {
@@ -1321,6 +1342,7 @@ impl Parser {
                 TokenKind::Star => BinOp::Mul,
                 TokenKind::Slash => BinOp::Div,
                 TokenKind::Percent => BinOp::Mod,
+                TokenKind::In => BinOp::In,
                 _ => break,
             };
 
@@ -1667,7 +1689,8 @@ impl Parser {
             if self.peek_kind() == &TokenKind::Ident {
                 let saved = self.pos;
                 let name_tok = self.advance().clone();
-                if self.at(&TokenKind::Eq) {
+                // Named argument: `name=value` or `name: value` (#300)
+                if self.at(&TokenKind::Eq) || self.at(&TokenKind::Colon) {
                     self.advance();
                     let value = self.parse_expression()?;
                     if !kwarg_names.insert(name_tok.text.clone()) {

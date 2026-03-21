@@ -281,6 +281,8 @@ pub struct FunctionParam {
     pub type_annotation: Option<TypeAnnotation>,
     pub default: Option<Expression>,
     pub rest: bool,
+    /// `**name` — collects extra named arguments into a Map.
+    pub kwargs: bool,
     pub span: Span,
 }
 
@@ -470,6 +472,8 @@ pub enum BinOp {
     // Logical
     And,
     Or,
+    // Containment
+    In,
 }
 
 impl BinOp {
@@ -489,6 +493,7 @@ impl BinOp {
             BinOp::LtEq => "less_eq",
             BinOp::And => "and",
             BinOp::Or => "or",
+            BinOp::In => "contains",
         }
     }
 
@@ -499,7 +504,7 @@ impl BinOp {
             BinOp::Div => "__div__", BinOp::Mod => "__mod__", BinOp::Eq => "__eq__",
             BinOp::NotEq => "__ne__", BinOp::Gt => "__gt__", BinOp::Lt => "__lt__",
             BinOp::GtEq => "__ge__", BinOp::LtEq => "__le__", BinOp::And => "__and__",
-            BinOp::Or => "__or__",
+            BinOp::Or => "__or__", BinOp::In => "__contains__",
         }
     }
 
@@ -507,6 +512,7 @@ impl BinOp {
         match self {
             BinOp::Or => 1,
             BinOp::And => 2,
+            BinOp::In => 3,
             BinOp::Eq | BinOp::NotEq => 3,
             BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq => 4,
             BinOp::Add | BinOp::Sub => 5,
@@ -531,6 +537,7 @@ impl fmt::Display for BinOp {
             BinOp::LtEq => "<=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+            BinOp::In => "in",
         };
         write!(f, "{}", s)
     }

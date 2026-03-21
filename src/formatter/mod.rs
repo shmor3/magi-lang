@@ -500,7 +500,9 @@ impl<'a> Formatter<'a> {
         self.write(&fdef.name);
         self.write("(");
         for (i, param) in fdef.params.iter().enumerate() {
-            if param.rest {
+            if param.kwargs {
+                self.write("**");
+            } else if param.rest {
                 self.write("...");
             }
             self.write(&param.name);
@@ -783,7 +785,9 @@ impl<'a> Formatter<'a> {
                 }
                 self.write("|");
                 for (i, param) in params.iter().enumerate() {
-                    if param.rest {
+                    if param.kwargs {
+                        self.write("**");
+                    } else if param.rest {
                         self.write("...");
                     }
                     self.write(&param.name);

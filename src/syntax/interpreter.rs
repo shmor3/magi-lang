@@ -9,6 +9,7 @@ use crate::eval::{EvalError, OperationEvaluator};
 use crate::ops::op_input_ports;
 use crate::types::{DataType, FutureState, OperationType};
 
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -355,6 +356,10 @@ pub struct Interpreter<'a> {
     call_stack_names: Vec<String>,
     /// Stack of deferred expressions per scope level.
     deferred: Vec<Vec<Expression>>,
+    /// Maximum errors to collect in keep-going mode.
+    max_errors: Option<usize>,
+    /// Errors collected during keep-going execution.
+    pub collected_errors: Vec<InterpError>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -383,7 +388,22 @@ impl<'a> Interpreter<'a> {
             call_stack_names: Vec::new(),
             importing_packages: std::collections::HashSet::new(),
             deferred: vec![Vec::new()],
+            max_errors: None,
+            collected_errors: Vec::new(),
         }
+    }
+
+    /// Set max errors for keep-going mode.
+    pub fn with_max_errors(mut self, max: usize) -> Self {
+        self.max_errors = Some(max);
+        self
+    }
+
+    /// Collect an error in keep-going mode. Returns true if execution should continue,
+    /// false if the max_errors limit has been reached.
+    fn collect_error_keep_going(&mut self, error: InterpError) -> bool {
+        self.collected_errors.push(error);
+        !self.max_errors.is_some_and(|m| self.collected_errors.len() >= m)
     }
 
     /// Add a resolved package to the interpreter.
@@ -798,7 +818,8 @@ impl<'a> Interpreter<'a> {
                 .unwrap_or_default();
             self.call_function("main", &[], main_span)
         } else {
-            // Backward compat: execute top-level statements, skip FunctionDefs/ModuleDefs
+            // Execute top-level statements, skip FunctionDefs/ModuleDefs (#132 keep-going)
+            let keep_going = self.max_errors.is_some();
             let mut last_value = DataType::Null;
             for stmt in &program.statements {
                 if matches!(
@@ -817,13 +838,19 @@ impl<'a> Interpreter<'a> {
                 last_value = match self.exec_statement(stmt) {
                     Ok(val) => val,
                     Err(InterpError::BreakSignal(_)) | Err(InterpError::LabeledBreak { .. }) => {
-                        return Err(InterpError::BreakOutsideLoop { span: stmt.span });
+                        let err = InterpError::BreakOutsideLoop { span: stmt.span };
+                        if keep_going && self.collect_error_keep_going(err) { DataType::Null } else if keep_going { break; } else { return Err(InterpError::BreakOutsideLoop { span: stmt.span }); }
                     }
                     Err(InterpError::ContinueSignal) | Err(InterpError::LabeledContinue { .. }) => {
-                        return Err(InterpError::ContinueOutsideLoop { span: stmt.span });
+                        let err = InterpError::ContinueOutsideLoop { span: stmt.span };
+                        if keep_going && self.collect_error_keep_going(err) { DataType::Null } else if keep_going { break; } else { return Err(InterpError::ContinueOutsideLoop { span: stmt.span }); }
                     }
                     Err(InterpError::ReturnSignal(_)) => {
-                        return Err(InterpError::ReturnOutsideFunction { span: stmt.span });
+                        let err = InterpError::ReturnOutsideFunction { span: stmt.span };
+                        if keep_going && self.collect_error_keep_going(err) { DataType::Null } else if keep_going { break; } else { return Err(InterpError::ReturnOutsideFunction { span: stmt.span }); }
+                    }
+                    Err(e) if keep_going && !matches!(e, InterpError::Cancelled) => {
+                        if self.collect_error_keep_going(e) { DataType::Null } else { break; }
                     }
                     Err(e) => return Err(e),
                 };
@@ -831,7 +858,11 @@ impl<'a> Interpreter<'a> {
                     return Err(InterpError::Cancelled);
                 }
             }
-            Ok(last_value)
+            if !self.collected_errors.is_empty() {
+                Err(self.collected_errors.remove(0))
+            } else {
+                Ok(last_value)
+            }
         }
     }
 
@@ -1544,6 +1575,58 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(result)
+    }
+
+    /// Merge named (keyword) arguments into a positional argument vector
+    /// by matching kwarg names to the function's parameter names (#300).
+    fn merge_kwargs_into_args(
+        &mut self,
+        fn_name: &str,
+        args: &[Expression],
+        kwargs: &[(String, Expression)],
+        span: Span,
+    ) -> Result<Vec<DataType>, InterpError> {
+        let mut evaluated = self.eval_call_args(args)?;
+        if kwargs.is_empty() {
+            return Ok(evaluated);
+        }
+        let func = match self.functions.get(fn_name) {
+            Some(f) => f.clone(),
+            None => return Ok(evaluated),
+        };
+        // Check if the function has a **kwargs parameter
+        let kwargs_param = func.params.iter().find(|p| p.kwargs).map(|p| p.name.clone());
+        let mut extra_kwargs = IndexMap::new();
+
+        // Extend the evaluated args vector to accommodate named args
+        for (kwarg_name, kwarg_expr) in kwargs {
+            let kwarg_val = self.eval_expr(kwarg_expr)?;
+            // Find the parameter index by name
+            if let Some(idx) = func.params.iter().position(|p| p.name == *kwarg_name && !p.kwargs) {
+                // Grow the vector if needed (fill gaps with Null)
+                while evaluated.len() <= idx {
+                    evaluated.push(DataType::Null);
+                }
+                evaluated[idx] = kwarg_val;
+            } else if kwargs_param.is_some() {
+                // Collect into the kwargs map
+                extra_kwargs.insert(kwarg_name.clone(), kwarg_val);
+            } else {
+                return Err(InterpError::EvalError {
+                    error: EvalError::InvalidInput(
+                        format!("function '{}' has no parameter named '{}'", fn_name, kwarg_name),
+                    ),
+                    span,
+                });
+            }
+        }
+
+        // If the function has a **kwargs param, add the collected map
+        if kwargs_param.is_some() {
+            evaluated.push(DataType::Map(extra_kwargs));
+        }
+
+        Ok(evaluated)
     }
 
     /// Spread-aware argument evaluation for pipe stages.
@@ -3299,10 +3382,11 @@ impl<'a> Interpreter<'a> {
             }
         };
 
-        // Check arity (accounting for default parameters and rest params)
+        // Check arity (accounting for default parameters, rest params, and kwargs)
         let has_rest = func.params.last().is_some_and(|p| p.rest);
-        let required = func.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
-        let max_positional = if has_rest { usize::MAX } else { func.params.len() };
+        let has_kwargs = func.params.iter().any(|p| p.kwargs);
+        let required = func.params.iter().filter(|p| p.default.is_none() && !p.rest && !p.kwargs).count();
+        let max_positional = if has_rest || has_kwargs { usize::MAX } else { func.params.len() };
         if args.len() < required || args.len() > max_positional {
             let expected = if has_rest {
                 format!("at least {}", required)
@@ -3323,6 +3407,17 @@ impl<'a> Interpreter<'a> {
         // (default expressions may reference caller-scope variables)
         let mut resolved_args: Vec<(String, DataType, bool)> = Vec::new();
         for (i, param) in func.params.iter().enumerate() {
+            if param.kwargs {
+                // kwargs param gets the Map from the corresponding position,
+                // or an empty Map if not provided
+                let kwargs_map = if i < args.len() {
+                    args[i].clone()
+                } else {
+                    DataType::Map(IndexMap::new())
+                };
+                resolved_args.push((param.name.clone(), kwargs_map, false));
+                break;
+            }
             if param.rest {
                 let rest_args = args[i..].to_vec();
                 resolved_args.push((param.name.clone(), DataType::Array(rest_args), true));
@@ -3568,6 +3663,59 @@ impl<'a> Interpreter<'a> {
                 let lhs = self.eval_expr(left)?;
                 let rhs = self.eval_expr(right)?;
 
+                // `in` operator: containment check (#290)
+                if *op == BinOp::In {
+                    let result = match &rhs {
+                        DataType::Array(arr) => arr.iter().any(|item| *item == lhs),
+                        DataType::Set(set) => set.iter().any(|item| *item == lhs),
+                        DataType::Map(map) => {
+                            if let DataType::String(key) = &lhs {
+                                map.contains_key(key.as_str())
+                            } else {
+                                false
+                            }
+                        }
+                        DataType::String(s) => {
+                            if let DataType::String(needle) = &lhs {
+                                s.contains(needle.as_str())
+                            } else {
+                                false
+                            }
+                        }
+                        _ => {
+                            return Err(InterpError::TypeError {
+                                expected: "Array, Map, Set, or String".to_string(),
+                                actual: rhs.type_name().to_string(),
+                                context: "'in' operator".to_string(),
+                                span: expr.span,
+                            });
+                        }
+                    };
+                    return Ok(DataType::Bool(result));
+                }
+
+                // String multiplication: "ha" * 3 => "hahaha" (#289)
+                if *op == BinOp::Mul {
+                    if let DataType::String(ref s) = lhs {
+                        if let Some(n) = rhs.to_i64() {
+                            if n < 0 {
+                                return Ok(DataType::String(String::new()));
+                            }
+                            let n = n as usize;
+                            let result_len = s.len().saturating_mul(n);
+                            if result_len > MAX_STRING_OUTPUT {
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} bytes", MAX_STRING_OUTPUT),
+                                    actual: format!("{} bytes", result_len),
+                                    context: "string multiplication".to_string(),
+                                    span: expr.span,
+                                });
+                            }
+                            return Ok(DataType::String(s.repeat(n)));
+                        }
+                    }
+                }
+
                 // Operator overloading: check if lhs is a struct with a magic method (#86)
                 if let DataType::Map(ref map) = lhs {
                     if let Some(DataType::String(struct_name)) = map.get("__struct") {
@@ -3669,7 +3817,7 @@ impl<'a> Interpreter<'a> {
             } => {
                 // Check if it's a user-defined function
                 if self.functions.contains_key(fn_name.as_str()) {
-                    let evaluated_args = self.eval_call_args(args)?;
+                    let evaluated_args = self.merge_kwargs_into_args(fn_name, args, kwargs, expr.span)?;
                     return self.call_function(fn_name, &evaluated_args, expr.span);
                 }
 
@@ -3678,7 +3826,7 @@ impl<'a> Interpreter<'a> {
                     let addr = entry.addr;
                     if let Some(DataType::String(ref_name)) = self.heap.read(addr).cloned() {
                         if self.functions.contains_key(ref_name.as_str()) {
-                            let evaluated_args = self.eval_call_args(args)?;
+                            let evaluated_args = self.merge_kwargs_into_args(&ref_name, args, kwargs, expr.span)?;
                             return self.call_function(&ref_name, &evaluated_args, expr.span);
                         }
                     }
@@ -6861,6 +7009,38 @@ impl std::fmt::Display for InterpError {
 }
 
 impl InterpError {
+    /// Returns the stable MAGI error code for this error variant (#136).
+    ///
+    /// Uses enum-based dispatch. Control flow signals return `None`.
+    pub fn error_code(&self) -> Option<&'static str> {
+        match self {
+            InterpError::UndefinedVariable { .. } => Some("E200"),
+            InterpError::UndefinedFunction { .. } => Some("E201"),
+            InterpError::UnknownOperation { .. } => Some("E202"),
+            InterpError::TypeError { .. } => Some("E100"),
+            InterpError::EvalError { error, .. } => Some(error.error_code()),
+            InterpError::ImmutableAssignment { .. } => Some("E404"),
+            InterpError::ArityMismatch { .. } => Some("E405"),
+            InterpError::InvalidPlaceholder { .. } => Some("E303"),
+            InterpError::InvalidPipeStage { .. } => Some("E304"),
+            InterpError::BreakOutsideLoop { .. } => Some("E300"),
+            InterpError::ContinueOutsideLoop { .. } => Some("E301"),
+            InterpError::ReturnOutsideFunction { .. } => Some("E302"),
+            InterpError::MaxIterations { .. } => Some("E400"),
+            InterpError::MaxCallDepth { .. } => Some("E401"),
+            InterpError::AssertionFailed { .. } => Some("E402"),
+            InterpError::ThrownError { .. } => Some("E403"),
+            InterpError::Cancelled => Some("E407"),
+            InterpError::NotImplemented { .. } => Some("E408"),
+            InterpError::ResourceLimit { .. } => Some("E409"),
+            InterpError::BreakSignal(_)
+            | InterpError::ContinueSignal
+            | InterpError::LabeledBreak { .. }
+            | InterpError::LabeledContinue { .. }
+            | InterpError::ReturnSignal(_) => None,
+        }
+    }
+
     /// Returns the source span associated with this error, if any.
     pub fn span(&self) -> Option<Span> {
         match self {
