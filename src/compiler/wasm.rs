@@ -5346,10 +5346,6 @@ mod tests {
     }
 
     // ── E2E: Integer arithmetic ────────────────────────────────────
-    //
-    // The compiler generates direct WASM instructions for basic integer
-    // arithmetic (add, sub, mul, etc.) rather than runtime_call. This
-    // means integer arithmetic works correctly in the test environment.
 
     #[test]
     fn test_e2e_integer_addition() {
