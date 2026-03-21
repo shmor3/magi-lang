@@ -59,6 +59,12 @@ fn fold_statement(stmt: &mut Statement) {
         StatementKind::Defer(expr) => {
             fold_expr(expr);
         }
+        StatementKind::CStyleFor { init, condition, update, body } => {
+            fold_statement(init);
+            fold_expr(condition);
+            fold_statement(update);
+            fold_block(body);
+        }
         StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
             for param in &mut fdef.params {
                 if let Some(default) = &mut param.default {

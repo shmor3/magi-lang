@@ -254,7 +254,7 @@ impl<'a> LintContext<'a> {
                 self.check_expression(condition);
                 self.check_block(body);
             }
-            StatementKind::DoWhileLoop { condition, body, .. } => {
+            StatementKind::DoWhileLoop { condition, body, .. } | StatementKind::CStyleFor { condition, body, .. } => {
                 if let Some(d) = rules::check_constant_condition(condition, Some(body)) {
                     self.emit(d);
                 }

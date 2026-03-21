@@ -232,6 +232,13 @@ pub enum StatementKind {
     },
     /// `defer expr;` or `defer { block }` -- runs when enclosing scope exits
     Defer(Expression),
+    /// C-style for loop: `for (init; condition; update) { body }`
+    CStyleFor {
+        init: Box<Statement>,
+        condition: Expression,
+        update: Box<Statement>,
+        body: Block,
+    },
 }
 
 /// Pattern for for-loop iteration variable binding.

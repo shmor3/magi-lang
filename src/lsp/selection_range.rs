@@ -190,7 +190,7 @@ fn collect_statement_spans(stmt: &Statement, line: u32, col: u32, spans: &mut Ve
             collect_expr_spans(condition, line, col, spans);
             collect_block_spans(body, line, col, spans);
         }
-        StatementKind::DoWhileLoop { body, condition, .. } => {
+        StatementKind::DoWhileLoop { body, condition, .. } | StatementKind::CStyleFor { body, condition, .. } => {
             collect_block_spans(body, line, col, spans);
             collect_expr_spans(condition, line, col, spans);
         }

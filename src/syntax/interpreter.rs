@@ -1095,6 +1095,49 @@ impl<'a> Interpreter<'a> {
                 Ok(last)
             }
 
+            StatementKind::CStyleFor { init, condition, update, body } => {
+                self.symbols.push(HashMap::new());
+                self.heap.push_scope();
+                self.exec_statement(init)?;
+                let mut iterations = 0;
+                let mut last = DataType::Null;
+                loop {
+                    if self.is_cancelled() {
+                        self.heap.pop_scope();
+                        self.symbols.pop();
+                        return Err(InterpError::Cancelled);
+                    }
+                    if iterations >= MAX_LOOP_ITERATIONS {
+                        self.heap.pop_scope();
+                        self.symbols.pop();
+                        return Err(InterpError::MaxIterations { limit: MAX_LOOP_ITERATIONS, span: stmt.span });
+                    }
+                    let cond = self.eval_expr(condition)?;
+                    if !cond.to_bool() { break; }
+                    self.symbols.push(HashMap::new());
+                    self.heap.push_scope();
+                    let result = self.exec_block(body);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
+                    match result {
+                        Ok(val) => { last = val; }
+                        Err(InterpError::BreakSignal(val)) => { last = val; break; }
+                        Err(InterpError::ContinueSignal) => {}
+                        Err(e) => {
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            return Err(e);
+                        }
+                    }
+                    self.exec_statement(update)?;
+                    iterations += 1;
+                    self.maybe_gc();
+                }
+                self.heap.pop_scope();
+                self.symbols.pop();
+                Ok(last)
+            }
+
             StatementKind::DoWhileLoop { label, body, condition } => {
                 let mut iterations = 0;
                 let mut last = DataType::Null;

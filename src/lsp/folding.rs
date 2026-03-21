@@ -84,7 +84,7 @@ fn collect_statement_folding_ranges(stmt: &Statement, ranges: &mut Vec<FoldingRa
         }
 
         // ---- Do-while loop ----
-        StatementKind::DoWhileLoop { body, condition, .. } => {
+        StatementKind::DoWhileLoop { body, condition, .. } | StatementKind::CStyleFor { body, condition, .. } => {
             push_range(ranges, &stmt.span, FoldingRangeKind::Region);
             collect_block_folding_ranges(body, ranges);
             collect_expression_folding_ranges(condition, ranges);

@@ -563,6 +563,11 @@ impl Parser {
     fn parse_for_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'for'
 
+        // C-style for loop: for (init; condition; update) { body }
+        if self.at(&TokenKind::LParen) {
+            return self.parse_c_style_for(start);
+        }
+
         let pattern = if self.at(&TokenKind::LBracket) {
             // Array destructure: for [a, b] in ...
             self.advance(); // consume [
@@ -629,6 +634,65 @@ impl Parser {
                 body,
             },
         })
+    }
+
+    /// Parse C-style for loop: `for (init; condition; update) { body }`
+    fn parse_c_style_for(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.expect(&TokenKind::LParen)?;
+        let init = self.parse_statement()?;
+        let condition = self.parse_expression()?;
+        self.expect(&TokenKind::Semicolon)?;
+        let update = self.parse_c_style_for_update()?;
+        self.expect(&TokenKind::RParen)?;
+        let body = self.parse_block()?;
+        Ok(Statement {
+            span: start.merge(body.span),
+            kind: StatementKind::CStyleFor {
+                init: Box::new(init),
+                condition,
+                update: Box::new(update),
+                body,
+            },
+        })
+    }
+
+    /// Parse the update clause of a C-style for loop (no trailing semicolon).
+    fn parse_c_style_for_update(&mut self) -> Result<Statement, SyntaxError> {
+        let start = self.peek().span;
+        if self.peek_kind() == &TokenKind::Ident {
+            let saved_pos = self.pos;
+            let name_tok = self.advance().clone();
+            if self.at(&TokenKind::Eq) {
+                self.advance();
+                let value = self.parse_expression()?;
+                let end = value.span;
+                return Ok(Statement {
+                    kind: StatementKind::Assignment { name: name_tok.text, value },
+                    span: start.merge(end),
+                });
+            }
+            let compound_op = match self.peek_kind() {
+                TokenKind::PlusEq => Some(BinOp::Add),
+                TokenKind::MinusEq => Some(BinOp::Sub),
+                TokenKind::StarEq => Some(BinOp::Mul),
+                TokenKind::SlashEq => Some(BinOp::Div),
+                TokenKind::PercentEq => Some(BinOp::Mod),
+                _ => None,
+            };
+            if let Some(op) = compound_op {
+                self.advance();
+                let value = self.parse_expression()?;
+                let end = value.span;
+                return Ok(Statement {
+                    kind: StatementKind::CompoundAssign { name: name_tok.text, op, value },
+                    span: start.merge(end),
+                });
+            }
+            self.pos = saved_pos;
+        }
+        let expr = self.parse_expression()?;
+        let end = expr.span;
+        Ok(Statement { kind: StatementKind::ExprStatement(expr), span: start.merge(end) })
     }
 
     fn parse_while_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {

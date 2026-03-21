@@ -767,6 +767,38 @@ impl Compiler {
             }
 
             StatementKind::Defer(_) => {}
+
+            StatementKind::CStyleFor { init, condition, update, body } => {
+                // Compile init statement
+                self.compile_statement(init)?;
+                // Compile as a while loop: while (condition) { body; update }
+                self.emit(Instruction::Block); // break target
+                let break_depth = self.block_depth;
+                self.emit(Instruction::Loop);  // continue target
+                let continue_depth = self.block_depth;
+                self.loop_stack.push(LoopContext { break_depth, continue_depth });
+                // Check condition
+                self.compile_expr(condition)?;
+                self.emit(Instruction::BoolNot);
+                let cond_break_offset = self.block_depth.saturating_sub(break_depth);
+                self.emit(Instruction::BrIf(cond_break_offset));
+                // Body
+                self.fb()?.push_scope();
+                self.compile_statements(&body.statements)?;
+                if let Some(tail) = &body.tail_expr {
+                    self.compile_expr(tail)?;
+                    self.emit(Instruction::Drop);
+                }
+                self.fb()?.pop_scope();
+                // Update
+                self.compile_statement(update)?;
+                // Loop back
+                let continue_offset = self.block_depth.saturating_sub(continue_depth);
+                self.emit(Instruction::Br(continue_offset));
+                self.emit(Instruction::End); // Loop
+                self.emit(Instruction::End); // Block
+                self.loop_stack.pop();
+            }
         }
         Ok(())
     }

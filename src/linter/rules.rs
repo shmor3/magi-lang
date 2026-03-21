@@ -168,7 +168,7 @@ fn block_contains_break(block: &Block) -> bool {
                 }
             }
             // Don't recurse into nested loops — their breaks target the inner loop.
-            StatementKind::ForLoop { .. } | StatementKind::WhileLoop { .. } | StatementKind::DoWhileLoop { .. } => {}
+            StatementKind::ForLoop { .. } | StatementKind::WhileLoop { .. } | StatementKind::DoWhileLoop { .. } | StatementKind::CStyleFor { .. } => {}
             StatementKind::ExprStatement(expr) => {
                 if expr_contains_break(expr) {
                     return true;
@@ -697,7 +697,7 @@ fn find_control_flow_in_stmt(stmt: &Statement, diagnostics: &mut Vec<AstDiagnost
         }
         // Inside a loop body within finally, break/continue target the loop itself.
         // Only return/throw still override the finally block.
-        StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. } | StatementKind::DoWhileLoop { body, .. } => {
+        StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. } | StatementKind::DoWhileLoop { body, .. } | StatementKind::CStyleFor { body, .. } => {
             find_return_throw_in_block(body, diagnostics);
         }
         StatementKind::TryCatch {
@@ -757,7 +757,7 @@ fn find_return_throw_in_block(block: &Block, diagnostics: &mut Vec<AstDiagnostic
             StatementKind::Throw(_) => {
                 emit_w212(stmt.span, "throw", diagnostics);
             }
-            StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. } | StatementKind::DoWhileLoop { body, .. } => {
+            StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. } | StatementKind::DoWhileLoop { body, .. } | StatementKind::CStyleFor { body, .. } => {
                 find_return_throw_in_block(body, diagnostics);
             }
             StatementKind::TryCatch {
@@ -1031,7 +1031,7 @@ fn check_nesting_depth_stmt(stmt: &Statement, depth: usize, max_depth: usize, di
     match &stmt.kind {
         StatementKind::ForLoop { body, .. }
         | StatementKind::WhileLoop { body, .. }
-        | StatementKind::DoWhileLoop { body, .. } => {
+        | StatementKind::DoWhileLoop { body, .. } | StatementKind::CStyleFor { body, .. } => {
             let new_depth = depth + 1;
             if new_depth > max_depth {
                 let code = ErrorCode::W233;

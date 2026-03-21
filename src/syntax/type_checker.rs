@@ -1330,6 +1330,17 @@ impl TypeChecker {
             StatementKind::Defer(expr) => {
                 let _ = self.infer_expr(expr);
             }
+
+            StatementKind::CStyleFor { init, condition, update, body } => {
+                self.push_scope();
+                self.check_statement(init);
+                self.infer_expr(condition);
+                self.loop_depth += 1;
+                self.check_block(body);
+                self.loop_depth -= 1;
+                self.check_statement(update);
+                self.pop_scope();
+            }
         }
     }
 

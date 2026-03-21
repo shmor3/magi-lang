@@ -282,6 +282,16 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression(condition);
                 self.write(";");
             }
+            StatementKind::CStyleFor { init, condition, update, body } => {
+                self.write("for (");
+                self.fmt_statement_inline(init);
+                self.write("; ");
+                self.fmt_expression(condition);
+                self.write("; ");
+                self.fmt_statement_inline(update);
+                self.write(") ");
+                self.fmt_block(body);
+            }
             StatementKind::Defer(expr) => {
                 self.write("defer ");
                 match &expr.kind {
@@ -493,6 +503,38 @@ impl<'a> Formatter<'a> {
                 self.dedent();
                 self.write("}");
             }
+        }
+    }
+
+    /// Format a statement inline (no trailing newline/semicolon), for C-style for loop parts.
+    fn fmt_statement_inline(&mut self, stmt: &Statement) {
+        match &stmt.kind {
+            StatementKind::Let { name, value, .. } => {
+                self.write("let ");
+                self.write(name);
+                self.write(" = ");
+                self.fmt_expression(value);
+            }
+            StatementKind::LetMut { name, value, .. } => {
+                self.write("let mut ");
+                self.write(name);
+                self.write(" = ");
+                self.fmt_expression(value);
+            }
+            StatementKind::Assignment { name, value } => {
+                self.write(name);
+                self.write(" = ");
+                self.fmt_expression(value);
+            }
+            StatementKind::CompoundAssign { name, op, value } => {
+                self.write(name);
+                self.write(&format!(" {}= ", op));
+                self.fmt_expression(value);
+            }
+            StatementKind::ExprStatement(expr) => {
+                self.fmt_expression(expr);
+            }
+            _ => self.fmt_statement(stmt),
         }
     }
 
