@@ -120,6 +120,9 @@ pub enum TokenKind {
     Dot,        // .
     Underscore, // _ (standalone placeholder)
 
+    // Labels
+    Label, // 'identifier (loop label like 'outer)
+
     // End of file
     Eof,
 }
@@ -209,6 +212,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Comma => ",",
             TokenKind::Dot => ".",
             TokenKind::Underscore => "_",
+            TokenKind::Label => "label",
             TokenKind::Eof => "EOF",
         };
         write!(f, "{}", s)
@@ -735,6 +739,11 @@ impl<'a> Lexer<'a> {
         // Number literal (digit or negative sign handled by parser as unary minus)
         if ch.is_ascii_digit() {
             return self.lex_number(start_line, start_col);
+        }
+
+        // Label: 'identifier (e.g. 'outer for labeled loops)
+        if ch == b'\'' && self.peek_at(1).is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+            return self.lex_label(start_line, start_col);
         }
 
         // Identifier or keyword
@@ -1290,6 +1299,34 @@ impl<'a> Lexer<'a> {
             kind,
             span: Span::new(start_line, start_col, self.line, self.col - 1),
             text,
+        })
+    }
+
+    /// Lex a label token: `'identifier` (e.g. `'outer`).
+    /// The leading `'` has not been consumed yet.
+    fn lex_label(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        self.advance(); // consume the '\''
+        let ident_start = self.pos;
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_alphanumeric() || ch == b'_' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let name = String::from_utf8_lossy(&self.source[ident_start..self.pos]).to_string();
+        if name.is_empty() {
+            return Err(SyntaxError {
+                line: start_line as usize,
+                column: start_col as usize,
+                message: "Expected identifier after ' for label".to_string(),
+                code: None,
+            });
+        }
+        Ok(Token {
+            kind: TokenKind::Label,
+            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            text: name,
         })
     }
 }

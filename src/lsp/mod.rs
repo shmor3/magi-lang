@@ -1,15 +1,18 @@
 //! Language Server Protocol implementation for the MAGI language.
 //!
 //! Provides diagnostics, hover, go-to-definition, completion, signature help,
-//! document symbols, and formatting.
+//! document symbols, code lens, workspace symbols, selection ranges, and formatting.
 
 pub mod analysis;
 pub mod code_actions;
+pub mod code_lens;
 pub mod completion;
 pub mod definition;
 pub mod document_symbols;
 pub mod hover;
+pub mod selection_range;
 pub mod signature_help;
+pub mod workspace_symbols;
 
 use analysis::{analyze_document, to_lsp_diagnostic_with_source, DocumentState};
 use std::collections::HashMap;
@@ -23,6 +26,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 pub struct MagiLanguageServer {
     client: Client,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
+    workspace_root: Arc<RwLock<Option<String>>>,
 }
 
 impl MagiLanguageServer {
@@ -30,6 +34,7 @@ impl MagiLanguageServer {
         Self {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
+            workspace_root: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -69,7 +74,15 @@ impl MagiLanguageServer {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for MagiLanguageServer {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Store workspace root for workspace symbol queries.
+        #[allow(deprecated)] // root_uri is deprecated in favor of workspace_folders
+        if let Some(root_uri) = params.root_uri {
+            if let Ok(path) = root_uri.to_file_path() {
+                *self.workspace_root.write().await = Some(path.to_string_lossy().to_string());
+            }
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -89,6 +102,11 @@ impl LanguageServer for MagiLanguageServer {
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -287,6 +305,64 @@ impl LanguageServer for MagiLanguageServer {
             }])
         })) {
             Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            code_lens::handle_code_lens(state)
+        })) {
+            Ok(lenses) if lenses.is_empty() => Ok(None),
+            Ok(lenses) => Ok(Some(lenses)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    #[allow(deprecated)] // WorkspaceSymbolParams::query
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let root = self.workspace_root.read().await;
+        let root_path = match root.as_deref() {
+            Some(r) => r.to_string(),
+            None => return Ok(None),
+        };
+        drop(root);
+
+        let query = params.query.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            workspace_symbols::handle_workspace_symbols(&root_path, &query)
+        })) {
+            Ok(symbols) if symbols.is_empty() => Ok(None),
+            Ok(symbols) => Ok(Some(symbols)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let positions = params.positions.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            selection_range::handle_selection_ranges(state, &positions)
+        })) {
+            Ok(ranges) if ranges.is_empty() => Ok(None),
+            Ok(ranges) => Ok(Some(ranges)),
             Err(_) => Ok(None),
         }
     }

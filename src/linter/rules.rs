@@ -88,8 +88,8 @@ pub fn check_dead_code_in_block(stmts: &[Statement]) -> Vec<AstDiagnostic> {
 
         match &stmt.kind {
             StatementKind::Return(_)
-            | StatementKind::Break(_)
-            | StatementKind::Continue
+            | StatementKind::Break { value: _, .. }
+            | StatementKind::Continue { .. }
             | StatementKind::Throw(_) => {
                 terminated = true;
             }
@@ -157,7 +157,7 @@ pub fn check_constant_condition(condition: &Expression, loop_body: Option<&Block
 fn block_contains_break(block: &Block) -> bool {
     for stmt in &block.statements {
         match &stmt.kind {
-            StatementKind::Break(_) => return true,
+            StatementKind::Break { value: _, .. } => return true,
             StatementKind::TryCatch { try_block, catch_block, .. } => {
                 if block_contains_break(try_block) || block_contains_break(catch_block) {
                     return true;
@@ -196,7 +196,7 @@ fn expr_contains_break(expr: &Expression) -> bool {
             arms.iter().any(|arm| block_contains_break(&arm.body))
         }
         // Don't recurse into loop expressions — their breaks are for the inner loop.
-        ExpressionKind::Loop(_) => false,
+        ExpressionKind::Loop { body: _, .. } => false,
         ExpressionKind::TryCatchExpr { try_block, catch_block, .. } => {
             block_contains_break(try_block) || block_contains_break(catch_block)
         }
@@ -296,7 +296,7 @@ fn is_terminating_expr(expr: &Expression) -> bool {
         // A loop always either runs forever or exits via break/return/throw.
         // Code after it is unreachable only if the body terminates without break
         // (break would exit the loop, making subsequent code reachable).
-        ExpressionKind::Loop(block) => is_terminating_block(block) && !block_contains_break(block),
+        ExpressionKind::Loop { body: block, .. } => is_terminating_block(block) && !block_contains_break(block),
         // A try/catch expression where both blocks terminate, or finally terminates, is a terminator.
         ExpressionKind::TryCatchExpr { try_block, catch_block, finally_block, .. } => {
             (is_terminating_block(try_block) && is_terminating_block(catch_block))
@@ -311,8 +311,8 @@ fn is_terminating_block(block: &Block) -> bool {
     for stmt in &block.statements {
         match &stmt.kind {
             StatementKind::Return(_)
-            | StatementKind::Break(_)
-            | StatementKind::Continue
+            | StatementKind::Break { value: _, .. }
+            | StatementKind::Continue { .. }
             | StatementKind::Throw(_) => return true,
             StatementKind::ExprStatement(expr) => {
                 if is_terminating_expr(expr) {
@@ -674,10 +674,10 @@ fn find_control_flow_in_stmt(stmt: &Statement, diagnostics: &mut Vec<AstDiagnost
         StatementKind::Return(_) => {
             emit_w212(stmt.span, "return", diagnostics);
         }
-        StatementKind::Break(_) => {
+        StatementKind::Break { value: _, .. } => {
             emit_w212(stmt.span, "break", diagnostics);
         }
-        StatementKind::Continue => {
+        StatementKind::Continue { .. } => {
             emit_w212(stmt.span, "continue", diagnostics);
         }
         StatementKind::Throw(_) => {
@@ -801,7 +801,7 @@ fn find_return_throw_in_expr(expr: &Expression, diagnostics: &mut Vec<AstDiagnos
                 find_return_throw_in_block(&arm.body, diagnostics);
             }
         }
-        ExpressionKind::Loop(block) => {
+        ExpressionKind::Loop { body: block, .. } => {
             find_return_throw_in_block(block, diagnostics);
         }
         ExpressionKind::TryCatchExpr {
@@ -841,7 +841,7 @@ fn find_control_flow_in_expr(expr: &Expression, diagnostics: &mut Vec<AstDiagnos
                 find_control_flow_in_block(&arm.body, diagnostics);
             }
         }
-        ExpressionKind::Loop(block) => {
+        ExpressionKind::Loop { body: block, .. } => {
             find_return_throw_in_block(block, diagnostics);
         }
         ExpressionKind::TryCatchExpr {

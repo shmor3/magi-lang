@@ -236,7 +236,7 @@ impl<'a> LintContext<'a> {
                     self.emit(d);
                 }
             }
-            StatementKind::ForLoop { pattern, iterable, body } => {
+            StatementKind::ForLoop { pattern, iterable, body, .. } => {
                 self.check_for_pattern(pattern, stmt.span);
                 if let Some(d) = rules::check_empty_block(body, "for-loop", stmt.span) {
                     self.emit(d);
@@ -244,7 +244,7 @@ impl<'a> LintContext<'a> {
                 self.check_expression(iterable);
                 self.check_block(body);
             }
-            StatementKind::WhileLoop { condition, body } => {
+            StatementKind::WhileLoop { condition, body, .. } => {
                 if let Some(d) = rules::check_constant_condition(condition, Some(body)) {
                     self.emit(d);
                 }
@@ -263,7 +263,7 @@ impl<'a> LintContext<'a> {
             StatementKind::Return(Some(expr)) => {
                 self.check_expression(expr);
             }
-            StatementKind::Break(Some(expr)) => {
+            StatementKind::Break { label: None, value: Some(expr) } => {
                 self.check_expression(expr);
             }
             StatementKind::Throw(expr) => {
@@ -518,7 +518,7 @@ impl<'a> LintContext<'a> {
                 }
                 self.check_expression(body);
             }
-            ExpressionKind::Loop(block) => {
+            ExpressionKind::Loop { body: block, .. } => {
                 if let Some(d) = rules::check_empty_block(block, "loop", expr.span) {
                     self.emit(d);
                 }

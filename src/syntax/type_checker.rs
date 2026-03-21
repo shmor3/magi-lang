@@ -592,6 +592,7 @@ impl TypeChecker {
             // for item in iterable { body }
             // -----------------------------------------------------------------
             StatementKind::ForLoop {
+                label: _,
                 pattern,
                 iterable,
                 body,
@@ -653,7 +654,7 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // while condition { body }
             // -----------------------------------------------------------------
-            StatementKind::WhileLoop { condition, body } => {
+            StatementKind::WhileLoop { condition, body, .. } => {
                 let cond_type = self.infer_expr(condition);
                 if cond_type != ChannelType::Bool && cond_type != ChannelType::Null {
                     self.emit_coded(
@@ -790,7 +791,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            StatementKind::Break(ref val_expr) => {
+            StatementKind::Break { value: ref val_expr, .. } => {
                 if self.loop_depth == 0 {
                     self.emit_coded(
                         stmt.span.start_line,
@@ -806,7 +807,7 @@ impl TypeChecker {
                 }
             }
 
-            StatementKind::Continue => {
+            StatementKind::Continue { .. } => {
                 if self.loop_depth == 0 {
                     self.emit_coded(
                         stmt.span.start_line,
@@ -2306,7 +2307,7 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // loop { body } — infinite loop with break value
             // -----------------------------------------------------------------
-            ExpressionKind::Loop(block) => {
+            ExpressionKind::Loop { body: block, .. } => {
                 // W104 (empty block) is handled by the linter as W206.
                 self.push_scope();
                 self.loop_depth += 1;

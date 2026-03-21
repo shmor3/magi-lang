@@ -303,8 +303,8 @@ impl Parser {
             TokenKind::Const => self.parse_const_statement(start),
             TokenKind::Fn => self.parse_function_def(start),
             TokenKind::Async => self.parse_async_function_def(start),
-            TokenKind::For => self.parse_for_loop(start),
-            TokenKind::While => self.parse_while_loop(start),
+            TokenKind::For => self.parse_for_loop(start, None),
+            TokenKind::While => self.parse_while_loop(start, None),
             TokenKind::Break => self.parse_break_statement(start),
             TokenKind::Continue => self.parse_continue_statement(start),
             TokenKind::Return => self.parse_return_statement(start),
@@ -338,6 +338,38 @@ impl Parser {
                         line: start.start_line as usize,
                         column: start.start_col as usize,
                         message: "'pub' can only be applied to fn, async fn, mod, enum, struct, const, type, or use definitions".to_string(),
+                        code: None,
+                    }),
+                }
+            }
+            TokenKind::Label => {
+                // Labeled loop: 'label: for/while/loop { ... }
+                let label_tok = self.advance().clone();
+                let label_name = label_tok.text.clone();
+                self.expect(&TokenKind::Colon)?;
+                match self.peek_kind() {
+                    TokenKind::For => self.parse_for_loop(start, Some(label_name)),
+                    TokenKind::While => self.parse_while_loop(start, Some(label_name)),
+                    TokenKind::Loop => {
+                        // Labeled loop expression as statement
+                        self.advance(); // consume 'loop'
+                        let block = self.parse_block()?;
+                        let span = start.merge(block.span);
+                        Ok(Statement {
+                            kind: StatementKind::ExprStatement(Expression {
+                                kind: ExpressionKind::Loop {
+                                    label: Some(label_name),
+                                    body: block,
+                                },
+                                span,
+                            }),
+                            span,
+                        })
+                    }
+                    _ => Err(SyntaxError {
+                        line: self.peek().span.start_line as usize,
+                        column: self.peek().span.start_col as usize,
+                        message: "Expected 'for', 'while', or 'loop' after label".to_string(),
                         code: None,
                     }),
                 }
@@ -510,7 +542,7 @@ impl Parser {
         })
     }
 
-    fn parse_for_loop(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+    fn parse_for_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'for'
 
         let pattern = if self.at(&TokenKind::LBracket) {
@@ -573,6 +605,7 @@ impl Parser {
         Ok(Statement {
             span: start.merge(body.span),
             kind: StatementKind::ForLoop {
+                label,
                 pattern,
                 iterable,
                 body,
@@ -580,22 +613,30 @@ impl Parser {
         })
     }
 
-    fn parse_while_loop(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+    fn parse_while_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'while'
         let condition = self.parse_expression_no_struct()?;
         let body = self.parse_block()?;
 
         Ok(Statement {
             span: start.merge(body.span),
-            kind: StatementKind::WhileLoop { condition, body },
+            kind: StatementKind::WhileLoop { label, condition, body },
         })
     }
 
     fn parse_break_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         let keyword_tok = self.advance().clone(); // consume 'break'
-        // Optional value expression (e.g. `break 42;`)
-        // Only parse value if next token is on the same line as `break`
         let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
+        // Optional label: break 'label
+        let label = if next_on_same_line && self.at(&TokenKind::Label) {
+            let label_tok = self.advance().clone();
+            Some(label_tok.text)
+        } else {
+            None
+        };
+        // Re-check same-line after possibly consuming label
+        let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
+        // Optional value expression (e.g. `break 42;` or `break 'label 42;`)
         let value = if next_on_same_line && !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
             Some(self.parse_expression()?)
         } else {
@@ -604,17 +645,25 @@ impl Parser {
         let end = self.peek().span;
         self.eat(&TokenKind::Semicolon);
         Ok(Statement {
-            kind: StatementKind::Break(value),
+            kind: StatementKind::Break { label, value },
             span: start.merge(end),
         })
     }
 
     fn parse_continue_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
-        self.advance(); // consume 'continue'
+        let keyword_tok = self.advance().clone(); // consume 'continue'
+        let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
+        // Optional label: continue 'label
+        let label = if next_on_same_line && self.at(&TokenKind::Label) {
+            let label_tok = self.advance().clone();
+            Some(label_tok.text)
+        } else {
+            None
+        };
         let end = self.peek().span;
         self.eat(&TokenKind::Semicolon);
         Ok(Statement {
-            kind: StatementKind::Continue,
+            kind: StatementKind::Continue { label },
             span: start.merge(end),
         })
     }
@@ -1824,7 +1873,7 @@ impl Parser {
                 let block = self.parse_block()?;
                 let span = tok.span.merge(block.span);
                 Ok(Expression {
-                    kind: ExpressionKind::Loop(block),
+                    kind: ExpressionKind::Loop { label: None, body: block },
                     span,
                 })
             }
@@ -3373,11 +3422,7 @@ mod tests {
     fn test_parse_for_loop() {
         let prog = parse("for item in items { x; }");
         match &prog.statements[0].kind {
-            StatementKind::ForLoop {
-                pattern,
-                iterable,
-                body,
-            } => {
+            StatementKind::ForLoop { pattern, iterable, body, .. } => {
                 assert!(matches!(pattern, ForPattern::Single(name) if name == "item"));
                 assert!(matches!(iterable.kind, ExpressionKind::Variable(_)));
                 assert_eq!(body.statements.len(), 1);
@@ -3403,7 +3448,7 @@ mod tests {
     fn test_parse_while_loop() {
         let prog = parse("while total < 100 { total = total * 2; }");
         match &prog.statements[0].kind {
-            StatementKind::WhileLoop { condition, body } => {
+            StatementKind::WhileLoop { condition, body, .. } => {
                 assert!(matches!(
                     condition.kind,
                     ExpressionKind::BinaryOp { op: BinOp::Lt, .. }

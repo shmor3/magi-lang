@@ -48,7 +48,7 @@ fn fold_statement(stmt: &mut Statement) {
             fold_expr(iterable);
             fold_block(body);
         }
-        StatementKind::WhileLoop { condition, body } => {
+        StatementKind::WhileLoop { condition, body, .. } => {
             fold_expr(condition);
             fold_block(body);
         }
@@ -60,7 +60,10 @@ fn fold_statement(stmt: &mut Statement) {
             }
             fold_block(&mut fdef.body);
         }
-        StatementKind::Break(Some(expr)) | StatementKind::Return(Some(expr)) => {
+        StatementKind::Break { value: Some(expr), .. } => {
+            fold_expr(expr);
+        }
+        StatementKind::Return(Some(expr)) => {
             fold_expr(expr);
         }
         StatementKind::TryCatch {
@@ -83,8 +86,8 @@ fn fold_statement(stmt: &mut Statement) {
         }
         // These statements have no expressions to fold
         StatementKind::Import(_)
-        | StatementKind::Break(None)
-        | StatementKind::Continue
+        | StatementKind::Break { value: None, .. }
+        | StatementKind::Continue { .. }
         | StatementKind::Return(None)
         | StatementKind::TypeAlias { .. }
         | StatementKind::Use { .. }
@@ -103,8 +106,8 @@ fn fold_block(block: &mut Block) {
     // Dead code elimination: remove statements after return/break/continue/throw
     if let Some(pos) = block.statements.iter().position(|s| matches!(
         &s.kind,
-        StatementKind::Return(_) | StatementKind::Break(_)
-        | StatementKind::Continue | StatementKind::Throw(_)
+        StatementKind::Return(_) | StatementKind::Break { value: _, .. }
+        | StatementKind::Continue { .. } | StatementKind::Throw(_)
     )) {
         block.statements.truncate(pos + 1);
         // If there's a tail expr after a terminator, remove it
@@ -258,7 +261,7 @@ fn fold_expr(expr: &mut Expression) {
             fold_expr(inner);
             return;
         }
-        ExpressionKind::Loop(block) => {
+        ExpressionKind::Loop { body: block, .. } => {
             fold_block(block);
             return;
         }

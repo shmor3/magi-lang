@@ -793,10 +793,10 @@ impl<'a> Interpreter<'a> {
                 }
                 last_value = match self.exec_statement(stmt) {
                     Ok(val) => val,
-                    Err(InterpError::BreakSignal(_)) => {
+                    Err(InterpError::BreakSignal(_)) | Err(InterpError::LabeledBreak { .. }) => {
                         return Err(InterpError::BreakOutsideLoop { span: stmt.span });
                     }
-                    Err(InterpError::ContinueSignal) => {
+                    Err(InterpError::ContinueSignal) | Err(InterpError::LabeledContinue { .. }) => {
                         return Err(InterpError::ContinueOutsideLoop { span: stmt.span });
                     }
                     Err(InterpError::ReturnSignal(_)) => {
@@ -874,11 +874,7 @@ impl<'a> Interpreter<'a> {
                 Ok(val)
             }
 
-            StatementKind::ForLoop {
-                pattern,
-                iterable,
-                body,
-            } => {
+            StatementKind::ForLoop { label, pattern, iterable, body } => {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     DataType::Array(arr) => arr,
@@ -963,7 +959,15 @@ impl<'a> Interpreter<'a> {
                             last = val;
                             break;
                         }
+                        Err(InterpError::LabeledBreak { label: ref lbl, ref value })
+                            if label.as_deref() == Some(lbl.as_str()) =>
+                        {
+                            last = value.clone();
+                            break;
+                        }
                         Err(InterpError::ContinueSignal) => continue,
+                        Err(InterpError::LabeledContinue { label: ref lbl })
+                            if label.as_deref() == Some(lbl.as_str()) => continue,
                         Err(e) => return Err(e),
                     }
                     self.maybe_gc();
@@ -971,7 +975,7 @@ impl<'a> Interpreter<'a> {
                 Ok(last)
             }
 
-            StatementKind::WhileLoop { condition, body } => {
+            StatementKind::WhileLoop { label, condition, body } => {
                 let mut iterations = 0;
                 let mut last = DataType::Null;
                 loop {
@@ -1015,7 +1019,15 @@ impl<'a> Interpreter<'a> {
                             last = val;
                             break;
                         }
+                        Err(InterpError::LabeledBreak { label: ref lbl, ref value })
+                            if label.as_deref() == Some(lbl.as_str()) =>
+                        {
+                            last = value.clone();
+                            break;
+                        }
                         Err(InterpError::ContinueSignal) => {}
+                        Err(InterpError::LabeledContinue { label: ref lbl })
+                            if label.as_deref() == Some(lbl.as_str()) => {}
                         Err(e) => return Err(e), // propagate return/errors
                     }
                     iterations += 1;
@@ -1053,15 +1065,23 @@ impl<'a> Interpreter<'a> {
                 Ok(DataType::Null)
             }
 
-            StatementKind::Break(ref val_expr) => {
-                let val = match val_expr {
+            StatementKind::Break { ref label, ref value } => {
+                let val = match value {
                     Some(expr) => self.eval_expr(expr)?,
                     None => DataType::Null,
                 };
-                Err(InterpError::BreakSignal(val))
+                match label {
+                    Some(lbl) => Err(InterpError::LabeledBreak { label: lbl.clone(), value: val }),
+                    None => Err(InterpError::BreakSignal(val)),
+                }
             }
 
-            StatementKind::Continue => Err(InterpError::ContinueSignal),
+            StatementKind::Continue { ref label } => {
+                match label {
+                    Some(lbl) => Err(InterpError::LabeledContinue { label: lbl.clone() }),
+                    None => Err(InterpError::ContinueSignal),
+                }
+            }
 
             StatementKind::Return(ref val_expr) => {
                 let val = match val_expr {
@@ -4447,7 +4467,7 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
-            ExpressionKind::Loop(block) => {
+            ExpressionKind::Loop { label, body: block } => {
                 let mut iterations = 0;
                 loop {
                     if self.is_cancelled() {
@@ -4467,7 +4487,11 @@ impl<'a> Interpreter<'a> {
                     match result {
                         Ok(_) => {}
                         Err(InterpError::BreakSignal(val)) => return Ok(val),
+                        Err(InterpError::LabeledBreak { label: ref lbl, ref value })
+                            if label.as_deref() == Some(lbl.as_str()) => return Ok(value.clone()),
                         Err(InterpError::ContinueSignal) => {}
+                        Err(InterpError::LabeledContinue { label: ref lbl })
+                            if label.as_deref() == Some(lbl.as_str()) => {}
                         Err(e) => return Err(e),
                     }
                     iterations += 1;
@@ -5663,6 +5687,8 @@ fn is_control_flow(err: &InterpError) -> bool {
         err,
         InterpError::BreakSignal(_)
             | InterpError::ContinueSignal
+            | InterpError::LabeledBreak { .. }
+            | InterpError::LabeledContinue { .. }
             | InterpError::ReturnSignal(_)
             | InterpError::Cancelled
     )
@@ -6132,6 +6158,10 @@ pub enum InterpError {
     BreakSignal(DataType),
     /// Control flow signal: `continue` (caught by loops)
     ContinueSignal,
+    /// Control flow signal: `break 'label` (caught by the matching labeled loop)
+    LabeledBreak { label: String, value: DataType },
+    /// Control flow signal: `continue 'label` (caught by the matching labeled loop)
+    LabeledContinue { label: String },
     /// Control flow signal: `return expr` (caught by function calls)
     ReturnSignal(DataType),
     /// `break` used outside a loop
@@ -6267,6 +6297,8 @@ impl std::fmt::Display for InterpError {
             }
             InterpError::BreakSignal(_) => write!(f, "break"),
             InterpError::ContinueSignal => write!(f, "continue"),
+            InterpError::LabeledBreak { label, .. } => write!(f, "break '{}", label),
+            InterpError::LabeledContinue { label } => write!(f, "continue '{}", label),
             InterpError::ReturnSignal(_) => write!(f, "return"),
             InterpError::BreakOutsideLoop { span } => {
                 write!(f, "{} [E300]: 'break' used outside of a loop", span)
@@ -6318,6 +6350,8 @@ impl InterpError {
             InterpError::Cancelled
             | InterpError::BreakSignal(_)
             | InterpError::ContinueSignal
+            | InterpError::LabeledBreak { .. }
+            | InterpError::LabeledContinue { .. }
             | InterpError::ReturnSignal(_) => None,
         }
     }

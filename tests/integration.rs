@@ -19576,3 +19576,131 @@ fn test_is_prime_large() {
     assert_eq!(run("output is_prime(997);"), DataType::Bool(true));
     assert_eq!(run("output is_prime(999);"), DataType::Bool(false));
 }
+
+// =========================================================================
+// Round 14 edge case tests (#401-430)
+// =========================================================================
+
+#[test]
+fn test_empty_program_returns_null() {
+    // #401: Empty program should return Null
+    assert_eq!(run(""), DataType::Null);
+}
+
+#[test]
+fn test_file_with_only_comments() {
+    // #402: Only comments should parse and return Null
+    assert_eq!(run("// just a comment"), DataType::Null);
+}
+
+#[test]
+fn test_negative_zero() {
+    // #411: -0.0 == 0.0 should be true (IEEE 754)
+    assert_eq!(run("output -0.0 == 0.0;"), DataType::Bool(true));
+}
+
+#[test]
+fn test_empty_string_split() {
+    // #418: "".split(",") returns [""] (one empty element)
+    assert_eq!(run(r#"output "".split(",");"#), DataType::Array(vec![DataType::String("".to_string())]));
+}
+
+#[test]
+fn test_throw_non_string() {
+    // #426: throw 42 should be catchable
+    assert_eq!(run(r#"
+        let result = try { throw 42; } catch e { e };
+        output result;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_break_with_value_in_for() {
+    // #423: break with value — capture via variable since for is a statement
+    assert_eq!(run(r#"
+        let mut result = null;
+        for x in [1, 2, 3, 4] {
+            if x == 3 { result = x * 10; break; }
+        }
+        output result;
+    "#), DataType::Int64(30));
+}
+
+#[test]
+fn test_single_variant_enum() {
+    // #409: Single-variant enum should work
+    assert_eq!(run(r#"
+        enum Single { Only(int64) }
+        let s = Single::Only(42);
+        let val = match s {
+            Single::Only(n) => n,
+        };
+        output val;
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_recursive_data_clone() {
+    // #417: Recursive structure is cloned, not circular
+    assert_eq!(run(r#"
+        let mut x = [];
+        x = array_push(x, x);
+        output len(x);
+    "#), DataType::Int64(1));
+}
+
+#[test]
+fn test_string_count_words_empty() {
+    assert_eq!(run(r#"output "".count_words();"#), DataType::Int64(0));
+}
+
+#[test]
+fn test_string_count_words_whitespace_only() {
+    assert_eq!(run(r#"output "   ".count_words();"#), DataType::Int64(0));
+}
+
+#[test]
+fn test_map_deep_merge_nested() {
+    // Deep merge with 3 levels
+    let result = run(r#"
+        let a = {"x": {"y": {"z": 1}}};
+        let b = {"x": {"y": {"w": 2}}};
+        let merged = a.deep_merge(b);
+        output merged;
+    "#);
+    match result {
+        DataType::Map(m) => {
+            if let Some(DataType::Map(x)) = m.get("x") {
+                if let Some(DataType::Map(y)) = x.get("y") {
+                    assert_eq!(y.get("z"), Some(&DataType::Int64(1)));
+                    assert_eq!(y.get("w"), Some(&DataType::Int64(2)));
+                } else { panic!("Expected nested map y"); }
+            } else { panic!("Expected nested map x"); }
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_array_flatten_infinite_depth() {
+    // flatten() with no args flattens all levels
+    assert_eq!(run(r#"output [1, [2, [3, [4]]]].flatten();"#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(2), DataType::Int64(3), DataType::Int64(4),
+    ]));
+}
+
+#[test]
+fn test_array_window_larger_than_array() {
+    assert_eq!(run(r#"output [1, 2].window(5);"#), DataType::Array(vec![]));
+}
+
+#[test]
+fn test_map_omit_empty_keys() {
+    let result = run(r#"output {"a": 1, "b": 2}.omit([]);"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 2);
+        }
+        _ => panic!("Expected map"),
+    }
+}

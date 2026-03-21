@@ -137,13 +137,20 @@ pub enum StatementKind {
         value: Expression,
     },
     /// `for item in iterable { body }` / `for [a, b] in pairs { }` / `for {k, v} in map { }`
+    /// Optionally labeled: `'label: for item in iterable { body }`
     ForLoop {
+        label: Option<String>,
         pattern: ForPattern,
         iterable: Expression,
         body: Block,
     },
     /// `while condition { body }`
-    WhileLoop { condition: Expression, body: Block },
+    /// Optionally labeled: `'label: while condition { body }`
+    WhileLoop {
+        label: Option<String>,
+        condition: Expression,
+        body: Block,
+    },
     /// `output expr;`
     Output(Expression),
     /// Expression used as a statement (e.g. function call for side effects)
@@ -152,10 +159,15 @@ pub enum StatementKind {
     FunctionDef(FunctionDef),
     /// `async fn name(params) -> type { body }`
     AsyncFunctionDef(FunctionDef),
-    /// `break;` or `break expr;`
-    Break(Option<Expression>),
-    /// `continue;`
-    Continue,
+    /// `break;` or `break expr;` or `break 'label;` or `break 'label expr;`
+    Break {
+        label: Option<String>,
+        value: Option<Expression>,
+    },
+    /// `continue;` or `continue 'label;`
+    Continue {
+        label: Option<String>,
+    },
     /// `return;` or `return expr;`
     Return(Option<Expression>),
     /// `try { ... } catch err { ... } finally { ... }`
@@ -346,7 +358,11 @@ pub enum ExpressionKind {
     /// Spread: `...expr` (in array/map literals)
     Spread(Box<Expression>),
     /// `loop { body }` — infinite loop, exits with `break value`
-    Loop(Block),
+    /// Optionally labeled: `'label: loop { body }`
+    Loop {
+        label: Option<String>,
+        body: Block,
+    },
     /// `try { expr } catch var { expr }` — expression form of try/catch
     TryCatchExpr {
         try_block: Block,

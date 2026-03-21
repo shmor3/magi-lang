@@ -252,11 +252,10 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression(value);
                 self.write(";");
             }
-            StatementKind::ForLoop {
-                pattern,
-                iterable,
-                body,
-            } => {
+            StatementKind::ForLoop { label, pattern, iterable, body } => {
+                if let Some(lbl) = label {
+                    self.write(&format!("'{}: ", lbl));
+                }
                 self.write("for ");
                 self.fmt_for_pattern(pattern);
                 self.write(" in ");
@@ -264,7 +263,10 @@ impl<'a> Formatter<'a> {
                 self.write(" ");
                 self.fmt_block(body);
             }
-            StatementKind::WhileLoop { condition, body } => {
+            StatementKind::WhileLoop { label, condition, body } => {
+                if let Some(lbl) = label {
+                    self.write(&format!("'{}: ", lbl));
+                }
                 self.write("while ");
                 self.fmt_expression(condition);
                 self.write(" ");
@@ -295,16 +297,23 @@ impl<'a> Formatter<'a> {
                 self.write("async fn ");
                 self.fmt_function_def(fdef);
             }
-            StatementKind::Break(None) => {
-                self.write("break;");
-            }
-            StatementKind::Break(Some(expr)) => {
-                self.write("break ");
-                self.fmt_expression(expr);
+            StatementKind::Break { label, value } => {
+                self.write("break");
+                if let Some(lbl) = label {
+                    self.write(&format!(" '{}", lbl));
+                }
+                if let Some(expr) = value {
+                    self.write(" ");
+                    self.fmt_expression(expr);
+                }
                 self.write(";");
             }
-            StatementKind::Continue => {
-                self.write("continue;");
+            StatementKind::Continue { label } => {
+                self.write("continue");
+                if let Some(lbl) = label {
+                    self.write(&format!(" '{}", lbl));
+                }
+                self.write(";");
             }
             StatementKind::Return(None) => {
                 self.write("return;");
@@ -810,7 +819,10 @@ impl<'a> Formatter<'a> {
                 self.write("...");
                 self.fmt_expression(inner);
             }
-            ExpressionKind::Loop(block) => {
+            ExpressionKind::Loop { label, body: block } => {
+                if let Some(lbl) = label {
+                    self.write(&format!("'{}: ", lbl));
+                }
                 self.write("loop ");
                 self.fmt_block(block);
             }

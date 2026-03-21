@@ -6553,6 +6553,7 @@ fn print_usage() {
     eprintln!("  lint <file.magi>            Lint for style issues");
     eprintln!("  fmt [options] <file.magi>   Format source code");
     eprintln!("  init <name>                 Create a new MAGI project");
+    eprintln!("  bench [options] <file.magi>  Benchmark a .magi file");
     eprintln!("  compile <file.magi>         Compile to WebAssembly (.wasm)");
     eprintln!("  run-wasm <file.wasm>        Execute a compiled .wasm file");
     eprintln!("  lsp                         Start the Language Server Protocol server");
@@ -6579,6 +6580,7 @@ fn print_usage() {
     eprintln!("  magi repl                   Start interactive session");
     eprintln!("  magi check main.magi        Type-check before deploying");
     eprintln!("  magi fmt --write main.magi  Format a file in-place");
+    eprintln!("  magi bench -n 500 main.magi Benchmark a file (500 iterations)");
     eprintln!("  magi init my-project        Scaffold a new project");
     eprintln!("  magi compile main.magi      Compile to dist/main.wasm");
 }
@@ -6704,6 +6706,39 @@ fn main() {
                 None => {
                     eprintln!("error: missing file argument");
                     eprintln!("Usage: magi fmt [--write] [--check] <file.magi>");
+                    process::exit(1);
+                }
+            }
+        }
+        "bench" => {
+            let mut iterations: u64 = 100;
+            let mut file_path = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-n" => {
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("error: -n requires an iteration count");
+                            process::exit(1);
+                        }
+                        iterations = match args[i].parse::<u64>() {
+                            Ok(v) if v > 0 => v,
+                            _ => {
+                                eprintln!("error: -n value must be a positive integer");
+                                process::exit(1);
+                            }
+                        };
+                    }
+                    _ => file_path = Some(args[i].as_str()),
+                }
+                i += 1;
+            }
+            match file_path {
+                Some(path) => cmd_bench(path, iterations),
+                None => {
+                    eprintln!("error: missing file argument");
+                    eprintln!("Usage: magi bench [-n <iterations>] <file.magi>");
                     process::exit(1);
                 }
             }
@@ -7190,6 +7225,51 @@ fn cmd_eval(expr: &str) {
     for log in &interp.logs {
         println!("{}", log.message);
     }
+}
+
+fn cmd_bench(path: &str, iterations: u64) {
+    let source = read_source(path);
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
+            process::exit(1);
+        }
+    };
+
+    let file_path = std::path::Path::new(path);
+    let packages = resolve_dependencies(file_path);
+
+    eprintln!("Benchmarking {} ({} iterations)...", path, iterations);
+
+    let mut times = Vec::with_capacity(iterations as usize);
+
+    for _ in 0..iterations {
+        let evaluator = FullEvaluator;
+        let mut interp = Interpreter::new(&evaluator).with_packages(packages.clone());
+        let start = std::time::Instant::now();
+        match interp.execute(&program) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{}: runtime error: {}", path, e);
+                process::exit(1);
+            }
+        }
+        let elapsed = start.elapsed();
+        times.push(elapsed);
+    }
+
+    let total: std::time::Duration = times.iter().sum();
+    let avg = total / iterations as u32;
+    let min = times.iter().min().unwrap();
+    let max = times.iter().max().unwrap();
+
+    println!("Iterations: {}", iterations);
+    println!("Average:    {:.3?}", avg);
+    println!("Min:        {:.3?}", min);
+    println!("Max:        {:.3?}", max);
+    println!("Total:      {:.3?}", total);
 }
 
 fn cmd_test(path: &str) {
