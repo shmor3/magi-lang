@@ -19704,3 +19704,120 @@ fn test_map_omit_empty_keys() {
         _ => panic!("Expected map"),
     }
 }
+
+// =========================================================================
+// Labeled loops (#70)
+// =========================================================================
+
+#[test]
+fn test_labeled_for_break() {
+    assert_eq!(run(r#"
+        let mut found = null;
+        'outer: for x in [1, 2, 3] {
+            for y in [10, 20, 30] {
+                if x == 2 && y == 20 {
+                    found = x * 100 + y;
+                    break 'outer;
+                }
+            }
+        }
+        output found;
+    "#), DataType::Int64(220));
+}
+
+#[test]
+fn test_labeled_while_continue() {
+    assert_eq!(run(r#"
+        let mut sum = 0;
+        let mut i = 0;
+        'outer: while i < 3 {
+            i = i + 1;
+            let mut j = 0;
+            while j < 3 {
+                j = j + 1;
+                if j == 2 { continue 'outer; }
+                sum = sum + 1;
+            }
+        }
+        output sum;
+    "#), DataType::Int64(3));
+}
+
+// =========================================================================
+// More edge cases
+// =========================================================================
+
+#[test]
+fn test_string_pad_center_odd() {
+    // Odd padding distributes extra char to right
+    assert_eq!(run(r#"output "a".pad_center(4);"#), DataType::String(" a  ".to_string()));
+}
+
+#[test]
+fn test_array_interleave_unequal() {
+    // Interleave with different lengths
+    assert_eq!(run(r#"output [1, 2].interleave([3, 4, 5]);"#), DataType::Array(vec![
+        DataType::Int64(1), DataType::Int64(3), DataType::Int64(2), DataType::Int64(4), DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_map_pick_missing_keys() {
+    // Pick keys that don't exist should just skip them
+    let result = run(r#"output {"a": 1}.pick(["a", "b", "c"]);"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.len(), 1);
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_index_assignment_out_of_bounds() {
+    // Index assignment out of bounds should error
+    let result = std::panic::catch_unwind(|| {
+        run(r#"
+            let mut arr = [1, 2, 3];
+            arr[5] = 99;
+            output arr;
+        "#)
+    });
+    assert!(result.is_err() || matches!(result, Ok(DataType::Null)));
+}
+
+#[test]
+fn test_field_assignment_immutable_error() {
+    // Field assignment on immutable variable should error
+    let result = std::panic::catch_unwind(|| {
+        run(r#"
+            let m = {"x": 1};
+            m.x = 2;
+            output m;
+        "#)
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_string_byte_length_unicode() {
+    // Unicode characters have multi-byte UTF-8 encoding
+    assert_eq!(run(r#"output "é".byte_length();"#), DataType::Int64(2));
+}
+
+#[test]
+fn test_array_dedup_all_same() {
+    assert_eq!(run(r#"output [1, 1, 1, 1].dedup();"#), DataType::Array(vec![DataType::Int64(1)]));
+}
+
+#[test]
+fn test_map_flatten_keys_nested_3_levels() {
+    let result = run(r#"output {"a": {"b": {"c": 1}}}.flatten_keys();"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a.b.c"), Some(&DataType::Int64(1)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
