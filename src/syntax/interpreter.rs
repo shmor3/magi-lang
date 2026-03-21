@@ -345,6 +345,10 @@ pub struct Interpreter<'a> {
     struct_defs: HashMap<String, Vec<StructField>>,
     /// Package import guard: tracks packages currently being imported (circular import detection).
     importing_packages: std::collections::HashSet<String>,
+    /// Source file name for error messages (#134).
+    source_file: Option<String>,
+    /// Runtime call stack for error diagnostics (#133).
+    call_stack_names: Vec<String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -367,6 +371,8 @@ impl<'a> Interpreter<'a> {
             packages: HashMap::new(),
             enum_defs: HashMap::new(),
             struct_defs: HashMap::new(),
+            source_file: None,
+            call_stack_names: Vec::new(),
             importing_packages: std::collections::HashSet::new(),
         }
     }
@@ -436,6 +442,24 @@ impl<'a> Interpreter<'a> {
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = Some(cancel);
         self
+    }
+
+    /// Set the source file name for error messages (#134).
+    pub fn with_source_file(mut self, path: String) -> Self {
+        self.source_file = Some(path);
+        self
+    }
+
+    /// Get the current call stack as a formatted string (#133).
+    pub fn call_stack_trace(&self) -> String {
+        if self.call_stack_names.is_empty() {
+            return String::new();
+        }
+        let mut trace = String::from("\nCall stack:\n");
+        for (i, name) in self.call_stack_names.iter().rev().enumerate() {
+            trace.push_str(&format!("  {}: {}()\n", i, name));
+        }
+        trace
     }
 
     fn is_cancelled(&self) -> bool {
@@ -3106,6 +3130,9 @@ impl<'a> Interpreter<'a> {
             resolved_args.push((param.name.clone(), arg, false));
         }
 
+        // Track call stack for error diagnostics (#133)
+        self.call_stack_names.push(name.to_string());
+
         // Save outer symbol table, but preserve global scope (#311)
         // Functions can see top-level (global) definitions like `const PI = 3.14`
         let global_scope = self.symbols.first().cloned().unwrap_or_default();
@@ -3153,7 +3180,8 @@ impl<'a> Interpreter<'a> {
         self.heap.pop_scope();
         self.call_depth -= 1;
 
-        // Pop call stack for debugger
+        // Pop call stack for diagnostics (#133) and debugger
+        self.call_stack_names.pop();
         if let Some(ref mut debug) = self.debug {
             debug.call_stack.pop();
         }
