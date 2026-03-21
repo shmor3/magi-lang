@@ -158,6 +158,7 @@ impl Heap {
             DataType::Array(arr) => 8 + 8 * (arr.len() as u64),
             DataType::Map(map) => 8 + 16 * (map.len() as u64),
             DataType::Set(items) => 8 + 8 * (items.len() as u64),
+            DataType::Tuple(items) => 8 + 8 * (items.len() as u64),
             DataType::Future(_) => 16,
         };
         // Align to ALIGNMENT
@@ -3003,7 +3004,8 @@ impl<'a> Interpreter<'a> {
                                 DataType::Map(_) => 5,
                                 DataType::Bytes(_) => 6,
                                 DataType::Set(_) => 7,
-                                DataType::Future(_) => 8,
+                                DataType::Tuple(_) => 8,
+                                DataType::Future(_) => 9,
                             }
                         }
                         let ta = type_tier(a);
@@ -3744,6 +3746,22 @@ impl<'a> Interpreter<'a> {
                         }
                         return Ok(DataType::Set(items));
                     }
+                    "Tuple" | "tuple" => {
+                        let mut items = Vec::new();
+                        for arg in args {
+                            let val = self.eval_expr(arg)?;
+                            if args.len() == 1 {
+                                // Single array arg: convert to tuple
+                                if let DataType::Array(arr) = val {
+                                    return Ok(DataType::Tuple(arr));
+                                }
+                                items.push(val);
+                                return Ok(DataType::Tuple(items));
+                            }
+                            items.push(val);
+                        }
+                        return Ok(DataType::Tuple(items));
+                    }
                     "stdin_read" | "input" => {
                         use std::io::BufRead;
                         let mut line = String::new();
@@ -3934,6 +3952,128 @@ impl<'a> Interpreter<'a> {
                         let mut result: i64 = 1;
                         for i in 0..(r as u64) { result = result.saturating_mul((n as u64 - i) as i64); }
                         return Ok(DataType::Int64(result));
+                    }
+                    // Date/DateTime builtins (#81)
+                    "date_now" => {
+                        use std::time::SystemTime;
+                        let now = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let secs = now.as_secs() as i64;
+                        // Format as ISO 8601 date string (UTC)
+                        let days = secs / 86400;
+                        let rem = secs % 86400;
+                        // Civil date from days since epoch (algorithm from Howard Hinnant)
+                        let z = days + 719468;
+                        let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+                        let doe = (z - era * 146097) as u64;
+                        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+                        let y = (yoe as i64) + era * 400;
+                        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                        let mp = (5 * doy + 2) / 153;
+                        let d = doy - (153 * mp + 2) / 5 + 1;
+                        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                        let y = if m <= 2 { y + 1 } else { y };
+                        let h = rem / 3600;
+                        let min = (rem % 3600) / 60;
+                        let s = rem % 60;
+                        let iso = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, h, min, s);
+                        return Ok(DataType::String(iso));
+                    }
+                    "date_parse" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "date_parse".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let s = match &val { DataType::String(s) => s.as_str(), _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: val.type_name().to_string(), context: "date_parse".to_string(), span: expr.span }) };
+                        // Parse ISO 8601: YYYY-MM-DDThh:mm:ssZ or YYYY-MM-DD
+                        let parts: Vec<&str> = s.split('T').collect();
+                        let date_part = parts[0];
+                        let dp: Vec<&str> = date_part.split('-').collect();
+                        if dp.len() != 3 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("invalid date format: {}", s)), span: expr.span }); }
+                        let y: i64 = dp[0].parse().map_err(|_| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("invalid year: {}", dp[0])), span: expr.span })?;
+                        let m: u32 = dp[1].parse().map_err(|_| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("invalid month: {}", dp[1])), span: expr.span })?;
+                        let d: u32 = dp[2].parse().map_err(|_| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("invalid day: {}", dp[2])), span: expr.span })?;
+                        if m < 1 || m > 12 || d < 1 || d > 31 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("invalid date: {}", s)), span: expr.span }); }
+                        let (mut h, mut min, mut sec) = (0i64, 0i64, 0i64);
+                        if parts.len() > 1 {
+                            let time_part = parts[1].trim_end_matches('Z');
+                            let tp: Vec<&str> = time_part.split(':').collect();
+                            if !tp.is_empty() { h = tp[0].parse().unwrap_or(0); }
+                            if tp.len() > 1 { min = tp[1].parse().unwrap_or(0); }
+                            if tp.len() > 2 { sec = tp[2].parse().unwrap_or(0); }
+                        }
+                        // Convert to Unix timestamp (days since epoch algorithm)
+                        let m_adj = if m <= 2 { m + 9 } else { m - 3 };
+                        let y_adj = if m <= 2 { y - 1 } else { y };
+                        let era = (if y_adj >= 0 { y_adj } else { y_adj - 399 }) / 400;
+                        let yoe = (y_adj - era * 400) as u64;
+                        let doy = (153 * (m_adj as u64) + 2) / 5 + (d as u64) - 1;
+                        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+                        let days = (era as i64) * 146097 + (doe as i64) - 719468;
+                        let timestamp = days * 86400 + h * 3600 + min * 60 + sec;
+                        return Ok(DataType::Int64(timestamp));
+                    }
+                    "date_format" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "date_format".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let ts = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "date_format(timestamp)".to_string(), span: expr.span })?;
+                        let fmt_val = self.eval_expr(&args[1])?;
+                        let fmt_str = match &fmt_val { DataType::String(s) => s.as_str(), _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: fmt_val.type_name().to_string(), context: "date_format(format)".to_string(), span: expr.span }) };
+                        // Convert timestamp to date parts
+                        let days = ts.div_euclid(86400);
+                        let rem = ts.rem_euclid(86400);
+                        let z = days + 719468;
+                        let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+                        let doe = (z - era * 146097) as u64;
+                        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+                        let y = (yoe as i64) + era * 400;
+                        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                        let mp = (5 * doy + 2) / 153;
+                        let d = doy - (153 * mp + 2) / 5 + 1;
+                        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                        let y = if m <= 2 { y + 1 } else { y };
+                        let h = rem / 3600;
+                        let min = (rem % 3600) / 60;
+                        let s = rem % 60;
+                        let result = fmt_str
+                            .replace("%Y", &format!("{:04}", y))
+                            .replace("%m", &format!("{:02}", m))
+                            .replace("%d", &format!("{:02}", d))
+                            .replace("%H", &format!("{:02}", h))
+                            .replace("%M", &format!("{:02}", min))
+                            .replace("%S", &format!("{:02}", s));
+                        return Ok(DataType::String(result));
+                    }
+                    "date_add" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "date_add".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let ts = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "date_add(timestamp)".to_string(), span: expr.span })?;
+                        let days = self.eval_expr(&args[1])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "date_add(days)".to_string(), span: expr.span })?;
+                        return Ok(DataType::Int64(ts + days * 86400));
+                    }
+                    "date_diff" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "date_diff".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let ts1 = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "date_diff(ts1)".to_string(), span: expr.span })?;
+                        let ts2 = self.eval_expr(&args[1])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "date_diff(ts2)".to_string(), span: expr.span })?;
+                        return Ok(DataType::Int64((ts1 - ts2) / 86400));
+                    }
+                    // Duration helpers (#82)
+                    "duration_ms" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "duration_ms".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: "non-number".to_string(), context: "duration_ms".to_string(), span: expr.span })?;
+                        return Ok(DataType::Int64(n));
+                    }
+                    "duration_secs" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "duration_secs".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: "non-number".to_string(), context: "duration_secs".to_string(), span: expr.span })?;
+                        return Ok(DataType::Int64(n * 1000));
+                    }
+                    "duration_mins" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "duration_mins".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: "non-number".to_string(), context: "duration_mins".to_string(), span: expr.span })?;
+                        return Ok(DataType::Int64(n * 60 * 1000));
+                    }
+                    "duration_hours" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "duration_hours".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: "non-number".to_string(), context: "duration_hours".to_string(), span: expr.span })?;
+                        return Ok(DataType::Int64(n * 60 * 60 * 1000));
                     }
                     _ => {}
                 }
@@ -5792,6 +5932,15 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "time_diff",
             "start_of",
             "end_of",
+            "date_now",
+            "date_parse",
+            "date_format",
+            "date_add",
+            "date_diff",
+            "duration_ms",
+            "duration_secs",
+            "duration_mins",
+            "duration_hours",
         ],
         "hash" => vec![
             "hash_sha256",
@@ -6096,6 +6245,18 @@ fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
                 format!("{{{}}}", entries.join(", "))
             }
         }
+        DataType::Tuple(items) => {
+            if depth >= MAX_DISPLAY_DEPTH {
+                return "(...)".to_string();
+            }
+            let elems: Vec<String> = items.iter()
+                .map(|v| datatype_to_display_depth(v, depth + 1)).collect();
+            if items.len() == 1 {
+                format!("({},)", elems[0])
+            } else {
+                format!("({})", elems.join(", "))
+            }
+        }
         DataType::Future(_) => "<future>".to_string(),
     }
 }
@@ -6118,6 +6279,9 @@ fn datatype_eq(a: &DataType, b: &DataType) -> bool {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| datatype_eq(x, y))
         }
         (DataType::Set(a), DataType::Set(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| datatype_eq(x, y))
+        }
+        (DataType::Tuple(a), DataType::Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| datatype_eq(x, y))
         }
         _ => false,
@@ -7052,5 +7216,151 @@ mod tests {
             heap.free_list.len(), 100,
             "non-adjacent entries should not coalesce"
         );
+    }
+
+    // =========================================================================
+    // #132: Error recovery (keep-going mode)
+    // =========================================================================
+
+    #[test]
+    fn test_keep_going_collects_errors() {
+        let evaluator: &'static dyn crate::eval::OperationEvaluator =
+            Box::leak(Box::new(NoOpEvaluator));
+        let mut interp = Interpreter::new(evaluator).with_max_errors(10);
+        // Program referencing undefined variables -- each statement should produce an error
+        let src = "let a = x;\nlet b = y;\nlet c = z;";
+        let program = crate::syntax::parser::parse_v2(src).unwrap();
+        let result = interp.execute(&program);
+        // Should return the first error
+        assert!(result.is_err());
+        // Additional errors should be in collected_errors
+        assert!(
+            interp.collected_errors.len() >= 1,
+            "keep-going mode should collect additional errors, got {}",
+            interp.collected_errors.len()
+        );
+    }
+
+    #[test]
+    fn test_default_mode_aborts_on_first_error() {
+        let evaluator: &'static dyn crate::eval::OperationEvaluator =
+            Box::leak(Box::new(NoOpEvaluator));
+        let mut interp = Interpreter::new(evaluator);
+        let src = "let a = x;\nlet b = y;";
+        let program = crate::syntax::parser::parse_v2(src).unwrap();
+        let result = interp.execute(&program);
+        assert!(result.is_err());
+        assert!(
+            interp.collected_errors.is_empty(),
+            "default mode should not collect errors"
+        );
+    }
+
+    #[test]
+    fn test_keep_going_max_errors_limit() {
+        let evaluator: &'static dyn crate::eval::OperationEvaluator =
+            Box::leak(Box::new(NoOpEvaluator));
+        let mut interp = Interpreter::new(evaluator).with_max_errors(2);
+        // 5 statements each referencing undefined variables
+        let src = "let a = x;\nlet b = y;\nlet c = z;\nlet d = w;\nlet e = v;";
+        let program = crate::syntax::parser::parse_v2(src).unwrap();
+        let result = interp.execute(&program);
+        assert!(result.is_err());
+        // With max_errors=2, at most 1 additional error should be collected
+        // (first error is returned as Err, rest go into collected_errors,
+        //  but collection stops when limit is reached)
+        assert!(
+            interp.collected_errors.len() <= 2,
+            "max_errors should limit collection, got {}",
+            interp.collected_errors.len()
+        );
+    }
+
+    // =========================================================================
+    // #136: InterpError::error_code()
+    // =========================================================================
+
+    #[test]
+    fn test_interp_error_code_dispatch() {
+        let span = Span::new(1, 1, 1, 1);
+        assert_eq!(
+            InterpError::UndefinedVariable {
+                name: "x".into(),
+                span,
+                suggestion: None,
+            }
+            .error_code(),
+            Some("E200")
+        );
+        assert_eq!(
+            InterpError::UndefinedFunction {
+                name: "f".into(),
+                span,
+                suggestion: None,
+            }
+            .error_code(),
+            Some("E201")
+        );
+        assert_eq!(
+            InterpError::TypeError {
+                expected: "Int".into(),
+                actual: "String".into(),
+                context: "test".into(),
+                span,
+            }
+            .error_code(),
+            Some("E100")
+        );
+        assert_eq!(
+            InterpError::ArityMismatch {
+                name: "f".into(),
+                expected: "2".into(),
+                actual: 1,
+                span,
+            }
+            .error_code(),
+            Some("E405")
+        );
+        assert_eq!(InterpError::Cancelled.error_code(), Some("E407"));
+        assert_eq!(
+            InterpError::ResourceLimit {
+                limit: "10".into(),
+                actual: "20".into(),
+                context: "test".into(),
+                span,
+            }
+            .error_code(),
+            Some("E409")
+        );
+        // Control flow signals return None
+        assert_eq!(InterpError::BreakSignal(DataType::Null).error_code(), None);
+        assert_eq!(InterpError::ContinueSignal.error_code(), None);
+        assert_eq!(
+            InterpError::ReturnSignal(DataType::Null).error_code(),
+            None
+        );
+    }
+
+    // =========================================================================
+    // #282: Method arity errors show expected + actual
+    // =========================================================================
+
+    #[test]
+    fn test_method_arity_error_shows_expected_and_actual() {
+        let span = Span::new(1, 1, 1, 1);
+        let err = InterpError::ArityMismatch {
+            name: "map".to_string(),
+            expected: "1".to_string(),
+            actual: 0,
+            span,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expects 1 argument(s)"),
+            "should show expected: {}",
+            msg
+        );
+        assert!(msg.contains("got 0"), "should show actual: {}", msg);
+        assert!(msg.contains("map"), "should show method name: {}", msg);
     }
 }

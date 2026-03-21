@@ -76,6 +76,7 @@ pub fn analyze_document(source: &str) -> (DocumentState, Vec<AstDiagnostic>) {
             code: None,
             help: None,
             suggestion: None,
+        source_file: None,
         });
     }
 
@@ -936,6 +937,7 @@ mod tests {
             code: Some("E200".to_string()),
             help: None,
             suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.range.start.line, 0);
@@ -955,6 +957,7 @@ mod tests {
             code: Some("E100".to_string()),
             help: None,
             suggestion: None,
+            source_file: None,
         };
         let source = "let my_var = 42;";
         let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
@@ -1353,6 +1356,7 @@ mod tests {
             code: None,
             help: None,
             suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.range.start.line, 0);
@@ -1369,6 +1373,7 @@ mod tests {
             code: Some("W100".to_string()),
             help: Some("try this".to_string()),
             suggestion: Some("fix it".to_string()),
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert!(lsp_d.message.contains("error"));
@@ -1387,6 +1392,7 @@ mod tests {
             code: None,
             help: None,
             suggestion: None,
+            source_file: None,
         };
         let source = "short";
         let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
@@ -1404,6 +1410,7 @@ mod tests {
             code: None,
             help: None,
             suggestion: None,
+            source_file: None,
         };
         let source = "let x = 5;";
         let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
@@ -1423,6 +1430,7 @@ mod tests {
             severity: crate::eval::DiagnosticSeverity::Warning,
             code: Some("W100".to_string()),
             help: None, suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
@@ -1436,6 +1444,7 @@ mod tests {
             severity: crate::eval::DiagnosticSeverity::Warning,
             code: Some("W101".to_string()),
             help: None, suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
@@ -1449,6 +1458,7 @@ mod tests {
             severity: crate::eval::DiagnosticSeverity::Warning,
             code: Some("W202".to_string()),
             help: None, suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
@@ -1462,6 +1472,7 @@ mod tests {
             severity: crate::eval::DiagnosticSeverity::Warning,
             code: Some("W111".to_string()),
             help: None, suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::DEPRECATED]));
@@ -1475,6 +1486,7 @@ mod tests {
             severity: crate::eval::DiagnosticSeverity::Error,
             code: Some("E100".to_string()),
             help: None, suggestion: None,
+            source_file: None,
         };
         let lsp_d = to_lsp_diagnostic(&d);
         assert_eq!(lsp_d.tags, None);
@@ -1636,6 +1648,7 @@ mod tests {
                 severity: crate::eval::DiagnosticSeverity::Warning,
                 code: Some("W100".to_string()),
                 help: None, suggestion: None,
+                source_file: None,
             },
             AstDiagnostic {
                 line: 1, column: 1,
@@ -1643,6 +1656,7 @@ mod tests {
                 severity: crate::eval::DiagnosticSeverity::Warning,
                 code: Some("W100".to_string()),
                 help: None, suggestion: None,
+                source_file: None,
             },
             AstDiagnostic {
                 line: 1, column: 1,
@@ -1650,6 +1664,7 @@ mod tests {
                 severity: crate::eval::DiagnosticSeverity::Warning,
                 code: Some("W200".to_string()),
                 help: None, suggestion: None,
+                source_file: None,
             },
             AstDiagnostic {
                 line: 2, column: 1,
@@ -1657,6 +1672,7 @@ mod tests {
                 severity: crate::eval::DiagnosticSeverity::Warning,
                 code: Some("W100".to_string()),
                 help: None, suggestion: None,
+                source_file: None,
             },
         ];
         deduplicate_diagnostics(&mut diags);

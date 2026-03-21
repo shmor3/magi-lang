@@ -43,6 +43,8 @@ pub struct AstDiagnostic {
     pub help: Option<String>,
     /// "Did you mean?" suggestion for typos.
     pub suggestion: Option<String>,
+    /// Source file path for multi-file error aggregation (#135).
+    pub source_file: Option<String>,
 }
 
 // =============================================================================
@@ -94,6 +96,22 @@ pub fn check_types(program: &Program, imports: &HashSet<String>) -> AstTypeAnaly
     let mut checker = TypeChecker::new(imports);
     checker.check_program(program);
     checker.finalize()
+}
+
+/// Type-check a parsed AST program, attributing all diagnostics to the given source file (#135).
+///
+/// Same as [`check_types`] but stamps each diagnostic with `source_file`.
+pub fn check_types_with_source(
+    program: &Program,
+    imports: &HashSet<String>,
+    source_file: &str,
+) -> AstTypeAnalysis {
+    let mut result = check_types(program, imports);
+    let file = source_file.to_string();
+    for diag in &mut result.diagnostics {
+        diag.source_file = Some(file.clone());
+    }
+    result
 }
 
 // =============================================================================
@@ -192,6 +210,7 @@ impl TypeChecker {
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
                         suggestion: None,
+                        source_file: None,
                     });
                 } else if info.mutable && !info.mutated {
                     let code = super::errors::ErrorCode::W110;
@@ -203,6 +222,7 @@ impl TypeChecker {
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
                         suggestion: None,
+                        source_file: None,
                     });
                 }
             }
@@ -271,6 +291,7 @@ impl TypeChecker {
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: None,
+                source_file: None,
             });
         }
     }
@@ -327,6 +348,7 @@ impl TypeChecker {
             code: Some(error_code.to_string()),
             help: Some(error_code.help().to_string()),
             suggestion,
+            source_file: None,
         });
     }
 
@@ -2498,6 +2520,7 @@ impl TypeChecker {
                             code: Some(code.to_string()),
                             help: Some(code.help().to_string()),
                             suggestion: super::errors::suggest_name(variant, &variant_names),
+                            source_file: None,
                         });
                     }
                 } else if !enum_name.contains("::") && !self.use_aliases.contains(enum_name.as_str()) {
@@ -2602,6 +2625,7 @@ impl TypeChecker {
                             code: Some(code.to_string()),
                             help: Some(code.help().to_string()),
                             suggestion: None,
+                            source_file: None,
                         });
                     }
                     let ft = self.infer_expr(field_expr);
@@ -3194,6 +3218,7 @@ impl TypeChecker {
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
                         suggestion: None,
+                        source_file: None,
                     });
                 } else if info.mutable && !info.mutated {
                     let code = super::errors::ErrorCode::W110;
@@ -3205,6 +3230,7 @@ impl TypeChecker {
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
                         suggestion: None,
+                        source_file: None,
                     });
                 }
             }
@@ -3222,6 +3248,7 @@ impl TypeChecker {
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: None,
+                    source_file: None,
                 });
             }
         }
@@ -3239,6 +3266,7 @@ impl TypeChecker {
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: None,
+                    source_file: None,
                 });
             }
         }
@@ -6533,4 +6561,22 @@ test "reads outer" { let r = x + 1; output r; }"#,
             "Should not warn about duplicate variants, got: {:?}", w);
     }
 
+    #[test]
+    fn test_source_file_none_by_default() {
+        let a = check("let x = 1;");
+        for d in &a.diagnostics {
+            assert!(d.source_file.is_none(), "source_file should be None by default");
+        }
+    }
+
+    #[test]
+    fn test_check_types_with_source_stamps_file() {
+        let program = parse_v2("let x = 1;").unwrap();
+        let imports = std::collections::HashSet::new();
+        let result = check_types_with_source(&program, &imports, "main.magi");
+        for d in &result.diagnostics {
+            assert_eq!(d.source_file.as_deref(), Some("main.magi"),
+                "All diagnostics should be attributed to the source file");
+        }
+    }
 }

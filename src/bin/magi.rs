@@ -1441,6 +1441,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     DataType::Bytes(_) => "bytes",
                     DataType::Set(_) => "set",
+                    DataType::Tuple(_) => "tuple",
                     DataType::Future(_) => "future",
                 };
                 Ok(DataType::String(type_name.to_string()))
@@ -6106,7 +6107,8 @@ fn total_cmp_values(a: &DataType, b: &DataType) -> std::cmp::Ordering {
             DataType::Map(_) => 5,
             DataType::Bytes(_) => 6,
             DataType::Set(_) => 7,
-            DataType::Future(_) => 8,
+            DataType::Tuple(_) => 8,
+            DataType::Future(_) => 9,
         }
     }
     let ta = type_tier(a);
@@ -6461,6 +6463,9 @@ fn datatype_to_yaml_value_depth(data: &DataType, depth: usize) -> serde_yaml_ng:
         DataType::Set(items) => {
             serde_yaml_ng::Value::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
         }
+        DataType::Tuple(items) => {
+            serde_yaml_ng::Value::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
+        }
         DataType::Future(_) => serde_yaml_ng::Value::Null,
     }
 }
@@ -6496,6 +6501,7 @@ fn datatype_to_serde_json_depth(val: &DataType, depth: usize) -> serde_json::Val
             serde_json::Value::Object(obj)
         }
         DataType::Set(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
+        DataType::Tuple(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
         DataType::Bytes(b) => {
             use base64::Engine;
             serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
@@ -6572,6 +6578,7 @@ fn print_usage() {
     eprintln!("Run options:");
     eprintln!("  --timeout <seconds>         Abort execution after N seconds");
     eprintln!("  --sandbox                   Disable filesystem and network operations");
+    eprintln!("  --watch, -w                 Watch file for changes and re-run on modification");
     eprintln!("  --json                      Output diagnostics as JSON");
     eprintln!();
     eprintln!("Flags:");
@@ -6609,6 +6616,7 @@ fn main() {
         "run" => {
             let mut json_output = false;
             let mut sandbox = false;
+            let mut watch = false;
             let mut timeout_secs: u64 = 0;
             let mut file_path = None;
             let mut i = 2;
@@ -6616,6 +6624,7 @@ fn main() {
                 match args[i].as_str() {
                     "--json" => json_output = true,
                     "--sandbox" => sandbox = true,
+                    "--watch" | "-w" => watch = true,
                     "--timeout" => {
                         i += 1;
                         if i >= args.len() {
@@ -6638,10 +6647,15 @@ fn main() {
                 SANDBOX_MODE.store(true, Ordering::Relaxed);
             }
             match file_path {
-                Some(path) => cmd_run(path, json_output, timeout_secs),
+                Some(path) => {
+                    cmd_run(path, json_output, timeout_secs);
+                    if watch {
+                        cmd_watch(path, json_output, timeout_secs);
+                    }
+                }
                 None => {
                     eprintln!("error: missing file argument");
-                    eprintln!("Usage: magi run [--json] [--timeout <seconds>] [--sandbox] <file.magi>");
+                    eprintln!("Usage: magi run [--json] [--timeout <seconds>] [--sandbox] [--watch] <file.magi>");
                     process::exit(1);
                 }
             }
@@ -7200,6 +7214,126 @@ fn cmd_run(path: &str, json_output: bool, timeout_secs: u64) {
         }
 
         // Print all output/log messages
+        for log in &interp.logs {
+            println!("{}", log.message);
+        }
+    }
+}
+
+fn cmd_watch(path: &str, json_output: bool, timeout_secs: u64) {
+    let poll_interval = std::time::Duration::from_millis(500);
+    let mut last_modified = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok();
+
+    eprintln!("[watch] watching {} for changes...", path);
+
+    loop {
+        std::thread::sleep(poll_interval);
+        let current_modified = fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok();
+        if current_modified != last_modified {
+            last_modified = current_modified;
+            eprintln!("[watch] change detected, re-running...");
+            let start = std::time::Instant::now();
+            try_run(path, json_output, timeout_secs);
+            let elapsed = start.elapsed();
+            eprintln!("[watch] finished in {:.2}s", elapsed.as_secs_f64());
+        }
+    }
+}
+
+/// Run a file without calling process::exit on error (for watch mode).
+fn try_run(path: &str, json_output: bool, timeout_secs: u64) {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: error reading file: {}", path, e);
+            return;
+        }
+    };
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            if json_output {
+                let diag = serde_json::json!({
+                    "error": e.message,
+                    "line": e.line,
+                    "column": e.column,
+                });
+                println!("{}", diag);
+            } else {
+                magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
+            }
+            return;
+        }
+    };
+
+    if timeout_secs > 0 {
+        let path_owned = path.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let evaluator = FullEvaluator;
+            let file_path = std::path::Path::new(&path_owned);
+            let packages = resolve_dependencies(file_path);
+            let mut interp = Interpreter::new(&evaluator).with_packages(packages);
+            let result = interp.execute(&program);
+            let logs: Vec<String> = interp.logs.iter().map(|l| l.message.clone()).collect();
+            let _ = tx.send((result, logs));
+        });
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        match rx.recv_timeout(timeout) {
+            Ok((result, logs)) => {
+                for msg in &logs {
+                    println!("{}", msg);
+                }
+                if let Err(e) = result {
+                    if json_output {
+                        let span = e.span();
+                        let diag = serde_json::json!({
+                            "error": format!("{}", e),
+                            "line": span.map(|s| s.start_line),
+                            "column": span.map(|s| s.start_col),
+                        });
+                        println!("{}", diag);
+                    } else {
+                        eprintln!("{}: runtime error: {}", path, e);
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("error: execution timed out after {} seconds", timeout_secs);
+            }
+        }
+    } else {
+        let evaluator = FullEvaluator;
+        let file_path = std::path::Path::new(path);
+        let packages = resolve_dependencies(file_path);
+        let mut interp = Interpreter::new(&evaluator).with_packages(packages);
+
+        match interp.execute(&program) {
+            Ok(_) => {}
+            Err(e) => {
+                if json_output {
+                    let span = e.span();
+                    let diag = serde_json::json!({
+                        "error": format!("{}", e),
+                        "line": span.map(|s| s.start_line),
+                        "column": span.map(|s| s.start_col),
+                    });
+                    println!("{}", diag);
+                } else {
+                    for log in &interp.logs {
+                        println!("{}", log.message);
+                    }
+                    eprintln!("{}: runtime error: {}", path, e);
+                }
+                return;
+            }
+        }
+
         for log in &interp.logs {
             println!("{}", log.message);
         }

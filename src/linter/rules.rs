@@ -39,6 +39,7 @@ pub fn check_naming_snake_case(name: &str, span: Span) -> Option<AstDiagnostic> 
         code: Some(code.to_string()),
         help: Some(code.help().to_string()),
         suggestion: Some(format!("Rename to `{}`", suggestion)),
+        source_file: None,
     })
 }
 
@@ -62,6 +63,7 @@ pub fn check_naming_pascal_case(name: &str, span: Span) -> Option<AstDiagnostic>
         code: Some(code.to_string()),
         help: Some(code.help().to_string()),
         suggestion: None,
+        source_file: None,
     })
 }
 
@@ -82,6 +84,7 @@ pub fn check_dead_code_in_block(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: None,
+                source_file: None,
             });
             continue; // Report all unreachable statements, not just the first
         }
@@ -147,6 +150,7 @@ pub fn check_constant_condition(condition: &Expression, loop_body: Option<&Block
             code: Some(code.to_string()),
             help: Some(code.help().to_string()),
             suggestion: None,
+            source_file: None,
         });
     }
     None
@@ -216,6 +220,7 @@ pub fn check_empty_block(block: &Block, context: &str, span: Span) -> Option<Ast
             code: Some(code.to_string()),
             help: Some(code.help().to_string()),
             suggestion: None,
+            source_file: None,
         });
     }
     None
@@ -237,6 +242,7 @@ pub fn check_unreachable_arms(arms: &[MatchArm]) -> Vec<AstDiagnostic> {
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: None,
+                source_file: None,
             });
             continue;
         }
@@ -272,6 +278,7 @@ pub fn check_duplicate_imports(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: None,
+                    source_file: None,
                 });
             }
         }
@@ -445,6 +452,7 @@ pub fn check_match_exhaustiveness(
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: Some(format!("add a wildcard arm `_ => ...` or unguarded variant arms for {}", all_names.join(", "))),
+                    source_file: None,
                 });
             }
         }
@@ -473,6 +481,7 @@ pub fn check_match_exhaustiveness(
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: None,
+                    source_file: None,
                 });
             }
         }
@@ -503,6 +512,7 @@ pub fn check_self_comparison(op: &BinOp, left: &Expression, right: &Expression, 
             code: Some(code.to_string()),
             help: Some(code.help().to_string()),
             suggestion: Some("Did you mean to compare to a different value? Use `x.is_nan()` to check for NaN.".to_string()),
+            source_file: None,
         })
     } else {
         None
@@ -636,6 +646,7 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                         "Use a different name or remove the earlier declaration of `{}`",
                         name
                     )),
+                    source_file: None,
                 });
             } else {
                 seen.insert(name, span);
@@ -730,6 +741,7 @@ fn emit_w212(span: Span, keyword: &str, diagnostics: &mut Vec<AstDiagnostic>) {
         code: Some(code.to_string()),
         help: Some(code.help().to_string()),
         suggestion: None,
+        source_file: None,
     });
 }
 
@@ -876,6 +888,7 @@ pub fn check_empty_enum(variants: &[EnumVariant], name: &str, span: Span) -> Opt
             code: Some(code.to_string()),
             help: Some(code.help().to_string()),
             suggestion: None,
+            source_file: None,
         });
     }
     None
@@ -898,6 +911,7 @@ pub fn check_self_assignment_let(name: &str, value: &Expression, span: Span) -> 
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: None,
+                source_file: None,
             });
         }
     }
@@ -917,6 +931,7 @@ pub fn check_self_assignment(name: &str, value: &Expression, span: Span) -> Opti
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: None,
+                source_file: None,
             });
         }
     }
@@ -950,6 +965,7 @@ pub fn check_boolean_if_else(expr: &Expression) -> Option<AstDiagnostic> {
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
                         suggestion: Some("Replace with the condition directly".to_string()),
+                        source_file: None,
                     });
                 }
                 (Some(false), Some(true)) => {
@@ -962,6 +978,7 @@ pub fn check_boolean_if_else(expr: &Expression) -> Option<AstDiagnostic> {
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
                         suggestion: Some("Replace with `!cond`".to_string()),
+                        source_file: None,
                     });
                 }
                 _ => {}
@@ -990,6 +1007,7 @@ pub fn check_negated_if_else(condition: &Expression, else_block: Option<&Block>,
             code: Some(code.to_string()),
             help: Some(code.help().to_string()),
             suggestion: Some("Swap the branches and remove the `!`".to_string()),
+            source_file: None,
         });
     }
     None
@@ -1024,6 +1042,7 @@ fn check_nesting_depth_stmt(stmt: &Statement, depth: usize, max_depth: usize, di
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: None,
+                    source_file: None,
                 });
             }
             for s in &body.statements {
@@ -1073,6 +1092,7 @@ pub fn check_empty_match_arms(arms: &[MatchArm]) -> Vec<AstDiagnostic> {
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: Some("Add an expression or use `null` explicitly".to_string()),
+                source_file: None,
             });
         }
     }
@@ -1092,6 +1112,7 @@ fn check_nesting_depth_expr(expr: &Expression, depth: usize, max_depth: usize, d
                 code: Some(code.to_string()),
                 help: Some(code.help().to_string()),
                 suggestion: None,
+                source_file: None,
             });
         }
         for s in &then_block.statements {
@@ -1122,6 +1143,7 @@ pub fn check_todo_comments(source: &str) -> Vec<AstDiagnostic> {
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
                     suggestion: None,
+                    source_file: None,
                 });
             }
         }
@@ -1150,6 +1172,7 @@ pub fn check_magic_number(expr: &Expression, in_binding: bool) -> Option<AstDiag
                             code: Some(code.to_string()),
                             help: Some(code.help().to_string()),
                             suggestion: Some(format!("Extract {} into a named constant", n)),
+                            source_file: None,
                         });
                     }
                 }

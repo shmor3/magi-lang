@@ -4834,6 +4834,7 @@ fn test_lsp_diagnostic_nonzero_width() {
         code: Some("E100".to_string()),
         help: None,
         suggestion: None,
+        source_file: None,
     };
     let source = "let my_var = 42;";
     let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
