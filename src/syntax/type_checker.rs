@@ -63,6 +63,8 @@ struct FunctionSig {
     def_line: u32,
     def_col: u32,
     used: bool,
+    /// Whether this function is marked `#[deprecated]`.
+    deprecated: bool,
 }
 
 // =============================================================================
@@ -387,11 +389,11 @@ impl TypeChecker {
 
         // Pass 1b: collect function signatures, enum definitions, and struct definitions
         for stmt in &program.statements {
-            if let StatementKind::EnumDef { name, variants } = &stmt.kind {
+            if let StatementKind::EnumDef { name, variants, .. } = &stmt.kind {
                 let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
                 self.enum_variants.insert(name.clone(), variant_info);
             }
-            if let StatementKind::StructDef { name, fields } = &stmt.kind {
+            if let StatementKind::StructDef { name, fields, .. } = &stmt.kind {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                 self.struct_defs.insert(name.clone(), field_info);
             }
@@ -427,6 +429,7 @@ impl TypeChecker {
                         def_line: stmt.span.start_line,
                         def_col: stmt.span.start_col,
                         used: false,
+                        deprecated: def.deprecated,
                     },
                 );
             }
@@ -466,18 +469,19 @@ impl TypeChecker {
                                 def_line: s.span.start_line,
                                 def_col: s.span.start_col,
                                 used: false,
+                                deprecated: def.deprecated,
                             },
                         );
                     }
                     // Register module-scoped enums with both qualified and unqualified names
-                    if let StatementKind::EnumDef { name, variants } = &s.kind {
+                    if let StatementKind::EnumDef { name, variants, .. } = &s.kind {
                         let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
                         let qualified = format!("{}::{}", mod_name, name);
                         self.enum_variants.insert(qualified, variant_info.clone());
                         self.enum_variants.entry(name.clone()).or_insert(variant_info);
                     }
                     // Register module-scoped structs with both qualified and unqualified names
-                    if let StatementKind::StructDef { name, fields } = &s.kind {
+                    if let StatementKind::StructDef { name, fields, .. } = &s.kind {
                         let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                         let qualified = format!("{}::{}", mod_name, name);
                         self.struct_defs.insert(qualified, field_info.clone());
@@ -1176,7 +1180,7 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             // use path::to::item;
             // -----------------------------------------------------------------
-            StatementKind::Use { path, alias, glob } => {
+            StatementKind::Use { path, alias, glob, .. } => {
                 // W208: Duplicate import detection
                 let import_key = path.join("::");
                 if !self.seen_imports.insert(import_key.clone()) {
@@ -1225,7 +1229,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            StatementKind::EnumDef { name, variants } => {
+            StatementKind::EnumDef { name, variants, .. } => {
                 let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
                 self.enum_variants.insert(name.clone(), variant_info);
                 // W235: Duplicate enum variant names
@@ -1245,7 +1249,7 @@ impl TypeChecker {
                     }
                 }
             }
-            StatementKind::StructDef { name, fields } => {
+            StatementKind::StructDef { name, fields, .. } => {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                 self.struct_defs.insert(name.clone(), field_info);
                 // W234: Duplicate struct field names
@@ -1670,6 +1674,17 @@ impl TypeChecker {
                     // Mark as used
                     if let Some(sig_mut) = self.function_sigs.get_mut(name) {
                         sig_mut.used = true;
+                    }
+                    // W114: warn on calling a deprecated function
+                    if sig.deprecated {
+                        self.emit_coded(
+                            expr.span.start_line,
+                            expr.span.start_col,
+                            format!("use of deprecated function '{}'", name),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::W114,
+                            None,
+                        );
                     }
                     // Check arity (accounting for default parameters)
                     let max_args = if sig.has_rest { usize::MAX } else { sig.params.len() };
@@ -6384,6 +6399,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
                     span,
                     is_getter: false,
                     is_setter: false,
+                    deprecated: false,
                 }),
                 span,
             }],

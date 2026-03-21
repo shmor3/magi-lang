@@ -396,6 +396,31 @@ fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
     })
 }
 
+/// Maximum timeout for regex operations (#260).
+const REGEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run a regex operation with a 5-second timeout to prevent ReDoS (#260).
+fn regex_with_timeout<F, R>(f: F) -> Result<R, EvalError>
+where
+    F: FnOnce() -> Result<R, EvalError> + Send + 'static,
+    R: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = f();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(REGEX_TIMEOUT) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(EvalError::InvalidInput("regex operation timed out (5s limit)".to_string()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(EvalError::InvalidInput("regex operation thread panicked".to_string()))
+        }
+    }
+}
+
 /// Extract a string reference from an input map.
 fn get_string<'a>(inputs: &'a HashMap<String, DataType>, key: &str) -> Result<&'a str, EvalError> {
     match inputs.get(key) {
@@ -645,7 +670,11 @@ impl OperationEvaluator for FullEvaluator {
                     (DataType::Map(m), DataType::String(k)) => {
                         Ok(m.get(k).cloned().unwrap_or(DataType::Null))
                     }
-                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapGet key".to_string() }),
+                    // #291: Convert integer (and other) keys to string
+                    (DataType::Map(m), _) => {
+                        let k = key.to_string_lossy();
+                        Ok(m.get(&k).cloned().unwrap_or(DataType::Null))
+                    }
                     _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapGet".to_string() }),
                 }
             }
@@ -659,7 +688,16 @@ impl OperationEvaluator for FullEvaluator {
                         new_map.insert(k.clone(), value.clone());
                         Ok(DataType::Map(new_map))
                     }
-                    (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapSet key".to_string() }),
+                    // #291: Convert integer (and other) keys to string
+                    (DataType::Map(m), _) => {
+                        let k = key.to_string_lossy();
+                        if !m.contains_key(&k) && m.len() >= MAX_ARRAY_ELEMENTS {
+                            return Err(EvalError::InvalidInput(format!("MapSet would exceed {} entries", MAX_ARRAY_ELEMENTS)));
+                        }
+                        let mut new_map = m.clone();
+                        new_map.insert(k, value.clone());
+                        Ok(DataType::Map(new_map))
+                    }
                     _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapSet".to_string() }),
                 }
             }
@@ -3035,7 +3073,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::FsWrite => {
-                const MAX_FILE_WRITE: usize = 64 * 1024 * 1024; // 64 MB
+                const MAX_FILE_WRITE: usize = 100 * 1024 * 1024; // 100 MB (#274)
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 let content = inputs.get("content").cloned().unwrap_or(DataType::Null);
                 match (&path, &content) {
@@ -3079,7 +3117,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::FsAppend => {
-                const MAX_FILE_WRITE: usize = 64 * 1024 * 1024; // 64 MB
+                const MAX_FILE_WRITE: usize = 100 * 1024 * 1024; // 100 MB (#274)
                 const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024; // 256 MB max resulting file
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 let content = inputs.get("content").cloned().unwrap_or(DataType::Null);
@@ -6558,7 +6596,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  run <file.magi>             Interpret and execute a .magi file");
-    eprintln!("  test <file.magi>            Run test blocks in a .magi file");
+    eprintln!("  test <file.magi | dir>       Run test blocks in a file or directory");
     eprintln!("  eval '<expression>'         Evaluate an expression and print the result");
     eprintln!("  repl                        Start interactive REPL");
     eprintln!("  check <file.magi>           Type-check and lint (exit 1 on errors)");
@@ -6568,6 +6606,7 @@ fn print_usage() {
     eprintln!("  bench [options] <file.magi>  Benchmark a .magi file");
     eprintln!("  compile <file.magi>         Compile to WebAssembly (.wasm)");
     eprintln!("  run-wasm <file.wasm>        Execute a compiled .wasm file");
+    eprintln!("  doc <file.magi>             Generate Markdown documentation");
     eprintln!("  lsp                         Start the Language Server Protocol server");
     eprintln!("  version                     Show version information");
     eprintln!();
@@ -6765,11 +6804,17 @@ fn main() {
         }
         "test" => {
             if args.len() < 3 {
-                eprintln!("error: missing file argument");
-                eprintln!("Usage: magi test <file.magi>");
+                eprintln!("error: missing file or directory argument");
+                eprintln!("Usage: magi test <file.magi | directory>");
                 process::exit(1);
             }
-            cmd_test(&args[2]);
+            let target = &args[2];
+            let path = std::path::Path::new(target);
+            if path.is_dir() {
+                cmd_test_dir(target);
+            } else {
+                cmd_test(target);
+            }
         }
         "init" => {
             if args.len() < 3 {
@@ -6792,6 +6837,14 @@ fn main() {
         }
         "lsp" => {
             cmd_lsp();
+        }
+        "doc" => {
+            if args.len() < 3 {
+                eprintln!("error: missing file argument");
+                eprintln!("Usage: magi doc <file.magi>");
+                process::exit(1);
+            }
+            cmd_doc(&args[2]);
         }
         _ => {
             // If first arg is a .magi file, run it directly.
@@ -7915,4 +7968,197 @@ fn cmd_run_wasm(path: &str) {
             process::exit(1);
         }
     }
+}
+
+/// Recursively find all `.magi` files containing `test` blocks in `dir` and run them.
+fn cmd_test_dir(dir: &str) {
+    let root = std::path::Path::new(dir);
+    if !root.is_dir() {
+        eprintln!("error: '{}' is not a directory", dir);
+        process::exit(1);
+    }
+
+    let mut files = Vec::new();
+    collect_magi_files(root, &mut files);
+    files.sort();
+
+    if files.is_empty() {
+        eprintln!("No .magi files found in '{}'", dir);
+        process::exit(1);
+    }
+
+    let mut total_passed = 0;
+    let mut total_failed = 0;
+    let mut files_tested = 0;
+
+    for file_path in &files {
+        let path_str = file_path.to_string_lossy();
+        let source = match fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("warning: cannot read '{}': {}", path_str, e);
+                continue;
+            }
+        };
+
+        // Skip files that don't contain any test blocks
+        if !source.contains("test ") {
+            continue;
+        }
+
+        let program = match parse_v2(&source) {
+            Ok(p) => p,
+            Err(_) => continue, // skip unparseable files
+        };
+
+        // Check if program actually has test definitions
+        let has_tests = program.statements.iter().any(|s| {
+            matches!(&s.kind, magi_lang::syntax::ast::StatementKind::TestDef { .. })
+        });
+        if !has_tests {
+            continue;
+        }
+
+        println!("\n  {}", path_str);
+        files_tested += 1;
+
+        let evaluator = FullEvaluator;
+        let packages = resolve_dependencies(file_path);
+        let mut interp = Interpreter::new(&evaluator).with_packages(packages);
+        let results = interp.run_tests(&program);
+
+        for result in &results {
+            if result.passed {
+                total_passed += 1;
+                println!("    \x1b[32mPASS\x1b[0m {}", result.name);
+            } else {
+                total_failed += 1;
+                let msg = result.error_message.as_deref().unwrap_or("unknown error");
+                println!("    \x1b[31mFAIL\x1b[0m {} — {}", result.name, msg);
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "{} passed, {} failed, {} total ({} files)",
+        total_passed, total_failed, total_passed + total_failed, files_tested
+    );
+
+    if total_failed > 0 {
+        process::exit(1);
+    }
+}
+
+/// Recursively collect all `.magi` files under `dir`.
+fn collect_magi_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_magi_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("magi") {
+            out.push(path);
+        }
+    }
+}
+
+/// Extract `///` doc comments from a `.magi` source file and generate Markdown documentation.
+fn cmd_doc(path: &str) {
+    let source = read_source(path);
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
+            process::exit(1);
+        }
+    };
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut output = String::new();
+
+    output.push_str(&format!("# {}\n\n", path));
+
+    for stmt in &program.statements {
+        let (kind_label, name, detail) = match &stmt.kind {
+            magi_lang::syntax::ast::StatementKind::FunctionDef(def) => {
+                let params_str: Vec<String> = def.params.iter().map(|p| {
+                    let mut s = p.name.clone();
+                    if let Some(ta) = &p.type_annotation {
+                        s.push_str(&format!(": {}", ta));
+                    }
+                    s
+                }).collect();
+                let ret = def.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
+                ("Function", def.name.clone(), format!("fn {}({}){}", def.name, params_str.join(", "), ret))
+            }
+            magi_lang::syntax::ast::StatementKind::AsyncFunctionDef(def) => {
+                let params_str: Vec<String> = def.params.iter().map(|p| {
+                    let mut s = p.name.clone();
+                    if let Some(ta) = &p.type_annotation {
+                        s.push_str(&format!(": {}", ta));
+                    }
+                    s
+                }).collect();
+                let ret = def.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
+                ("Async Function", def.name.clone(), format!("async fn {}({}){}", def.name, params_str.join(", "), ret))
+            }
+            magi_lang::syntax::ast::StatementKind::StructDef { name, fields, .. } => {
+                let fields_str: Vec<String> = fields.iter().map(|f| {
+                    if let Some(ta) = &f.type_annotation {
+                        format!("{}: {}", f.name, ta)
+                    } else {
+                        f.name.clone()
+                    }
+                }).collect();
+                ("Struct", name.clone(), format!("struct {} {{ {} }}", name, fields_str.join(", ")))
+            }
+            magi_lang::syntax::ast::StatementKind::EnumDef { name, variants, .. } => {
+                let vs: Vec<String> = variants.iter().map(|v| {
+                    if v.fields.is_empty() {
+                        v.name.clone()
+                    } else {
+                        format!("{}({})", v.name, v.fields.join(", "))
+                    }
+                }).collect();
+                ("Enum", name.clone(), format!("enum {} {{ {} }}", name, vs.join(", ")))
+            }
+            _ => continue,
+        };
+
+        // Collect doc comments (/// lines) immediately preceding this statement
+        let def_line = stmt.span.start_line as usize; // 1-based
+        let mut doc_lines = Vec::new();
+        if def_line >= 2 {
+            let mut i = def_line - 2; // 0-based index of line before definition
+            loop {
+                let line = lines.get(i).unwrap_or(&"").trim();
+                if let Some(stripped) = line.strip_prefix("///") {
+                    doc_lines.push(stripped.strip_prefix(' ').unwrap_or(stripped));
+                    if i == 0 { break; }
+                    i -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        doc_lines.reverse();
+
+        output.push_str(&format!("## {} `{}`\n\n", kind_label, name));
+        output.push_str(&format!("```magi\n{}\n```\n\n", detail));
+
+        if !doc_lines.is_empty() {
+            for doc_line in &doc_lines {
+                output.push_str(doc_line);
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+    }
+
+    print!("{}", output);
 }

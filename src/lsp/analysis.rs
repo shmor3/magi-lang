@@ -301,7 +301,7 @@ fn extract_symbols_indexed(
                     col: name_col,
                 });
             }
-            StatementKind::EnumDef { name, variants } => {
+            StatementKind::EnumDef { name, variants, .. } => {
                 let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
                 let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
@@ -312,7 +312,7 @@ fn extract_symbols_indexed(
                     col: name_col,
                 });
             }
-            StatementKind::StructDef { name, fields } => {
+            StatementKind::StructDef { name, fields, .. } => {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| {
                     (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))
                 }).collect();
@@ -374,7 +374,7 @@ fn extract_symbols_indexed(
                     });
                 }
             }
-            StatementKind::Use { path, alias, glob } => {
+            StatementKind::Use { path, alias, glob, .. } => {
                 if !glob {
                     // For `use foo::bar` or `use foo::bar as baz`, register the local name
                     let local_name = if let Some(a) = alias {

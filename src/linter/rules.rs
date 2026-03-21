@@ -613,7 +613,7 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
             | StatementKind::ModuleDef { name, .. } => {
                 vec![(name.clone(), stmt.span)]
             }
-            StatementKind::Use { path, alias, glob } => {
+            StatementKind::Use { path, alias, glob, .. } => {
                 if *glob {
                     vec![]
                 } else if let Some(alias_name) = alias {

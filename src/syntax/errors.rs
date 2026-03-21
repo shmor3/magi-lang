@@ -102,6 +102,8 @@ pub enum ErrorCode {
     W112,
     /// Or-pattern alternatives bind different variables
     W113,
+    /// Use of deprecated function/struct/enum
+    W114,
 
     // Lint warnings (W2xx)
     /// Naming convention: functions/variables should be snake_case
@@ -191,6 +193,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W111 => "W111",
             ErrorCode::W112 => "W112",
             ErrorCode::W113 => "W113",
+            ErrorCode::W114 => "W114",
             ErrorCode::W200 => "W200",
             ErrorCode::W201 => "W201",
             ErrorCode::W202 => "W202",
@@ -269,6 +272,7 @@ impl ErrorCode {
             ErrorCode::W111 => "This name is a reserved keyword in MAGI. Using it as an identifier may cause issues in future versions.",
             ErrorCode::W112 => "The default value type does not match the parameter's type annotation. This may cause unexpected behavior.",
             ErrorCode::W113 => "All alternatives in an or-pattern must bind the same set of variable names.",
+            ErrorCode::W114 => "This item is marked as #[deprecated] and may be removed in a future version. Consider using the recommended replacement.",
 
             // Lint warnings
             ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",
@@ -362,7 +366,7 @@ mod tests {
             ErrorCode::W100, ErrorCode::W101, ErrorCode::W103,
             ErrorCode::W106, ErrorCode::W107,
             ErrorCode::W108, ErrorCode::W109, ErrorCode::W110, ErrorCode::W111,
-            ErrorCode::W112, ErrorCode::W113,
+            ErrorCode::W112, ErrorCode::W113, ErrorCode::W114,
             ErrorCode::W200, ErrorCode::W201, ErrorCode::W202, ErrorCode::W203,
             ErrorCode::W204, ErrorCode::W205, ErrorCode::W206, ErrorCode::W207,
             ErrorCode::W208, ErrorCode::W209, ErrorCode::W212,

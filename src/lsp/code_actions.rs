@@ -44,6 +44,11 @@ pub fn handle_code_actions(
         }
     }
 
+    // Always offer "Organize Imports" if there are use statements to sort
+    if let Some(action) = organize_imports_action(state, uri) {
+        actions.push(CodeActionOrCommand::CodeAction(action));
+    }
+
     actions
 }
 

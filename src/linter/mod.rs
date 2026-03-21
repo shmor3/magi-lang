@@ -68,7 +68,7 @@ impl<'a> LintContext<'a> {
     ) {
         for stmt in statements {
             match &stmt.kind {
-                StatementKind::EnumDef { name, variants } => {
+                StatementKind::EnumDef { name, variants, .. } => {
                     let variant_names: Vec<String> =
                         variants.iter().map(|v| v.name.clone()).collect();
                     if !enum_defs.iter().any(|(n, _)| n == name) {
@@ -212,7 +212,7 @@ impl<'a> LintContext<'a> {
                 // W211 (unused params) removed — handled by type checker as W109.
                 self.check_block(&fdef.body);
             }
-            StatementKind::EnumDef { name, variants } => {
+            StatementKind::EnumDef { name, variants, .. } => {
                 // Collect for exhaustiveness checks (handles enums in nested scopes)
                 let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
                 if !self.enum_defs.iter().any(|(n, _)| n == name) {

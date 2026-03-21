@@ -40,6 +40,9 @@ const MAX_VARIABLES: usize = 1_000_000;
 /// Maximum number of function definitions (#263).
 const MAX_FUNCTIONS: usize = 100_000;
 
+/// Maximum expression nesting depth (#261).
+const MAX_EXPR_DEPTH: usize = 128;
+
 /// Maximum identifier name length (#404).
 const MAX_IDENTIFIER_LEN: usize = 1024;
 
@@ -360,6 +363,8 @@ pub struct Interpreter<'a> {
     max_errors: Option<usize>,
     /// Errors collected during keep-going execution.
     pub collected_errors: Vec<InterpError>,
+    /// Current expression nesting depth (#261).
+    expr_depth: usize,
 }
 
 impl<'a> Interpreter<'a> {
@@ -390,6 +395,7 @@ impl<'a> Interpreter<'a> {
             deferred: vec![Vec::new()],
             max_errors: None,
             collected_errors: Vec::new(),
+            expr_depth: 0,
         }
     }
 
@@ -716,7 +722,7 @@ impl<'a> Interpreter<'a> {
                     self.async_fns.insert(qualified.clone());
                     self.functions.insert(qualified, def.clone());
                 }
-                StatementKind::EnumDef { name, variants } => {
+                StatementKind::EnumDef { name, variants, .. } => {
                     let qualified = format!("{}::{}", prefix, name);
                     self.enum_defs.insert(qualified, variants.clone());
                     // Register unqualified only if no top-level definition exists
@@ -725,7 +731,7 @@ impl<'a> Interpreter<'a> {
                         self.enum_defs.insert(name.clone(), variants.clone());
                     }
                 }
-                StatementKind::StructDef { name, fields } => {
+                StatementKind::StructDef { name, fields, .. } => {
                     let qualified = format!("{}::{}", prefix, name);
                     self.struct_defs.insert(qualified, fields.clone());
                     // Register unqualified only if no top-level definition exists
@@ -736,6 +742,60 @@ impl<'a> Interpreter<'a> {
                 StatementKind::ModuleDef { name, body: inner_body } => {
                     let nested_prefix = format!("{}::{}", prefix, name);
                     self.register_module(&nested_prefix, inner_body);
+                }
+                // pub use re-exports: make the imported item available under this module's prefix
+                StatementKind::Use { path, alias, glob, is_pub: true } => {
+                    let source_path = path.join("::");
+                    if *glob {
+                        // pub use inner_mod::* — re-export all items from inner module
+                        let source_prefix = format!("{}::", source_path);
+                        let matching_fns: Vec<(String, FunctionDef)> = self.functions.iter()
+                            .filter(|(k, _)| k.starts_with(&source_prefix))
+                            .map(|(k, v)| {
+                                let short = k.strip_prefix(&source_prefix).unwrap_or(k).to_string();
+                                (short, v.clone())
+                            })
+                            .filter(|(short, _)| !short.contains("::"))
+                            .collect();
+                        for (short, def) in matching_fns {
+                            let reexported = format!("{}::{}", prefix, short);
+                            self.functions.insert(reexported, def);
+                        }
+                        let matching_enums: Vec<(String, Vec<EnumVariant>)> = self.enum_defs.iter()
+                            .filter(|(k, _)| k.starts_with(&source_prefix))
+                            .map(|(k, v)| {
+                                let short = k.strip_prefix(&source_prefix).unwrap_or(k).to_string();
+                                (short, v.clone())
+                            })
+                            .filter(|(short, _)| !short.contains("::"))
+                            .collect();
+                        for (short, variants) in matching_enums {
+                            let reexported = format!("{}::{}", prefix, short);
+                            self.enum_defs.insert(reexported, variants);
+                        }
+                        let matching_structs: Vec<(String, Vec<StructField>)> = self.struct_defs.iter()
+                            .filter(|(k, _)| k.starts_with(&source_prefix))
+                            .map(|(k, v)| {
+                                let short = k.strip_prefix(&source_prefix).unwrap_or(k).to_string();
+                                (short, v.clone())
+                            })
+                            .filter(|(short, _)| !short.contains("::"))
+                            .collect();
+                        for (short, fields) in matching_structs {
+                            let reexported = format!("{}::{}", prefix, short);
+                            self.struct_defs.insert(reexported, fields);
+                        }
+                    } else {
+                        let item_name = alias.as_ref().or_else(|| path.last()).cloned().unwrap_or_default();
+                        let reexported = format!("{}::{}", prefix, item_name);
+                        if let Some(func) = self.functions.get(&source_path).cloned() {
+                            self.functions.insert(reexported, func);
+                        } else if let Some(variants) = self.enum_defs.get(&source_path).cloned() {
+                            self.enum_defs.insert(reexported, variants);
+                        } else if let Some(fields) = self.struct_defs.get(&source_path).cloned() {
+                            self.struct_defs.insert(reexported, fields);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -763,10 +823,10 @@ impl<'a> Interpreter<'a> {
                     self.async_fns.insert(def.name.clone());
                     self.functions.insert(def.name.clone(), def.clone());
                 }
-                StatementKind::EnumDef { name, variants } => {
+                StatementKind::EnumDef { name, variants, .. } => {
                     self.enum_defs.insert(name.clone(), variants.clone());
                 }
-                StatementKind::StructDef { name, fields } => {
+                StatementKind::StructDef { name, fields, .. } => {
                     self.struct_defs.insert(name.clone(), fields.clone());
                 }
                 StatementKind::ImplBlock { type_name, methods } => {
@@ -1511,13 +1571,13 @@ impl<'a> Interpreter<'a> {
                 Ok(DataType::Null)
             }
 
-            StatementKind::EnumDef { name, variants } => {
+            StatementKind::EnumDef { name, variants, .. } => {
                 // Store enum definition
                 self.enum_defs.insert(name.clone(), variants.clone());
                 Ok(DataType::Null)
             }
 
-            StatementKind::StructDef { name, fields } => {
+            StatementKind::StructDef { name, fields, .. } => {
                 // Store struct definition
                 self.struct_defs.insert(name.clone(), fields.clone());
                 Ok(DataType::Null)
@@ -1527,7 +1587,7 @@ impl<'a> Interpreter<'a> {
             StatementKind::TraitDef { .. } => Ok(DataType::Null),
             StatementKind::ImplTrait { .. } => Ok(DataType::Null),
 
-            StatementKind::Use { path, alias, glob } => {
+            StatementKind::Use { path, alias, glob, .. } => {
                 // Check if this is a std library import
                 if path.first().map(|s| s.as_str()) == Some("std") {
                     return self.handle_std_use(path, alias.as_deref(), *glob, stmt.span);
@@ -3696,6 +3756,23 @@ impl<'a> Interpreter<'a> {
     }
 
     fn eval_expr(&mut self, expr: &Expression) -> Result<DataType, InterpError> {
+        // AST depth limit (#261)
+        self.expr_depth += 1;
+        if self.expr_depth > MAX_EXPR_DEPTH {
+            self.expr_depth -= 1;
+            return Err(InterpError::ResourceLimit {
+                limit: format!("{} levels", MAX_EXPR_DEPTH),
+                actual: format!("{} levels", self.expr_depth + 1),
+                context: "expression nesting depth".to_string(),
+                span: expr.span,
+            });
+        }
+        let result = self.eval_expr_inner(expr);
+        self.expr_depth -= 1;
+        result
+    }
+
+    fn eval_expr_inner(&mut self, expr: &Expression) -> Result<DataType, InterpError> {
         match &expr.kind {
             ExpressionKind::Literal(lit) => self.eval_literal(lit),
 
@@ -3998,6 +4075,107 @@ impl<'a> Interpreter<'a> {
                         }
                         return Ok(DataType::Tuple(items));
                     }
+                    // Option/Result constructors and helpers (#78)
+                    "Some" => {
+                        if let Some(arg) = args.first() {
+                            return self.eval_expr(arg);
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "None" => {
+                        return Ok(DataType::Null);
+                    }
+                    "Ok" => {
+                        let val = if let Some(arg) = args.first() {
+                            self.eval_expr(arg)?
+                        } else {
+                            DataType::Null
+                        };
+                        let mut map = IndexMap::new();
+                        map.insert("ok".to_string(), val);
+                        return Ok(DataType::Map(map));
+                    }
+                    "Err" => {
+                        let val = if let Some(arg) = args.first() {
+                            self.eval_expr(arg)?
+                        } else {
+                            DataType::String("error".to_string())
+                        };
+                        let mut map = IndexMap::new();
+                        map.insert("err".to_string(), val);
+                        return Ok(DataType::Map(map));
+                    }
+                    "is_some" => {
+                        if let Some(arg) = args.first() {
+                            let val = self.eval_expr(arg)?;
+                            return Ok(DataType::Bool(!matches!(val, DataType::Null)));
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+                    "is_none" => {
+                        if let Some(arg) = args.first() {
+                            let val = self.eval_expr(arg)?;
+                            return Ok(DataType::Bool(matches!(val, DataType::Null)));
+                        }
+                        return Ok(DataType::Bool(true));
+                    }
+                    "is_ok" => {
+                        if let Some(arg) = args.first() {
+                            let val = self.eval_expr(arg)?;
+                            if let DataType::Map(ref m) = val {
+                                return Ok(DataType::Bool(m.contains_key("ok")));
+                            }
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+                    "is_err" => {
+                        if let Some(arg) = args.first() {
+                            let val = self.eval_expr(arg)?;
+                            if let DataType::Map(ref m) = val {
+                                return Ok(DataType::Bool(m.contains_key("err")));
+                            }
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+                    "unwrap" => {
+                        if let Some(arg) = args.first() {
+                            let val = self.eval_expr(arg)?;
+                            return match val {
+                                DataType::Null => Err(InterpError::ThrownError {
+                                    value: DataType::String("called unwrap on None value".to_string()),
+                                    span: expr.span,
+                                }),
+                                DataType::Map(ref m) if m.contains_key("ok") => {
+                                    Ok(m.get("ok").cloned().unwrap_or(DataType::Null))
+                                }
+                                DataType::Map(ref m) if m.contains_key("err") => {
+                                    Err(InterpError::ThrownError {
+                                        value: m.get("err").cloned().unwrap_or(DataType::String("error".to_string())),
+                                        span: expr.span,
+                                    })
+                                }
+                                other => Ok(other),
+                            };
+                        }
+                        return Err(InterpError::ArityMismatch { name: "unwrap".to_string(), expected: "1".to_string(), actual: 0, span: expr.span });
+                    }
+                    "unwrap_or" => {
+                        if args.len() < 2 {
+                            return Err(InterpError::ArityMismatch { name: "unwrap_or".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span });
+                        }
+                        let val = self.eval_expr(&args[0])?;
+                        let default = self.eval_expr(&args[1])?;
+                        return match val {
+                            DataType::Null => Ok(default),
+                            DataType::Map(ref m) if m.contains_key("ok") => {
+                                Ok(m.get("ok").cloned().unwrap_or(DataType::Null))
+                            }
+                            DataType::Map(ref m) if m.contains_key("err") => {
+                                Ok(default)
+                            }
+                            other => Ok(other),
+                        };
+                    }
                     "stdin_read" | "input" => {
                         use std::io::BufRead;
                         let mut line = String::new();
@@ -4188,6 +4366,100 @@ impl<'a> Interpreter<'a> {
                         let mut result: i64 = 1;
                         for i in 0..(r as u64) { result = result.saturating_mul((n as u64 - i) as i64); }
                         return Ok(DataType::Int64(result));
+                    }
+                    // String encode builtin (#103)
+                    "encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "encode".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let s = match &val { DataType::String(s) => s.clone(), _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: val.type_name().to_string(), context: "encode".to_string(), span: expr.span }) };
+                        let encoding = if args.len() > 1 {
+                            let enc_val = self.eval_expr(&args[1])?;
+                            match enc_val { DataType::String(e) => e, _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: enc_val.type_name().to_string(), context: "encode(encoding)".to_string(), span: expr.span }) }
+                        } else {
+                            "utf8".to_string()
+                        };
+                        let bytes = match encoding.to_lowercase().as_str() {
+                            "utf8" | "utf-8" => s.as_bytes().to_vec(),
+                            "utf16-le" | "utf16le" => {
+                                let mut buf = Vec::with_capacity(s.len() * 2);
+                                for code_unit in s.encode_utf16() { buf.extend_from_slice(&code_unit.to_le_bytes()); }
+                                buf
+                            }
+                            "utf16-be" | "utf16be" => {
+                                let mut buf = Vec::with_capacity(s.len() * 2);
+                                for code_unit in s.encode_utf16() { buf.extend_from_slice(&code_unit.to_be_bytes()); }
+                                buf
+                            }
+                            "ascii" => {
+                                let mut buf = Vec::with_capacity(s.len());
+                                for ch in s.chars() {
+                                    if ch.is_ascii() { buf.push(ch as u8); }
+                                    else { buf.push(b'?'); }
+                                }
+                                buf
+                            }
+                            other => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("encode: unsupported encoding '{}' (supported: utf8, utf16-le, utf16-be, ascii)", other)), span: expr.span }),
+                        };
+                        return Ok(DataType::Bytes(bytes));
+                    }
+                    // Array binary_search_by builtin (#112)
+                    "binary_search_by" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "binary_search_by".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let arr_val = self.eval_expr(&args[0])?;
+                        let arr = match arr_val { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "binary_search_by".to_string(), span: expr.span }) };
+                        // Binary search using comparator function
+                        let mut lo: usize = 0;
+                        let mut hi: usize = arr.len();
+                        let mut found: Option<usize> = None;
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let cmp_result = self.call_lambda_with_args(&args[1], &[arr[mid].clone()], expr.span)?;
+                            let ord = cmp_result.to_i64().unwrap_or(0);
+                            if ord == 0 {
+                                found = Some(mid);
+                                break;
+                            } else if ord < 0 {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        return match found {
+                            Some(idx) => Ok(DataType::Int64(idx as i64)),
+                            None => Ok(DataType::Null),
+                        };
+                    }
+                    // File watch builtin (#130)
+                    "fs_watch" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "fs_watch".to_string(), expected: "2-3".to_string(), actual: args.len(), span: expr.span }); }
+                        let path_val = self.eval_expr(&args[0])?;
+                        let path_str = match &path_val { DataType::String(s) => s.clone(), _ => return Err(InterpError::TypeError { expected: "string".to_string(), actual: path_val.type_name().to_string(), context: "fs_watch(path)".to_string(), span: expr.span }) };
+                        let timeout_ms: u64 = if args.len() > 2 {
+                            let t = self.eval_expr(&args[2])?;
+                            t.to_i64().unwrap_or(5000).max(0) as u64
+                        } else {
+                            5000
+                        };
+                        let path = std::path::Path::new(&path_str);
+                        let initial_mtime = std::fs::metadata(path)
+                            .and_then(|m| m.modified())
+                            .map_err(|e| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("fs_watch: {}", e)), span: expr.span })?;
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+                        let mut changes_detected: i64 = 0;
+                        loop {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            if std::time::Instant::now() >= deadline { break; }
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            let current_mtime = std::fs::metadata(path)
+                                .and_then(|m| m.modified())
+                                .unwrap_or(initial_mtime);
+                            if current_mtime != initial_mtime {
+                                self.call_lambda_with_args(&args[1], &[DataType::String(path_str.clone())], expr.span)?;
+                                changes_detected += 1;
+                                break;
+                            }
+                        }
+                        return Ok(DataType::Int64(changes_detected));
                     }
                     // Date/DateTime builtins (#81)
                     "date_now" => {
@@ -4737,6 +5009,7 @@ impl<'a> Interpreter<'a> {
                     span: expr.span,
                     is_getter: false,
                     is_setter: false,
+                    deprecated: false,
                 };
                 self.functions.insert(name.clone(), func_def);
                 Ok(DataType::String(name))
@@ -5116,18 +5389,41 @@ impl<'a> Interpreter<'a> {
                 let mut map = indexmap::IndexMap::new();
                 map.insert("__struct".to_string(), DataType::String(name.clone()));
                 for (field_name, field_expr) in fields {
+                    // Struct update syntax: `__spread` is the marker for `...base_expr`
+                    if field_name == "__spread" {
+                        let base_val = self.eval_expr(field_expr)?;
+                        if let DataType::Map(base_map) = base_val {
+                            for (k, v) in base_map {
+                                if k != "__struct" {
+                                    map.insert(k, v);
+                                }
+                            }
+                        } else {
+                            return Err(InterpError::TypeError {
+                                expected: "Map or struct".to_string(),
+                                actual: base_val.type_name().to_string(),
+                                context: "struct update spread".to_string(),
+                                span: expr.span,
+                            });
+                        }
+                        continue;
+                    }
                     if map.contains_key(field_name) && field_name != "__struct" {
-                        return Err(InterpError::TypeError {
-                            expected: format!("unique field in struct '{}'", name),
-                            actual: format!("duplicate field '{}'", field_name),
-                            context: format!("struct '{}' construction", name),
-                            span: expr.span,
-                        });
+                        // Override spread fields with explicit fields (not an error)
                     }
                     let val = self.eval_expr(field_expr)?;
                     map.insert(field_name.clone(), val);
                 }
-                // Validate all required fields are present
+                // Fill in defaults for missing fields (#294)
+                for fd in &field_defs {
+                    if !map.contains_key(&fd.name) {
+                        if let Some(ref default_expr) = fd.default {
+                            let default_val = self.eval_expr(default_expr)?;
+                            map.insert(fd.name.clone(), default_val);
+                        }
+                    }
+                }
+                // Validate all required fields are present (fields without defaults)
                 for fd in &field_defs {
                     if !map.contains_key(&fd.name) {
                         return Err(InterpError::TypeError {
@@ -5141,7 +5437,7 @@ impl<'a> Interpreter<'a> {
                 // Reject unknown fields
                 let known_fields: Vec<&str> = field_defs.iter().map(|f| f.name.as_str()).collect();
                 for (field_name, _) in fields {
-                    if field_name != "__struct" && !known_fields.contains(&field_name.as_str()) {
+                    if field_name != "__struct" && field_name != "__spread" && !known_fields.contains(&field_name.as_str()) {
                         return Err(InterpError::TypeError {
                             expected: format!("known field of struct '{}'", name),
                             actual: field_name.clone(),
@@ -5810,10 +6106,10 @@ impl<'a> Interpreter<'a> {
                     self.async_fns.insert(func.name.clone());
                     self.functions.insert(func.name.clone(), func.clone());
                 }
-                StatementKind::EnumDef { name, variants } => {
+                StatementKind::EnumDef { name, variants, .. } => {
                     self.enum_defs.insert(name.clone(), variants.clone());
                 }
-                StatementKind::StructDef { name, fields } => {
+                StatementKind::StructDef { name, fields, .. } => {
                     self.struct_defs.insert(name.clone(), fields.clone());
                 }
                 StatementKind::ModuleDef { name, body } => {
@@ -6117,6 +6413,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "regex_match",
             "regex_replace",
             "regex_extract",
+            "encode",
         ],
         "convert" => vec![
             "to_string",
@@ -6259,6 +6556,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "fs_size",
             "fs_is_file",
             "fs_is_dir",
+            "fs_watch",
         ],
         "env" => vec![
             "env_get",
@@ -6422,6 +6720,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "stable_sort",
             "is_sorted",
             "binary_search",
+            "binary_search_by",
             "sort_reverse",
         ],
         _ => vec![],
@@ -7228,9 +7527,9 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
                         | StatementKind::ImplBlock { .. }
                         | StatementKind::TraitDef { .. }
                         | StatementKind::ImplTrait { .. } => {
-                if let StatementKind::EnumDef { name, variants } = &stmt.kind {
+                if let StatementKind::EnumDef { name, variants, .. } = &stmt.kind {
                     enum_defs.push((name.clone(), variants.clone()));
-                } else if let StatementKind::StructDef { name, fields } = &stmt.kind {
+                } else if let StatementKind::StructDef { name, fields, .. } = &stmt.kind {
                     struct_defs.push((name.clone(), fields.clone()));
                 }
             }

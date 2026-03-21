@@ -124,6 +124,7 @@ pub enum TokenKind {
     Comma,      // ,
     Dot,        // .
     Underscore, // _ (standalone placeholder)
+    Hash,       // # (attribute prefix)
 
     // Labels
     Label, // 'identifier (loop label like 'outer)
@@ -221,6 +222,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Comma => ",",
             TokenKind::Dot => ".",
             TokenKind::Underscore => "_",
+            TokenKind::Hash => "#",
             TokenKind::Label => "label",
             TokenKind::Eof => "EOF",
         };
@@ -286,6 +288,8 @@ struct Lexer<'a> {
     pos: usize,
     line: u32,
     col: u32,
+    /// Byte offset at the start of the current token being lexed.
+    token_start_pos: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -295,7 +299,18 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
+            token_start_pos: 0,
         }
+    }
+
+    /// Create a Span::point with byte offset from the token start.
+    fn span_point(&self, line: u32, col: u32) -> Span {
+        Span::point_with_byte(line, col, self.token_start_pos as u32)
+    }
+
+    /// Create a Span::new with byte offsets.
+    fn span_range(&self, start_line: u32, start_col: u32, end_line: u32, end_col: u32) -> Span {
+        Span::with_bytes(start_line, start_col, end_line, end_col, self.token_start_pos as u32, self.pos as u32)
     }
 
     fn peek(&self) -> Option<u8> {
@@ -416,13 +431,14 @@ impl<'a> Lexer<'a> {
 
         let start_line = self.line;
         let start_col = self.col;
+        self.token_start_pos = self.pos;
 
         let ch = match self.peek() {
             Some(ch) => ch,
             None => {
                 return Ok(Token {
                     kind: TokenKind::Eof,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: String::new(),
                 });
             }
@@ -438,6 +454,7 @@ impl<'a> Lexer<'a> {
             b'}' => return self.single_char_token(TokenKind::RBrace, start_line, start_col),
             b';' => return self.single_char_token(TokenKind::Semicolon, start_line, start_col),
             b',' => return self.single_char_token(TokenKind::Comma, start_line, start_col),
+            b'#' => return self.single_char_token(TokenKind::Hash, start_line, start_col),
             _ => {}
         }
 
@@ -449,13 +466,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::PlusEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "+=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Plus,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "+".to_string(),
                 });
             }
@@ -465,13 +482,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::StarEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "*=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Star,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "*".to_string(),
                 });
             }
@@ -481,13 +498,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::SlashEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "/=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Slash,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "/".to_string(),
                 });
             }
@@ -497,13 +514,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::PercentEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "%=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Percent,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "%".to_string(),
                 });
             }
@@ -513,13 +530,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::ColonColon,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "::".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Colon,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: ":".to_string(),
                 });
             }
@@ -531,7 +548,7 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         return Ok(Token {
                             kind: TokenKind::DotDotDot,
-                            span: Span::new(start_line, start_col, self.line, self.col - 1),
+                            span: self.span_range(start_line, start_col, self.line, self.col - 1),
                             text: "...".to_string(),
                         });
                     }
@@ -539,19 +556,19 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         return Ok(Token {
                             kind: TokenKind::DotDotEq,
-                            span: Span::new(start_line, start_col, self.line, self.col - 1),
+                            span: self.span_range(start_line, start_col, self.line, self.col - 1),
                             text: "..=".to_string(),
                         });
                     }
                     return Ok(Token {
                         kind: TokenKind::DotDot,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "..".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Dot,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: ".".to_string(),
                 });
             }
@@ -561,7 +578,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::QuestionQuestion,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "??".to_string(),
                     });
                 }
@@ -569,13 +586,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::QuestionDot,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "?.".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Question,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "?".to_string(),
                 });
             }
@@ -590,7 +607,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::EqEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "==".to_string(),
                     });
                 }
@@ -598,13 +615,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::FatArrow,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "=>".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Eq,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "=".to_string(),
                 });
             }
@@ -614,13 +631,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::NotEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "!=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Bang,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "!".to_string(),
                 });
             }
@@ -630,13 +647,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::GtEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: ">=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Gt,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: ">".to_string(),
                 });
             }
@@ -646,13 +663,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::LtEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "<=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Lt,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "<".to_string(),
                 });
             }
@@ -662,7 +679,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::AndAnd,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "&&".to_string(),
                     });
                 }
@@ -679,7 +696,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::Pipe,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "|>".to_string(),
                     });
                 }
@@ -687,14 +704,14 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::PipePipe,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "||".to_string(),
                     });
                 }
                 // Single | for lambda params and or-patterns
                 return Ok(Token {
                     kind: TokenKind::Bar,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "|".to_string(),
                 });
             }
@@ -704,7 +721,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::Arrow,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "->".to_string(),
                     });
                 }
@@ -712,13 +729,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     return Ok(Token {
                         kind: TokenKind::MinusEq,
-                        span: Span::new(start_line, start_col, self.line, self.col - 1),
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
                         text: "-=".to_string(),
                     });
                 }
                 return Ok(Token {
                     kind: TokenKind::Minus,
-                    span: Span::point(start_line, start_col),
+                    span: self.span_point(start_line, start_col),
                     text: "-".to_string(),
                 });
             }
@@ -794,7 +811,7 @@ impl<'a> Lexer<'a> {
         })?;
         Ok(Token {
             kind,
-            span: Span::point(start_line, start_col),
+            span: self.span_point(start_line, start_col),
             text: String::from(ch as char),
         })
     }
@@ -944,7 +961,7 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::StringLiteral,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: value,
         })
     }
@@ -993,7 +1010,7 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::StringLiteral,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: value,
         })
     }
@@ -1021,7 +1038,7 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::StringLiteral,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: value,
         })
     }
@@ -1121,7 +1138,7 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::FStringStart,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: value,
         })
     }
@@ -1188,7 +1205,7 @@ impl<'a> Lexer<'a> {
 
         Ok(Token {
             kind,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text,
         })
     }
@@ -1230,7 +1247,7 @@ impl<'a> Lexer<'a> {
 
         Ok(Token {
             kind: TokenKind::IntLiteral,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: value.to_string(), // store decimal value for downstream parsers
         })
     }
@@ -1260,7 +1277,7 @@ impl<'a> Lexer<'a> {
         if text == "_" {
             return Ok(Token {
                 kind: TokenKind::Underscore,
-                span: Span::new(start_line, start_col, self.line, self.col - 1),
+                span: self.span_range(start_line, start_col, self.line, self.col - 1),
                 text,
             });
         }
@@ -1310,7 +1327,7 @@ impl<'a> Lexer<'a> {
 
         Ok(Token {
             kind,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text,
         })
     }
@@ -1338,7 +1355,7 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::Label,
-            span: Span::new(start_line, start_col, self.line, self.col - 1),
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: name,
         })
     }

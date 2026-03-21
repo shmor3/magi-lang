@@ -720,7 +720,7 @@ impl Compiler {
                 })?;
             }
 
-            StatementKind::EnumDef { name, variants } => {
+            StatementKind::EnumDef { name, variants, .. } => {
                 // Enum definitions are compile-time type info.
                 // Store variant info in string pool for runtime construction.
                 for variant in variants {
@@ -729,7 +729,7 @@ impl Compiler {
                 }
             }
 
-            StatementKind::StructDef { name, fields } => {
+            StatementKind::StructDef { name, fields, .. } => {
                 // Struct definitions are compile-time type info.
                 for field in fields {
                     let key = format!("{}::{}", name, field.name);

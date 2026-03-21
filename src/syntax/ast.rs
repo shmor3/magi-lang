@@ -18,6 +18,10 @@ pub struct Span {
     pub start_col: u32,
     pub end_line: u32,
     pub end_col: u32,
+    /// Byte offset of the span start in the source text (0-based).
+    pub start_byte: u32,
+    /// Byte offset of the span end in the source text (0-based).
+    pub end_byte: u32,
 }
 
 impl Span {
@@ -27,6 +31,20 @@ impl Span {
             start_col,
             end_line,
             end_col,
+            start_byte: 0,
+            end_byte: 0,
+        }
+    }
+
+    /// Create a span with byte offset information.
+    pub fn with_bytes(start_line: u32, start_col: u32, end_line: u32, end_col: u32, start_byte: u32, end_byte: u32) -> Self {
+        Self {
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+            start_byte,
+            end_byte,
         }
     }
 
@@ -37,6 +55,20 @@ impl Span {
             start_col: col,
             end_line: line,
             end_col: col,
+            start_byte: 0,
+            end_byte: 0,
+        }
+    }
+
+    /// Create a span covering a single point with byte offset.
+    pub fn point_with_byte(line: u32, col: u32, byte_offset: u32) -> Self {
+        Self {
+            start_line: line,
+            start_col: col,
+            end_line: line,
+            end_col: col,
+            start_byte: byte_offset,
+            end_byte: byte_offset,
         }
     }
 
@@ -59,6 +91,8 @@ impl Span {
             } else {
                 self.end_col.max(other.end_col)
             },
+            start_byte: self.start_byte.min(other.start_byte),
+            end_byte: self.end_byte.max(other.end_byte),
         }
     }
 }
@@ -191,10 +225,12 @@ pub enum StatementKind {
     /// `mod name { body }`
     ModuleDef { name: String, body: Block },
     /// `use path::to::item;` or `use path::to::item as alias;` or `use path::to::*;`
+    /// When `is_pub` is true, re-exports the item so importers of this module can access it.
     Use {
         path: Vec<String>,
         alias: Option<String>,
         glob: bool,
+        is_pub: bool,
     },
     /// `test "description" { body }`
     TestDef { name: String, body: Block },
@@ -202,11 +238,13 @@ pub enum StatementKind {
     EnumDef {
         name: String,
         variants: Vec<EnumVariant>,
+        deprecated: bool,
     },
     /// `struct Name { field: type, ... }`
     StructDef {
         name: String,
         fields: Vec<StructField>,
+        deprecated: bool,
     },
     /// `impl TypeName { fn method(self, ...) { ... } ... }`
     ImplBlock {
@@ -265,6 +303,7 @@ pub struct EnumVariant {
 pub struct StructField {
     pub name: String,
     pub type_annotation: Option<TypeAnnotation>,
+    pub default: Option<Expression>,
     pub span: Span,
 }
 
@@ -305,6 +344,8 @@ pub struct FunctionDef {
     pub is_getter: bool,
     /// Whether this method is a property setter (`set field(value) { ... }`).
     pub is_setter: bool,
+    /// Whether this function is marked with `#[deprecated]`.
+    pub deprecated: bool,
 }
 
 // =============================================================================

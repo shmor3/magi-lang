@@ -446,7 +446,10 @@ impl<'a> Formatter<'a> {
                 self.write(" ");
                 self.fmt_block(body);
             }
-            StatementKind::Use { path, alias, glob } => {
+            StatementKind::Use { path, alias, glob, is_pub } => {
+                if *is_pub {
+                    self.write("pub ");
+                }
                 self.write("use ");
                 self.write(&path.join("::"));
                 if *glob {
@@ -462,7 +465,7 @@ impl<'a> Formatter<'a> {
                 self.write(&format!("test \"{}\" ", escape_string_contents(name)));
                 self.fmt_block(body);
             }
-            StatementKind::EnumDef { name, variants } => {
+            StatementKind::EnumDef { name, variants, .. } => {
                 self.write("enum ");
                 self.write(name);
                 self.write(" {");
@@ -483,7 +486,7 @@ impl<'a> Formatter<'a> {
                 self.dedent();
                 self.write("}");
             }
-            StatementKind::StructDef { name, fields } => {
+            StatementKind::StructDef { name, fields, .. } => {
                 self.write("struct ");
                 self.write(name);
                 self.write(" {");

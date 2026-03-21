@@ -311,6 +311,7 @@ impl Parser {
         let start = self.peek().span;
 
         match self.peek_kind().clone() {
+            TokenKind::Hash => self.parse_attribute_and_def(start),
             TokenKind::Import => self.parse_import_statement(start),
             TokenKind::Output => self.parse_output_statement(start),
             TokenKind::Let => self.parse_let_statement(start),
@@ -344,6 +345,10 @@ impl Parser {
                     | TokenKind::Type | TokenKind::Use => {
                         let mut stmt = self.parse_statement()?;
                         stmt.span = pub_span.merge(stmt.span);
+                        // Mark `use` statements as pub for re-exports (#92)
+                        if let StatementKind::Use { ref mut is_pub, .. } = stmt.kind {
+                            *is_pub = true;
+                        }
                         Ok(stmt)
                     }
                     TokenKind::Pub => Err(SyntaxError {
@@ -399,6 +404,71 @@ impl Parser {
             }
             _ => self.parse_expr_statement(start),
         }
+    }
+
+    /// Parse `#[deprecated]` attribute followed by a fn/struct/enum definition.
+    fn parse_attribute_and_def(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume '#'
+        self.expect(&TokenKind::LBracket)?;
+        let attr_tok = self.expect_identifier()?;
+        if attr_tok.text != "deprecated" {
+            return Err(SyntaxError {
+                line: attr_tok.span.start_line as usize,
+                column: attr_tok.span.start_col as usize,
+                message: format!("Unknown attribute '{}'; only 'deprecated' is supported", attr_tok.text),
+                code: None,
+            });
+        }
+        self.expect(&TokenKind::RBracket)?;
+
+        // Parse the definition that follows
+        let mut stmt = match self.peek_kind() {
+            TokenKind::Fn => self.parse_function_def(start)?,
+            TokenKind::Async => self.parse_async_function_def(start)?,
+            TokenKind::Enum => self.parse_enum_def(start)?,
+            TokenKind::Struct => self.parse_struct_def(start)?,
+            TokenKind::Pub => {
+                let pub_span = self.peek().span;
+                self.advance(); // consume 'pub'
+                let mut inner = match self.peek_kind() {
+                    TokenKind::Fn => self.parse_function_def(start)?,
+                    TokenKind::Async => self.parse_async_function_def(start)?,
+                    TokenKind::Enum => self.parse_enum_def(start)?,
+                    TokenKind::Struct => self.parse_struct_def(start)?,
+                    _ => return Err(SyntaxError {
+                        line: self.peek().span.start_line as usize,
+                        column: self.peek().span.start_col as usize,
+                        message: "#[deprecated] can only be applied to fn, async fn, enum, or struct definitions".to_string(),
+                        code: None,
+                    }),
+                };
+                inner.span = pub_span.merge(inner.span);
+                inner
+            }
+            _ => return Err(SyntaxError {
+                line: self.peek().span.start_line as usize,
+                column: self.peek().span.start_col as usize,
+                message: "#[deprecated] can only be applied to fn, async fn, enum, or struct definitions".to_string(),
+                code: None,
+            }),
+        };
+
+        // Set the deprecated flag on the parsed definition
+        match &mut stmt.kind {
+            StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) => {
+                def.deprecated = true;
+            }
+            StatementKind::EnumDef { deprecated, .. } => {
+                *deprecated = true;
+            }
+            StatementKind::StructDef { deprecated, .. } => {
+                *deprecated = true;
+            }
+            _ => {}
+        }
+
+        stmt.span = start.merge(stmt.span);
+        Ok(stmt)
     }
 
     fn parse_import_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
@@ -931,7 +1001,7 @@ impl Parser {
         let end = self.peek().span;
         self.eat(&TokenKind::Semicolon);
         Ok(Statement {
-            kind: StatementKind::Use { path, alias, glob },
+            kind: StatementKind::Use { path, alias, glob, is_pub: false },
             span: start.merge(end),
         })
     }
@@ -1070,6 +1140,7 @@ impl Parser {
                 span: full_span,
                 is_getter: false,
                 is_setter: false,
+                deprecated: false,
             }),
         })
     }
@@ -1111,6 +1182,7 @@ impl Parser {
                 span: full_span,
                 is_getter: false,
                 is_setter: false,
+                deprecated: false,
             }),
         })
     }
@@ -1936,6 +2008,16 @@ impl Parser {
                     let mut fields = Vec::new();
                     let mut seen_fields = std::collections::HashSet::new();
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        // Struct update syntax: `{ ...base_expr, field: value }`
+                        if self.at(&TokenKind::DotDotDot) {
+                            self.advance(); // consume '...'
+                            let spread_expr = self.parse_expression()?;
+                            fields.push(("__spread".to_string(), spread_expr));
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                            continue;
+                        }
                         let field_tok = self.expect_identifier()?;
                         if !seen_fields.insert(field_tok.text.clone()) {
                             return Err(SyntaxError {
@@ -2942,7 +3024,7 @@ impl Parser {
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Statement {
             span: start.merge(end.span),
-            kind: StatementKind::EnumDef { name, variants },
+            kind: StatementKind::EnumDef { name, variants, deprecated: false },
         })
     }
 
@@ -2978,10 +3060,17 @@ impl Parser {
             } else {
                 None
             };
+            // Optional default value: `field: type = expr` or `field = expr`
+            let default = if self.eat(&TokenKind::Eq) {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
             let field_end = self.peek().span;
             fields.push(StructField {
                 name: field_tok.text,
                 type_annotation,
+                default,
                 span: field_start.merge(field_end),
             });
             if !self.eat(&TokenKind::Comma) {
@@ -2992,7 +3081,7 @@ impl Parser {
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Statement {
             span: start.merge(end.span),
-            kind: StatementKind::StructDef { name, fields },
+            kind: StatementKind::StructDef { name, fields, deprecated: false },
         })
     }
 
@@ -3060,7 +3149,7 @@ impl Parser {
             let return_type = if self.eat(&TokenKind::Arrow) { Some(self.parse_type_annotation()?) } else { None };
             let body = self.parse_block()?;
             let full_span = fn_start.merge(body.span);
-            methods.push(FunctionDef { name, params, return_type, body, span: full_span, is_getter, is_setter });
+            methods.push(FunctionDef { name, params, return_type, body, span: full_span, is_getter, is_setter, deprecated: false });
         }
         Ok(methods)
     }
@@ -3103,6 +3192,13 @@ impl Parser {
         if self.pos + 1 < self.tokens.len()
             && self.tokens[self.pos + 1].kind == TokenKind::RBrace
             && name.starts_with(|c: char| c.is_uppercase())
+        {
+            return true;
+        }
+        // Struct update syntax: Name { ...expr } — name must start with uppercase
+        if self.pos + 1 < self.tokens.len()
+            && name.starts_with(|c: char| c.is_uppercase())
+            && self.tokens[self.pos + 1].kind == TokenKind::DotDotDot
         {
             return true;
         }
