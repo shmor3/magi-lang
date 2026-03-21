@@ -53,6 +53,14 @@ ariadne = "0.5"
 [dev-dependencies]
 wasmparser = "0.245"
 
+[features]
+default = ["wasm-validate"]
+wasm-validate = ["dep:wasmparser"]
+
+[dependencies.wasmparser]
+version = "0.245"
+optional = true
+
 [[bin]]
 name = "magi"
 path = "src/bin/magi.rs"
