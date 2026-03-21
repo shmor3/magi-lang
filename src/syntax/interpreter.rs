@@ -6944,7 +6944,7 @@ pub const STD_MODULE_NAMES: &[&str] = &[
     "env", "net", "tcp", "udp", "ws", "sse", "http_server", "path",
     "yaml", "csv", "toml", "regex", "uuid", "crypto", "compress",
     "fmt", "stats", "text", "encode", "reflect", "collections", "sort",
-    "cert", "concurrent",
+    "cert", "concurrent", "itertools", "template", "flag",
 ];
 
 /// Get the list of operation names in a standard library module.
@@ -7370,6 +7370,15 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "chan_try_recv",
             "chan_close",
         ],
+        "itertools" => vec![
+            "iter_chain",
+            "iter_cycle",
+            "iter_repeat",
+            "iter_product",
+            "iter_pairwise",
+        ],
+        "template" => vec!["template_render"],
+        "flag" => vec!["flag_parse", "flag_args"],
         _ => vec![],
     }
 }

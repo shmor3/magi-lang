@@ -300,6 +300,16 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
 
         // Log
         LogInfo | LogWarn | LogError | LogDebug => ChannelType::Null,
+
+        // Itertools
+        IterChain | IterCycle | IterRepeat | IterProduct | IterPairwise => ChannelType::Array,
+
+        // Template
+        TemplateRender => ChannelType::String,
+
+        // Flag
+        FlagParse => ChannelType::Map,
+        FlagArgs => ChannelType::Array,
     }
 }
 
@@ -633,6 +643,20 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
 
         // Log
         LogInfo | LogWarn | LogError | LogDebug => &[("message", Null)],
+
+        // Itertools
+        IterChain => &[("array", Array), ("other", Array)],
+        IterCycle => &[("array", Array), ("count", Null)],
+        IterRepeat => &[("value", Null), ("count", Null)],
+        IterProduct => &[("array", Array), ("other", Array)],
+        IterPairwise => &[("array", Array)],
+
+        // Template
+        TemplateRender => &[("template", String), ("data", Map)],
+
+        // Flag
+        FlagParse => &[("args", Array), ("spec", Map)],
+        FlagArgs => &[],
     }
 }
 
@@ -928,6 +952,19 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
 
         // Log
         LogInfo | LogWarn | LogError | LogDebug => &["message"],
+
+        // Itertools
+        IterChain | IterProduct => &["array", "other"],
+        IterCycle => &["array", "count"],
+        IterRepeat => &["value", "count"],
+        IterPairwise => &["array"],
+
+        // Template
+        TemplateRender => &["template", "data"],
+
+        // Flag
+        FlagParse => &["args", "spec"],
+        FlagArgs => &[],
     }
 }
 

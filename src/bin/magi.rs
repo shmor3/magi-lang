@@ -6302,6 +6302,260 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
+            // Itertools
+            OperationType::IterChain => {
+                let arr_a = inputs.get("array").cloned().unwrap_or(DataType::Null);
+                let arr_b = inputs.get("other").cloned().unwrap_or(DataType::Null);
+                match (arr_a, arr_b) {
+                    (DataType::Array(mut a_vec), DataType::Array(b_vec)) => {
+                        a_vec.extend(b_vec);
+                        Ok(DataType::Array(a_vec))
+                    }
+                    (DataType::Array(_), other) => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "IterChain other".to_string(),
+                    }),
+                    (other, _) => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "IterChain array".to_string(),
+                    }),
+                }
+            }
+            OperationType::IterCycle => {
+                let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
+                let count_val = inputs.get("count").cloned().unwrap_or(DataType::Null);
+                match arr_val {
+                    DataType::Array(arr) => {
+                        let n = match &count_val {
+                            DataType::Int64(v) => *v as usize,
+                            DataType::Float64(v) => *v as usize,
+                            _ => {
+                                return Err(EvalError::TypeError {
+                                    expected: "Int64".to_string(),
+                                    actual: count_val.type_name().to_string(),
+                                    context: "IterCycle count".to_string(),
+                                });
+                            }
+                        };
+                        let mut result = Vec::with_capacity(arr.len().saturating_mul(n));
+                        for _ in 0..n {
+                            result.extend(arr.iter().cloned());
+                        }
+                        Ok(DataType::Array(result))
+                    }
+                    other => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "IterCycle".to_string(),
+                    }),
+                }
+            }
+            OperationType::IterRepeat => {
+                let val = inputs.get("value").cloned().unwrap_or(DataType::Null);
+                let count_val = inputs.get("count").cloned().unwrap_or(DataType::Null);
+                let n = match &count_val {
+                    DataType::Int64(v) => *v as usize,
+                    DataType::Float64(v) => *v as usize,
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int64".to_string(),
+                            actual: count_val.type_name().to_string(),
+                            context: "IterRepeat count".to_string(),
+                        });
+                    }
+                };
+                Ok(DataType::Array(vec![val; n]))
+            }
+            OperationType::IterProduct => {
+                let arr_a = inputs.get("array").cloned().unwrap_or(DataType::Null);
+                let arr_b = inputs.get("other").cloned().unwrap_or(DataType::Null);
+                match (arr_a, arr_b) {
+                    (DataType::Array(a_vec), DataType::Array(b_vec)) => {
+                        let mut result = Vec::with_capacity(a_vec.len() * b_vec.len());
+                        for a_item in &a_vec {
+                            for b_item in &b_vec {
+                                result.push(DataType::Array(vec![
+                                    a_item.clone(),
+                                    b_item.clone(),
+                                ]));
+                            }
+                        }
+                        Ok(DataType::Array(result))
+                    }
+                    (DataType::Array(_), other) => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "IterProduct other".to_string(),
+                    }),
+                    (other, _) => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "IterProduct array".to_string(),
+                    }),
+                }
+            }
+            OperationType::IterPairwise => {
+                let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
+                match arr_val {
+                    DataType::Array(arr) => {
+                        if arr.len() < 2 {
+                            return Ok(DataType::Array(vec![]));
+                        }
+                        let mut result = Vec::with_capacity(arr.len() - 1);
+                        for i in 0..arr.len() - 1 {
+                            result.push(DataType::Array(vec![
+                                arr[i].clone(),
+                                arr[i + 1].clone(),
+                            ]));
+                        }
+                        Ok(DataType::Array(result))
+                    }
+                    other => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "IterPairwise".to_string(),
+                    }),
+                }
+            }
+
+            // Template
+            OperationType::TemplateRender => {
+                let template = inputs.get("template").cloned().unwrap_or(DataType::Null);
+                let data = inputs.get("data").cloned().unwrap_or(DataType::Null);
+                match (template, data) {
+                    (DataType::String(tmpl), DataType::Map(map)) => {
+                        let mut result = tmpl;
+                        for (k, v) in &map {
+                            let placeholder = format!("{{{{{}}}}}", k);
+                            let replacement = match v {
+                                DataType::String(s) => s.clone(),
+                                other => other.to_string_lossy(),
+                            };
+                            result = result.replace(&placeholder, &replacement);
+                        }
+                        Ok(DataType::String(result))
+                    }
+                    (DataType::String(_), other) => Err(EvalError::TypeError {
+                        expected: "Map".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "TemplateRender data".to_string(),
+                    }),
+                    (other, _) => Err(EvalError::TypeError {
+                        expected: "String".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "TemplateRender template".to_string(),
+                    }),
+                }
+            }
+
+            // Flag
+            OperationType::FlagParse => {
+                let args_val = inputs.get("args").cloned().unwrap_or(DataType::Null);
+                let spec_val = inputs.get("spec").cloned().unwrap_or(DataType::Null);
+                match (args_val, spec_val) {
+                    (DataType::Array(args), DataType::Map(spec)) => {
+                        let mut result = indexmap::IndexMap::new();
+                        // Initialize defaults from spec
+                        for (name, spec_entry) in &spec {
+                            if let DataType::Map(entry_map) = spec_entry {
+                                if let Some(default_val) = entry_map.get("default") {
+                                    result.insert(name.clone(), default_val.clone());
+                                }
+                            }
+                        }
+                        // Parse args
+                        let mut i = 0;
+                        let args_str: Vec<String> = args
+                            .iter()
+                            .map(|a| match a {
+                                DataType::String(s) => s.clone(),
+                                other => other.to_string_lossy(),
+                            })
+                            .collect();
+                        while i < args_str.len() {
+                            let arg = &args_str[i];
+                            if let Some(name) = arg.strip_prefix("--") {
+                                if let Some(spec_entry) = spec.get(name) {
+                                    if let DataType::Map(entry_map) = spec_entry {
+                                        let type_str = entry_map
+                                            .get("type")
+                                            .and_then(|t| {
+                                                if let DataType::String(s) = t {
+                                                    Some(s.as_str())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .unwrap_or("string");
+                                        match type_str {
+                                            "bool" => {
+                                                result.insert(
+                                                    name.to_string(),
+                                                    DataType::Bool(true),
+                                                );
+                                            }
+                                            "int" => {
+                                                i += 1;
+                                                if i < args_str.len() {
+                                                    if let Ok(v) = args_str[i].parse::<i64>() {
+                                                        result.insert(
+                                                            name.to_string(),
+                                                            DataType::Int64(v),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            "float" => {
+                                                i += 1;
+                                                if i < args_str.len() {
+                                                    if let Ok(v) = args_str[i].parse::<f64>() {
+                                                        result.insert(
+                                                            name.to_string(),
+                                                            DataType::Float64(v),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                // string
+                                                i += 1;
+                                                if i < args_str.len() {
+                                                    result.insert(
+                                                        name.to_string(),
+                                                        DataType::String(args_str[i].clone()),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            i += 1;
+                        }
+                        Ok(DataType::Map(result))
+                    }
+                    (DataType::Array(_), other) => Err(EvalError::TypeError {
+                        expected: "Map".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "FlagParse spec".to_string(),
+                    }),
+                    (other, _) => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: other.type_name().to_string(),
+                        context: "FlagParse args".to_string(),
+                    }),
+                }
+            }
+            OperationType::FlagArgs => {
+                let args: Vec<DataType> = std::env::args()
+                    .skip(1)
+                    .map(DataType::String)
+                    .collect();
+                Ok(DataType::Array(args))
+            }
+
             // All OperationType variants are now handled above.
         }
     }

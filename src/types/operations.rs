@@ -518,6 +518,20 @@ pub enum OperationType {
     LogWarn,
     LogError,
     LogDebug,
+
+    // Itertools (5)
+    IterChain,
+    IterCycle,
+    IterRepeat,
+    IterProduct,
+    IterPairwise,
+
+    // Template (1)
+    TemplateRender,
+
+    // Flag (2)
+    FlagParse,
+    FlagArgs,
 }
 
 impl OperationType {
@@ -955,6 +969,17 @@ impl OperationType {
             OperationType::LogWarn => "log_warn",
             OperationType::LogError => "log_error",
             OperationType::LogDebug => "log_debug",
+            // Itertools
+            OperationType::IterChain => "iter_chain",
+            OperationType::IterCycle => "iter_cycle",
+            OperationType::IterRepeat => "iter_repeat",
+            OperationType::IterProduct => "iter_product",
+            OperationType::IterPairwise => "iter_pairwise",
+            // Template
+            OperationType::TemplateRender => "template_render",
+            // Flag
+            OperationType::FlagParse => "flag_parse",
+            OperationType::FlagArgs => "flag_args",
         }
     }
 
@@ -1392,6 +1417,17 @@ impl OperationType {
             "log_warn" => Some(OperationType::LogWarn),
             "log_error" => Some(OperationType::LogError),
             "log_debug" => Some(OperationType::LogDebug),
+            // Itertools
+            "iter_chain" => Some(OperationType::IterChain),
+            "iter_cycle" => Some(OperationType::IterCycle),
+            "iter_repeat" => Some(OperationType::IterRepeat),
+            "iter_product" => Some(OperationType::IterProduct),
+            "iter_pairwise" => Some(OperationType::IterPairwise),
+            // Template
+            "template_render" => Some(OperationType::TemplateRender),
+            // Flag
+            "flag_parse" => Some(OperationType::FlagParse),
+            "flag_args" => Some(OperationType::FlagArgs),
             _ => None,
         }
     }
@@ -1829,6 +1865,17 @@ impl OperationType {
         OperationType::LogWarn,
         OperationType::LogError,
         OperationType::LogDebug,
+        // Itertools (5)
+        OperationType::IterChain,
+        OperationType::IterCycle,
+        OperationType::IterRepeat,
+        OperationType::IterProduct,
+        OperationType::IterPairwise,
+        // Template (1)
+        OperationType::TemplateRender,
+        // Flag (2)
+        OperationType::FlagParse,
+        OperationType::FlagArgs,
     ];
 }
 
@@ -1844,7 +1891,7 @@ mod tests {
 
     #[test]
     fn test_operation_type_all_count() {
-        assert_eq!(OperationType::ALL.len(), 388);
+        assert_eq!(OperationType::ALL.len(), 396);
     }
 
     #[test]
