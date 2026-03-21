@@ -33,6 +33,15 @@ const MAX_STRING_OUTPUT: usize = 10_000_000;
 /// Maximum array element count.
 const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
 
+/// Maximum number of variables across all scopes (#262).
+const MAX_VARIABLES: usize = 1_000_000;
+
+/// Maximum number of function definitions (#263).
+const MAX_FUNCTIONS: usize = 100_000;
+
+/// Maximum identifier name length (#404).
+const MAX_IDENTIFIER_LEN: usize = 1024;
+
 /// A resolved package with its functions pre-extracted
 #[derive(Debug, Clone)]
 pub struct ResolvedPackage {
@@ -418,6 +427,11 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Total variable count across all scopes (for resource limiting).
+    fn total_variable_count(&self) -> usize {
+        self.symbols.iter().map(|s| s.len()).sum()
+    }
+
     /// Set the cancellation token for checking during loops.
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = Some(cancel);
@@ -788,6 +802,12 @@ impl<'a> Interpreter<'a> {
             }
 
             StatementKind::Let { name, value, .. } => {
+                if name.len() > MAX_IDENTIFIER_LEN {
+                    return Err(InterpError::ResourceLimit { limit: format!("{} chars", MAX_IDENTIFIER_LEN), actual: format!("{} chars", name.len()), context: "identifier length".to_string(), span: stmt.span });
+                }
+                if self.total_variable_count() >= MAX_VARIABLES {
+                    return Err(InterpError::ResourceLimit { limit: format!("{}", MAX_VARIABLES), actual: "limit reached".to_string(), context: "total variables".to_string(), span: stmt.span });
+                }
                 let val = self.eval_expr(value)?;
                 let addr = self.heap.alloc(val.clone());
                 self.define(name, addr, false);
@@ -795,6 +815,12 @@ impl<'a> Interpreter<'a> {
             }
 
             StatementKind::LetMut { name, value, .. } => {
+                if name.len() > MAX_IDENTIFIER_LEN {
+                    return Err(InterpError::ResourceLimit { limit: format!("{} chars", MAX_IDENTIFIER_LEN), actual: format!("{} chars", name.len()), context: "identifier length".to_string(), span: stmt.span });
+                }
+                if self.total_variable_count() >= MAX_VARIABLES {
+                    return Err(InterpError::ResourceLimit { limit: format!("{}", MAX_VARIABLES), actual: "limit reached".to_string(), context: "total variables".to_string(), span: stmt.span });
+                }
                 let val = self.eval_expr(value)?;
                 let addr = self.heap.alloc(val.clone());
                 self.define(name, addr, true);
@@ -988,12 +1014,16 @@ impl<'a> Interpreter<'a> {
             StatementKind::ExprStatement(expr) => self.eval_expr(expr),
 
             StatementKind::FunctionDef(def) => {
-                // Register function (may already exist from pass 1, but also handles
-                // functions defined inside blocks like test bodies or if-else)
+                if self.functions.len() >= MAX_FUNCTIONS {
+                    return Err(InterpError::ResourceLimit { limit: format!("{}", MAX_FUNCTIONS), actual: "limit reached".to_string(), context: "function definitions".to_string(), span: stmt.span });
+                }
                 self.functions.insert(def.name.clone(), def.clone());
                 Ok(DataType::Null)
             }
             StatementKind::AsyncFunctionDef(def) => {
+                if self.functions.len() >= MAX_FUNCTIONS {
+                    return Err(InterpError::ResourceLimit { limit: format!("{}", MAX_FUNCTIONS), actual: "limit reached".to_string(), context: "function definitions".to_string(), span: stmt.span });
+                }
                 self.async_fns.insert(def.name.clone());
                 self.functions.insert(def.name.clone(), def.clone());
                 Ok(DataType::Null)
@@ -1882,6 +1912,95 @@ impl<'a> Interpreter<'a> {
                         }
                         Ok(Some(DataType::Map(result)))
                     }
+                    "map_entries" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_entries".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        let mut result = indexmap::IndexMap::new();
+                        for (k, v) in map {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            let mapped = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
+                            match mapped {
+                                DataType::Array(pair) if pair.len() >= 2 => {
+                                    let new_key = match &pair[0] { DataType::String(s) => s.clone(), other => other.to_string_lossy() };
+                                    result.insert(new_key, pair[1].clone());
+                                }
+                                _ => return Err(InterpError::TypeError { expected: "[key, value] pair".to_string(), actual: mapped.type_name().to_string(), context: "map_entries callback must return a 2-element array".to_string(), span }),
+                            }
+                        }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    // --- Non-HOF map methods (#113-120) ---
+                    "invert" => {
+                        let mut result = indexmap::IndexMap::new();
+                        for (k, v) in map {
+                            let new_key = match v { DataType::String(s) => s.clone(), other => other.to_string_lossy() };
+                            result.insert(new_key, DataType::String(k.clone()));
+                        }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    "defaults" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "defaults".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        let defaults_val = self.eval_expr(&args[0])?;
+                        let defaults_map = match defaults_val { DataType::Map(m) => m, _ => return Err(InterpError::TypeError { expected: "Map".to_string(), actual: defaults_val.type_name().to_string(), context: "defaults argument".to_string(), span }) };
+                        let mut result = map.clone();
+                        for (k, v) in defaults_map {
+                            result.entry(k).or_insert(v);
+                        }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    "pick" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pick".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        let keys_val = self.eval_expr(&args[0])?;
+                        let keys = match keys_val { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: keys_val.type_name().to_string(), context: "pick keys".to_string(), span }) };
+                        let mut result = indexmap::IndexMap::new();
+                        for k in keys {
+                            let key_str = match k { DataType::String(s) => s, other => other.to_string_lossy() };
+                            if let Some(v) = map.get(&key_str) { result.insert(key_str, v.clone()); }
+                        }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    "omit" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "omit".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        let keys_val = self.eval_expr(&args[0])?;
+                        let keys = match keys_val { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: keys_val.type_name().to_string(), context: "omit keys".to_string(), span }) };
+                        let omit_set: std::collections::HashSet<String> = keys.into_iter().map(|k| match k { DataType::String(s) => s, other => other.to_string_lossy() }).collect();
+                        let result: indexmap::IndexMap<String, DataType> = map.iter().filter(|(k, _)| !omit_set.contains(*k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    "deep_merge" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "deep_merge".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                        let other_val = self.eval_expr(&args[0])?;
+                        let other_map = match other_val { DataType::Map(m) => m, _ => return Err(InterpError::TypeError { expected: "Map".to_string(), actual: other_val.type_name().to_string(), context: "deep_merge argument".to_string(), span }) };
+                        fn deep_merge_maps(base: &indexmap::IndexMap<String, DataType>, overlay: &indexmap::IndexMap<String, DataType>) -> indexmap::IndexMap<String, DataType> {
+                            let mut result = base.clone();
+                            for (k, v) in overlay {
+                                match (result.get(k), v) {
+                                    (Some(DataType::Map(existing)), DataType::Map(incoming)) => {
+                                        result.insert(k.clone(), DataType::Map(deep_merge_maps(existing, incoming)));
+                                    }
+                                    _ => { result.insert(k.clone(), v.clone()); }
+                                }
+                            }
+                            result
+                        }
+                        Ok(Some(DataType::Map(deep_merge_maps(map, &other_map))))
+                    }
+                    "flatten_keys" => {
+                        let separator = if !args.is_empty() {
+                            match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => ".".to_string() }
+                        } else { ".".to_string() };
+                        fn flatten_map(map: &indexmap::IndexMap<String, DataType>, prefix: &str, sep: &str, out: &mut indexmap::IndexMap<String, DataType>) {
+                            for (k, v) in map {
+                                let key = if prefix.is_empty() { k.clone() } else { format!("{}{}{}", prefix, sep, k) };
+                                match v {
+                                    DataType::Map(inner) => flatten_map(inner, &key, sep, out),
+                                    _ => { out.insert(key, v.clone()); }
+                                }
+                            }
+                        }
+                        let mut result = indexmap::IndexMap::new();
+                        flatten_map(map, "", &separator, &mut result);
+                        Ok(Some(DataType::Map(result)))
+                    }
                     _ => Ok(None),
                 }
             }
@@ -2409,6 +2528,76 @@ impl<'a> Interpreter<'a> {
                         Ok(Some(DataType::String(s.chars().skip(start).take(end - start).collect())))
                     }
                 }
+                // --- New string methods (#96-102) ---
+                "capitalize" => {
+                    let mut chars = s.chars();
+                    let result = match chars.next() {
+                        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    };
+                    Ok(Some(DataType::String(result)))
+                }
+                "uncapitalize" => {
+                    let mut chars = s.chars();
+                    let result = match chars.next() {
+                        Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    };
+                    Ok(Some(DataType::String(result)))
+                }
+                "pad_center" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pad_center".to_string(), expected: "1-2".to_string(), actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let width = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "pad_center width".to_string(), span })?.max(0) as usize;
+                    let pad_char = if args.len() > 1 {
+                        match self.eval_expr(&args[1])? { DataType::String(p) if !p.is_empty() => p.chars().next().unwrap(), _ => ' ' }
+                    } else { ' ' };
+                    let char_len = s.chars().count();
+                    if char_len >= width {
+                        Ok(Some(DataType::String(s.to_string())))
+                    } else {
+                        let total_pad = width - char_len;
+                        let left_pad = total_pad / 2;
+                        let right_pad = total_pad - left_pad;
+                        let left: String = std::iter::repeat(pad_char).take(left_pad).collect();
+                        let right: String = std::iter::repeat(pad_char).take(right_pad).collect();
+                        Ok(Some(DataType::String(format!("{}{}{}", left, s, right))))
+                    }
+                }
+                "truncate" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "truncate".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let max_len = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "truncate length".to_string(), span })?.max(0) as usize;
+                    let suffix = if args.len() > 1 {
+                        match self.eval_expr(&args[1])? { DataType::String(p) => p, _ => "...".to_string() }
+                    } else { "...".to_string() };
+                    let char_len = s.chars().count();
+                    if char_len <= max_len {
+                        Ok(Some(DataType::String(s.to_string())))
+                    } else if max_len <= suffix.chars().count() {
+                        Ok(Some(DataType::String(s.chars().take(max_len).collect())))
+                    } else {
+                        let take = max_len - suffix.chars().count();
+                        let truncated: String = s.chars().take(take).collect();
+                        Ok(Some(DataType::String(format!("{}{}", truncated, suffix))))
+                    }
+                }
+                "count_words" => {
+                    Ok(Some(DataType::Int64(s.split_whitespace().count() as i64)))
+                }
+                "strip_prefix" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "strip_prefix".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let prefix = match self.eval_expr(&args[0])? { DataType::String(p) => p, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "strip_prefix argument".to_string(), span }) };
+                    Ok(Some(DataType::String(s.strip_prefix(&*prefix).unwrap_or(s).to_string())))
+                }
+                "strip_suffix" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "strip_suffix".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let suffix = match self.eval_expr(&args[0])? { DataType::String(p) => p, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "strip_suffix argument".to_string(), span }) };
+                    Ok(Some(DataType::String(s.strip_suffix(&*suffix).unwrap_or(s).to_string())))
+                }
+                "byte_length" | "byte_len" => {
+                    Ok(Some(DataType::Int64(s.len() as i64)))
+                }
                 _ => Ok(None),
             },
             // Array methods (direct, no OperationEvaluator needed)
@@ -2651,6 +2840,109 @@ impl<'a> Interpreter<'a> {
                     let mut reversed = arr.clone();
                     reversed.reverse();
                     Ok(Some(DataType::Array(reversed)))
+                }
+                // --- New array methods (#104-111) ---
+                "flatten" => {
+                    let depth = if !args.is_empty() {
+                        let arg = self.eval_expr(&args[0])?;
+                        arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "flatten depth".to_string(), span })?.max(0) as usize
+                    } else { usize::MAX };
+                    fn flatten_recursive(arr: &[DataType], depth: usize, out: &mut Vec<DataType>, limit: usize) -> bool {
+                        for item in arr {
+                            if out.len() >= limit { return false; }
+                            if depth > 0 {
+                                if let DataType::Array(inner) = item {
+                                    if !flatten_recursive(inner, depth - 1, out, limit) { return false; }
+                                    continue;
+                                }
+                            }
+                            out.push(item.clone());
+                        }
+                        true
+                    }
+                    let mut result = Vec::new();
+                    flatten_recursive(arr, depth, &mut result, MAX_ARRAY_ELEMENTS);
+                    if result.len() >= MAX_ARRAY_ELEMENTS {
+                        return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{} elements", result.len()), context: "flatten".to_string(), span });
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                "rotate_left" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Array(vec![]))); }
+                    let n = if !args.is_empty() {
+                        let arg = self.eval_expr(&args[0])?;
+                        arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "rotate_left count".to_string(), span })? as usize % arr.len()
+                    } else { 1 };
+                    let mut rotated = arr.clone();
+                    rotated.rotate_left(n);
+                    Ok(Some(DataType::Array(rotated)))
+                }
+                "rotate_right" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Array(vec![]))); }
+                    let n = if !args.is_empty() {
+                        let arg = self.eval_expr(&args[0])?;
+                        arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "rotate_right count".to_string(), span })? as usize % arr.len()
+                    } else { 1 };
+                    let mut rotated = arr.clone();
+                    rotated.rotate_right(n);
+                    Ok(Some(DataType::Array(rotated)))
+                }
+                "interleave" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "interleave".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_arr = match other { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "interleave argument".to_string(), span }) };
+                    let max_len = arr.len().max(other_arr.len());
+                    let mut result = Vec::with_capacity(arr.len() + other_arr.len());
+                    for i in 0..max_len {
+                        if i < arr.len() { result.push(arr[i].clone()); }
+                        if i < other_arr.len() { result.push(other_arr[i].clone()); }
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                "dedup" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Array(vec![]))); }
+                    let mut result = vec![arr[0].clone()];
+                    for item in &arr[1..] {
+                        if result.last() != Some(item) { result.push(item.clone()); }
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                "transpose" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Array(vec![]))); }
+                    let cols = match &arr[0] { DataType::Array(row) => row.len(), _ => return Err(InterpError::TypeError { expected: "Array of Arrays".to_string(), actual: arr[0].type_name().to_string(), context: "transpose".to_string(), span }) };
+                    let mut result: Vec<Vec<DataType>> = (0..cols).map(|_| Vec::with_capacity(arr.len())).collect();
+                    for row in arr {
+                        match row {
+                            DataType::Array(r) => {
+                                for (j, val) in r.iter().enumerate() {
+                                    if j < cols { result[j].push(val.clone()); }
+                                }
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: row.type_name().to_string(), context: "transpose row".to_string(), span }),
+                        }
+                    }
+                    Ok(Some(DataType::Array(result.into_iter().map(DataType::Array).collect())))
+                }
+                "combinations" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "combinations".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let k = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "combinations size".to_string(), span })?.max(0) as usize;
+                    if k > arr.len() { return Ok(Some(DataType::Array(vec![]))); }
+                    let mut result = Vec::new();
+                    let mut indices: Vec<usize> = (0..k).collect();
+                    loop {
+                        if result.len() >= MAX_ARRAY_ELEMENTS { break; }
+                        result.push(DataType::Array(indices.iter().map(|&i| arr[i].clone()).collect()));
+                        let mut i = k;
+                        loop {
+                            if i == 0 { return Ok(Some(DataType::Array(result))); }
+                            i -= 1;
+                            indices[i] += 1;
+                            if indices[i] <= arr.len() - k + i { break; }
+                        }
+                        for j in (i + 1)..k { indices[j] = indices[j - 1] + 1; }
+                    }
+                    Ok(Some(DataType::Array(result)))
                 }
                 _ => Ok(None),
             },
@@ -5354,22 +5646,25 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
     match obj {
         DataType::Array(_) => {
             // Direct methods
-            methods.extend_from_slice(&["first", "last", "is_empty", "sum", "product", "min", "max", "join"]);
+            methods.extend_from_slice(&["first", "last", "is_empty", "sum", "product", "min", "max", "join",
+                "flatten", "rotate_left", "rotate_right", "interleave", "dedup", "transpose", "combinations"]);
             // HOF methods
             methods.extend_from_slice(&["map", "filter", "reduce", "find", "find_index", "any", "all",
                 "flat_map", "each", "sort_by", "group_by", "min_by", "max_by",
                 "take_while", "skip_while", "partition", "scan", "enumerate", "zip", "chunk"]);
             // Evaluator methods
             methods.extend_from_slice(&["push", "pop", "shift", "len", "length", "get", "set",
-                "slice", "contains", "sort", "reverse", "flatten", "concat",
-                "unique", "insert", "remove", "filter_nulls"]);
+                "slice", "contains", "sort", "reverse", "concat",
+                "unique", "insert", "remove", "filter_nulls", "window"]);
         }
         DataType::String(_) => {
             // Direct methods
             methods.extend_from_slice(&["is_empty", "is_numeric", "is_alphabetic", "to_int", "to_float",
                 "len", "length", "trim", "trim_start", "trim_end", "to_upper", "to_uppercase",
                 "to_lower", "to_lowercase", "reverse", "chars", "lines", "pad_start", "pad_end",
-                "char_at", "repeat", "substring", "slice", "index_of"]);
+                "char_at", "repeat", "substring", "slice", "index_of",
+                "capitalize", "uncapitalize", "pad_center", "truncate", "count_words",
+                "strip_prefix", "strip_suffix", "byte_length", "byte_len"]);
             // Evaluator methods
             methods.extend_from_slice(&["split", "contains", "replace", "starts_with", "ends_with",
                 "words", "count"]);
@@ -5400,9 +5695,10 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
         }
         DataType::Map(_) => {
             methods.extend_from_slice(&["get", "set", "delete", "has", "keys", "values", "entries",
-                "merge", "len", "length", "size"]);
+                "merge", "len", "length", "size",
+                "invert", "defaults", "pick", "omit", "deep_merge", "flatten_keys"]);
             // HOF methods
-            methods.extend_from_slice(&["filter_entries", "map_values", "map_keys"]);
+            methods.extend_from_slice(&["filter_entries", "map_values", "map_keys", "map_entries"]);
         }
         DataType::Bytes(_) => {
             methods.extend_from_slice(&["len", "length", "slice", "concat", "contains",

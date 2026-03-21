@@ -323,15 +323,20 @@ fn get_port_range(inputs: &HashMap<String, DataType>, key: &str, min_port: i64) 
     }
 }
 
-/// HTTP agent with sensible default timeouts.
+/// Shared HTTP agent with connection pooling (#369).
 /// Redirects are disabled to prevent SSRF bypass (our pre-request DNS validation
 /// would not apply to redirect targets).
-fn http_agent() -> ureq::Agent {
+static HTTP_AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
         .max_redirects(0)
         .build()
         .new_agent()
+});
+
+/// Get the shared HTTP agent (connection-pooled).
+fn http_agent() -> &'static ureq::Agent {
+    &HTTP_AGENT
 }
 
 /// Read HTTP response body with a size limit.
