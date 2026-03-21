@@ -5638,6 +5638,7 @@ impl<'a> Interpreter<'a> {
                 let func_body = Block {
                     statements: vec![],
                     tail_expr: Some(body.clone()),
+                    tail_comments: Vec::new(),
                     span: body.span,
                 };
                 let func_def = FunctionDef {

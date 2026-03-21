@@ -8,6 +8,23 @@ use super::SyntaxError;
 use std::fmt;
 
 // =============================================================================
+// Comment token — preserved for the formatter
+// =============================================================================
+
+/// A comment extracted during lexing, with position information.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommentToken {
+    /// The text of the comment (including `//` or `/* */` delimiters).
+    pub text: String,
+    /// 1-based line number where the comment starts.
+    pub line: u32,
+    /// 1-based column number where the comment starts.
+    pub column: u32,
+    /// True for block comments (`/* ... */`), false for line comments (`// ...`).
+    pub is_block: bool,
+}
+
+// =============================================================================
 // Token types
 // =============================================================================
 
@@ -251,17 +268,26 @@ pub fn is_reserved_keyword(name: &str) -> bool {
 
 /// Tokenize source code into a vector of tokens.
 pub fn tokenize(source: &str) -> Result<Vec<Token>, SyntaxError> {
+    let (tokens, _comments) = tokenize_with_comments(source)?;
+    Ok(tokens)
+}
+
+/// Tokenize source code into tokens and collected comments.
+///
+/// Comments are returned separately so the parser can attach them to AST nodes
+/// for comment-preserving formatting.
+pub fn tokenize_with_comments(source: &str) -> Result<(Vec<Token>, Vec<CommentToken>), SyntaxError> {
     let mut lexer = Lexer::new(source);
-    let mut done = false;
-    std::iter::from_fn(|| {
-        if done { return None; }
-        let token = lexer.next_token();
-        if matches!(&token, Ok(t) if t.kind == TokenKind::Eof) {
-            done = true;
+    let mut tokens = Vec::new();
+    loop {
+        let token = lexer.next_token()?;
+        let is_eof = token.kind == TokenKind::Eof;
+        tokens.push(token);
+        if is_eof {
+            break;
         }
-        Some(token)
-    })
-    .collect()
+    }
+    Ok((tokens, lexer.comments))
 }
 
 /// Tokenize source code with an offset applied to all span positions.
@@ -290,6 +316,8 @@ struct Lexer<'a> {
     col: u32,
     /// Byte offset at the start of the current token being lexed.
     token_start_pos: usize,
+    /// Comments collected during lexing.
+    comments: Vec<CommentToken>,
 }
 
 impl<'a> Lexer<'a> {
@@ -300,6 +328,7 @@ impl<'a> Lexer<'a> {
             line: 1,
             col: 1,
             token_start_pos: 0,
+            comments: Vec::new(),
         }
     }
 
@@ -376,22 +405,39 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            // Skip line comments
+            // Collect line comments
             // Use advance_char() so multi-byte UTF-8 in comments
             // increments col by 1 per character, not per byte.
             if self.peek() == Some(b'/') && self.peek_at(1) == Some(b'/') {
+                let comment_line = self.line;
+                let comment_col = self.col;
+                let start_pos = self.pos;
                 while let Some(ch) = self.advance_char() {
                     if ch == '\n' {
                         break;
                     }
                 }
+                // Extract comment text (without trailing newline)
+                let end_pos = if self.pos > 0 && self.source.get(self.pos - 1) == Some(&b'\n') {
+                    self.pos - 1
+                } else {
+                    self.pos
+                };
+                let text = String::from_utf8_lossy(&self.source[start_pos..end_pos]).to_string();
+                self.comments.push(CommentToken {
+                    text,
+                    line: comment_line,
+                    column: comment_col,
+                    is_block: false,
+                });
                 continue;
             }
 
-            // Skip block comments (nested: /* ... /* ... */ ... */)
+            // Collect block comments (nested: /* ... /* ... */ ... */)
             if self.peek() == Some(b'/') && self.peek_at(1) == Some(b'*') {
                 let comment_line = self.line;
                 let comment_col = self.col;
+                let start_pos = self.pos;
                 self.advance(); // consume /
                 self.advance(); // consume *
                 let mut depth: u32 = 1;
@@ -418,6 +464,13 @@ impl<'a> Lexer<'a> {
                         _ => {}
                     }
                 }
+                let text = String::from_utf8_lossy(&self.source[start_pos..self.pos]).to_string();
+                self.comments.push(CommentToken {
+                    text,
+                    line: comment_line,
+                    column: comment_col,
+                    is_block: true,
+                });
                 continue;
             }
 

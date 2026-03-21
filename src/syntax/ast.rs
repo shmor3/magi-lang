@@ -116,6 +116,8 @@ impl fmt::Display for Span {
 pub struct Program {
     pub statements: Vec<Statement>,
     pub span: Span,
+    /// Comments at the end of the file (after the last statement).
+    pub trailing_comments: Vec<String>,
 }
 
 // =============================================================================
@@ -127,6 +129,22 @@ pub struct Program {
 pub struct Statement {
     pub kind: StatementKind,
     pub span: Span,
+    /// Comments appearing on lines before this statement.
+    pub leading_comments: Vec<String>,
+    /// A comment appearing on the same line after the statement.
+    pub trailing_comment: Option<String>,
+}
+
+impl Statement {
+    /// Create a new statement with no attached comments.
+    pub fn new(kind: StatementKind, span: Span) -> Self {
+        Self {
+            kind,
+            span,
+            leading_comments: Vec::new(),
+            trailing_comment: None,
+        }
+    }
 }
 
 /// The kind of a statement node, determining its semantics and contained data.
@@ -501,6 +519,8 @@ pub struct Block {
     /// The final expression (without `;`) that becomes the block's value.
     pub tail_expr: Option<Box<Expression>>,
     pub span: Span,
+    /// Comments appearing before the tail expression (if any).
+    pub tail_comments: Vec<String>,
 }
 
 // =============================================================================

@@ -354,6 +354,7 @@ fn extract_symbols_indexed(
                 let module_program = crate::syntax::ast::Program {
                     statements: body.statements.clone(),
                     span: body.span,
+                    trailing_comments: Vec::new(),
                 };
                 extract_symbols_indexed(&module_program, source, line_index, functions, variables, enums, structs);
             }

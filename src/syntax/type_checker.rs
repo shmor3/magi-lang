@@ -6589,20 +6589,21 @@ test "reads outer" { let r = x + 1; output r; }"#,
         }).collect();
         let body = Block {
             statements: vec![
-                Statement {
-                    kind: StatementKind::Output(Expression {
+                Statement::new(
+                    StatementKind::Output(Expression {
                         kind: ExpressionKind::Variable(param_names[0].to_string()),
                         span,
                     }),
                     span,
-                },
+                ),
             ],
             tail_expr: None,
+            tail_comments: Vec::new(),
             span,
         };
         Program {
-            statements: vec![Statement {
-                kind: StatementKind::FunctionDef(FunctionDef {
+            statements: vec![Statement::new(
+                StatementKind::FunctionDef(FunctionDef {
                     name: fn_name.to_string(),
                     params,
                     return_type: None,
@@ -6613,8 +6614,9 @@ test "reads outer" { let r = x + 1; output r; }"#,
                     deprecated: false,
                 }),
                 span,
-            }],
+            )],
             span,
+            trailing_comments: Vec::new(),
         }
     }
 

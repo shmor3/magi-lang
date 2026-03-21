@@ -1,7 +1,7 @@
 //! AST pretty-printer / code formatter for the MAGI language.
 //!
 //! Takes a parsed `Program` and produces formatted source code.
-//! Comments are lost (the parser discards them), which is acceptable for v1.
+//! Comments attached to AST nodes are preserved in the output.
 
 use crate::syntax::ast::*;
 
@@ -144,6 +144,14 @@ impl<'a> Formatter<'a> {
         if !block.statements.is_empty() {
             return false;
         }
+        // Don't inline blocks that have comments
+        if !block.tail_comments.is_empty() {
+            return false;
+        }
+        // Don't inline blocks where statements have comments
+        if block.statements.iter().any(|s| !s.leading_comments.is_empty() || s.trailing_comment.is_some()) {
+            return false;
+        }
         match &block.tail_expr {
             Some(expr) => self.expr_len(expr) < self.config.max_width / 2,
             None => true,
@@ -161,14 +169,50 @@ impl<'a> Formatter<'a> {
                 self.newline();
             }
 
-            self.fmt_statement(stmt);
+            // Emit leading comments
+            self.fmt_leading_comments(&stmt.leading_comments);
+
+            self.fmt_statement_body(stmt);
+
+            // Emit trailing comment on the same line
+            if let Some(ref tc) = stmt.trailing_comment {
+                self.write(" ");
+                self.write(tc);
+            }
+
             self.newline();
 
             prev_was_def = is_def;
         }
+
+        // Emit trailing comments at end of file
+        for c in &program.trailing_comments {
+            self.write(c);
+            self.newline();
+        }
     }
 
+    /// Emit leading comment lines at the current indentation level.
+    fn fmt_leading_comments(&mut self, comments: &[String]) {
+        for c in comments {
+            self.write(c);
+            self.newline();
+        }
+    }
+
+    /// Format a statement including its leading/trailing comments.
+    /// Used within blocks where we want comment preservation.
     fn fmt_statement(&mut self, stmt: &Statement) {
+        self.fmt_leading_comments(&stmt.leading_comments);
+        self.fmt_statement_body(stmt);
+        if let Some(ref tc) = stmt.trailing_comment {
+            self.write(" ");
+            self.write(tc);
+        }
+    }
+
+    /// Format the body of a statement (without comments).
+    fn fmt_statement_body(&mut self, stmt: &Statement) {
         match &stmt.kind {
             StatementKind::Import(path) => {
                 self.write(&format!("import \"{}\";", escape_string_contents(path)));
@@ -541,7 +585,7 @@ impl<'a> Formatter<'a> {
             StatementKind::ExprStatement(expr) => {
                 self.fmt_expression(expr);
             }
-            _ => self.fmt_statement(stmt),
+            _ => self.fmt_statement_body(stmt),
         }
     }
 
@@ -607,8 +651,13 @@ impl<'a> Formatter<'a> {
             prev_was_def = is_def;
         }
 
+        // Emit comments before the tail expression
+        if !block.tail_comments.is_empty() {
+            self.fmt_leading_comments(&block.tail_comments);
+        }
+
         if let Some(tail) = &block.tail_expr {
-            if prev_was_def {
+            if prev_was_def && block.tail_comments.is_empty() {
                 self.newline();
             }
             self.fmt_expression(tail);
@@ -1658,8 +1707,8 @@ for n in 1..=10 {
     fn test_idempotent_comments_only() {
         let source = "// just a comment\n// another comment\n";
         let result = format_source(source);
-        // Comments are stripped by the parser, so output is empty
-        assert_eq!(result, "", "comments-only should produce empty string");
+        // Comments are now preserved by the formatter
+        assert_eq!(result, "// just a comment\n// another comment\n", "comments-only should preserve comments");
         let result2 = format_source(&result);
         assert_eq!(result, result2);
     }
@@ -2370,5 +2419,153 @@ mod math {
             ("spawn_call", "let x = spawn task();"),
             ("spawn_block", "let x = spawn {\n    let y = 1;\n    y + 2\n};"),
         ]);
+    }
+
+    // -----------------------------------------------------------------
+    // Comment preservation tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_comment_leading_line_comment() {
+        let source = "// this is a comment\nlet x = 1;\n";
+        let result = format_source(source);
+        assert!(result.contains("// this is a comment"), "leading line comment lost: {}", result);
+        assert!(result.contains("let x = 1;"), "statement lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_trailing_line_comment() {
+        let source = "let x = 1; // inline comment\n";
+        let result = format_source(source);
+        assert!(result.contains("let x = 1;"), "statement lost: {}", result);
+        assert!(result.contains("// inline comment"), "trailing comment lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_block_comment() {
+        let source = "/* block comment */\nlet x = 1;\n";
+        let result = format_source(source);
+        assert!(result.contains("/* block comment */"), "block comment lost: {}", result);
+        assert!(result.contains("let x = 1;"), "statement lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_multiple_leading_comments() {
+        let source = "// first comment\n// second comment\nlet x = 1;\n";
+        let result = format_source(source);
+        assert!(result.contains("// first comment"), "first comment lost: {}", result);
+        assert!(result.contains("// second comment"), "second comment lost: {}", result);
+        assert!(result.contains("let x = 1;"), "statement lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_between_statements() {
+        let source = "let x = 1;\n// comment between\nlet y = 2;\n";
+        let result = format_source(source);
+        assert!(result.contains("let x = 1;"), "first statement lost: {}", result);
+        assert!(result.contains("// comment between"), "comment lost: {}", result);
+        assert!(result.contains("let y = 2;"), "second statement lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_at_end_of_file() {
+        let source = "let x = 1;\n// end of file comment\n";
+        let result = format_source(source);
+        assert!(result.contains("let x = 1;"), "statement lost: {}", result);
+        assert!(result.contains("// end of file comment"), "trailing file comment lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_idempotent_with_functions() {
+        let source = "// A helper function\nfn add(a, b) { a + b }\n\n// Another function\nfn sub(a, b) { a - b }\n";
+        let result = format_source(source);
+        assert!(result.contains("// A helper function"), "first comment lost: {}", result);
+        assert!(result.contains("// Another function"), "second comment lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_preserves_both_leading_and_trailing() {
+        let source = "// leading\nlet x = 1; // trailing\n";
+        let result = format_source(source);
+        assert!(result.contains("// leading"), "leading comment lost: {}", result);
+        assert!(result.contains("// trailing"), "trailing comment lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_idempotent_batch() {
+        assert_batch_idempotent(&[
+            ("leading_line", "// comment\nlet x = 1;"),
+            ("trailing_line", "let x = 1; // comment"),
+            ("leading_block", "/* comment */\nlet x = 1;"),
+            ("multiple_leading", "// first\n// second\nlet x = 1;"),
+            ("between_stmts", "let x = 1;\n// between\nlet y = 2;"),
+            ("file_end", "let x = 1;\n// end"),
+            ("comment_fn", "// docs\nfn f() { 1 }"),
+        ]);
+    }
+
+    #[test]
+    fn test_comment_inside_block() {
+        let source = "fn f(x) {\n    // init\n    let y = x + 1;\n    y\n}";
+        let result = format_source(source);
+        assert!(result.contains("// init"), "comment inside block lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_trailing_in_block() {
+        let source = "fn f(x) {\n    let y = x + 1; // compute\n    y\n}";
+        let result = format_source(source);
+        assert!(result.contains("// compute"), "trailing comment in block lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_before_tail_expr() {
+        let source = "fn f(x) {\n    let y = x + 1;\n    // return value\n    y\n}";
+        let result = format_source(source);
+        assert!(result.contains("// return value"), "tail comment lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_in_for_loop() {
+        let source = "for i in items {\n    // process\n    output i;\n}";
+        let result = format_source(source);
+        assert!(result.contains("// process"), "comment in for loop lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_in_while_loop() {
+        let source = "while x > 0 {\n    // decrement\n    x -= 1;\n}";
+        let result = format_source(source);
+        assert!(result.contains("// decrement"), "comment in while loop lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_in_if_block() {
+        let source = "if true {\n    // branch\n    output 1;\n}";
+        let result = format_source(source);
+        assert!(result.contains("// branch"), "comment in if block lost: {}", result);
+        assert_idempotent(source);
+    }
+
+    #[test]
+    fn test_comment_nested_blocks() {
+        let source = "fn f() {\n    // outer\n    for i in items {\n        // inner\n        output i;\n    }\n}";
+        let result = format_source(source);
+        assert!(result.contains("// outer"), "outer comment lost: {}", result);
+        assert!(result.contains("// inner"), "inner comment lost: {}", result);
+        assert_idempotent(source);
     }
 }

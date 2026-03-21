@@ -7240,17 +7240,15 @@ fn main() {
             cmd_lint(&args[2]);
         }
         "fmt" => {
-            // Parse flags: --write, --check, --force
+            // Parse flags: --write, --check
             let mut write_in_place = false;
             let mut check_only = false;
-            let mut force = false;
             let mut file_path = None;
 
             for arg in &args[2..] {
                 match arg.as_str() {
                     "--write" | "-w" => write_in_place = true,
                     "--check" | "-c" => check_only = true,
-                    "--force" | "-f" => force = true,
                     _ => file_path = Some(arg.as_str()),
                 }
             }
@@ -7261,10 +7259,10 @@ fn main() {
             }
 
             match file_path {
-                Some(path) => cmd_fmt(path, write_in_place, check_only, force),
+                Some(path) => cmd_fmt(path, write_in_place, check_only),
                 None => {
                     eprintln!("error: missing file argument");
-                    eprintln!("Usage: magi fmt [--write] [--check] [--force] <file.magi>");
+                    eprintln!("Usage: magi fmt [--write] [--check] <file.magi>");
                     process::exit(1);
                 }
             }
@@ -7795,45 +7793,8 @@ fn cmd_lint(path: &str) {
     }
 }
 
-/// Returns true if the source contains `//` or `/*` comments.
-fn source_has_comments(source: &str) -> bool {
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' => {
-                // Skip string literals to avoid false positives on "//" inside strings.
-                while let Some(c) = chars.next() {
-                    if c == '\\' { let _ = chars.next(); }
-                    else if c == '"' { break; }
-                }
-            }
-            '\'' => {
-                // Skip char literals.
-                while let Some(c) = chars.next() {
-                    if c == '\\' { let _ = chars.next(); }
-                    else if c == '\'' { break; }
-                }
-            }
-            '/' => {
-                if chars.peek() == Some(&'/') || chars.peek() == Some(&'*') {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool, force: bool) {
+fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
     let source = read_source(path);
-
-    // Warn if the source contains comments and --write is used (comments will be lost).
-    if write_in_place && !force && source_has_comments(&source) {
-        eprintln!("Warning: magi fmt does not preserve comments. Your comments will be lost.");
-        eprintln!("Use --force to suppress this warning and proceed anyway.");
-        process::exit(1);
-    }
 
     let program = match parse_v2(&source) {
         Ok(p) => p,

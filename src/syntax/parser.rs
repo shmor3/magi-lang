@@ -4,7 +4,7 @@
 //! infix operator expressions.
 
 use super::ast::*;
-use super::lexer::{is_reserved_keyword, Token, TokenKind};
+use super::lexer::{is_reserved_keyword, CommentToken, Token, TokenKind};
 use super::SyntaxError;
 
 // =============================================================================
@@ -28,6 +28,10 @@ pub struct Parser {
     no_struct_literal: bool,
     /// Accumulated errors during error-recovering parse.
     errors: Vec<SyntaxError>,
+    /// Comments collected by the lexer, sorted by line number.
+    comments: Vec<CommentToken>,
+    /// Index into `comments` tracking which comments have been consumed.
+    comment_cursor: usize,
 }
 
 impl Parser {
@@ -38,7 +42,64 @@ impl Parser {
             depth: 0,
             no_struct_literal: false,
             errors: Vec::new(),
+            comments: Vec::new(),
+            comment_cursor: 0,
         }
+    }
+
+    /// Create a new parser with associated comments from the lexer.
+    pub fn new_with_comments(tokens: Vec<Token>, comments: Vec<CommentToken>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+            no_struct_literal: false,
+            errors: Vec::new(),
+            comments,
+            comment_cursor: 0,
+        }
+    }
+
+    /// Collect comments that appear before the given statement position.
+    /// A comment is considered "leading" if:
+    /// - It is on a line strictly before `stmt_start_line`, OR
+    /// - It is on the same line but starts before `stmt_start_col` (e.g., `/* c */ let x = 1;`)
+    fn take_leading_comments(&mut self, stmt_start_line: u32, stmt_start_col: u32) -> Vec<String> {
+        let mut result = Vec::new();
+        while self.comment_cursor < self.comments.len() {
+            let c = &self.comments[self.comment_cursor];
+            if c.line < stmt_start_line || (c.line == stmt_start_line && c.column < stmt_start_col) {
+                result.push(c.text.clone());
+                self.comment_cursor += 1;
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Check if there's a comment on the same line as the statement that just ended.
+    /// The comment must start after the statement's end column to be a trailing comment.
+    fn take_trailing_comment(&mut self, stmt_end_line: u32) -> Option<String> {
+        if self.comment_cursor < self.comments.len() {
+            let c = &self.comments[self.comment_cursor];
+            if c.line == stmt_end_line {
+                let text = c.text.clone();
+                self.comment_cursor += 1;
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    /// Collect any remaining comments that haven't been attached to statements.
+    fn take_remaining_comments(&mut self) -> Vec<String> {
+        let mut result = Vec::new();
+        while self.comment_cursor < self.comments.len() {
+            result.push(self.comments[self.comment_cursor].text.clone());
+            self.comment_cursor += 1;
+        }
+        result
     }
 
     /// Skip tokens until we reach a likely statement boundary.
@@ -103,8 +164,16 @@ impl Parser {
         let mut statements = Vec::new();
 
         while !self.at(&TokenKind::Eof) {
+            // Collect leading comments before this statement
+            let peek_span = self.peek().span;
+            let leading = self.take_leading_comments(peek_span.start_line, peek_span.start_col);
             match self.parse_statement() {
-                Ok(stmt) => statements.push(stmt),
+                Ok(mut stmt) => {
+                    stmt.leading_comments = leading;
+                    // Check for trailing comment on the same line as the end of this statement
+                    stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);
+                    statements.push(stmt);
+                }
                 Err(e) => {
                     self.errors.push(e);
                     self.synchronize();
@@ -114,10 +183,12 @@ impl Parser {
             }
         }
 
+        let trailing_comments = self.take_remaining_comments();
         let end = self.peek().span;
         let program = Program {
             statements,
             span: start.merge(end),
+            trailing_comments,
         };
         let errors = std::mem::take(&mut self.errors);
         (program, errors)
@@ -293,13 +364,22 @@ impl Parser {
         let mut statements = Vec::new();
 
         while !self.at(&TokenKind::Eof) {
-            statements.push(self.parse_statement()?);
+            // Collect leading comments before this statement
+            let peek_span = self.peek().span;
+            let leading = self.take_leading_comments(peek_span.start_line, peek_span.start_col);
+            let mut stmt = self.parse_statement()?;
+            stmt.leading_comments = leading;
+            // Check for trailing comment on the same line as the end of this statement
+            stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);
+            statements.push(stmt);
         }
 
+        let trailing_comments = self.take_remaining_comments();
         let end = self.peek().span;
         Ok(Program {
             statements,
             span: start.merge(end),
+            trailing_comments,
         })
     }
 
@@ -388,6 +468,8 @@ impl Parser {
                                 span,
                             }),
                             span,
+                            leading_comments: Vec::new(),
+                            trailing_comment: None,
                         })
                     }
                     _ => Err(SyntaxError {
@@ -487,6 +569,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Import(name_tok.text),
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -498,6 +582,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Output(expr),
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -546,6 +632,8 @@ impl Parser {
         Ok(Statement {
             kind,
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -591,6 +679,8 @@ impl Parser {
                 value,
             },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -627,6 +717,8 @@ impl Parser {
                 value,
             },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -703,6 +795,8 @@ impl Parser {
                 iterable,
                 body,
             },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -723,6 +817,8 @@ impl Parser {
                 update: Box::new(update),
                 body,
             },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -739,6 +835,8 @@ impl Parser {
                 return Ok(Statement {
                     kind: StatementKind::Assignment { name: name_tok.text, value },
                     span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
                 });
             }
             let compound_op = match self.peek_kind() {
@@ -756,13 +854,15 @@ impl Parser {
                 return Ok(Statement {
                     kind: StatementKind::CompoundAssign { name: name_tok.text, op, value },
                     span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
                 });
             }
             self.pos = saved_pos;
         }
         let expr = self.parse_expression()?;
         let end = expr.span;
-        Ok(Statement { kind: StatementKind::ExprStatement(expr), span: start.merge(end) })
+        Ok(Statement { leading_comments: Vec::new(), trailing_comment: None, kind: StatementKind::ExprStatement(expr), span: start.merge(end) })
     }
 
     fn parse_while_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
@@ -773,6 +873,8 @@ impl Parser {
         Ok(Statement {
             span: start.merge(body.span),
             kind: StatementKind::WhileLoop { label, condition, body },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -787,6 +889,8 @@ impl Parser {
         Ok(Statement {
             span: start.merge(end),
             kind: StatementKind::DoWhileLoop { label, body, condition },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -802,6 +906,8 @@ impl Parser {
             Ok(Statement {
                 span,
                 kind: StatementKind::Defer(expr),
+                leading_comments: Vec::new(),
+                trailing_comment: None,
             })
         } else {
             let expr = self.parse_expression()?;
@@ -810,6 +916,8 @@ impl Parser {
             Ok(Statement {
                 span: start.merge(end),
                 kind: StatementKind::Defer(expr),
+                leading_comments: Vec::new(),
+                trailing_comment: None,
             })
         }
     }
@@ -837,6 +945,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Break { label, value },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -855,6 +965,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Continue { label },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -873,6 +985,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Return(value),
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -898,6 +1012,8 @@ impl Parser {
                 value,
             },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -936,6 +1052,8 @@ impl Parser {
                 finally_block,
             },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -947,6 +1065,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Throw(expr),
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -961,6 +1081,8 @@ impl Parser {
                 body,
             },
             span: start.merge(end_span),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1003,6 +1125,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::Use { path, alias, glob, is_pub: false },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1019,6 +1143,8 @@ impl Parser {
                 target,
             },
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1036,6 +1162,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::TestDef { name, body },
             span: start.merge(body_span),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1142,6 +1270,8 @@ impl Parser {
                 is_setter: false,
                 deprecated: false,
             }),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1184,6 +1314,8 @@ impl Parser {
                 is_setter: false,
                 deprecated: false,
             }),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1209,6 +1341,8 @@ impl Parser {
                         value,
                     },
                     span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
                 });
             }
 
@@ -1233,6 +1367,8 @@ impl Parser {
                         value,
                     },
                     span: start.merge(end),
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
                 });
             }
 
@@ -1257,12 +1393,16 @@ impl Parser {
                     return Ok(Statement {
                         kind: StatementKind::FieldAssignment { object: *object, field, value },
                         span: start.merge(end),
+                        leading_comments: Vec::new(),
+                        trailing_comment: None,
                     });
                 }
                 ExpressionKind::Index { object, index } => {
                     return Ok(Statement {
                         kind: StatementKind::IndexAssignment { object: *object, index: *index, value },
                         span: start.merge(end),
+                        leading_comments: Vec::new(),
+                        trailing_comment: None,
                     });
                 }
                 _ => {
@@ -1281,6 +1421,8 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::ExprStatement(expr),
             span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -1294,9 +1436,14 @@ impl Parser {
         let start = start_tok.span;
         let mut statements = Vec::new();
         let mut tail_expr = None;
+        let mut tail_comments = Vec::new();
 
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let saved_pos = self.pos;
+
+            // Collect leading comments for the next statement/expression in the block
+            let peek_span = self.peek().span;
+            let leading = self.take_leading_comments(peek_span.start_line, peek_span.start_col);
 
             // If the next thing is a keyword statement, parse it as a statement
             match self.peek_kind() {
@@ -1321,12 +1468,18 @@ impl Parser {
                 | TokenKind::Test
                 | TokenKind::Do
                 | TokenKind::Defer => {
-                    statements.push(self.parse_statement()?);
+                    let mut stmt = self.parse_statement()?;
+                    stmt.leading_comments = leading;
+                    stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);
+                    statements.push(stmt);
                     continue;
                 }
                 // Identifiers followed by `=` or `+=`/etc. are assignments
                 TokenKind::Ident if self.is_assignment_start() => {
-                    statements.push(self.parse_statement()?);
+                    let mut stmt = self.parse_statement()?;
+                    stmt.leading_comments = leading;
+                    stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);
+                    statements.push(stmt);
                     continue;
                 }
                 _ => {}
@@ -1337,12 +1490,18 @@ impl Parser {
 
             if self.eat(&TokenKind::Semicolon) {
                 // It's an expression statement
+                let end_line = self.tokens[self.pos.saturating_sub(1)].span.end_line;
+                let trailing = self.take_trailing_comment(end_line);
                 statements.push(Statement {
                     span: expr.span,
                     kind: StatementKind::ExprStatement(expr),
+                    leading_comments: leading,
+                    trailing_comment: trailing,
                 });
             } else if self.at(&TokenKind::RBrace) {
-                // It's the tail expression (no semicolon before closing brace)
+                // It's the tail expression (no semicolon before closing brace).
+                // Leading comments for this expression are stored as tail_comments on the Block.
+                tail_comments = leading;
                 tail_expr = Some(Box::new(expr));
             } else if matches!(
                 self.peek_kind(),
@@ -1356,21 +1515,33 @@ impl Parser {
             {
                 // It's actually an assignment — backtrack and parse as statement
                 self.pos = saved_pos;
-                statements.push(self.parse_statement()?);
+                let mut stmt = self.parse_statement()?;
+                stmt.leading_comments = leading;
+                stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);
+                statements.push(stmt);
             } else {
                 // Treat as expression statement with implicit semicolon
+                let trailing = self.take_trailing_comment(expr.span.end_line);
                 statements.push(Statement {
                     span: expr.span,
                     kind: StatementKind::ExprStatement(expr),
+                    leading_comments: leading,
+                    trailing_comment: trailing,
                 });
             }
         }
 
+        // Any remaining comments before the closing brace become tail comments
+        // (append to any tail_comments already captured before the tail expression)
+        let peek_span = self.peek().span;
+        let extra = self.take_leading_comments(peek_span.start_line, peek_span.start_col);
+        tail_comments.extend(extra);
         let end_tok = self.expect(&TokenKind::RBrace)?;
         self.exit_depth();
         Ok(Block {
             statements,
             tail_expr,
+            tail_comments,
             span: start.merge(end_tok.span),
         })
     }
@@ -2301,6 +2472,7 @@ impl Parser {
                 Some(Block {
                     statements: Vec::new(),
                     tail_expr: Some(Box::new(nested_if)),
+                    tail_comments: Vec::new(),
                     span,
                 })
             } else {
@@ -2362,6 +2534,7 @@ impl Parser {
                 Block {
                     statements: vec![stmt],
                     tail_expr: None,
+                    tail_comments: Vec::new(),
                     span,
                 }
             } else {
@@ -2370,6 +2543,7 @@ impl Parser {
                 Block {
                     statements: Vec::new(),
                     tail_expr: Some(Box::new(expr)),
+                    tail_comments: Vec::new(),
                     span,
                 }
             };
@@ -3025,6 +3199,8 @@ impl Parser {
         Ok(Statement {
             span: start.merge(end.span),
             kind: StatementKind::EnumDef { name, variants, deprecated: false },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -3082,6 +3258,8 @@ impl Parser {
         Ok(Statement {
             span: start.merge(end.span),
             kind: StatementKind::StructDef { name, fields, deprecated: false },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
         })
     }
 
@@ -3105,12 +3283,12 @@ impl Parser {
             self.expect(&TokenKind::LBrace)?;
             let methods = self.parse_impl_methods()?;
             let end = self.expect(&TokenKind::RBrace)?;
-            return Ok(Statement { span: start.merge(end.span), kind: StatementKind::ImplTrait { trait_name: first_name, type_name, methods } });
+            return Ok(Statement { leading_comments: Vec::new(), trailing_comment: None, span: start.merge(end.span), kind: StatementKind::ImplTrait { trait_name: first_name, type_name, methods } });
         }
         self.expect(&TokenKind::LBrace)?;
         let methods = self.parse_impl_methods()?;
         let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Statement { span: start.merge(end.span), kind: StatementKind::ImplBlock { type_name: first_name, methods } })
+        Ok(Statement { leading_comments: Vec::new(), trailing_comment: None, span: start.merge(end.span), kind: StatementKind::ImplBlock { type_name: first_name, methods } })
     }
 
     fn parse_impl_methods(&mut self) -> Result<Vec<FunctionDef>, SyntaxError> {
@@ -3181,7 +3359,7 @@ impl Parser {
             methods.push(TraitMethod { name: mn, params, return_type, span: fn_start.merge(fn_end) });
         }
         let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Statement { span: start.merge(end.span), kind: StatementKind::TraitDef { name, methods } })
+        Ok(Statement { leading_comments: Vec::new(), trailing_comment: None, span: start.merge(end.span), kind: StatementKind::TraitDef { name, methods } })
     }
 
     fn is_struct_literal(&self, name: &str) -> bool {
@@ -3268,8 +3446,8 @@ impl Parser {
 
 /// Parse v2 source code into an AST.
 pub fn parse_v2(source: &str) -> Result<Program, SyntaxError> {
-    let tokens = super::lexer::tokenize(source)?;
-    let mut parser = Parser::new(tokens);
+    let (tokens, comments) = super::lexer::tokenize_with_comments(source)?;
+    let mut parser = Parser::new_with_comments(tokens, comments);
     parser.parse_program()
 }
 
@@ -3282,18 +3460,19 @@ pub fn parse_v2(source: &str) -> Result<Program, SyntaxError> {
 /// This is intended for IDE/LSP use where showing multiple diagnostics at once
 /// is preferable to stopping at the first error.
 pub fn parse_v2_recovering(source: &str) -> (Program, Vec<SyntaxError>) {
-    let tokens = match super::lexer::tokenize(source) {
-        Ok(tokens) => tokens,
+    let (tokens, comments) = match super::lexer::tokenize_with_comments(source) {
+        Ok(pair) => pair,
         Err(e) => {
             // Lexer error — return empty program with the error
             let empty = Program {
                 statements: Vec::new(),
                 span: Span::default(),
+                trailing_comments: Vec::new(),
             };
             return (empty, vec![e]);
         }
     };
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new_with_comments(tokens, comments);
     parser.parse_program_recovering()
 }
 
@@ -4317,7 +4496,7 @@ output result;
     fn test_parse_exceeds_max_depth() {
         // Run in a thread with a larger stack to avoid stack overflow in debug mode
         let handle = std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024) // 4MB stack
+            .stack_size(16 * 1024 * 1024) // 16MB stack
             .spawn(|| {
                 let mut code = String::new();
                 for _ in 0..70 {

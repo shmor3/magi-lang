@@ -785,18 +785,19 @@ mod tests {
         Program {
             statements: stmts,
             span: Span::default(),
+            trailing_comments: Vec::new(),
         }
     }
 
     fn let_stmt(name: &str, value: Expression) -> Statement {
-        Statement {
-            kind: StatementKind::Let {
+        Statement::new(
+            StatementKind::Let {
                 name: name.to_string(),
                 type_annotation: None,
                 value,
             },
-            span: Span::default(),
-        }
+            Span::default(),
+        )
     }
 
     fn assert_is_int(expr: &Expression, expected: i64) {
@@ -1149,10 +1150,10 @@ mod tests {
 
     #[test]
     fn fold_program_output() {
-        let mut program = make_program(vec![Statement {
-            kind: StatementKind::Output(binop(BinOp::Mul, lit_int(6), lit_int(7))),
-            span: Span::default(),
-        }]);
+        let mut program = make_program(vec![Statement::new(
+            StatementKind::Output(binop(BinOp::Mul, lit_int(6), lit_int(7))),
+            Span::default(),
+        )]);
         fold_constants(&mut program);
         match &program.statements[0].kind {
             StatementKind::Output(expr) => assert_is_int(expr, 42),
