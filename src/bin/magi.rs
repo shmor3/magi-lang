@@ -7680,7 +7680,8 @@ fn cmd_bench(path: &str, iterations: u64) {
     }
 
     let total: std::time::Duration = times.iter().sum();
-    let avg = total / iterations as u32;
+    let avg = total / iterations.min(u32::MAX as u64) as u32;
+    // SAFETY: iterations >= 1 (enforced by CLI parser), so times is non-empty
     let min = times.iter().min().unwrap();
     let max = times.iter().max().unwrap();
 

@@ -2984,6 +2984,7 @@ impl<'a> Interpreter<'a> {
                     let arg = self.eval_expr(&args[0])?;
                     let width = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "pad_center width".to_string(), span })?.max(0) as usize;
                     let pad_char = if args.len() > 1 {
+                        // SAFETY: guard `!p.is_empty()` guarantees at least one char
                         match self.eval_expr(&args[1])? { DataType::String(p) if !p.is_empty() => p.chars().next().unwrap(), _ => ' ' }
                     } else { ' ' };
                     let char_len = s.chars().count();
@@ -5082,6 +5083,7 @@ impl<'a> Interpreter<'a> {
                             let val = self.eval_expr(e)?;
                             // Write directly into the result buffer to avoid an
                             // intermediate String allocation from datatype_to_display.
+                            // SAFETY: fmt::Write for String is infallible
                             write!(result, "{}", DataTypeDisplay(&val)).unwrap();
                         }
                     }
