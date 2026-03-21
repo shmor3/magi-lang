@@ -120,23 +120,53 @@ fn channel_remove(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A lightweight evaluator used by spawned threads that handles only
-/// interpreter-level constructs (arithmetic, etc. are already handled
-/// inline by the interpreter). Std operations dispatched via
-/// OperationType fall through to the injected evaluator; for spawned
-/// threads we use a stub that returns an error for unknown ops.
-struct SpawnEvaluator;
+// =============================================================================
+// Global spawn evaluator factory — allows the binary crate to register a
+// full-featured evaluator so spawned threads get access to all stdlib ops.
+// =============================================================================
 
-impl OperationEvaluator for SpawnEvaluator {
+/// Type alias for the factory function that creates a boxed evaluator for spawned threads.
+type SpawnEvalFactory = fn() -> Box<dyn OperationEvaluator + Send + 'static>;
+
+/// Global factory function pointer.  When the binary crate calls
+/// `register_spawn_evaluator_factory`, this is set to produce a
+/// `FullEvaluator` (or equivalent).  If unset, spawned threads fall
+/// back to the built-in `FallbackSpawnEvaluator` which only handles
+/// pure operations.
+static SPAWN_EVAL_FACTORY: Mutex<Option<SpawnEvalFactory>> = Mutex::new(None);
+
+/// Register a factory function that produces evaluators for spawned threads.
+///
+/// The binary crate should call this once at startup:
+/// ```ignore
+/// magi_lang::syntax::interpreter::register_spawn_evaluator_factory(|| Box::new(FullEvaluator));
+/// ```
+pub fn register_spawn_evaluator_factory(factory: SpawnEvalFactory) {
+    let mut guard = SPAWN_EVAL_FACTORY.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(factory);
+}
+
+/// Create the best available evaluator for a spawned thread.
+fn make_spawn_evaluator() -> Box<dyn OperationEvaluator + Send + 'static> {
+    let guard = SPAWN_EVAL_FACTORY.lock().unwrap_or_else(|e| e.into_inner());
+    match *guard {
+        Some(factory) => factory(),
+        None => Box::new(FallbackSpawnEvaluator),
+    }
+}
+
+/// Fallback evaluator used by spawned threads when no full evaluator
+/// factory has been registered.  Handles arithmetic, comparison, logic,
+/// conversion, and common pure operations.
+struct FallbackSpawnEvaluator;
+
+impl OperationEvaluator for FallbackSpawnEvaluator {
     fn eval_operation(
         &self,
         op: OperationType,
         inputs: &HashMap<String, DataType>,
         config: &HashMap<String, DataType>,
     ) -> Result<DataType, EvalError> {
-        // Re-use the same full evaluator from the `magi` binary if available.
-        // In library/test mode, fall back to a minimal stub that handles
-        // common pure operations to keep spawned closures useful.
         spawn_eval_operation(op, inputs, config)
     }
 }
@@ -5142,6 +5172,143 @@ impl<'a> Interpreter<'a> {
                         })?;
                         return Ok(DataType::Null);
                     }
+                    "select" => {
+                        // select(receivers, timeout_ms?) -> [index, value]
+                        // Waits on multiple channel receivers, returns whichever has data first.
+                        // - receivers: array of receiver ID strings
+                        // - timeout_ms: optional timeout in milliseconds (default: 5000)
+                        // Returns [index, value] where index is which receiver fired, or
+                        // [-1, null] on timeout.
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "select".to_string(),
+                                expected: "1-2".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let receivers_val = self.eval_expr(&args[0])?;
+                        let receiver_ids: Vec<String> = match &receivers_val {
+                            DataType::Array(arr) => {
+                                let mut ids = Vec::with_capacity(arr.len());
+                                for item in arr {
+                                    match item {
+                                        DataType::String(s) => ids.push(s.clone()),
+                                        _ => {
+                                            return Err(InterpError::TypeError {
+                                                expected: "string (receiver ID)".to_string(),
+                                                actual: item.type_name().to_string(),
+                                                context: "select".to_string(),
+                                                span: expr.span,
+                                            });
+                                        }
+                                    }
+                                }
+                                ids
+                            }
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    expected: "array of receiver IDs".to_string(),
+                                    actual: receivers_val.type_name().to_string(),
+                                    context: "select".to_string(),
+                                    span: expr.span,
+                                });
+                            }
+                        };
+                        if receiver_ids.is_empty() {
+                            return Err(InterpError::EvalError {
+                                error: EvalError::InvalidInput(
+                                    "select requires at least one receiver".to_string(),
+                                ),
+                                span: expr.span,
+                            });
+                        }
+                        let timeout_ms: u64 = if args.len() > 1 {
+                            self.eval_expr(&args[1])?
+                                .to_i64()
+                                .unwrap_or(5000)
+                                .max(0) as u64
+                        } else {
+                            5000
+                        };
+
+                        // Clone the Arc<Mutex<Receiver>> for each channel so we
+                        // can drop the registry lock before polling.
+                        let rx_arcs: Vec<Arc<Mutex<std::sync::mpsc::Receiver<DataType>>>> = {
+                            let map = CHANNEL_REGISTRY
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let mut arcs = Vec::with_capacity(receiver_ids.len());
+                            for rx_id in &receiver_ids {
+                                let entry = map.get(rx_id).ok_or_else(|| {
+                                    InterpError::EvalError {
+                                        error: EvalError::InvalidInput(format!(
+                                            "receiver not found: {}",
+                                            rx_id
+                                        )),
+                                        span: expr.span,
+                                    }
+                                })?;
+                                let receiver =
+                                    entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                                        InterpError::EvalError {
+                                            error: EvalError::InvalidInput(format!(
+                                                "not a receiver: {}",
+                                                rx_id
+                                            )),
+                                            span: expr.span,
+                                        }
+                                    })?;
+                                arcs.push(Arc::clone(&receiver.rx));
+                            }
+                            arcs
+                        };
+
+                        // Poll all receivers in round-robin with try_recv.
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(timeout_ms);
+                        loop {
+                            for (i, rx_arc) in rx_arcs.iter().enumerate() {
+                                let rx_guard =
+                                    rx_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                match rx_guard.try_recv() {
+                                    Ok(val) => {
+                                        return Ok(DataType::Array(vec![
+                                            DataType::Int64(i as i64),
+                                            val,
+                                        ]));
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        // This channel is closed; skip it but
+                                        // continue checking others.
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                }
+                            }
+                            // Check if all channels are disconnected
+                            let all_disconnected = rx_arcs.iter().all(|rx_arc| {
+                                let rx_guard =
+                                    rx_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                matches!(
+                                    rx_guard.try_recv(),
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected)
+                                )
+                            });
+                            if all_disconnected {
+                                return Ok(DataType::Array(vec![
+                                    DataType::Int64(-1),
+                                    DataType::Null,
+                                ]));
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                return Ok(DataType::Array(vec![
+                                    DataType::Int64(-1),
+                                    DataType::Null,
+                                ]));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
                     _ => {}
                 }
 
@@ -5453,9 +5620,10 @@ impl<'a> Interpreter<'a> {
                 let tid_clone = tid.clone();
 
                 let handle = std::thread::spawn(move || {
-                    // Use a leaked SpawnEvaluator for the 'static lifetime
+                    // Use the registered factory (full evaluator) or fallback.
+                    let boxed_eval = make_spawn_evaluator();
                     let evaluator: &'static dyn OperationEvaluator =
-                        Box::leak(Box::new(SpawnEvaluator));
+                        Box::leak(boxed_eval);
                     let mut interp = Interpreter::new(evaluator);
                     interp.functions = functions;
                     interp.enum_defs = enum_defs;
@@ -7376,6 +7544,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "chan_recv",
             "chan_try_recv",
             "chan_close",
+            "select",
         ],
         "itertools" => vec![
             "iter_chain",
@@ -8709,6 +8878,7 @@ mod tests {
         assert!(ops.contains(&"chan_recv"));
         assert!(ops.contains(&"chan_try_recv"));
         assert!(ops.contains(&"chan_close"));
+        assert!(ops.contains(&"select"));
     }
 
     #[test]
@@ -8879,5 +9049,140 @@ mod tests {
         assert_eq!(result, DataType::Null);
 
         channel_remove(&rx_id).unwrap();
+    }
+
+    // =========================================================================
+    // Select (multi-channel wait)
+    // =========================================================================
+
+    #[test]
+    fn test_select_picks_ready_channel() {
+        // Create two channels; send on the second one.
+        // select should return [1, value].
+        let (_tx1_id, rx1_id) = channel_ids();
+        let (tx1, rx1) = std::sync::mpsc::channel::<DataType>();
+        channel_store(
+            &rx1_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx1)),
+            },
+        )
+        .unwrap();
+
+        let (_tx2_id, rx2_id) = channel_ids();
+        let (tx2, rx2) = std::sync::mpsc::channel::<DataType>();
+        channel_store(
+            &rx2_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx2)),
+            },
+        )
+        .unwrap();
+
+        // Only send on tx2
+        tx2.send(DataType::String("from-ch2".into())).unwrap();
+
+        // Manually poll like select does
+        let rx_arcs: Vec<Arc<Mutex<std::sync::mpsc::Receiver<DataType>>>> = {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            vec![rx1_id.clone(), rx2_id.clone()]
+                .iter()
+                .map(|id| {
+                    let entry = map.get(id).unwrap();
+                    let receiver = entry.downcast_ref::<ChannelReceiver>().unwrap();
+                    Arc::clone(&receiver.rx)
+                })
+                .collect()
+        };
+
+        // Poll round-robin
+        let mut found_index = -1i64;
+        let mut found_value = DataType::Null;
+        for (i, rx_arc) in rx_arcs.iter().enumerate() {
+            let rx_guard = rx_arc.lock().unwrap();
+            if let Ok(val) = rx_guard.try_recv() {
+                found_index = i as i64;
+                found_value = val;
+                break;
+            }
+        }
+        assert_eq!(found_index, 1);
+        assert_eq!(found_value, DataType::String("from-ch2".into()));
+
+        // Cleanup
+        drop(tx1);
+        drop(tx2);
+        channel_remove(&rx1_id).unwrap();
+        channel_remove(&rx2_id).unwrap();
+    }
+
+    #[test]
+    fn test_select_all_disconnected_returns_negative_one() {
+        let (_tx_id, rx_id) = channel_ids();
+        let (tx, rx) = std::sync::mpsc::channel::<DataType>();
+        channel_store(
+            &rx_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx)),
+            },
+        )
+        .unwrap();
+        drop(tx); // close the channel
+
+        let rx_arc = {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            let entry = map.get(&rx_id).unwrap();
+            let receiver = entry.downcast_ref::<ChannelReceiver>().unwrap();
+            Arc::clone(&receiver.rx)
+        };
+
+        let rx_guard = rx_arc.lock().unwrap();
+        let result = rx_guard.try_recv();
+        assert!(matches!(result, Err(std::sync::mpsc::TryRecvError::Disconnected)));
+
+        channel_remove(&rx_id).unwrap();
+    }
+
+    // =========================================================================
+    // Spawn evaluator factory
+    // =========================================================================
+
+    #[test]
+    fn test_make_spawn_evaluator_fallback() {
+        // Without a registered factory, should return FallbackSpawnEvaluator.
+        let eval = make_spawn_evaluator();
+        let inputs = HashMap::from([
+            ("a".to_string(), DataType::Int64(10)),
+            ("b".to_string(), DataType::Int64(20)),
+        ]);
+        let config = HashMap::new();
+        let result = eval.eval_operation(OperationType::Add, &inputs, &config).unwrap();
+        assert_eq!(result, DataType::Int64(30));
+    }
+
+    #[test]
+    fn test_register_spawn_evaluator_factory() {
+        // Register a custom factory and verify it's used.
+        struct CustomEval;
+        impl OperationEvaluator for CustomEval {
+            fn eval_operation(
+                &self,
+                _op: OperationType,
+                _inputs: &HashMap<String, DataType>,
+                _config: &HashMap<String, DataType>,
+            ) -> Result<DataType, EvalError> {
+                Ok(DataType::String("custom".into()))
+            }
+        }
+        register_spawn_evaluator_factory(|| Box::new(CustomEval));
+        let eval = make_spawn_evaluator();
+        let result = eval
+            .eval_operation(OperationType::Add, &HashMap::new(), &HashMap::new())
+            .unwrap();
+        assert_eq!(result, DataType::String("custom".into()));
+
+        // Reset to avoid affecting other tests.
+        let mut guard = SPAWN_EVAL_FACTORY.lock().unwrap();
+        *guard = None;
     }
 }

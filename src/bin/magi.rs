@@ -7094,6 +7094,7 @@ fn print_usage() {
     eprintln!("  lint <file.magi>            Lint for style issues");
     eprintln!("  fmt [options] <file.magi>   Format source code");
     eprintln!("  init <name>                 Create a new MAGI project");
+    eprintln!("  get [file | dir]            Fetch all git dependencies");
     eprintln!("  bench [options] <file.magi>  Benchmark a .magi file");
     eprintln!("  compile <file.magi>         Compile to WebAssembly (.wasm)");
     eprintln!("  run-wasm <file.wasm>        Execute a compiled .wasm file");
@@ -7152,6 +7153,12 @@ fn main() {
 }
 
 fn main_inner() {
+    // Register FullEvaluator as the spawn evaluator factory so spawned
+    // threads get access to all 374+ stdlib operations.
+    magi_lang::syntax::interpreter::register_spawn_evaluator_factory(|| {
+        Box::new(FullEvaluator)
+    });
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -7368,6 +7375,66 @@ fn main_inner() {
         "test-all" => {
             cmd_test_all();
         }
+        "get" => {
+            // Fetch all git dependencies declared in magi.toml.
+            // Optionally takes a path to a .magi file; defaults to main.magi.
+            let file_arg = args.get(2).map(|s| s.as_str()).unwrap_or("main.magi");
+            let file_path = std::path::Path::new(file_arg);
+            // If the argument is a directory, look for magi.toml inside it.
+            let toml_dir = if file_path.is_dir() {
+                file_path.to_path_buf()
+            } else {
+                file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+            };
+            let toml_path = toml_dir.join("magi.toml");
+            if !toml_path.exists() {
+                eprintln!("error: no magi.toml found in {}", toml_dir.display());
+                process::exit(1);
+            }
+            let toml_str = fs::read_to_string(&toml_path).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {}: {}", toml_path.display(), e);
+                process::exit(1);
+            });
+            let table: toml::Table = match toml_str.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: failed to parse {}: {}", toml_path.display(), e);
+                    process::exit(1);
+                }
+            };
+            let deps = match table.get("dependencies").and_then(|d| d.as_table()) {
+                Some(d) => d,
+                None => {
+                    println!("No dependencies found.");
+                    return;
+                }
+            };
+            let mut fetched = 0usize;
+            for (id, value) in deps {
+                if let Some(dep_table) = value.as_table() {
+                    if let Some(git_url) = dep_table.get("git").and_then(|g| g.as_str()) {
+                        let branch_or_tag = dep_table
+                            .get("branch")
+                            .or_else(|| dep_table.get("tag"))
+                            .and_then(|v| v.as_str());
+                        match resolve_git_dependency(id, git_url, branch_or_tag) {
+                            Ok(p) => {
+                                println!("  {} -> {}", id, p.display());
+                                fetched += 1;
+                            }
+                            Err(e) => {
+                                eprintln!("  error fetching '{}': {}", id, e);
+                            }
+                        }
+                    }
+                }
+            }
+            if fetched == 0 {
+                println!("No git dependencies to fetch.");
+            } else {
+                println!("Fetched {} git dependencies.", fetched);
+            }
+        }
         _ => {
             // If first arg is a .magi file, run it directly.
             if args[1].ends_with(".magi") {
@@ -7493,6 +7560,70 @@ fn validate_package_exports(table: &toml::Table, packages: &[ResolvedPackage]) {
     }
 }
 
+/// Resolve a git-based dependency by cloning it to `~/.magi/cache/<hash>/`.
+///
+/// If the cache directory already exists, the clone is skipped (idempotent).
+/// Returns the canonical path to the cloned repository root.
+fn resolve_git_dependency(
+    id: &str,
+    git_url: &str,
+    branch_or_tag: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    // Compute a stable cache key from URL + branch/tag.
+    let cache_key = match branch_or_tag {
+        Some(ref_name) => format!("{}@{}", git_url, ref_name),
+        None => git_url.to_string(),
+    };
+    let hash = sha256_hex(cache_key.as_bytes());
+    let cache_dir = magi_cache_dir().join(&hash);
+
+    // If already cloned, reuse.
+    if cache_dir.join("source.magi").exists() {
+        return Ok(cache_dir);
+    }
+
+    // Ensure parent directory exists.
+    if let Err(e) = fs::create_dir_all(&cache_dir) {
+        return Err(format!("failed to create cache dir: {}", e));
+    }
+
+    // Build git clone command: shallow clone for speed.
+    let mut cmd = process::Command::new("git");
+    cmd.arg("clone")
+        .arg("--depth")
+        .arg("1");
+    if let Some(ref_name) = branch_or_tag {
+        cmd.arg("--branch").arg(ref_name);
+    }
+    cmd.arg(git_url).arg(&cache_dir);
+
+    // Suppress stdout, capture stderr.
+    cmd.stdout(process::Stdio::null())
+        .stderr(process::Stdio::piped());
+
+    eprintln!("Fetching git dependency '{}' from {}", id, git_url);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run git: {} (is git installed?)", e))?;
+
+    if !output.status.success() {
+        // Clean up failed clone.
+        let _ = fs::remove_dir_all(&cache_dir);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git clone failed: {}", stderr.trim()));
+    }
+
+    Ok(cache_dir)
+}
+
+/// Get the magi cache directory (`~/.magi/cache/`).
+fn magi_cache_dir() -> std::path::PathBuf {
+    let home = env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::Path::new(&home).join(".magi").join("cache")
+}
+
 /// Resolve package dependencies by reading magi.toml next to the source file.
 fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage> {
     let dir = magi_file_path.parent().unwrap_or(std::path::Path::new("."));
@@ -7557,37 +7688,59 @@ fn resolve_dependencies(magi_file_path: &std::path::Path) -> Vec<ResolvedPackage
     let mut lock_entries = Vec::new();
 
     for (id, value) in deps {
-        let rel_path = match value.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
-            Some(p) => p,
+        let dep_table = match value.as_table() {
+            Some(t) => t,
             None => continue,
         };
 
-        // Security: reject absolute paths and path traversal that escapes the project
-        if std::path::Path::new(rel_path).is_absolute() {
-            eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
-            continue;
-        }
-        // Check if resolved path escapes the project root
-        let dep_resolved = dir.join(rel_path);
-        let project_canonical = match dir.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                eprintln!("Warning: dependency '{}': cannot resolve project directory, skipping", id);
+        // Determine the resolved directory for this dependency.
+        // Either a local `path` or a remote `git` source.
+        let dep_canonical: std::path::PathBuf;
+
+        if let Some(git_url) = dep_table.get("git").and_then(|g| g.as_str()) {
+            // Git-based dependency: clone to ~/.magi/cache/<hash>/
+            let branch_or_tag = dep_table
+                .get("branch")
+                .or_else(|| dep_table.get("tag"))
+                .and_then(|v| v.as_str());
+            match resolve_git_dependency(id, git_url, branch_or_tag) {
+                Ok(p) => dep_canonical = p,
+                Err(e) => {
+                    eprintln!("Warning: could not fetch git dependency '{}': {}", id, e);
+                    continue;
+                }
+            }
+        } else if let Some(rel_path) = dep_table.get("path").and_then(|p| p.as_str()) {
+            // Local path dependency (existing logic)
+            // Security: reject absolute paths and path traversal that escapes the project
+            if std::path::Path::new(rel_path).is_absolute() {
+                eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
                 continue;
             }
-        };
-        let dep_canonical = match dep_resolved.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                eprintln!("Warning: dependency '{}': cannot resolve dependency path, skipping", id);
+            // Check if resolved path escapes the project root
+            let dep_resolved = dir.join(rel_path);
+            let project_canonical = match dir.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!("Warning: dependency '{}': cannot resolve project directory, skipping", id);
+                    continue;
+                }
+            };
+            dep_canonical = match dep_resolved.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!("Warning: dependency '{}': cannot resolve dependency path, skipping", id);
+                    continue;
+                }
+            };
+            let project_root = project_canonical.parent().unwrap_or(&project_canonical);
+            if !dep_canonical.starts_with(project_root) {
+                eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
                 continue;
             }
-        };
-        let project_root = project_canonical.parent().unwrap_or(&project_canonical);
-        if !dep_canonical.starts_with(project_root) {
-            eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+        } else {
             continue;
-        }
+        };
 
         // Read using canonicalized path to avoid TOCTOU race
         let source_path = dep_canonical.join("source.magi");
@@ -7651,43 +7804,62 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
 
     let mut sources = Vec::new();
     for (id, value) in deps {
-        let rel_path = match value.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
-            Some(p) => p,
+        let dep_table = match value.as_table() {
+            Some(t) => t,
             None => continue,
         };
 
-        // Security: reject absolute paths
-        if std::path::Path::new(rel_path).is_absolute() {
-            eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
-            continue;
-        }
+        // Determine the source path — either local `path` or remote `git`.
+        let source_canonical: std::path::PathBuf;
 
-        // Check if resolved path escapes the project root
-        let dep_dir = dir.join(rel_path);
-        let source_path = dep_dir.join("source.magi");
-
-        // Canonicalize the actual file we will read and verify it's within the project dir
-        let project_canonical = match dir.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let source_canonical = match source_path.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Warning: could not resolve dependency '{}' at {}: {}", id, source_path.display(), e);
+        if let Some(git_url) = dep_table.get("git").and_then(|g| g.as_str()) {
+            let branch_or_tag = dep_table
+                .get("branch")
+                .or_else(|| dep_table.get("tag"))
+                .and_then(|v| v.as_str());
+            match resolve_git_dependency(id, git_url, branch_or_tag) {
+                Ok(p) => source_canonical = p.join("source.magi"),
+                Err(e) => {
+                    eprintln!("Warning: could not fetch git dependency '{}': {}", id, e);
+                    continue;
+                }
+            }
+        } else if let Some(rel_path) = dep_table.get("path").and_then(|p| p.as_str()) {
+            // Security: reject absolute paths
+            if std::path::Path::new(rel_path).is_absolute() {
+                eprintln!("Warning: dependency '{}' uses an absolute path, skipping", id);
                 continue;
             }
-        };
-        if !source_canonical.starts_with(&project_canonical) {
-            eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+
+            // Check if resolved path escapes the project root
+            let dep_dir = dir.join(rel_path);
+            let sp = dep_dir.join("source.magi");
+
+            // Canonicalize the actual file we will read and verify it's within the project dir
+            let project_canonical = match dir.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            source_canonical = match sp.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Warning: could not resolve dependency '{}' at {}: {}", id, sp.display(), e);
+                    continue;
+                }
+            };
+            if !source_canonical.starts_with(&project_canonical) {
+                eprintln!("Warning: dependency '{}' escapes project root, skipping", id);
+                continue;
+            }
+        } else {
             continue;
-        }
+        };
 
         // Read the canonicalized path (same inode we validated)
         match fs::read_to_string(&source_canonical) {
             Ok(s) => sources.push(s),
             Err(e) => {
-                eprintln!("Warning: could not read dependency '{}' at {}: {}", id, source_path.display(), e);
+                eprintln!("Warning: could not read dependency '{}' at {}: {}", id, source_canonical.display(), e);
             }
         }
     }

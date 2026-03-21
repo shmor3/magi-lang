@@ -2010,6 +2010,17 @@ impl TypeChecker {
                     "chan_recv" => return ChannelType::Null,
                     "chan_try_recv" => return ChannelType::Null,
                     "chan_close" => return ChannelType::Null,
+                    // Concurrency: select returns [index, value]
+                    "select" => return ChannelType::Array,
+                    // Sync module: mutex, rwlock, barrier, etc.
+                    "mutex_new" | "mutex_lock" | "mutex_unlock" | "mutex_try_lock"
+                    | "rwlock_new" | "rwlock_read" | "rwlock_write" | "rwlock_unlock"
+                    | "once_new" | "once_call"
+                    | "barrier_new" | "barrier_wait"
+                    | "semaphore_new" | "semaphore_acquire" | "semaphore_release"
+                    | "condvar_new" | "condvar_wait" | "condvar_notify_one" | "condvar_notify_all"
+                    | "atomic_new" | "atomic_load" | "atomic_store"
+                    | "atomic_add" | "atomic_sub" | "atomic_compare_exchange" => return ChannelType::Null,
                     _ => {}
                 }
 

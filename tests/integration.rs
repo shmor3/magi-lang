@@ -20535,3 +20535,227 @@ fn test_spawned_thread_error_propagates() {
     "#);
     assert!(result.is_err(), "division by zero in spawned task should propagate as error");
 }
+
+// ═══════════════════════════════════════════════════════════
+// if let / while let syntax (desugared to match)
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_if_let_some_match() {
+    // `if let Some(x) = val` desugars to match with Option::Some pattern
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let val = Option::Some(42);
+        if let Some(x) = val {
+            x
+        } else {
+            0
+        }
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_if_let_none_fallthrough() {
+    // When value is None, the else branch should execute
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let val = Option::None;
+        if let Some(x) = val {
+            x
+        } else {
+            -1
+        }
+    "#), DataType::Int64(-1));
+}
+
+#[test]
+fn test_if_let_no_else() {
+    // if let without else produces null when pattern doesn't match
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let val = Option::None;
+        if let Some(x) = val {
+            x
+        }
+    "#), DataType::Null);
+}
+
+#[test]
+fn test_if_let_enum_variant() {
+    // if let with user-defined enum variant
+    assert_eq!(run(r#"
+        enum Shape { Circle(r), Square(s) }
+        let s = Shape::Circle(10);
+        if let Shape::Circle(r) = s {
+            r * 2
+        } else {
+            0
+        }
+    "#), DataType::Int64(20));
+}
+
+#[test]
+fn test_if_let_else_if_let_chain() {
+    // Chaining else if let
+    assert_eq!(run(r#"
+        enum Shape { Circle(r), Square(s) }
+        let s = Shape::Square(5);
+        if let Shape::Circle(r) = s {
+            r
+        } else if let Shape::Square(side) = s {
+            side
+        } else {
+            0
+        }
+    "#), DataType::Int64(5));
+}
+
+#[test]
+fn test_while_let_some_collect() {
+    // while let iterating with a function that returns Option::Some or Option::None
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let mut i = 0;
+        let items = [10, 20, 30];
+        let mut sum = 0;
+        fn next_item(idx, arr) {
+            if idx < len(arr) {
+                Option::Some(arr[idx])
+            } else {
+                Option::None
+            }
+        }
+        while let Some(x) = next_item(i, items) {
+            sum = sum + x;
+            i = i + 1;
+        }
+        sum
+    "#), DataType::Int64(60));
+}
+
+#[test]
+fn test_while_let_immediate_break() {
+    // while let with None immediately breaks
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let mut count = 0;
+        let val = Option::None;
+        while let Some(x) = val {
+            count = count + 1;
+        }
+        count
+    "#), DataType::Int64(0));
+}
+
+#[test]
+fn test_bare_some_pattern_in_match() {
+    // Bare Some(x) / None patterns in regular match expressions
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let val = Option::Some(99);
+        match val {
+            Some(x) => x,
+            None => 0,
+        }
+    "#), DataType::Int64(99));
+}
+
+#[test]
+fn test_bare_none_pattern_in_match() {
+    assert_eq!(run(r#"
+        enum Option { Some(val), None }
+        let val = Option::None;
+        match val {
+            Some(x) => x,
+            None => -1,
+        }
+    "#), DataType::Int64(-1));
+}
+
+#[test]
+fn test_bare_ok_err_pattern_in_match() {
+    assert_eq!(run(r#"
+        enum Result { Ok(val), Err(msg) }
+        let val = Result::Ok(42);
+        match val {
+            Ok(v) => v,
+            Err(e) => -1,
+        }
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_bare_err_pattern_in_match() {
+    assert_eq!(run(r#"
+        enum Result { Ok(val), Err(msg) }
+        let val = Result::Err("oops");
+        match val {
+            Ok(v) => 0,
+            Err(e) => e,
+        }
+    "#), DataType::String("oops".to_string()));
+}
+
+#[test]
+fn test_if_let_ok_pattern() {
+    assert_eq!(run(r#"
+        enum Result { Ok(val), Err(msg) }
+        let val = Result::Ok(100);
+        if let Ok(v) = val {
+            v
+        } else {
+            0
+        }
+    "#), DataType::Int64(100));
+}
+
+// ═══════════════════════════════════════════════════════════
+// select / sync built-in type checker coverage
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_select_no_false_warning() {
+    // `select` is a built-in; type checker should not emit "undefined function" errors
+    let warnings = typecheck_warnings(r#"
+        let ch1 = channel(0);
+        let ch2 = channel(0);
+        select(ch1, ch2);
+    "#);
+    let has_undefined_select = warnings.iter().any(|w| w == "E201");
+    assert!(!has_undefined_select, "select() should not produce E201 'undefined function' error, got: {:?}", warnings);
+}
+
+#[test]
+fn test_sync_functions_no_false_warning() {
+    // sync module functions should not produce "undefined function" errors
+    let warnings = typecheck_warnings(r#"
+        let m = mutex_new(0);
+        mutex_lock(m);
+        mutex_unlock(m);
+        let rw = rwlock_new(0);
+        rwlock_read(rw);
+        rwlock_write(rw);
+        rwlock_unlock(rw);
+    "#);
+    let has_undefined = warnings.iter().any(|w| w == "E201");
+    assert!(!has_undefined, "sync functions should not produce E201, got: {:?}", warnings);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Remote dependency / mock test
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn test_use_unknown_remote_dep_produces_error() {
+    // Using an unknown remote path should produce an undefined function error
+    // when the imported name is called. This is a "mock" test since we can't
+    // actually fetch remote deps in tests.
+    let warnings = typecheck_warnings(r#"
+        use some_remote::lib::*;
+        let x = unknown_fn(42);
+    "#);
+    // The import itself is fine (use_aliases), but calling unknown_fn should error
+    // since use doesn't actually bring real functions into scope in the checker.
+    let has_e201 = warnings.iter().any(|w| w == "E201");
+    assert!(has_e201, "calling a function from an unresolved remote dep should produce E201, got: {:?}", warnings);
+}

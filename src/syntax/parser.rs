@@ -867,12 +867,83 @@ impl Parser {
 
     fn parse_while_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'while'
+
+        // `while let Pattern = expr { body }`
+        // Desugars to: `loop { match expr { Pattern => { body }, _ => break } }`
+        if self.at(&TokenKind::Let) {
+            return self.parse_while_let(start, label);
+        }
+
         let condition = self.parse_expression_no_struct()?;
         let body = self.parse_block()?;
 
         Ok(Statement {
             span: start.merge(body.span),
             kind: StatementKind::WhileLoop { label, condition, body },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
+        })
+    }
+
+    /// Parse `while let Pattern = expr { body }` and desugar into a loop + match.
+    fn parse_while_let(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume 'let'
+        let pattern = self.parse_pattern()?;
+        self.expect(&TokenKind::Eq)?;
+        let value = self.parse_expression_no_struct()?;
+        let body = self.parse_block()?;
+
+        let end_span = body.span;
+
+        // Build: match expr { Pattern => { body }, _ => break }
+        let match_arm = MatchArm {
+            pattern,
+            guard: None,
+            body,
+            span: start,
+        };
+        let break_arm = MatchArm {
+            pattern: Pattern::Wildcard,
+            guard: None,
+            body: Block {
+                statements: vec![Statement {
+                    kind: StatementKind::Break { label: label.clone(), value: None },
+                    span: start,
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                }],
+                tail_expr: None,
+                tail_comments: Vec::new(),
+                span: start,
+            },
+            span: start,
+        };
+
+        let match_expr = Expression {
+            kind: ExpressionKind::Match {
+                value: Box::new(value),
+                arms: vec![match_arm, break_arm],
+            },
+            span: start.merge(end_span),
+        };
+
+        // Wrap in loop { match_expr }
+        let loop_expr = Expression {
+            kind: ExpressionKind::Loop {
+                label,
+                body: Block {
+                    statements: Vec::new(),
+                    tail_expr: Some(Box::new(match_expr)),
+                    tail_comments: Vec::new(),
+                    span: start.merge(end_span),
+                },
+            },
+            span: start.merge(end_span),
+        };
+
+        Ok(Statement {
+            span: start.merge(end_span),
+            kind: StatementKind::ExprStatement(loop_expr),
             leading_comments: Vec::new(),
             trailing_comment: None,
         })
@@ -2459,6 +2530,13 @@ impl Parser {
 
     fn parse_if_expr(&mut self) -> Result<Expression, SyntaxError> {
         let start = self.advance().span; // consume 'if'
+
+        // `if let Pattern = expr { body } else { body }`
+        // Desugars to: `match expr { Pattern => { body }, _ => { else_body } }`
+        if self.at(&TokenKind::Let) {
+            return self.parse_if_let_expr(start);
+        }
+
         let condition = self.parse_expression_no_struct()?;
         let then_block = self.parse_block()?;
 
@@ -2492,6 +2570,66 @@ impl Parser {
                 condition: Box::new(condition),
                 then_block,
                 else_block,
+            },
+            span: start.merge(end_span),
+        })
+    }
+
+    /// Parse `if let Pattern = expr { body } else { body }` and desugar into a match.
+    fn parse_if_let_expr(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        self.advance(); // consume 'let'
+        let pattern = self.parse_pattern()?;
+        self.expect(&TokenKind::Eq)?;
+        let value = self.parse_expression_no_struct()?;
+        let then_block = self.parse_block()?;
+
+        let else_block = if self.eat(&TokenKind::Else) {
+            if self.at(&TokenKind::If) {
+                // `else if` / `else if let` chain
+                self.enter_depth()?;
+                let nested_if = self.parse_if_expr()?;
+                self.exit_depth();
+                let span = nested_if.span;
+                Block {
+                    statements: Vec::new(),
+                    tail_expr: Some(Box::new(nested_if)),
+                    tail_comments: Vec::new(),
+                    span,
+                }
+            } else {
+                self.parse_block()?
+            }
+        } else {
+            // No else: wildcard arm produces null
+            Block {
+                statements: Vec::new(),
+                tail_expr: Some(Box::new(Expression {
+                    kind: ExpressionKind::Literal(Literal::Null),
+                    span: start,
+                })),
+                tail_comments: Vec::new(),
+                span: start,
+            }
+        };
+
+        let end_span = else_block.span;
+        let then_arm = MatchArm {
+            pattern,
+            guard: None,
+            body: then_block,
+            span: start,
+        };
+        let else_arm = MatchArm {
+            pattern: Pattern::Wildcard,
+            guard: None,
+            body: else_block,
+            span: start,
+        };
+
+        Ok(Expression {
+            kind: ExpressionKind::Match {
+                value: Box::new(value),
+                arms: vec![then_arm, else_arm],
             },
             span: start.merge(end_span),
         })
@@ -2777,6 +2915,66 @@ impl Parser {
                         variant: variant_tok.text,
                         bindings,
                     });
+                }
+                // Bare Option/Result variant patterns: Some(x), None, Ok(x), Err(x)
+                // These desugar to EnumPattern with the well-known enum name.
+                match tok.text.as_str() {
+                    "Some" if self.at(&TokenKind::LParen) => {
+                        self.advance(); // consume '('
+                        let mut bindings = Vec::new();
+                        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                            bindings.push(self.parse_pattern()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RParen)?;
+                        return Ok(Pattern::EnumPattern {
+                            enum_name: "Option".to_string(),
+                            variant: "Some".to_string(),
+                            bindings,
+                        });
+                    }
+                    "None" if !self.at(&TokenKind::LParen) => {
+                        return Ok(Pattern::EnumPattern {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            bindings: Vec::new(),
+                        });
+                    }
+                    "Ok" if self.at(&TokenKind::LParen) => {
+                        self.advance(); // consume '('
+                        let mut bindings = Vec::new();
+                        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                            bindings.push(self.parse_pattern()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RParen)?;
+                        return Ok(Pattern::EnumPattern {
+                            enum_name: "Result".to_string(),
+                            variant: "Ok".to_string(),
+                            bindings,
+                        });
+                    }
+                    "Err" if self.at(&TokenKind::LParen) => {
+                        self.advance(); // consume '('
+                        let mut bindings = Vec::new();
+                        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                            bindings.push(self.parse_pattern()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RParen)?;
+                        return Ok(Pattern::EnumPattern {
+                            enum_name: "Result".to_string(),
+                            variant: "Err".to_string(),
+                            bindings,
+                        });
+                    }
+                    _ => {}
                 }
                 // Type pattern: name: type_name (in match context)
                 if self.at(&TokenKind::Colon) {
