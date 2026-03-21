@@ -215,10 +215,34 @@ impl WasmCodegen {
 
     /// Validate the generated WASM binary before returning it.
     ///
-    /// Checks the WASM magic number (`\0asm`) and version (1) to catch
-    /// obviously corrupt output. This is a structural sanity check that
-    /// runs without requiring the `wasmparser` crate at runtime.
+    /// When the `wasm-validate` feature is enabled (default), performs full
+    /// semantic validation using `wasmparser::Validator` — catching type
+    /// mismatches, stack underflows, invalid instructions, and all other
+    /// WASM spec violations at compile time rather than at runtime.
+    ///
+    /// When the feature is disabled, falls back to structural checks only
+    /// (magic number, version, section ordering).
     fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), CompileError> {
+        #[cfg(feature = "wasm-validate")]
+        {
+            let mut validator = wasmparser::Validator::new();
+            validator.validate_all(bytes).map_err(|e| {
+                CompileError::Internal(format!("WASM validation failed: {e}"))
+            })?;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "wasm-validate"))]
+        {
+            Self::validate_wasm_bytes_structural(bytes)
+        }
+    }
+
+    /// Structural-only WASM validation (magic number, version, section order).
+    ///
+    /// Used as a fallback when `wasm-validate` feature is disabled.
+    #[cfg(not(feature = "wasm-validate"))]
+    fn validate_wasm_bytes_structural(bytes: &[u8]) -> Result<(), CompileError> {
         const WASM_MAGIC: &[u8; 4] = b"\0asm";
         const WASM_VERSION: &[u8; 4] = &[1, 0, 0, 0];
 
@@ -292,6 +316,7 @@ impl WasmCodegen {
 
     /// Decode an unsigned LEB128 value from a byte slice.
     /// Returns `(value, bytes_consumed)`.
+    #[cfg(not(feature = "wasm-validate"))]
     fn decode_leb128(bytes: &[u8]) -> Result<(u32, usize), CompileError> {
         let mut result: u32 = 0;
         let mut shift: u32 = 0;
