@@ -890,6 +890,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_string(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        const MAX_STRING_LEN: usize = 10_000_000;
         self.advance(); // consume opening "
         let mut value = String::new();
         loop {
@@ -914,6 +915,14 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
+            if value.len() > MAX_STRING_LEN {
+                return Err(SyntaxError {
+                    line: start_line as usize,
+                    column: start_col as usize,
+                    message: "String literal exceeds 10MB limit".to_string(),
+                    code: None,
+                });
+            }
         }
         Ok(Token {
             kind: TokenKind::StringLiteral,
@@ -923,6 +932,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_triple_string(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        const MAX_STRING_LEN: usize = 10_000_000;
         self.advance(); // consume first "
         self.advance(); // consume second "
         self.advance(); // consume third "
@@ -953,6 +963,14 @@ impl<'a> Lexer<'a> {
                         value.push(ch);
                     }
                 }
+            }
+            if value.len() > MAX_STRING_LEN {
+                return Err(SyntaxError {
+                    line: start_line as usize,
+                    column: start_col as usize,
+                    message: "String literal exceeds 10MB limit".to_string(),
+                    code: None,
+                });
             }
         }
         Ok(Token {

@@ -5346,7 +5346,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 let stream = std::net::TcpStream::connect_timeout(
                     &sock_addr,
-                    std::time::Duration::from_millis(5000),
+                    std::time::Duration::from_secs(30),
                 )
                 .map_err(|e| EvalError::InvalidInput(format!("tcp_connect: {}", e)))?;
                 let timeout = Some(std::time::Duration::from_secs(30));

@@ -1720,8 +1720,15 @@ impl Parser {
                                 code: None,
                             });
                         }
-                        self.expect(&TokenKind::Colon)?;
-                        let value = self.parse_expression()?;
+                        let value = if self.eat(&TokenKind::Colon) {
+                            self.parse_expression()?
+                        } else {
+                            // Shorthand: `field` expands to `field: field`
+                            Expression {
+                                kind: ExpressionKind::Variable(field_tok.text.clone()),
+                                span: field_tok.span,
+                            }
+                        };
                         fields.push((field_tok.text, value));
                         if !self.eat(&TokenKind::Comma) {
                             break;
@@ -2771,6 +2778,7 @@ impl Parser {
 
     /// Check if current position looks like a struct literal: `Name { ident :`
     /// or `Name {}` (empty struct, uppercase name)
+    /// or `Name { ident , ...}` / `Name { ident }` (shorthand fields)
     fn is_struct_literal(&self, name: &str) -> bool {
         if self.pos >= self.tokens.len() || self.tokens[self.pos].kind != TokenKind::LBrace {
             return false;
@@ -2786,8 +2794,12 @@ impl Parser {
         if self.pos + 2 < self.tokens.len()
             && name.starts_with(|c: char| c.is_uppercase())
         {
-            self.tokens[self.pos + 1].kind == TokenKind::Ident
-                && self.tokens[self.pos + 2].kind == TokenKind::Colon
+            let is_ident = self.tokens[self.pos + 1].kind == TokenKind::Ident;
+            let has_colon = self.tokens[self.pos + 2].kind == TokenKind::Colon;
+            // Shorthand: Name { field , ... } or Name { field }
+            let has_comma = self.tokens[self.pos + 2].kind == TokenKind::Comma;
+            let has_rbrace = self.tokens[self.pos + 2].kind == TokenKind::RBrace;
+            is_ident && (has_colon || has_comma || has_rbrace)
         } else {
             false
         }

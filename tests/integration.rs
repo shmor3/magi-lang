@@ -19289,3 +19289,63 @@ fn test_map_deep_merge() {
         _ => panic!("Expected map"),
     }
 }
+
+// =========================================================================
+// Struct shorthand parsing (#293)
+// =========================================================================
+
+#[test]
+fn test_struct_shorthand_field() {
+    assert_eq!(run(r#"
+        struct Point { x: int64, y: int64 }
+        let x = 10;
+        let y = 20;
+        let p = Point { x, y };
+        output p.x;
+    "#), DataType::Int64(10));
+}
+
+#[test]
+fn test_struct_shorthand_mixed() {
+    assert_eq!(run(r#"
+        struct Pair { a: int64, b: int64 }
+        let a = 1;
+        let p = Pair { a, b: 2 };
+        output p.b;
+    "#), DataType::Int64(2));
+}
+
+// =========================================================================
+// Map methods: defaults (#114)
+// =========================================================================
+
+#[test]
+fn test_map_defaults() {
+    let result = run(r#"output {"a": 1}.defaults({"a": 99, "b": 2});"#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("b"), Some(&DataType::Int64(2)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+// =========================================================================
+// Map HOF: map_entries (#117)
+// =========================================================================
+
+#[test]
+fn test_map_map_entries() {
+    let result = run(r#"
+        let m = {"x": 1, "y": 2};
+        output m.map_entries(|k, v| [k.to_upper(), v * 10]);
+    "#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("X"), Some(&DataType::Int64(10)));
+            assert_eq!(m.get("Y"), Some(&DataType::Int64(20)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
