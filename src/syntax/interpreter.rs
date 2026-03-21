@@ -318,7 +318,7 @@ fn spawn_binop(
 }
 
 /// Maximum iterations for while/for loops to prevent infinite loops.
-const MAX_LOOP_ITERATIONS: usize = 1_000_000_000; // 1 billion — effectively unlimited like Go/Rust
+const MAX_LOOP_ITERATIONS: usize = 100_000_000; // 100 million — generous while keeping tests fast
 
 /// Maximum call depth for recursion guard.
 const MAX_CALL_DEPTH: usize = 128; // Safe for interpreter stack frames in debug builds
