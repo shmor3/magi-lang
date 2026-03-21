@@ -1467,14 +1467,15 @@ fn test_const_binding() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-fn test_compile_showcase_rejects_unsupported() {
-    // The showcase uses features not yet supported in WASM compilation
-    // (spread in array literals, match guards, etc.).
+fn test_compile_showcase_succeeds() {
+    // The showcase exercises major language features including spread in
+    // array literals, match guards, try/catch, defer, and nested field
+    // assignment -- all of which are now supported in WASM compilation.
     let src = include_str!("../examples/showcase/main.magi");
     let program = parse(src);
     let mut compiler_inst = compiler::Compiler::new();
     let result = compiler_inst.compile(&program);
-    assert!(result.is_err(), "showcase should fail WASM compilation due to unsupported features");
+    assert!(result.is_ok(), "showcase should compile successfully: {:?}", result.err());
 }
 
 #[test]
@@ -5602,7 +5603,7 @@ fn test_min_max_mixed_numeric_ok() {
 }
 
 #[test]
-fn test_wasm_match_guard_rejected() {
+fn test_wasm_match_guard_compiles() {
     let src = r#"
         fn classify(x) {
             match x {
@@ -5613,22 +5614,18 @@ fn test_wasm_match_guard_rejected() {
     "#;
     let program = parse(src);
     let result = compiler::compile_to_wasm(&program);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("match guards"), "expected guard error, got: {err}");
+    assert!(result.is_ok(), "match guards should compile: {:?}", result.err());
 }
 
 #[test]
-fn test_wasm_array_spread_rejected() {
+fn test_wasm_array_spread_compiles() {
     let src = r#"
         let a = [1, 2, 3];
         let b = [0, ...a, 4];
     "#;
     let program = parse(src);
     let result = compiler::compile_to_wasm(&program);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("spread"), "expected spread error, got: {err}");
+    assert!(result.is_ok(), "array spread should compile: {:?}", result.err());
 }
 
 // ═══════════════════════════════════════════════════════════

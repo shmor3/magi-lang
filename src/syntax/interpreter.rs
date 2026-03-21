@@ -19,11 +19,11 @@ use std::sync::Arc;
 static EMPTY_CONFIG: std::sync::LazyLock<HashMap<String, DataType>> =
     std::sync::LazyLock::new(HashMap::new);
 
-/// Maximum iterations for while loops to prevent infinite loops.
-const MAX_LOOP_ITERATIONS: usize = 10_000;
+/// Maximum iterations for while/for loops to prevent infinite loops.
+const MAX_LOOP_ITERATIONS: usize = 10_000_000;
 
 /// Maximum call depth for recursion guard.
-const MAX_CALL_DEPTH: usize = 48;
+const MAX_CALL_DEPTH: usize = 64;
 
 /// GC trigger threshold: collect after this many allocations since last GC.
 const GC_ALLOC_THRESHOLD: usize = 256;

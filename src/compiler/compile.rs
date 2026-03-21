@@ -23,6 +23,8 @@ pub struct Compiler {
     loop_stack: Vec<LoopContext>,
     /// Current WASM structured block nesting depth (incremented by Block/Loop/If/IfVoid, decremented by End).
     block_depth: u32,
+    /// Deferred expressions collected from `defer` statements, emitted before returns.
+    deferred_exprs: Vec<Expression>,
 }
 
 /// Builder for a function being compiled.
@@ -110,6 +112,7 @@ impl Compiler {
             lambda_counter: 0,
             loop_stack: Vec::new(),
             block_depth: 0,
+            deferred_exprs: Vec::new(),
         }
     }
 
@@ -123,6 +126,7 @@ impl Compiler {
         self.lambda_counter = 0;
         self.loop_stack.clear();
         self.block_depth = 0;
+        self.deferred_exprs.clear();
 
         // First pass: register all function definitions.
         self.register_functions(program)?;
@@ -425,6 +429,7 @@ impl Compiler {
         let prev_fn = self.current_fn.take();
         let prev_depth = self.block_depth;
         let prev_loop_stack = std::mem::take(&mut self.loop_stack);
+        let prev_deferred = std::mem::take(&mut self.deferred_exprs);
 
         let result = body(self);
 
@@ -432,6 +437,7 @@ impl Compiler {
         self.current_fn = prev_fn;
         self.block_depth = prev_depth;
         self.loop_stack = prev_loop_stack;
+        self.deferred_exprs = prev_deferred;
 
         result
     }
@@ -493,49 +499,77 @@ impl Compiler {
             }
 
             StatementKind::FieldAssignment { object, field, value } => {
-                // obj.field = value → map set on the variable's map
-                match &object.kind {
-                    ExpressionKind::Variable(name) => {
-                        if let Some(idx) = self.resolve_local(name) {
-                            self.emit(Instruction::LocalGet(idx));
-                            let key = self.module.intern_string(field);
-                            self.emit(Instruction::PushString(key));
-                            self.compile_expr(value)?;
-                            self.emit(Instruction::MapSet);
-                            self.emit(Instruction::LocalSet(idx));
-                        } else {
-                            return Err(CompileError::at(
-                                stmt.span.start_line,
-                                stmt.span.start_col,
-                                format!("undefined variable: {name}"),
-                            ));
+                // obj.field = value → map set on the variable's map.
+                // For nested paths (a.b.c.d = val), collect the field chain,
+                // get each level, set the leaf, then store back up the chain.
+                let mut chain = Vec::new();
+                let mut current = object;
+                // Walk the field access chain to find the root variable.
+                loop {
+                    match &current.kind {
+                        ExpressionKind::FieldAccess { object: inner, field: f } => {
+                            chain.push(f.as_str());
+                            current = inner;
                         }
-                    }
-                    ExpressionKind::FieldAccess { object: inner_obj, field: inner_field } => {
-                        // Nested field assignment: a.b.field = value
-                        // Compile inner object, get inner field's map, set field, store back.
-                        // For nested paths we need to reload and re-store each level.
-                        // Only support one level of nesting for now: var.field1.field2 = val
-                        if let ExpressionKind::Variable(name) = &inner_obj.kind {
+                        ExpressionKind::Variable(name) => {
                             if let Some(var_idx) = self.resolve_local(name) {
-                                // Get the inner map: var.inner_field
-                                self.emit(Instruction::LocalGet(var_idx));
-                                let inner_key = self.module.intern_string(inner_field);
-                                self.emit(Instruction::PushString(inner_key));
-                                self.emit(Instruction::MapGet);
-                                // Set field on the inner map
-                                let key = self.module.intern_string(field);
-                                self.emit(Instruction::PushString(key));
-                                self.compile_expr(value)?;
-                                self.emit(Instruction::MapSet);
-                                // Store updated inner map back into the outer map
-                                let temp = self.ensure_temp_local()?;
-                                self.emit(Instruction::LocalSet(temp));
-                                self.emit(Instruction::LocalGet(var_idx));
-                                self.emit(Instruction::PushString(inner_key));
-                                self.emit(Instruction::LocalGet(temp));
-                                self.emit(Instruction::MapSet);
-                                self.emit(Instruction::LocalSet(var_idx));
+                                if chain.is_empty() {
+                                    // Simple case: var.field = value
+                                    self.emit(Instruction::LocalGet(var_idx));
+                                    let key = self.module.intern_string(field);
+                                    self.emit(Instruction::PushString(key));
+                                    self.compile_expr(value)?;
+                                    self.emit(Instruction::MapSet);
+                                    self.emit(Instruction::LocalSet(var_idx));
+                                } else {
+                                    // Nested: var.chain[n-1]. ... .chain[0].field = value
+                                    // chain is in reverse order (innermost first).
+                                    chain.reverse();
+                                    // Allocate temp locals for each intermediate map.
+                                    let mut temp_locals = Vec::new();
+                                    // Get the first level from the variable.
+                                    self.emit(Instruction::LocalGet(var_idx));
+                                    for f in &chain {
+                                        let key = self.module.intern_string(f);
+                                        self.emit(Instruction::PushString(key));
+                                        self.emit(Instruction::MapGet);
+                                        // Save intermediate map in a temp local.
+                                        let temp = self.define_local(
+                                            &format!("__nest_{}", temp_locals.len()),
+                                            ValType::Tagged, true,
+                                        )?;
+                                        self.emit(Instruction::LocalTee(temp));
+                                        temp_locals.push(temp);
+                                    }
+                                    // Now stack top is the innermost map. Set the target field.
+                                    let key = self.module.intern_string(field);
+                                    self.emit(Instruction::PushString(key));
+                                    self.compile_expr(value)?;
+                                    self.emit(Instruction::MapSet);
+                                    // Store back up the chain in reverse.
+                                    // After MapSet, stack has the updated innermost map.
+                                    // We need to set it back on the parent, and so on.
+                                    for i in (0..chain.len()).rev() {
+                                        let updated_temp = self.define_local(
+                                            &format!("__nest_upd_{}", i),
+                                            ValType::Tagged, true,
+                                        )?;
+                                        self.emit(Instruction::LocalSet(updated_temp));
+                                        if i == 0 {
+                                            // Parent is the root variable.
+                                            self.emit(Instruction::LocalGet(var_idx));
+                                        } else {
+                                            // Parent is the temp for chain[i-1].
+                                            self.emit(Instruction::LocalGet(temp_locals[i - 1]));
+                                        }
+                                        let parent_key = self.module.intern_string(chain[i]);
+                                        self.emit(Instruction::PushString(parent_key));
+                                        self.emit(Instruction::LocalGet(updated_temp));
+                                        self.emit(Instruction::MapSet);
+                                    }
+                                    // Final MapSet produced the updated root map; store in variable.
+                                    self.emit(Instruction::LocalSet(var_idx));
+                                }
                             } else {
                                 return Err(CompileError::at(
                                     stmt.span.start_line,
@@ -543,16 +577,19 @@ impl Compiler {
                                     format!("undefined variable: {name}"),
                                 ));
                             }
-                        } else {
-                            // Deeply nested field assignment not yet supported in WASM
-                            self.emit(Instruction::PushNull);
-                            self.emit(Instruction::Drop);
+                            break;
                         }
-                    }
-                    _ => {
-                        // Complex expression targets not yet supported in WASM compilation
-                        self.emit(Instruction::PushNull);
-                        self.emit(Instruction::Drop);
+                        _ => {
+                            // Complex expression target: compile the object expression,
+                            // set the field, and drop the result (no variable to store back to).
+                            self.compile_expr(object)?;
+                            let key = self.module.intern_string(field);
+                            self.emit(Instruction::PushString(key));
+                            self.compile_expr(value)?;
+                            self.emit(Instruction::MapSet);
+                            self.emit(Instruction::Drop);
+                            break;
+                        }
                     }
                 }
             }
@@ -565,12 +602,6 @@ impl Compiler {
                             self.emit(Instruction::LocalGet(idx));
                             self.compile_expr(index)?;
                             self.compile_expr(value)?;
-                            // Use ArraySet for index-based assignment.
-                            // For string keys on maps, ArraySet will be incorrect — but the
-                            // wasm.rs codegen for ArraySet expects [array, index, value] and
-                            // handles tagged integer indices. String-keyed index assignment
-                            // (map["key"] = val) should use MapSet instead.
-                            // Check if the index is a string literal to decide.
                             self.emit(Instruction::ArraySet);
                             self.emit(Instruction::LocalSet(idx));
                         } else {
@@ -582,8 +613,11 @@ impl Compiler {
                         }
                     }
                     _ => {
-                        // Complex expression targets not yet supported in WASM compilation
-                        self.emit(Instruction::PushNull);
+                        // Complex expression target: compile object, index, value, set, drop.
+                        self.compile_expr(object)?;
+                        self.compile_expr(index)?;
+                        self.compile_expr(value)?;
+                        self.emit(Instruction::ArraySet);
                         self.emit(Instruction::Drop);
                     }
                 }
@@ -643,6 +677,13 @@ impl Compiler {
                     self.compile_expr(e)?;
                 } else {
                     self.emit(Instruction::PushNull);
+                }
+                // Emit deferred expressions before returning.
+                if !self.deferred_exprs.is_empty() {
+                    let temp = self.ensure_temp_local()?;
+                    self.emit(Instruction::LocalSet(temp));
+                    self.emit_deferred()?;
+                    self.emit(Instruction::LocalGet(temp));
                 }
                 self.emit(Instruction::Return);
             }
@@ -766,7 +807,9 @@ impl Compiler {
                 self.loop_stack.pop();
             }
 
-            StatementKind::Defer(_) => {}
+            StatementKind::Defer(expr) => {
+                self.deferred_exprs.push(expr.clone());
+            }
 
             StatementKind::CStyleFor { init, condition, update, body } => {
                 // Compile init statement
@@ -1177,21 +1220,36 @@ impl Compiler {
                 self.emit(Instruction::PushNull);
             }
 
-            ExpressionKind::TryCatchExpr { try_block, finally_block, .. } => {
-                // In WASM MVP, traps can't be caught. Only compile the try block;
-                // the catch block is unreachable in WASM and would create stack issues
-                // if compiled unconditionally.
+            ExpressionKind::TryCatchExpr { try_block, catch_var, catch_block, finally_block } => {
+                // WASM MVP has no exception handling. Compile the try block as the
+                // primary path. The catch block is compiled as dead code (placed in
+                // an unreachable branch) so it is at least valid WASM and doesn't
+                // cause missing-compilation errors.
                 self.compile_block(try_block)?;
+                let result_local = self.define_local("__try_result", ValType::Tagged, true)?;
+                self.emit(Instruction::LocalSet(result_local));
+
+                // Compile the catch block in a dead-code branch (if false { catch }).
+                // This ensures the catch code is compiled and validated but never runs.
+                self.emit(Instruction::PushBool(false));
+                self.emit(Instruction::IfVoid);
+                if let Some(var) = catch_var {
+                    // Define the catch variable (bound to null since we never enter).
+                    self.emit(Instruction::PushNull);
+                    let catch_idx = self.define_local(var, ValType::Tagged, false)?;
+                    self.emit(Instruction::LocalSet(catch_idx));
+                }
+                self.compile_block(catch_block)?;
+                self.emit(Instruction::LocalSet(result_local));
+                self.emit(Instruction::End);
 
                 // Compile finally block if present (always runs).
                 if let Some(finally) = finally_block {
-                    // Save try result, execute finally, restore result
-                    let temp = self.ensure_temp_local()?;
-                    self.emit(Instruction::LocalSet(temp));
                     self.compile_block(finally)?;
                     self.emit(Instruction::Drop); // finally doesn't contribute a value
-                    self.emit(Instruction::LocalGet(temp));
                 }
+
+                self.emit(Instruction::LocalGet(result_local));
             }
 
             ExpressionKind::ListComprehension { expr, pattern, iterable, condition } => {
@@ -1282,15 +1340,45 @@ impl Compiler {
             Literal::Bool(b) => self.emit(Instruction::PushBool(*b)),
             Literal::Null => self.emit(Instruction::PushNull),
             Literal::Array(elems) => {
-                for elem in elems {
-                    if matches!(&elem.kind, ExpressionKind::Spread(_)) {
-                        return Err(CompileError::Internal(
-                            "spread in array literals is not yet supported in WASM compilation".into(),
-                        ));
+                let has_spread = elems.iter().any(|e| matches!(&e.kind, ExpressionKind::Spread(_)));
+                if has_spread {
+                    // With spread elements, we build the array incrementally:
+                    // start with an empty array and append elements/spread arrays.
+                    self.emit(Instruction::ArrayNew(0));
+                    let arr_local = self.define_local("__spread_arr", ValType::Tagged, true)?;
+                    self.emit(Instruction::LocalSet(arr_local));
+
+                    for elem in elems {
+                        if let ExpressionKind::Spread(inner) = &elem.kind {
+                            // Spread: compile the inner expression, then call
+                            // __array_spread(target, source) to append all elements.
+                            self.emit(Instruction::LocalGet(arr_local));
+                            self.compile_expr(inner)?;
+                            let name_idx = self.module.intern_string("__array_spread");
+                            self.emit(Instruction::RuntimeCall {
+                                name: name_idx,
+                                arg_count: 2,
+                            });
+                            self.emit(Instruction::LocalSet(arr_local));
+                        } else {
+                            // Normal element: array_push(target, element).
+                            self.emit(Instruction::LocalGet(arr_local));
+                            self.compile_expr(elem)?;
+                            let name_idx = self.module.intern_string("array_push");
+                            self.emit(Instruction::RuntimeCall {
+                                name: name_idx,
+                                arg_count: 2,
+                            });
+                            self.emit(Instruction::LocalSet(arr_local));
+                        }
                     }
-                    self.compile_expr(elem)?;
+                    self.emit(Instruction::LocalGet(arr_local));
+                } else {
+                    for elem in elems {
+                        self.compile_expr(elem)?;
+                    }
+                    self.emit(Instruction::ArrayNew(elems.len() as u32));
                 }
-                self.emit(Instruction::ArrayNew(elems.len() as u32));
             }
             Literal::Map(pairs) => {
                 for (key, val) in pairs {
@@ -1383,6 +1471,15 @@ impl Compiler {
 
         // Compile body.
         self.compile_block(&func.body)?;
+
+        // Emit deferred expressions before the implicit return.
+        if !self.deferred_exprs.is_empty() {
+            let temp = self.ensure_temp_local()?;
+            self.emit(Instruction::LocalSet(temp));
+            self.emit_deferred()?;
+            self.emit(Instruction::LocalGet(temp));
+        }
+
         self.emit(Instruction::Return);
         self.end_function();
         Ok(())
@@ -1593,16 +1690,13 @@ impl Compiler {
         let val_local = self.define_local("__match_val", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(val_local));
 
-        // Check for unsupported features — match guards.
-        for arm in arms {
-            if arm.guard.is_some() {
-                return Err(CompileError::at(
-                    arm.span.start_line,
-                    arm.span.start_col,
-                    "match guards (`if` conditions) are not yet supported in WASM compilation".to_string(),
-                ));
-            }
-        }
+        // Result local to hold the match result across arms.
+        let result_local = self.define_local("__match_result", ValType::Tagged, true)?;
+        self.emit(Instruction::PushNull);
+        self.emit(Instruction::LocalSet(result_local));
+
+        // Track how many If blocks we open (for closing End instructions).
+        let mut if_count = 0u32;
 
         // Compile as chain of if-else.
         for (i, arm) in arms.iter().enumerate() {
@@ -1610,27 +1704,63 @@ impl Compiler {
 
             match &arm.pattern {
                 Pattern::Wildcard | Pattern::Variable(_) => {
-                    // Always matches.
+                    // Always matches — but may have a guard.
                     if let Pattern::Variable(name) = &arm.pattern {
                         self.emit(Instruction::LocalGet(val_local));
                         let idx = self.define_local(name, ValType::Tagged, false)?;
                         self.emit(Instruction::LocalSet(idx));
                     }
-                    self.compile_block(&arm.body)?;
-                    // Skip remaining arms.
-                    break;
+                    if let Some(guard) = &arm.guard {
+                        // Guard on wildcard/variable: if guard { body } else { continue }
+                        self.compile_expr(guard)?;
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        self.compile_block(&arm.body)?;
+                        self.emit(Instruction::Else);
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
+                    } else {
+                        self.compile_block(&arm.body)?;
+                        // Skip remaining arms.
+                        break;
+                    }
                 }
                 Pattern::Literal(lit) => {
                     self.emit(Instruction::LocalGet(val_local));
                     self.compile_literal(lit)?;
                     self.emit(Instruction::I64Eq);
-                    self.emit(Instruction::If);
-                    self.compile_block(&arm.body)?;
-                    // Always emit Else: either chain to next arm, or provide
-                    // default PushNull so the If block has a valid Else branch.
-                    self.emit(Instruction::Else);
-                    if is_last {
-                        self.emit(Instruction::PushNull);
+                    // If there's a guard, combine: pattern_matches AND guard
+                    if let Some(guard) = &arm.guard {
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        // Inside the pattern-match If, evaluate the guard.
+                        self.compile_expr(guard)?;
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        self.compile_block(&arm.body)?;
+                        self.emit(Instruction::Else);
+                        // Guard failed — fall through to next arm.
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
+                        self.emit(Instruction::End);
+                        if_count -= 1;
+                        // Else of the pattern match — fall through.
+                        self.emit(Instruction::Else);
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
+                    } else {
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        self.compile_block(&arm.body)?;
+                        // Always emit Else: either chain to next arm, or provide
+                        // default PushNull so the If block has a valid Else branch.
+                        self.emit(Instruction::Else);
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
                     }
                 }
                 _ => {
@@ -1641,23 +1771,38 @@ impl Compiler {
                         name: name_idx,
                         arg_count: 1,
                     });
-                    self.emit(Instruction::If);
-                    self.compile_block(&arm.body)?;
-                    self.emit(Instruction::Else);
-                    if is_last {
-                        self.emit(Instruction::PushNull);
+                    if let Some(guard) = &arm.guard {
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        self.compile_expr(guard)?;
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        self.compile_block(&arm.body)?;
+                        self.emit(Instruction::Else);
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
+                        self.emit(Instruction::End);
+                        if_count -= 1;
+                        self.emit(Instruction::Else);
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
+                    } else {
+                        self.emit(Instruction::If);
+                        if_count += 1;
+                        self.compile_block(&arm.body)?;
+                        self.emit(Instruction::Else);
+                        if is_last {
+                            self.emit(Instruction::PushNull);
+                        }
                     }
                 }
             }
         }
 
-        // Close if chains.
-        let non_wildcard_count = arms
-            .iter()
-            .take_while(|a| !matches!(&a.pattern, Pattern::Wildcard | Pattern::Variable(_)))
-            .count();
-
-        for _ in 0..non_wildcard_count {
+        // Close all open if blocks.
+        for _ in 0..if_count {
             self.emit(Instruction::End);
         }
 
@@ -1667,15 +1812,27 @@ impl Compiler {
     fn compile_try_catch(
         &mut self,
         try_block: &Block,
-        _catch_var: Option<&str>,
-        _catch_block: &Block,
+        catch_var: Option<&str>,
+        catch_block: &Block,
         finally_block: Option<&Block>,
     ) -> Result<(), CompileError> {
-        // WASM MVP has no exception handling — traps (from `throw`/`unreachable`)
-        // cannot be caught. Only compile the try block; the catch block is dead
-        // code in WASM. The finally block always executes.
+        // WASM MVP has no exception handling — traps cannot be caught.
+        // Compile the try block as the primary path. The catch block is
+        // compiled in a dead-code branch so it is valid WASM but never runs.
         self.compile_block(try_block)?;
         self.emit(Instruction::Drop); // try-catch is a statement, drop try result
+
+        // Compile the catch block in a dead-code branch (if false { catch }).
+        self.emit(Instruction::PushBool(false));
+        self.emit(Instruction::IfVoid);
+        if let Some(var) = catch_var {
+            self.emit(Instruction::PushNull);
+            let catch_idx = self.define_local(var, ValType::Tagged, false)?;
+            self.emit(Instruction::LocalSet(catch_idx));
+        }
+        self.compile_block(catch_block)?;
+        self.emit(Instruction::Drop);
+        self.emit(Instruction::End);
 
         // Compile finally block if present (always runs).
         if let Some(finally) = finally_block {
@@ -1994,6 +2151,19 @@ impl Compiler {
         self.emit(Instruction::End);
 
         self.emit(Instruction::LocalGet(result_local));
+        Ok(())
+    }
+
+    /// Emit all deferred expressions in reverse order (LIFO).
+    /// Called before Return instructions to ensure deferred code runs on exit.
+    fn emit_deferred(&mut self) -> Result<(), CompileError> {
+        // Clone to avoid borrow conflict — deferred_exprs is read while
+        // self is mutably borrowed for compilation.
+        let deferred: Vec<Expression> = self.deferred_exprs.iter().rev().cloned().collect();
+        for expr in &deferred {
+            self.compile_expr(expr)?;
+            self.emit(Instruction::Drop); // deferred expressions are side-effect only
+        }
         Ok(())
     }
 
@@ -2796,18 +2966,18 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_error_match_guard() {
-        let result = compile(r#"
+    fn test_compile_match_guard() {
+        let module = compile(r#"
             let x = 42;
             let y = match x {
                 n if n > 10 => "big",
                 _ => "small",
             };
-        "#);
-        assert!(result.is_err(), "match guards should fail in WASM mode");
-        let err = result.unwrap_err();
-        let msg = format!("{}", err);
-        assert!(msg.contains("match guard") || msg.contains("not yet supported"), "error should mention match guards: {}", msg);
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Match guards produce nested If blocks for pattern + guard checks.
+        let if_count = main.instructions.iter().filter(|i| matches!(i, Instruction::If)).count();
+        assert!(if_count >= 1, "match guard should produce If instructions");
     }
 
     // ── Break/Continue depth tests ──────────────────────────────────

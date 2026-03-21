@@ -4300,15 +4300,15 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_compile_error_match_guard() {
+    fn test_wasm_compile_match_guard() {
         let result = compile_to_wasm(r#"
             let x = 42;
-            match x {
+            let y = match x {
                 n if n > 10 => "big",
                 _ => "small",
             };
         "#);
-        assert!(result.is_err(), "match guards should fail in WASM mode");
+        assert!(result.is_ok(), "match guards should compile successfully in WASM mode");
     }
 
     // ── End-to-end compile → run tests ──────────────────────────────
