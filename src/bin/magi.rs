@@ -6527,12 +6527,22 @@ fn main() {
             println!("MAGI Language v{}", magi_lang::version::version_string());
         }
         "run" => {
-            if args.len() < 3 {
-                eprintln!("error: missing file argument");
-                eprintln!("Usage: magi run <file.magi>");
-                process::exit(1);
+            let mut json_output = false;
+            let mut file_path = None;
+            for arg in &args[2..] {
+                match arg.as_str() {
+                    "--json" => json_output = true,
+                    _ => file_path = Some(arg.as_str()),
+                }
             }
-            cmd_run(&args[2]);
+            match file_path {
+                Some(path) => cmd_run(path, json_output),
+                None => {
+                    eprintln!("error: missing file argument");
+                    eprintln!("Usage: magi run [--json] <file.magi>");
+                    process::exit(1);
+                }
+            }
         }
         "compile" => {
             if args.len() < 3 {
@@ -6637,7 +6647,7 @@ fn main() {
         _ => {
             // If first arg is a .magi file, run it directly.
             if args[1].ends_with(".magi") {
-                cmd_run(&args[1]);
+                cmd_run(&args[1], false);
             } else {
                 eprintln!("error: unknown command '{}'", args[1]);
                 print_usage();
@@ -6957,13 +6967,22 @@ fn cmd_lsp() {
     }
 }
 
-fn cmd_run(path: &str) {
+fn cmd_run(path: &str, json_output: bool) {
     let source = read_source(path);
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
+            if json_output {
+                let diag = serde_json::json!({
+                    "error": e.message,
+                    "line": e.line,
+                    "column": e.column,
+                });
+                println!("{}", diag);
+            } else {
+                magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
+            }
             process::exit(1);
         }
     };
@@ -6977,10 +6996,22 @@ fn cmd_run(path: &str) {
         Ok(_) => {}
         Err(e) => {
             // Print any logs collected before the error
-            for log in &interp.logs {
-                println!("{}", log.message);
+            if !json_output {
+                for log in &interp.logs {
+                    println!("{}", log.message);
+                }
             }
-            eprintln!("{}: runtime error: {}", path, e);
+            if json_output {
+                let span = e.span();
+                let diag = serde_json::json!({
+                    "error": format!("{}", e),
+                    "line": span.map(|s| s.start_line),
+                    "column": span.map(|s| s.start_col),
+                });
+                println!("{}", diag);
+            } else {
+                eprintln!("{}: runtime error: {}", path, e);
+            }
             process::exit(1);
         }
     }
