@@ -320,6 +320,7 @@ impl Parser {
         if tok.kind == TokenKind::Async
             || tok.kind == TokenKind::Await
             || tok.kind == TokenKind::Spawn
+            || tok.kind == TokenKind::Go
         {
             return Err(SyntaxError {
                 line: tok.span.start_line as usize,
@@ -1740,7 +1741,8 @@ impl Parser {
                 | TokenKind::Struct
                 | TokenKind::Test
                 | TokenKind::Do
-                | TokenKind::Defer => {
+                | TokenKind::Defer
+                | TokenKind::Go => {
                     let mut stmt = self.parse_statement()?;
                     stmt.leading_comments = leading;
                     stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);

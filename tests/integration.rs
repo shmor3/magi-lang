@@ -1854,7 +1854,8 @@ fn test_w105_infinite_loop_moved_to_linter() {
 
 #[test]
 fn test_w106_double_negation() {
-    let codes = typecheck_warnings("let x = 5; let y = --x;");
+    // With ++/-- operators, double negation must use -(-x) syntax
+    let codes = typecheck_warnings("let x = 5; let y = -(-x);");
     assert!(codes.contains(&"W106".to_string()), "expected W106, got: {:?}", codes);
 }
 
@@ -6778,9 +6779,10 @@ let _y = x == true
 
 #[test]
 fn test_w106_stays_for_double_negation() {
+    // With ++/-- operators, double negation must use -(-x) syntax
     let codes = typecheck_warnings(r#"
 let x = 5
-let _y = --x
+let _y = -(-x)
 "#);
     assert!(codes.contains(&"W106".to_string()), "expected W106, got {:?}", codes);
 }
@@ -13868,8 +13870,8 @@ fn test_smoke_type_checker_all_codes() {
     let codes = typecheck_warnings("let x = true; let y = x == true; output y;");
     assert!(codes.contains(&"W106".to_string()), "W106 (boolean literal comparison) missing, got: {:?}", codes);
 
-    // W106: Double negation
-    let codes = typecheck_warnings("let x = 5; let y = --x; output y;");
+    // W106: Double negation (use -(-x) since -- is now decrement)
+    let codes = typecheck_warnings("let x = 5; let y = -(-x); output y;");
     assert!(codes.contains(&"W106".to_string()), "W106 (double negation) missing, got: {:?}", codes);
 
     // W107: Modulo by 1
@@ -17983,8 +17985,8 @@ assert_eq(result, "matched float")
 
 #[test]
 fn test_double_negation_w106() {
-    // W106 should still fire for double negation
-    let codes = typecheck_warnings("let x = 5; let _y = --x;");
+    // With ++/-- operators, double negation must use -(-x) syntax
+    let codes = typecheck_warnings("let x = 5; let _y = -(-x);");
     assert!(codes.contains(&"W106".to_string()), "expected W106 for double negation, got: {:?}", codes);
 }
 
