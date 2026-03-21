@@ -234,27 +234,21 @@ impl TypeChecker {
     }
 
     /// Collect all variable names visible in the current scope stack.
-    fn available_variable_names(&self) -> Vec<String> {
-        let mut names = HashSet::new();
-        for scope in self.env.iter().rev() {
-            for key in scope.keys() {
-                names.insert(key.clone());
-            }
-        }
-        names.into_iter().collect()
-    }
-
     /// Suggest a variable name using Levenshtein distance.
     fn suggest_variable(&self, name: &str) -> Option<String> {
-        let names = self.available_variable_names();
-        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        // Collect unique variable names from all scopes without cloning into a HashSet
+        let mut seen = HashSet::new();
+        let refs: Vec<&str> = self.env.iter().rev()
+            .flat_map(|scope| scope.keys())
+            .filter(|k| seen.insert(k.as_str()))
+            .map(|k| k.as_str())
+            .collect();
         super::errors::suggest_name(name, &refs)
     }
 
     /// Suggest a function name using Levenshtein distance.
     fn suggest_function(&self, name: &str) -> Option<String> {
-        let names: Vec<String> = self.function_sigs.keys().cloned().collect();
-        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = self.function_sigs.keys().map(|s| s.as_str()).collect();
         super::errors::suggest_name(name, &refs)
     }
 

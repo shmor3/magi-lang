@@ -394,31 +394,20 @@ impl<'a> Interpreter<'a> {
         None
     }
 
-    /// Collect all variable names visible in the current scope stack.
-    fn available_variable_names(&self) -> Vec<String> {
-        self.symbols.iter().rev()
-            .flat_map(|scope| scope.keys().cloned())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    /// Collect all function names currently defined.
-    fn available_function_names(&self) -> Vec<String> {
-        self.functions.keys().cloned().collect()
-    }
-
     /// Suggest a variable name using Levenshtein distance.
     fn suggest_variable(&self, name: &str) -> Option<String> {
-        let names = self.available_variable_names();
-        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut seen = std::collections::HashSet::new();
+        let refs: Vec<&str> = self.symbols.iter().rev()
+            .flat_map(|scope| scope.keys())
+            .filter(|k| seen.insert(k.as_str()))
+            .map(|k| k.as_str())
+            .collect();
         super::errors::suggest_name(name, &refs)
     }
 
     /// Suggest a function name using Levenshtein distance.
     fn suggest_function(&self, name: &str) -> Option<String> {
-        let names = self.available_function_names();
-        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = self.functions.keys().map(|s| s.as_str()).collect();
         super::errors::suggest_name(name, &refs)
     }
 
