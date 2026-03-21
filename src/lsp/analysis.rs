@@ -245,7 +245,7 @@ fn extract_symbols_indexed(
                     s.push_str(&p.name);
                     if let Some(ty) = &p.type_annotation {
                         s.push_str(": ");
-                        s.push_str(ty);
+                        s.push_str(&ty.to_string());
                     }
                     s
                 }).collect();
@@ -255,7 +255,7 @@ fn extract_symbols_indexed(
                 functions.insert(fdef.name.clone(), FunctionSymbol {
                     name: fdef.name.clone(),
                     params,
-                    return_type: fdef.return_type.clone(),
+                    return_type: fdef.return_type.as_ref().map(|t| t.to_string()),
                     is_async,
                     line: fdef.span.start_line,
                     col: name_col,
@@ -269,7 +269,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: false,
                     is_type_alias: false,
-                    type_annotation: type_annotation.clone(),
+                    type_annotation: type_annotation.as_ref().map(|t| t.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
                 });
@@ -282,7 +282,7 @@ fn extract_symbols_indexed(
                     mutable: true,
                     constant: false,
                     is_type_alias: false,
-                    type_annotation: type_annotation.clone(),
+                    type_annotation: type_annotation.as_ref().map(|t| t.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
                 });
@@ -295,7 +295,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: true,
                     is_type_alias: false,
-                    type_annotation: type_annotation.clone(),
+                    type_annotation: type_annotation.as_ref().map(|t| t.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
                 });
@@ -313,7 +313,7 @@ fn extract_symbols_indexed(
             }
             StatementKind::StructDef { name, fields } => {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| {
-                    (f.name.clone(), f.type_annotation.clone())
+                    (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))
                 }).collect();
                 let name_col = find_name_col_indexed(source, line_index, stmt.span.start_line, name)
                     .unwrap_or(stmt.span.start_col);
@@ -332,7 +332,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: false,
                     is_type_alias: true,
-                    type_annotation: Some(target.clone()),
+                    type_annotation: Some(target.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
                 });
@@ -846,8 +846,8 @@ pub fn find_variable_struct_type(state: &DocumentState, var_name: &str) -> Optio
                 if name == var_name {
                     // Check type annotation first
                     if let Some(ta) = type_annotation {
-                        if state.structs.contains_key(ta) {
-                            return Some(ta.clone());
+                        let ta_str = ta.to_string(); if state.structs.contains_key(&ta_str) {
+                            return Some(ta_str);
                         }
                     }
                     // Check if RHS is a struct constructor

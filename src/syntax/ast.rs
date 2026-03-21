@@ -5,6 +5,7 @@
 //! infix operators, blocks, and proper type checking.
 
 use std::fmt;
+pub use super::type_ann::TypeAnnotation;
 
 // =============================================================================
 // Span — source location tracking
@@ -101,13 +102,13 @@ pub enum StatementKind {
     /// `let name = expr;` or `let name: type = expr;`
     Let {
         name: String,
-        type_annotation: Option<String>,
+        type_annotation: Option<TypeAnnotation>,
         value: Expression,
     },
     /// `let mut name = expr;` or `let mut name: type = expr;`
     LetMut {
         name: String,
-        type_annotation: Option<String>,
+        type_annotation: Option<TypeAnnotation>,
         value: Expression,
     },
     /// `let [a, b] = expr;` or `let {x, y} = expr;` — destructuring bind
@@ -182,11 +183,11 @@ pub enum StatementKind {
     /// `const NAME = expr;` or `const NAME: type = expr;`
     ConstDef {
         name: String,
-        type_annotation: Option<String>,
+        type_annotation: Option<TypeAnnotation>,
         value: Expression,
     },
     /// `type Name = target;`
-    TypeAlias { name: String, target: String },
+    TypeAlias { name: String, target: TypeAnnotation },
     /// `mod name { body }`
     ModuleDef { name: String, body: Block },
     /// `use path::to::item;` or `use path::to::item as alias;` or `use path::to::*;`
@@ -207,6 +208,30 @@ pub enum StatementKind {
         name: String,
         fields: Vec<StructField>,
     },
+    /// `impl TypeName { fn method(self, ...) { ... } ... }`
+    ImplBlock {
+        type_name: String,
+        methods: Vec<FunctionDef>,
+    },
+    /// `trait Name { fn method(self, ...); ... }`
+    TraitDef {
+        name: String,
+        methods: Vec<TraitMethod>,
+    },
+    /// `impl Trait for Type { fn method(self, ...) { ... } ... }`
+    ImplTrait {
+        trait_name: String,
+        type_name: String,
+        methods: Vec<FunctionDef>,
+    },
+    /// `do { body } while condition;`
+    DoWhileLoop {
+        label: Option<String>,
+        body: Block,
+        condition: Expression,
+    },
+    /// `defer expr;` or `defer { block }` -- runs when enclosing scope exits
+    Defer(Expression),
 }
 
 /// Pattern for for-loop iteration variable binding.
@@ -232,7 +257,16 @@ pub struct EnumVariant {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
     pub name: String,
-    pub type_annotation: Option<String>,
+    pub type_annotation: Option<TypeAnnotation>,
+    pub span: Span,
+}
+
+/// A method signature in a trait definition (no body).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<TypeAnnotation>,
     pub span: Span,
 }
 
@@ -244,7 +278,7 @@ pub struct StructField {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionParam {
     pub name: String,
-    pub type_annotation: Option<String>,
+    pub type_annotation: Option<TypeAnnotation>,
     pub default: Option<Expression>,
     pub rest: bool,
     pub span: Span,
@@ -255,7 +289,7 @@ pub struct FunctionParam {
 pub struct FunctionDef {
     pub name: String,
     pub params: Vec<FunctionParam>,
-    pub return_type: Option<String>,
+    pub return_type: Option<TypeAnnotation>,
     pub body: Block,
     pub span: Span,
 }
@@ -459,6 +493,16 @@ impl BinOp {
     }
 
     /// Operator precedence (higher = tighter binding).
+    pub fn magic_method_name(self) -> &'static str {
+        match self {
+            BinOp::Add => "__add__", BinOp::Sub => "__sub__", BinOp::Mul => "__mul__",
+            BinOp::Div => "__div__", BinOp::Mod => "__mod__", BinOp::Eq => "__eq__",
+            BinOp::NotEq => "__ne__", BinOp::Gt => "__gt__", BinOp::Lt => "__lt__",
+            BinOp::GtEq => "__ge__", BinOp::LtEq => "__le__", BinOp::And => "__and__",
+            BinOp::Or => "__or__",
+        }
+    }
+
     pub fn precedence(self) -> u8 {
         match self {
             BinOp::Or => 1,
@@ -533,6 +577,8 @@ pub enum Literal {
     Null,
     Array(Vec<Expression>),
     Map(Vec<(String, Expression)>),
+    /// `Set(expr, expr, ...)` -- set literal
+    Set(Vec<Expression>),
 }
 
 // =============================================================================

@@ -182,7 +182,7 @@ impl<'a> Formatter<'a> {
                 self.write(name);
                 if let Some(ty) = type_annotation {
                     self.write(": ");
-                    self.write(ty);
+                    self.write(&ty.to_string());
                 }
                 self.write(" = ");
                 self.fmt_expression(value);
@@ -197,7 +197,7 @@ impl<'a> Formatter<'a> {
                 self.write(name);
                 if let Some(ty) = type_annotation {
                     self.write(": ");
-                    self.write(ty);
+                    self.write(&ty.to_string());
                 }
                 self.write(" = ");
                 self.fmt_expression(value);
@@ -271,6 +271,71 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression(condition);
                 self.write(" ");
                 self.fmt_block(body);
+            }
+            StatementKind::DoWhileLoop { label, body, condition } => {
+                if let Some(lbl) = label {
+                    self.write(&format!("\'{}: ", lbl));
+                }
+                self.write("do ");
+                self.fmt_block(body);
+                self.write(" while ");
+                self.fmt_expression(condition);
+                self.write(";");
+            }
+            StatementKind::Defer(expr) => {
+                self.write("defer ");
+                match &expr.kind {
+                    ExpressionKind::Block(_) => {
+                        self.fmt_expression(expr);
+                    }
+                    _ => {
+                        self.fmt_expression(expr);
+                        self.write(";");
+                    }
+                }
+            }
+            StatementKind::ImplBlock { type_name, methods } => {
+                self.write(&format!("impl {} ", type_name));
+                self.write("{");
+                self.newline();
+                self.indent();
+                for method in methods {
+                    self.write("fn ");
+                    self.fmt_function_def(method);
+                    self.newline();
+                }
+                self.dedent();
+                self.write("}");
+            }
+            StatementKind::TraitDef { name, methods } => {
+                self.write(&format!("trait {} ", name));
+                self.write("{");
+                self.newline();
+                self.indent();
+                for method in methods {
+                    self.write(&format!("fn {}(", method.name));
+                    for (i, p) in method.params.iter().enumerate() {
+                        if i > 0 { self.write(", "); }
+                        self.write(&p.name);
+                    }
+                    self.write(");");
+                    self.newline();
+                }
+                self.dedent();
+                self.write("}");
+            }
+            StatementKind::ImplTrait { trait_name, type_name, methods } => {
+                self.write(&format!("impl {} for {} ", trait_name, type_name));
+                self.write("{");
+                self.newline();
+                self.indent();
+                for method in methods {
+                    self.write("fn ");
+                    self.fmt_function_def(method);
+                    self.newline();
+                }
+                self.dedent();
+                self.write("}");
             }
             StatementKind::Output(expr) => {
                 self.write("output ");
@@ -356,7 +421,7 @@ impl<'a> Formatter<'a> {
                 self.write(name);
                 if let Some(ty) = type_annotation {
                     self.write(": ");
-                    self.write(ty);
+                    self.write(&ty.to_string());
                 }
                 self.write(" = ");
                 self.fmt_expression(value);
@@ -418,7 +483,7 @@ impl<'a> Formatter<'a> {
                     self.write(&field.name);
                     if let Some(ty) = &field.type_annotation {
                         self.write(": ");
-                        self.write(ty);
+                        self.write(&ty.to_string());
                     }
                     if i < fields.len() - 1 {
                         self.write(",");
@@ -441,7 +506,7 @@ impl<'a> Formatter<'a> {
             self.write(&param.name);
             if let Some(ty) = &param.type_annotation {
                 self.write(": ");
-                self.write(ty);
+                self.write(&ty.to_string());
             }
             if let Some(default) = &param.default {
                 self.write(" = ");
@@ -454,7 +519,7 @@ impl<'a> Formatter<'a> {
         self.write(")");
         if let Some(ret) = &fdef.return_type {
             self.write(" -> ");
-            self.write(ret);
+            self.write(&ret.to_string());
         }
         self.write(" ");
         self.fmt_block(&fdef.body);
@@ -724,7 +789,7 @@ impl<'a> Formatter<'a> {
                     self.write(&param.name);
                     if let Some(ty) = &param.type_annotation {
                         self.write(": ");
-                        self.write(ty);
+                        self.write(&ty.to_string());
                     }
                     if let Some(default) = &param.default {
                         self.write(" = ");
@@ -1083,6 +1148,16 @@ impl<'a> Formatter<'a> {
                     self.dedent();
                     self.write("}");
                 }
+            }
+            Literal::Set(elems) => {
+                self.write("Set(");
+                for (i, elem) in elems.iter().enumerate() {
+                    self.fmt_expression(elem);
+                    if i < elems.len() - 1 {
+                        self.write(", ");
+                    }
+                }
+                self.write(")");
             }
         }
     }

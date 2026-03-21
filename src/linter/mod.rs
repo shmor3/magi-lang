@@ -254,6 +254,19 @@ impl<'a> LintContext<'a> {
                 self.check_expression(condition);
                 self.check_block(body);
             }
+            StatementKind::DoWhileLoop { condition, body, .. } => {
+                if let Some(d) = rules::check_constant_condition(condition, Some(body)) {
+                    self.emit(d);
+                }
+                if let Some(d) = rules::check_empty_block(body, "do-while-loop", stmt.span) {
+                    self.emit(d);
+                }
+                self.check_expression(condition);
+                self.check_block(body);
+            }
+            StatementKind::Defer(expr) => {
+                self.check_expression(expr);
+            }
             StatementKind::Output(expr) => {
                 self.check_expression(expr);
             }

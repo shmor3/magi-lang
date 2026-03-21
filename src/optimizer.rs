@@ -52,6 +52,13 @@ fn fold_statement(stmt: &mut Statement) {
             fold_expr(condition);
             fold_block(body);
         }
+        StatementKind::DoWhileLoop { body, condition, .. } => {
+            fold_block(body);
+            fold_expr(condition);
+        }
+        StatementKind::Defer(expr) => {
+            fold_expr(expr);
+        }
         StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
             for param in &mut fdef.params {
                 if let Some(default) = &mut param.default {
@@ -92,7 +99,10 @@ fn fold_statement(stmt: &mut Statement) {
         | StatementKind::TypeAlias { .. }
         | StatementKind::Use { .. }
         | StatementKind::EnumDef { .. }
-        | StatementKind::StructDef { .. } => {}
+        | StatementKind::StructDef { .. }
+        | StatementKind::ImplBlock { .. }
+        | StatementKind::TraitDef { .. }
+        | StatementKind::ImplTrait { .. } => {}
     }
 }
 

@@ -157,6 +157,7 @@ impl Heap {
             DataType::Bytes(b) => 8 + b.len() as u64,
             DataType::Array(arr) => 8 + 8 * (arr.len() as u64),
             DataType::Map(map) => 8 + 16 * (map.len() as u64),
+            DataType::Set(items) => 8 + 8 * (items.len() as u64),
             DataType::Future(_) => 16,
         };
         // Align to ALIGNMENT
@@ -343,12 +344,16 @@ pub struct Interpreter<'a> {
     enum_defs: HashMap<String, Vec<EnumVariant>>,
     /// Struct definitions: name → fields.
     struct_defs: HashMap<String, Vec<StructField>>,
+    impl_methods: HashMap<String, HashMap<String, FunctionDef>>,
+    trait_defs: HashMap<String, Vec<TraitMethod>>,
     /// Package import guard: tracks packages currently being imported (circular import detection).
     importing_packages: std::collections::HashSet<String>,
     /// Source file name for error messages (#134).
     source_file: Option<String>,
     /// Runtime call stack for error diagnostics (#133).
     call_stack_names: Vec<String>,
+    /// Stack of deferred expressions per scope level.
+    deferred: Vec<Vec<Expression>>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -371,9 +376,12 @@ impl<'a> Interpreter<'a> {
             packages: HashMap::new(),
             enum_defs: HashMap::new(),
             struct_defs: HashMap::new(),
+            impl_methods: HashMap::new(),
+            trait_defs: HashMap::new(),
             source_file: None,
             call_stack_names: Vec::new(),
             importing_packages: std::collections::HashSet::new(),
+            deferred: vec![Vec::new()],
         }
     }
 
@@ -735,6 +743,17 @@ impl<'a> Interpreter<'a> {
                 StatementKind::StructDef { name, fields } => {
                     self.struct_defs.insert(name.clone(), fields.clone());
                 }
+                StatementKind::ImplBlock { type_name, methods } => {
+                    let tm = self.impl_methods.entry(type_name.clone()).or_default();
+                    for m in methods { tm.insert(m.name.clone(), m.clone()); }
+                }
+                StatementKind::TraitDef { name, methods } => {
+                    self.trait_defs.insert(name.clone(), methods.clone());
+                }
+                StatementKind::ImplTrait { type_name, methods, .. } => {
+                    let tm = self.impl_methods.entry(type_name.clone()).or_default();
+                    for m in methods { tm.insert(m.name.clone(), m.clone()); }
+                }
                 StatementKind::ModuleDef { name, body } => {
                     self.register_module(name, body);
                 }
@@ -788,6 +807,9 @@ impl<'a> Interpreter<'a> {
                         | StatementKind::ModuleDef { .. }
                         | StatementKind::EnumDef { .. }
                         | StatementKind::StructDef { .. }
+                        | StatementKind::ImplBlock { .. }
+                        | StatementKind::TraitDef { .. }
+                        | StatementKind::ImplTrait { .. }
                 ) {
                     continue;
                 }
@@ -1034,6 +1056,76 @@ impl<'a> Interpreter<'a> {
                     self.maybe_gc();
                 }
                 Ok(last)
+            }
+
+            StatementKind::DoWhileLoop { label, body, condition } => {
+                let mut iterations = 0;
+                let mut last = DataType::Null;
+                loop {
+                    if self.is_cancelled() {
+                        return Err(InterpError::Cancelled);
+                    }
+                    if iterations >= MAX_LOOP_ITERATIONS {
+                        return Err(InterpError::MaxIterations {
+                            limit: MAX_LOOP_ITERATIONS,
+                            span: stmt.span,
+                        });
+                    }
+
+                    // Execute body first (guaranteed at least one execution)
+                    self.symbols.push(HashMap::new());
+                    self.heap.push_scope();
+                    let result = self.exec_block(body);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
+                    match result {
+                        Ok(val) => { last = val; }
+                        Err(InterpError::BreakSignal(val)) => {
+                            last = val;
+                            break;
+                        }
+                        Err(InterpError::LabeledBreak { label: ref lbl, ref value })
+                            if label.as_deref() == Some(lbl.as_str()) =>
+                        {
+                            last = value.clone();
+                            break;
+                        }
+                        Err(InterpError::ContinueSignal) => {}
+                        Err(InterpError::LabeledContinue { label: ref lbl })
+                            if label.as_deref() == Some(lbl.as_str()) => {}
+                        Err(e) => return Err(e),
+                    }
+
+                    // Then check condition
+                    let cond = self.eval_expr(condition)?;
+                    let is_true = match &cond {
+                        DataType::Bool(b) => *b,
+                        other => {
+                            return Err(InterpError::TypeError {
+                                expected: "Bool".to_string(),
+                                actual: other.type_name().to_string(),
+                                context: "do-while condition".to_string(),
+                                span: condition.span,
+                            });
+                        }
+                    };
+
+                    if !is_true {
+                        break;
+                    }
+                    iterations += 1;
+                    self.maybe_gc();
+                }
+                Ok(last)
+            }
+
+            StatementKind::Defer(expr) => {
+                // Push the deferred expression onto the current scope's deferred stack.
+                // It will be executed (in reverse order) when the enclosing block exits.
+                if let Some(scope) = self.deferred.last_mut() {
+                    scope.push(expr.clone());
+                }
+                Ok(DataType::Null)
             }
 
             StatementKind::Output(expr) => {
@@ -1310,6 +1402,10 @@ impl<'a> Interpreter<'a> {
                 self.struct_defs.insert(name.clone(), fields.clone());
                 Ok(DataType::Null)
             }
+
+            StatementKind::ImplBlock { .. } => Ok(DataType::Null),
+            StatementKind::TraitDef { .. } => Ok(DataType::Null),
+            StatementKind::ImplTrait { .. } => Ok(DataType::Null),
 
             StatementKind::Use { path, alias, glob } => {
                 // Check if this is a std library import
@@ -2906,7 +3002,8 @@ impl<'a> Interpreter<'a> {
                                 DataType::Array(_) => 4,
                                 DataType::Map(_) => 5,
                                 DataType::Bytes(_) => 6,
-                                DataType::Future(_) => 7,
+                                DataType::Set(_) => 7,
+                                DataType::Future(_) => 8,
                             }
                         }
                         let ta = type_tier(a);
@@ -3080,6 +3177,95 @@ impl<'a> Interpreter<'a> {
                 }
                 _ => Ok(None),
             },
+            DataType::Set(items) => match method {
+                "len" | "length" | "size" => Ok(Some(DataType::Int64(items.len() as i64))),
+                "is_empty" => Ok(Some(DataType::Bool(items.is_empty()))),
+                "contains" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let val = self.eval_expr(&args[0])?;
+                    Ok(Some(DataType::Bool(items.iter().any(|x| datatype_eq(x, &val)))))
+                }
+                "add" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "add".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let val = self.eval_expr(&args[0])?;
+                    let mut new_items = items.clone();
+                    if !new_items.iter().any(|x| datatype_eq(x, &val)) {
+                        new_items.push(val);
+                    }
+                    Ok(Some(DataType::Set(new_items)))
+                }
+                "remove" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "remove".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let val = self.eval_expr(&args[0])?;
+                    let new_items: Vec<DataType> = items.iter()
+                        .filter(|x| !datatype_eq(x, &val))
+                        .cloned().collect();
+                    Ok(Some(DataType::Set(new_items)))
+                }
+                "union" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "union".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_items = match &other {
+                        DataType::Set(s) => s,
+                        DataType::Array(a) => a,
+                        _ => return Err(InterpError::TypeError { expected: "Set or Array".to_string(), actual: other.type_name().to_string(), context: "union argument".to_string(), span }),
+                    };
+                    let mut result = items.clone();
+                    for item in other_items {
+                        if !result.iter().any(|x| datatype_eq(x, item)) {
+                            result.push(item.clone());
+                        }
+                    }
+                    Ok(Some(DataType::Set(result)))
+                }
+                "intersection" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "intersection".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_items = match &other {
+                        DataType::Set(s) => s,
+                        DataType::Array(a) => a,
+                        _ => return Err(InterpError::TypeError { expected: "Set or Array".to_string(), actual: other.type_name().to_string(), context: "intersection argument".to_string(), span }),
+                    };
+                    let result: Vec<DataType> = items.iter()
+                        .filter(|x| other_items.iter().any(|y| datatype_eq(x, y)))
+                        .cloned().collect();
+                    Ok(Some(DataType::Set(result)))
+                }
+                "difference" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "difference".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_items = match &other {
+                        DataType::Set(s) => s,
+                        DataType::Array(a) => a,
+                        _ => return Err(InterpError::TypeError { expected: "Set or Array".to_string(), actual: other.type_name().to_string(), context: "difference argument".to_string(), span }),
+                    };
+                    let result: Vec<DataType> = items.iter()
+                        .filter(|x| !other_items.iter().any(|y| datatype_eq(x, y)))
+                        .cloned().collect();
+                    Ok(Some(DataType::Set(result)))
+                }
+                "is_subset" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_subset".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_items = match &other {
+                        DataType::Set(s) => s, DataType::Array(a) => a,
+                        _ => return Err(InterpError::TypeError { expected: "Set or Array".to_string(), actual: other.type_name().to_string(), context: "is_subset argument".to_string(), span }),
+                    };
+                    Ok(Some(DataType::Bool(items.iter().all(|x| other_items.iter().any(|y| datatype_eq(x, y))))))
+                }
+                "is_superset" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_superset".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?;
+                    let other_items = match &other {
+                        DataType::Set(s) => s, DataType::Array(a) => a,
+                        _ => return Err(InterpError::TypeError { expected: "Set or Array".to_string(), actual: other.type_name().to_string(), context: "is_superset argument".to_string(), span }),
+                    };
+                    Ok(Some(DataType::Bool(other_items.iter().all(|x| items.iter().any(|y| datatype_eq(x, y))))))
+                }
+                "to_array" => Ok(Some(DataType::Array(items.clone()))),
+                "clear" => Ok(Some(DataType::Set(Vec::new()))),
+                _ => Ok(None),
+            },
             _ => Ok(None),
         }
     }
@@ -3222,14 +3408,42 @@ impl<'a> Interpreter<'a> {
     }
 
     fn exec_block(&mut self, block: &Block) -> Result<DataType, InterpError> {
+        // Push a new deferred scope for this block
+        self.deferred.push(Vec::new());
+
         let mut last = DataType::Null;
+        let mut block_err: Option<InterpError> = None;
+
         for stmt in &block.statements {
-            last = self.exec_statement(stmt)?;
+            match self.exec_statement(stmt) {
+                Ok(val) => last = val,
+                Err(e) => {
+                    block_err = Some(e);
+                    break;
+                }
+            }
         }
-        if let Some(tail) = &block.tail_expr {
-            last = self.eval_expr(tail)?;
+        if block_err.is_none() {
+            if let Some(tail) = &block.tail_expr {
+                match self.eval_expr(tail) {
+                    Ok(val) => last = val,
+                    Err(e) => block_err = Some(e),
+                }
+            }
         }
-        Ok(last)
+
+        // Execute deferred expressions in reverse order (LIFO)
+        let deferred = self.deferred.pop().unwrap_or_default();
+        for deferred_expr in deferred.iter().rev() {
+            // Deferred expressions run even on error; errors from deferred
+            // expressions are logged but do not override the original error.
+            let _ = self.eval_expr(deferred_expr);
+        }
+
+        match block_err {
+            Some(e) => Err(e),
+            None => Ok(last),
+        }
     }
 
     // =========================================================================
@@ -3282,6 +3496,16 @@ impl<'a> Interpreter<'a> {
                     map.insert(key.clone(), self.eval_expr(value_expr)?);
                 }
                 Ok(DataType::Map(map))
+            }
+            Literal::Set(elements) => {
+                let mut items = Vec::with_capacity(elements.len());
+                for elem in elements {
+                    let val = self.eval_expr(elem)?;
+                    if !items.iter().any(|x| datatype_eq(x, &val)) {
+                        items.push(val);
+                    }
+                }
+                Ok(DataType::Set(items))
             }
         }
     }
@@ -3341,6 +3565,33 @@ impl<'a> Interpreter<'a> {
 
                 let lhs = self.eval_expr(left)?;
                 let rhs = self.eval_expr(right)?;
+
+                // Operator overloading: check if lhs is a struct with a magic method (#86)
+                if let DataType::Map(ref map) = lhs {
+                    if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                        let magic = op.magic_method_name();
+                        if let Some(im) = self.impl_methods.get(struct_name).and_then(|m| m.get(magic)).cloned() {
+                            self.call_depth += 1;
+                            if self.call_depth > MAX_CALL_DEPTH {
+                                self.call_depth -= 1;
+                                return Err(InterpError::ResourceLimit { limit: format!("{} calls", MAX_CALL_DEPTH), actual: format!("{} calls", self.call_depth + 1), context: format!("{}.{}", struct_name, magic), span: expr.span });
+                            }
+                            self.symbols.push(HashMap::new());
+                            self.heap.push_scope();
+                            if let Some(p) = im.params.first() { let addr = self.heap.alloc(lhs.clone()); self.define(&p.name, addr, false); }
+                            if let Some(p) = im.params.get(1) { let addr = self.heap.alloc(rhs.clone()); self.define(&p.name, addr, false); }
+                            let result = self.exec_block(&im.body);
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            self.call_depth -= 1;
+                            return match result {
+                                Ok(v) => Ok(v),
+                                Err(InterpError::ReturnSignal(value)) => Ok(value),
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
+                }
 
                 let op_type = OperationType::parse(op.operation_name()).ok_or_else(|| {
                     InterpError::UnknownOperation {
@@ -3468,6 +3719,31 @@ impl<'a> Interpreter<'a> {
                         }
                         return Ok(DataType::String("null".to_string()));
                     }
+                    "Set" => {
+                        let mut items = Vec::new();
+                        for arg in args {
+                            let val = self.eval_expr(arg)?;
+                            if args.len() == 1 {
+                                if let DataType::Array(arr) = val {
+                                    for item in arr {
+                                        if !items.iter().any(|x: &DataType| datatype_eq(x, &item)) {
+                                            items.push(item);
+                                        }
+                                    }
+                                    return Ok(DataType::Set(items));
+                                } else {
+                                    if !items.iter().any(|x: &DataType| datatype_eq(x, &val)) {
+                                        items.push(val);
+                                    }
+                                    return Ok(DataType::Set(items));
+                                }
+                            }
+                            if !items.iter().any(|x: &DataType| datatype_eq(x, &val)) {
+                                items.push(val);
+                            }
+                        }
+                        return Ok(DataType::Set(items));
+                    }
                     "stdin_read" | "input" => {
                         use std::io::BufRead;
                         let mut line = String::new();
@@ -3480,6 +3756,7 @@ impl<'a> Interpreter<'a> {
                             let val = self.eval_expr(arg)?;
                             let length = match &val {
                                 DataType::Array(a) => a.len() as i64,
+                                DataType::Set(s) => s.len() as i64,
                                 DataType::String(s) => s.chars().count() as i64,
                                 DataType::Map(m) => m.len() as i64,
                                 DataType::Bytes(b) => b.len() as i64,
@@ -3945,6 +4222,43 @@ impl<'a> Interpreter<'a> {
                 // Try direct interpreter methods (no OperationEvaluator needed)
                 if let Some(result) = self.try_eval_direct_method(&obj, method, args, expr.span)? {
                     return Ok(result);
+                }
+
+                // Try impl block methods for struct values
+                if let DataType::Map(ref map) = obj {
+                    if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                        if let Some(impl_method) = self.impl_methods.get(struct_name).and_then(|m| m.get(method.as_str())).cloned() {
+                            self.call_depth += 1;
+                            if self.call_depth > MAX_CALL_DEPTH {
+                                self.call_depth -= 1;
+                                return Err(InterpError::ResourceLimit { limit: format!("{} calls", MAX_CALL_DEPTH), actual: format!("{} calls", self.call_depth + 1), context: format!("{}.{}", struct_name, method), span: expr.span });
+                            }
+                            self.symbols.push(HashMap::new());
+                            self.heap.push_scope();
+                            if let Some(p) = impl_method.params.first() {
+                                let addr = self.heap.alloc(obj.clone());
+                                self.define(&p.name, addr, false);
+                            }
+                            let mut eval_args = Vec::new();
+                            for arg in args { eval_args.push(self.eval_expr(arg)?); }
+                            for (i, param) in impl_method.params.iter().skip(1).enumerate() {
+                                let val = if i < eval_args.len() { eval_args[i].clone() }
+                                    else if let Some(default) = &param.default { self.eval_expr(default)? }
+                                    else { DataType::Null };
+                                let addr = self.heap.alloc(val);
+                                self.define(&param.name, addr, false);
+                            }
+                            let result = self.exec_block(&impl_method.body);
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            self.call_depth -= 1;
+                            return match result {
+                                Ok(v) => Ok(v),
+                                Err(InterpError::ReturnSignal(value)) => Ok(value),
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
                 }
 
                 let op_type =
@@ -5088,6 +5402,17 @@ impl<'a> Interpreter<'a> {
                 StatementKind::ModuleDef { name, body } => {
                     self.register_module(name, body);
                 }
+                StatementKind::ImplBlock { type_name, methods } => {
+                    let tm = self.impl_methods.entry(type_name.clone()).or_default();
+                    for m in methods { tm.insert(m.name.clone(), m.clone()); }
+                }
+                StatementKind::TraitDef { name, methods } => {
+                    self.trait_defs.insert(name.clone(), methods.clone());
+                }
+                StatementKind::ImplTrait { type_name, methods, .. } => {
+                    let tm = self.impl_methods.entry(type_name.clone()).or_default();
+                    for m in methods { tm.insert(m.name.clone(), m.clone()); }
+                }
                 StatementKind::TestDef { .. } => {
                     // Skip tests in pass 1
                 }
@@ -5740,6 +6065,20 @@ fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
                 format!("[{}]", items.join(", "))
             }
         }
+        DataType::Set(items) => {
+            if depth >= MAX_DISPLAY_DEPTH {
+                return "Set(...)".to_string();
+            }
+            const MAX_DISPLAY_ELEMENTS: usize = 1000;
+            let truncated = items.len() > MAX_DISPLAY_ELEMENTS;
+            let elems: Vec<String> = items.iter().take(MAX_DISPLAY_ELEMENTS)
+                .map(|v| datatype_to_display_depth(v, depth + 1)).collect();
+            if truncated {
+                format!("Set({{{}, ...({} more)}})", elems.join(", "), items.len() - MAX_DISPLAY_ELEMENTS)
+            } else {
+                format!("Set({{{}}})", elems.join(", "))
+            }
+        }
         DataType::Map(map) => {
             if depth >= MAX_DISPLAY_DEPTH {
                 return "{...}".to_string();
@@ -5762,6 +6101,29 @@ fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
 }
 
 /// Convert a DataType to i128 for wide numeric comparisons (handles Uint64 > i64::MAX).
+/// Compare two DataType values for equality (used for Set dedup).
+fn datatype_eq(a: &DataType, b: &DataType) -> bool {
+    match (a, b) {
+        (DataType::Null, DataType::Null) => true,
+        (DataType::Bool(a), DataType::Bool(b)) => a == b,
+        (DataType::Int64(a), DataType::Int64(b)) => a == b,
+        (DataType::Int32(a), DataType::Int32(b)) => a == b,
+        (DataType::Uint32(a), DataType::Uint32(b)) => a == b,
+        (DataType::Uint64(a), DataType::Uint64(b)) => a == b,
+        (DataType::Float64(a), DataType::Float64(b)) => a.to_bits() == b.to_bits(),
+        (DataType::Float32(a), DataType::Float32(b)) => a.to_bits() == b.to_bits(),
+        (DataType::String(a), DataType::String(b)) => a == b,
+        (DataType::Bytes(a), DataType::Bytes(b)) => a == b,
+        (DataType::Array(a), DataType::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| datatype_eq(x, y))
+        }
+        (DataType::Set(a), DataType::Set(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| datatype_eq(x, y))
+        }
+        _ => false,
+    }
+}
+
 /// Resolve a method call to an OperationType based on receiver type and method name.
 fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
     let result = match obj {
@@ -5830,6 +6192,10 @@ fn resolve_method(obj: &DataType, method: &str) -> Option<OperationType> {
             "contains" => Some(OperationType::BytesContains),
             "base64_encode" => Some(OperationType::Base64Encode),
             "base64_decode" => Some(OperationType::Base64Decode),
+            _ => None,
+        },
+        DataType::Set(_) => match method {
+            "len" | "length" | "size" => Some(OperationType::ArrayLength),
             _ => None,
         },
         _ => None,
@@ -5909,6 +6275,11 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
         DataType::Bytes(_) => {
             methods.extend_from_slice(&["len", "length", "slice", "concat", "contains",
                 "base64_encode", "base64_decode"]);
+        }
+        DataType::Set(_) => {
+            methods.extend_from_slice(&["add", "remove", "contains", "len", "length", "size",
+                "union", "intersection", "difference", "is_subset", "is_superset",
+                "to_array", "clear", "is_empty"]);
         }
         _ => {}
     }
@@ -6380,7 +6751,10 @@ pub fn resolve_package_from_source(id: &str, source: &str) -> Result<ResolvedPac
             StatementKind::Use { .. } => {
                 use_statements.push(stmt.clone());
             }
-            StatementKind::EnumDef { .. } | StatementKind::StructDef { .. } => {
+            StatementKind::EnumDef { .. } | StatementKind::StructDef { .. }
+                        | StatementKind::ImplBlock { .. }
+                        | StatementKind::TraitDef { .. }
+                        | StatementKind::ImplTrait { .. } => {
                 if let StatementKind::EnumDef { name, variants } = &stmt.kind {
                     enum_defs.push((name.clone(), variants.clone()));
                 } else if let StatementKind::StructDef { name, fields } = &stmt.kind {

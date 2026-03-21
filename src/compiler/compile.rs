@@ -736,6 +736,37 @@ impl Compiler {
                     self.module.intern_string(&key);
                 }
             }
+
+            // Impl blocks, traits, and trait implementations
+            StatementKind::ImplBlock { .. }
+            | StatementKind::TraitDef { .. }
+            | StatementKind::ImplTrait { .. } => {}
+
+            StatementKind::DoWhileLoop { body, condition, .. } => {
+                self.emit(Instruction::Block);
+                let break_depth = self.block_depth;
+                self.emit(Instruction::Loop);
+                let continue_depth = self.block_depth;
+                self.loop_stack.push(LoopContext { break_depth, continue_depth });
+                self.fb()?.push_scope();
+                self.compile_statements(&body.statements)?;
+                if let Some(tail) = &body.tail_expr {
+                    self.compile_expr(tail)?;
+                    self.emit(Instruction::Drop);
+                }
+                self.fb()?.pop_scope();
+                self.compile_expr(condition)?;
+                self.emit(Instruction::BoolNot);
+                let cond_break_offset = self.block_depth.saturating_sub(break_depth);
+                self.emit(Instruction::BrIf(cond_break_offset));
+                let continue_offset = self.block_depth.saturating_sub(continue_depth);
+                self.emit(Instruction::Br(continue_offset));
+                self.emit(Instruction::End);
+                self.emit(Instruction::End);
+                self.loop_stack.pop();
+            }
+
+            StatementKind::Defer(_) => {}
         }
         Ok(())
     }
@@ -1236,6 +1267,14 @@ impl Compiler {
                     self.compile_expr(val)?;
                 }
                 self.emit(Instruction::MapNew(pairs.len() as u32));
+            }
+            Literal::Set(elems) => {
+                for elem in elems {
+                    self.compile_expr(elem)?;
+                }
+                self.emit(Instruction::ArrayNew(elems.len() as u32));
+                let name_idx = self.module.intern_string("__set_from_array");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 1 });
             }
         }
         Ok(())

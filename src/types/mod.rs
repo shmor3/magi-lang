@@ -34,6 +34,7 @@ pub enum DataType {
     Bytes(Vec<u8>),
     Array(Vec<DataType>),
     Map(IndexMap<String, DataType>),
+    Set(Vec<DataType>),
     Future(Box<FutureState>),
     #[default]
     Null,
@@ -112,6 +113,7 @@ impl DataType {
             DataType::Bytes(_) => "bytes",
             DataType::Array(_) => "array",
             DataType::Map(_) => "map",
+            DataType::Set(_) => "set",
             DataType::Future(_) => "future",
             DataType::Null => "null",
         }
@@ -132,6 +134,7 @@ impl DataType {
         match self {
             DataType::Array(arr) => arr.len(),
             DataType::Map(map) => map.len(),
+            DataType::Set(s) => s.len(),
             DataType::Bytes(b) => b.len(),
             DataType::String(s) => s.chars().count(),
             _ => 0,
@@ -160,6 +163,7 @@ impl DataType {
             DataType::Bytes(b) => !b.is_empty(),
             DataType::Array(a) => !a.is_empty(),
             DataType::Map(m) => !m.is_empty(),
+            DataType::Set(s) => !s.is_empty(),
             DataType::Future(_) => true,
         }
     }
@@ -302,6 +306,9 @@ impl DataType {
                     map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
                 serde_json::Value::Object(obj)
             }
+            DataType::Set(items) => {
+                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+            }
             DataType::Future(state) => match state.as_ref() {
                 FutureState::Pending => serde_json::json!({"state": "pending"}),
                 FutureState::Resolved(val) => {
@@ -333,6 +340,7 @@ impl std::fmt::Display for DataType {
             DataType::Bytes(b) => write!(f, "<{} bytes>", b.len()),
             DataType::Array(arr) => write!(f, "[{} items]", arr.len()),
             DataType::Map(map) => write!(f, "{{{} entries}}", map.len()),
+            DataType::Set(s) => write!(f, "Set({} items)", s.len()),
             DataType::Future(state) => match state.as_ref() {
                 FutureState::Pending => write!(f, "<future:pending>"),
                 FutureState::Resolved(val) => write!(f, "<future:resolved({})>", val),

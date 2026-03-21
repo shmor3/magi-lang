@@ -1440,6 +1440,7 @@ impl OperationEvaluator for FullEvaluator {
                         else { "map" }
                     }
                     DataType::Bytes(_) => "bytes",
+                    DataType::Set(_) => "set",
                     DataType::Future(_) => "future",
                 };
                 Ok(DataType::String(type_name.to_string()))
@@ -6104,7 +6105,8 @@ fn total_cmp_values(a: &DataType, b: &DataType) -> std::cmp::Ordering {
             DataType::Array(_) => 4,
             DataType::Map(_) => 5,
             DataType::Bytes(_) => 6,
-            DataType::Future(_) => 7,
+            DataType::Set(_) => 7,
+            DataType::Future(_) => 8,
         }
     }
     let ta = type_tier(a);
@@ -6456,6 +6458,9 @@ fn datatype_to_yaml_value_depth(data: &DataType, depth: usize) -> serde_yaml_ng:
             serde_yaml_ng::Value::Mapping(mapping)
         }
         DataType::Bytes(b) => serde_yaml_ng::Value::String(format!("<bytes:{}>", b.len())),
+        DataType::Set(items) => {
+            serde_yaml_ng::Value::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
+        }
         DataType::Future(_) => serde_yaml_ng::Value::Null,
     }
 }
@@ -6490,6 +6495,7 @@ fn datatype_to_serde_json_depth(val: &DataType, depth: usize) -> serde_json::Val
                 .collect();
             serde_json::Value::Object(obj)
         }
+        DataType::Set(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
         DataType::Bytes(b) => {
             use base64::Engine;
             serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))

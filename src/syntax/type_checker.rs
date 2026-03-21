@@ -339,16 +339,16 @@ impl TypeChecker {
     fn collect_type_aliases(&mut self, statements: &[Statement]) {
         for stmt in statements {
             if let StatementKind::TypeAlias { name, target } = &stmt.kind {
-                self.type_aliases.insert(name.clone(), target.clone());
+                self.type_aliases.insert(name.clone(), target.to_string());
             }
             // Also collect from module bodies (both qualified and unqualified)
             if let StatementKind::ModuleDef { name: mod_name, body } = &stmt.kind {
                 for s in &body.statements {
                     if let StatementKind::TypeAlias { name, target } = &s.kind {
                         let qualified = format!("{}::{}", mod_name, name);
-                        self.type_aliases.insert(qualified, target.clone());
+                        self.type_aliases.insert(qualified, target.to_string());
                         // Also register unqualified so it resolves inside the module body
-                        self.type_aliases.entry(name.clone()).or_insert_with(|| target.clone());
+                        self.type_aliases.entry(name.clone()).or_insert_with(|| target.to_string());
                     }
                 }
             }
@@ -370,7 +370,7 @@ impl TypeChecker {
                 self.enum_variants.insert(name.clone(), variant_info);
             }
             if let StatementKind::StructDef { name, fields } = &stmt.kind {
-                let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
+                let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                 self.struct_defs.insert(name.clone(), field_info);
             }
             if let StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) =
@@ -382,8 +382,8 @@ impl TypeChecker {
                     .map(|p| {
                         let ct = p
                             .type_annotation
-                            .as_deref()
-                            .and_then(|s| self.resolve_type(s))
+                            .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                             .unwrap_or(ChannelType::Null);
                         (p.name.clone(), ct)
                     })
@@ -392,8 +392,8 @@ impl TypeChecker {
                 let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
                 let return_type = def
                     .return_type
-                    .as_deref()
-                    .and_then(|s| self.resolve_type(s))
+                    .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                     .unwrap_or(ChannelType::Null);
                 self.function_sigs.insert(
                     def.name.clone(),
@@ -420,8 +420,8 @@ impl TypeChecker {
                             .map(|p| {
                                 let ct = p
                                     .type_annotation
-                                    .as_deref()
-                                    .and_then(|s| self.resolve_type(s))
+                                    .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                                     .unwrap_or(ChannelType::Null);
                                 (p.name.clone(), ct)
                             })
@@ -430,8 +430,8 @@ impl TypeChecker {
                         let required_params = def.params.iter().filter(|p| p.default.is_none() && !p.rest).count();
                         let return_type = def
                             .return_type
-                            .as_deref()
-                            .and_then(|s| self.resolve_type(s))
+                            .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                             .unwrap_or(ChannelType::Null);
                         let qualified_name = format!("{}::{}", mod_name, def.name);
                         self.function_sigs.insert(
@@ -456,7 +456,7 @@ impl TypeChecker {
                     }
                     // Register module-scoped structs with both qualified and unqualified names
                     if let StatementKind::StructDef { name, fields } = &s.kind {
-                        let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
+                        let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                         let qualified = format!("{}::{}", mod_name, name);
                         self.struct_defs.insert(qualified, field_info.clone());
                         self.struct_defs.entry(name.clone()).or_insert(field_info);
@@ -492,7 +492,7 @@ impl TypeChecker {
             } => {
                 let inferred = self.infer_expr(value);
                 let ct = self.reconcile_annotation(
-                    type_annotation.as_deref(),
+                    type_annotation.as_ref(),
                     inferred,
                     stmt.span.start_line,
                     stmt.span.start_col,
@@ -511,7 +511,7 @@ impl TypeChecker {
             } => {
                 let inferred = self.infer_expr(value);
                 let ct = self.reconcile_annotation(
-                    type_annotation.as_deref(),
+                    type_annotation.as_ref(),
                     inferred,
                     stmt.span.start_line,
                     stmt.span.start_col,
@@ -519,7 +519,7 @@ impl TypeChecker {
                 );
                 self.define_var(name, ct, true, stmt.span.start_line, stmt.span.start_col);
                 // Store declared type annotation for reassignment checks.
-                if let Some(ann) = type_annotation.as_deref().and_then(|s| self.resolve_type(s)) {
+                if let Some(ann) = type_annotation.as_ref().and_then(|ta| self.resolve_type_annotation(ta)) {
                     if let Some(info) = self.lookup_mut(name) {
                         info.declared_type = Some(ann);
                     }
@@ -699,8 +699,8 @@ impl TypeChecker {
                 self.function_depth += 1;
                 let saved_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
-                let resolved_return = def.return_type.as_deref()
-                    .and_then(|s| self.resolve_type(s))
+                let resolved_return = def.return_type.as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                     .unwrap_or(ChannelType::Null);
                 let prev_return_type = std::mem::replace(
                     &mut self.current_return_type,
@@ -729,8 +729,8 @@ impl TypeChecker {
                 for param in &def.params {
                     let ct = param
                         .type_annotation
-                        .as_deref()
-                        .and_then(|s| self.resolve_type(s))
+                        .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                         .unwrap_or(ChannelType::Null);
                     // Type-check default param expression if present
                     if let Some(default_expr) = &param.default {
@@ -751,8 +751,8 @@ impl TypeChecker {
                 let body_type = self.infer_block_no_scope(&def.body);
                 let declared_return = def
                     .return_type
-                    .as_deref()
-                    .and_then(|s| self.resolve_type(s))
+                    .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                     .unwrap_or(ChannelType::Null);
                 if declared_return != ChannelType::Null
                     && body_type != ChannelType::Null
@@ -917,7 +917,7 @@ impl TypeChecker {
                             );
                         }
                         for (key, alias) in entries {
-                            let var_name = alias.as_deref().unwrap_or(key);
+                            let var_name = alias.as_ref().unwrap_or(key);
                             self.define_var(
                                 var_name,
                                 ChannelType::Null, // value type unknown
@@ -1104,7 +1104,7 @@ impl TypeChecker {
                     _ => inferred,
                 };
                 let ct = self.reconcile_annotation(
-                    type_annotation.as_deref(),
+                    type_annotation.as_ref(),
                     precise_type,
                     stmt.span.start_line,
                     stmt.span.start_col,
@@ -1125,7 +1125,7 @@ impl TypeChecker {
             // -----------------------------------------------------------------
             StatementKind::TypeAlias { name, target } => {
                 // Validate the target type resolves (could be a built-in or another alias)
-                if self.resolve_type(target).is_none() {
+                if self.resolve_type(&target.to_string()).is_none() {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
@@ -1224,7 +1224,7 @@ impl TypeChecker {
                 }
             }
             StatementKind::StructDef { name, fields } => {
-                let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
+                let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                 self.struct_defs.insert(name.clone(), field_info);
                 // W234: Duplicate struct field names
                 {
@@ -1245,9 +1245,10 @@ impl TypeChecker {
                 // Validate field type annotations against known types
                 for field in fields {
                     if let Some(ref ann) = field.type_annotation {
-                        if self.resolve_type(ann).is_none()
-                            && !self.struct_defs.contains_key(ann.as_str())
-                            && !self.enum_variants.contains_key(ann.as_str())
+                        let ann_str = ann.to_string();
+                        if self.resolve_type(&ann_str).is_none()
+                            && !self.struct_defs.contains_key(ann_str.as_str())
+                            && !self.enum_variants.contains_key(ann_str.as_str())
                         {
                             self.emit_coded(
                                 field.span.start_line,
@@ -1263,6 +1264,49 @@ impl TypeChecker {
                         }
                     }
                 }
+            }
+
+            StatementKind::ImplBlock { methods, .. } => {
+                for method in methods {
+                    self.push_scope();
+                    for param in &method.params {
+                        let ct = param.type_annotation.as_ref()
+                            .and_then(|ta| self.resolve_type(&ta.to_string()))
+                            .unwrap_or(ChannelType::Null);
+                        self.define_var(&param.name, ct, false, param.span.start_line, param.span.start_col);
+                    }
+                    self.check_block(&method.body);
+                    self.pop_scope();
+                }
+            }
+
+            StatementKind::TraitDef { .. } => {}
+
+            StatementKind::ImplTrait { methods, .. } => {
+                for method in methods {
+                    self.push_scope();
+                    for param in &method.params {
+                        let ct = param.type_annotation.as_ref()
+                            .and_then(|ta| self.resolve_type(&ta.to_string()))
+                            .unwrap_or(ChannelType::Null);
+                        self.define_var(&param.name, ct, false, param.span.start_line, param.span.start_col);
+                    }
+                    self.check_block(&method.body);
+                    self.pop_scope();
+                }
+            }
+
+            StatementKind::DoWhileLoop { condition, body, .. } => {
+                self.infer_expr(condition);
+                self.push_scope();
+                self.loop_depth += 1;
+                self.check_block(body);
+                self.loop_depth -= 1;
+                self.pop_scope();
+            }
+
+            StatementKind::Defer(expr) => {
+                let _ = self.infer_expr(expr);
             }
         }
     }
@@ -1444,6 +1488,12 @@ impl TypeChecker {
                         let _ = self.infer_expr(val);
                     }
                     ChannelType::Map
+                }
+                Literal::Set(elements) => {
+                    for el in elements {
+                        let _ = self.infer_expr(el);
+                    }
+                    ChannelType::Array
                 }
             },
 
@@ -2135,8 +2185,8 @@ impl TypeChecker {
                 for param in params {
                     let ct = param
                         .type_annotation
-                        .as_deref()
-                        .and_then(|s| self.resolve_type(s))
+                        .as_ref()
+                    .and_then(|ta| self.resolve_type(&ta.to_string()))
                         .unwrap_or(ChannelType::Null);
                     // Type-check default param expression if present
                     if let Some(default_expr) = &param.default {
@@ -3035,6 +3085,18 @@ impl TypeChecker {
         None // cycle detected or chain too long
     }
 
+
+    fn resolve_type_annotation(&self, ann: &TypeAnnotation) -> Option<ChannelType> {
+        match ann {
+            TypeAnnotation::Simple(name) => self.resolve_type(name),
+            TypeAnnotation::Generic { base, .. } => self.resolve_type(base),
+            TypeAnnotation::Union(_) => Some(ChannelType::Null),
+            TypeAnnotation::Optional(_) => Some(ChannelType::Null),
+            TypeAnnotation::Function { .. } => Some(ChannelType::Null),
+            TypeAnnotation::Tuple(_) => Some(ChannelType::Array),
+        }
+    }
+
     // =========================================================================
     // Annotation reconciliation
     // =========================================================================
@@ -3043,24 +3105,24 @@ impl TypeChecker {
     /// the inferred type. Returns the definitive type (annotation wins if valid).
     fn reconcile_annotation(
         &mut self,
-        annotation: Option<&str>,
+        annotation: Option<&TypeAnnotation>,
         inferred: ChannelType,
         line: u32,
         col: u32,
         var_name: &str,
     ) -> ChannelType {
-        let ann_str = match annotation {
-            Some(s) => s,
+        let ann = match annotation {
+            Some(a) => a,
             None => return inferred,
         };
 
-        let ann_type = match self.resolve_type(ann_str) {
+        let ann_type = match self.resolve_type_annotation(ann) {
             Some(ct) => ct,
             None => {
                 self.emit_coded(
                     line,
                     col,
-                    format!("unknown type annotation '{}' on '{}'", ann_str, var_name),
+                    format!("unknown type annotation '{}' on '{}'", ann, var_name),
                     DiagnosticSeverity::Error,
                     super::errors::ErrorCode::E100,
                     None,
@@ -3085,7 +3147,7 @@ impl TypeChecker {
             col,
             format!(
                 "type annotation '{}' on '{}' conflicts with inferred type '{}'",
-                ann_str,
+                ann,
                 var_name,
                 inferred.as_str()
             ),
@@ -4238,7 +4300,7 @@ output r;"#,
         // Direct unit test of the type checker's define_var warning
         let imports = HashSet::new();
         let mut checker = TypeChecker::new(&imports);
-        checker.define_var("trait", ChannelType::Int64, false, 1, 1);
+        checker.define_var("static", ChannelType::Int64, false, 1, 1);
         let result = checker.finalize();
         let w = result
             .diagnostics

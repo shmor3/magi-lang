@@ -5,6 +5,7 @@ pub mod errors;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;
+pub mod type_ann;
 pub mod type_checker;
 
 use std::fmt;

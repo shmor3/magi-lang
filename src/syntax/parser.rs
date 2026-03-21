@@ -84,6 +84,10 @@ impl Parser {
                 | TokenKind::Async
                 | TokenKind::Try
                 | TokenKind::Throw
+                | TokenKind::Do
+                | TokenKind::Defer
+                | TokenKind::Impl
+                | TokenKind::Trait
                 | TokenKind::Output => return,
                 _ => {
                     self.advance();
@@ -271,6 +275,16 @@ impl Parser {
     }
 
     // =========================================================================
+    // Type annotations
+    // =========================================================================
+
+    /// Parse a type annotation (returns a TypeAnnotation).
+    fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, SyntaxError> {
+        let type_tok = self.expect(&TokenKind::Ident)?;
+        Ok(TypeAnnotation::Simple(type_tok.text))
+    }
+
+    // =========================================================================
     // Program
     // =========================================================================
 
@@ -316,6 +330,10 @@ impl Parser {
             TokenKind::Test => self.parse_test_def(start),
             TokenKind::Enum => self.parse_enum_def(start),
             TokenKind::Struct => self.parse_struct_def(start),
+            TokenKind::Do => self.parse_do_while_loop(start, None),
+            TokenKind::Defer => self.parse_defer_statement(start),
+            TokenKind::Impl => self.parse_impl_block(start),
+            TokenKind::Trait => self.parse_trait_def(start),
             TokenKind::Pub => {
                 // pub fn / pub mod / pub enum / pub struct / pub const
                 let pub_span = self.peek().span;
@@ -350,6 +368,7 @@ impl Parser {
                 match self.peek_kind() {
                     TokenKind::For => self.parse_for_loop(start, Some(label_name)),
                     TokenKind::While => self.parse_while_loop(start, Some(label_name)),
+                    TokenKind::Do => self.parse_do_while_loop(start, Some(label_name)),
                     TokenKind::Loop => {
                         // Labeled loop expression as statement
                         self.advance(); // consume 'loop'
@@ -369,7 +388,7 @@ impl Parser {
                     _ => Err(SyntaxError {
                         line: self.peek().span.start_line as usize,
                         column: self.peek().span.start_col as usize,
-                        message: "Expected 'for', 'while', or 'loop' after label".to_string(),
+                        message: "Expected 'for', 'while', 'do', or 'loop' after label".to_string(),
                         code: None,
                     }),
                 }
@@ -430,8 +449,7 @@ impl Parser {
 
         // Optional type annotation
         let type_annotation = if self.eat(&TokenKind::Colon) {
-            let type_tok = self.expect(&TokenKind::Ident)?;
-            Some(type_tok.text)
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
@@ -624,6 +642,44 @@ impl Parser {
         })
     }
 
+    fn parse_do_while_loop(&mut self, start: Span, label: Option<String>) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume 'do'
+        let body = self.parse_block()?;
+        self.expect(&TokenKind::While)?;
+        let condition = self.parse_expression_no_struct()?;
+        let end = self.peek().span;
+        self.expect(&TokenKind::Semicolon)?;
+
+        Ok(Statement {
+            span: start.merge(end),
+            kind: StatementKind::DoWhileLoop { label, body, condition },
+        })
+    }
+
+    fn parse_defer_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume 'defer'
+        if self.at(&TokenKind::LBrace) {
+            let block = self.parse_block()?;
+            let span = start.merge(block.span);
+            let expr = Expression {
+                kind: ExpressionKind::Block(block),
+                span,
+            };
+            Ok(Statement {
+                span,
+                kind: StatementKind::Defer(expr),
+            })
+        } else {
+            let expr = self.parse_expression()?;
+            let end = self.peek().span;
+            self.expect(&TokenKind::Semicolon)?;
+            Ok(Statement {
+                span: start.merge(end),
+                kind: StatementKind::Defer(expr),
+            })
+        }
+    }
+
     fn parse_break_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         let keyword_tok = self.advance().clone(); // consume 'break'
         let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
@@ -692,8 +748,7 @@ impl Parser {
         let name = name_tok.text;
 
         let type_annotation = if self.eat(&TokenKind::Colon) {
-            let type_tok = self.expect(&TokenKind::Ident)?;
-            Some(type_tok.text)
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
@@ -821,13 +876,13 @@ impl Parser {
         self.advance(); // consume 'type'
         let name_tok = self.expect_identifier()?;
         self.expect(&TokenKind::Eq)?;
-        let target_tok = self.expect(&TokenKind::Ident)?;
+        let target = self.parse_type_annotation()?;
         let end = self.peek().span;
         self.eat(&TokenKind::Semicolon);
         Ok(Statement {
             kind: StatementKind::TypeAlias {
                 name: name_tok.text,
-                target: target_tok.text,
+                target,
             },
             span: start.merge(end),
         })
@@ -866,8 +921,7 @@ impl Parser {
                 });
             }
             let type_annotation = if self.eat(&TokenKind::Colon) {
-                let type_tok = self.expect(&TokenKind::Ident)?;
-                Some(type_tok.text)
+                Some(self.parse_type_annotation()?)
             } else {
                 None
             };
@@ -913,8 +967,7 @@ impl Parser {
         self.expect(&TokenKind::RParen)?;
 
         let return_type = if self.eat(&TokenKind::Arrow) {
-            let type_tok = self.expect(&TokenKind::Ident)?;
-            Some(type_tok.text)
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
@@ -953,8 +1006,7 @@ impl Parser {
         self.expect(&TokenKind::RParen)?;
 
         let return_type = if self.eat(&TokenKind::Arrow) {
-            let type_tok = self.expect(&TokenKind::Ident)?;
-            Some(type_tok.text)
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
@@ -1105,7 +1157,9 @@ impl Parser {
                 | TokenKind::Pub
                 | TokenKind::Enum
                 | TokenKind::Struct
-                | TokenKind::Test => {
+                | TokenKind::Test
+                | TokenKind::Do
+                | TokenKind::Defer => {
                     statements.push(self.parse_statement()?);
                     continue;
                 }
@@ -2829,8 +2883,7 @@ impl Parser {
                 });
             }
             let type_annotation = if self.eat(&TokenKind::Colon) {
-                let type_tok = self.expect(&TokenKind::Ident)?;
-                Some(type_tok.text)
+                Some(self.parse_type_annotation()?)
             } else {
                 None
             };
@@ -2852,6 +2905,8 @@ impl Parser {
         })
     }
 
+    // parse_impl_block and parse_trait_def are defined below in the Helpers section
+
     // =========================================================================
     // Helpers
     // =========================================================================
@@ -2859,6 +2914,80 @@ impl Parser {
     /// Check if current position looks like a struct literal: `Name { ident :`
     /// or `Name {}` (empty struct, uppercase name)
     /// or `Name { ident , ...}` / `Name { ident }` (shorthand fields)
+    fn parse_impl_block(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance();
+        let first_tok = self.expect_identifier()?;
+        let first_name = first_tok.text;
+        if self.peek_kind() == &TokenKind::For {
+            self.advance();
+            let type_tok = self.expect_identifier()?;
+            let type_name = type_tok.text;
+            self.expect(&TokenKind::LBrace)?;
+            let methods = self.parse_impl_methods()?;
+            let end = self.expect(&TokenKind::RBrace)?;
+            return Ok(Statement { span: start.merge(end.span), kind: StatementKind::ImplTrait { trait_name: first_name, type_name, methods } });
+        }
+        self.expect(&TokenKind::LBrace)?;
+        let methods = self.parse_impl_methods()?;
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Statement { span: start.merge(end.span), kind: StatementKind::ImplBlock { type_name: first_name, methods } })
+    }
+
+    fn parse_impl_methods(&mut self) -> Result<Vec<FunctionDef>, SyntaxError> {
+        let mut methods = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            if !self.at(&TokenKind::Fn) {
+                return Err(SyntaxError { line: self.peek().span.start_line as usize, column: self.peek().span.start_col as usize, message: "Expected 'fn' in impl block".into(), code: None });
+            }
+            let fn_start = self.peek().span;
+            self.advance();
+            let name_tok = self.expect_identifier()?;
+            let name = name_tok.text;
+            if !seen.insert(name.clone()) {
+                return Err(SyntaxError { line: fn_start.start_line as usize, column: fn_start.start_col as usize, message: format!("Duplicate method '{}' in impl block", name), code: None });
+            }
+            self.expect(&TokenKind::LParen)?;
+            let params = self.parse_function_params(&TokenKind::RParen)?;
+            self.expect(&TokenKind::RParen)?;
+            let return_type = if self.eat(&TokenKind::Arrow) { Some(self.parse_type_annotation()?) } else { None };
+            let body = self.parse_block()?;
+            let full_span = fn_start.merge(body.span);
+            methods.push(FunctionDef { name, params, return_type, body, span: full_span });
+        }
+        Ok(methods)
+    }
+
+    fn parse_trait_def(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance();
+        let name_tok = self.expect_identifier()?;
+        let name = name_tok.text;
+        self.expect(&TokenKind::LBrace)?;
+        let mut methods = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            if !self.at(&TokenKind::Fn) {
+                return Err(SyntaxError { line: self.peek().span.start_line as usize, column: self.peek().span.start_col as usize, message: "Expected 'fn' in trait definition".into(), code: None });
+            }
+            let fn_start = self.peek().span;
+            self.advance();
+            let mn_tok = self.expect_identifier()?;
+            let mn = mn_tok.text;
+            if !seen.insert(mn.clone()) {
+                return Err(SyntaxError { line: fn_start.start_line as usize, column: fn_start.start_col as usize, message: format!("Duplicate method '{}' in trait definition", mn), code: None });
+            }
+            self.expect(&TokenKind::LParen)?;
+            let params = self.parse_function_params(&TokenKind::RParen)?;
+            self.expect(&TokenKind::RParen)?;
+            let return_type = if self.eat(&TokenKind::Arrow) { Some(self.parse_type_annotation()?) } else { None };
+            let fn_end = self.peek().span;
+            self.eat(&TokenKind::Semicolon);
+            methods.push(TraitMethod { name: mn, params, return_type, span: fn_start.merge(fn_end) });
+        }
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Statement { span: start.merge(end.span), kind: StatementKind::TraitDef { name, methods } })
+    }
+
     fn is_struct_literal(&self, name: &str) -> bool {
         if self.pos >= self.tokens.len() || self.tokens[self.pos].kind != TokenKind::LBrace {
             return false;
@@ -3035,7 +3164,7 @@ mod tests {
             StatementKind::Let {
                 type_annotation, ..
             } => {
-                assert_eq!(type_annotation.as_deref(), Some("int64"));
+                assert_eq!(type_annotation.as_ref().map(|t| t.to_string()).as_deref(), Some("int64"));
             }
             other => panic!("Expected Let, got {:?}", other),
         }
@@ -3749,8 +3878,8 @@ output result;
                 assert_eq!(def.name, "double");
                 assert_eq!(def.params.len(), 1);
                 assert_eq!(def.params[0].name, "x");
-                assert_eq!(def.params[0].type_annotation.as_deref(), Some("int64"));
-                assert_eq!(def.return_type.as_deref(), Some("int64"));
+                assert_eq!(def.params[0].type_annotation.as_ref().map(|t| t.to_string()).as_deref(), Some("int64"));
+                assert_eq!(def.return_type.as_ref().map(|t| t.to_string()).as_deref(), Some("int64"));
                 assert!(def.body.tail_expr.is_some());
             }
             other => panic!("Expected FunctionDef, got {:?}", other),
@@ -3853,13 +3982,13 @@ output result;
 
     #[test]
     fn test_reserved_keyword_in_let() {
-        let err = parse_err("let trait = 5;");
+        let err = parse_err("let static = 5;");
         assert!(err.message.contains("reserved keyword"));
     }
 
     #[test]
     fn test_reserved_keyword_in_fn_name() {
-        let err = parse_err("fn trait() { 42; }");
+        let err = parse_err("fn static() { 42; }");
         assert!(err.message.contains("reserved keyword"));
     }
 

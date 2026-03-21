@@ -77,10 +77,22 @@ fn collect_statement_folding_ranges(stmt: &Statement, ranges: &mut Vec<FoldingRa
         }
 
         // ---- While loop ----
-        StatementKind::WhileLoop { condition, body } => {
+        StatementKind::WhileLoop { condition, body, .. } => {
             push_range(ranges, &stmt.span, FoldingRangeKind::Region);
             collect_expression_folding_ranges(condition, ranges);
             collect_block_folding_ranges(body, ranges);
+        }
+
+        // ---- Do-while loop ----
+        StatementKind::DoWhileLoop { body, condition, .. } => {
+            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            collect_block_folding_ranges(body, ranges);
+            collect_expression_folding_ranges(condition, ranges);
+        }
+
+        // ---- Defer ----
+        StatementKind::Defer(expr) => {
+            collect_expression_folding_ranges(expr, ranges);
         }
 
         // ---- Try/catch ----

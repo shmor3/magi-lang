@@ -61,6 +61,11 @@ pub enum TokenKind {
     // Promoted keywords (enum, struct)
     Enum,
     Struct,
+    Impl,
+    Trait,
+    // do-while and defer
+    Do,
+    Defer,
     /// A reserved keyword that cannot be used as an identifier.
     Reserved,
 
@@ -164,6 +169,10 @@ impl fmt::Display for TokenKind {
             TokenKind::Test => "test",
             TokenKind::Enum => "enum",
             TokenKind::Struct => "struct",
+            TokenKind::Impl => "impl",
+            TokenKind::Trait => "trait",
+            TokenKind::Do => "do",
+            TokenKind::Defer => "defer",
             TokenKind::Reserved => "reserved keyword",
             TokenKind::IntLiteral => "integer",
             TokenKind::FloatLiteral => "float",
@@ -226,7 +235,7 @@ impl fmt::Display for TokenKind {
 /// Keywords reserved for future use. Using these as identifiers is an error.
 /// Note: match, use, mod, const, type, as, pub, loop are now active keywords.
 pub const RESERVED_KEYWORDS: &[&str] = &[
-    "trait", "impl", "static", "ref", "move", "yield", "self", "super", "where", "dyn",
+    "static", "ref", "move", "yield", "super", "where", "dyn",
 ];
 
 /// Check if a name is a reserved keyword.
@@ -1291,6 +1300,10 @@ impl<'a> Lexer<'a> {
             "test" => TokenKind::Test,
             "enum" => TokenKind::Enum,
             "struct" => TokenKind::Struct,
+            "impl" => TokenKind::Impl,
+            "trait" => TokenKind::Trait,
+            "do" => TokenKind::Do,
+            "defer" => TokenKind::Defer,
             s if is_reserved_keyword(s) => TokenKind::Reserved,
             _ => TokenKind::Ident,
         };
