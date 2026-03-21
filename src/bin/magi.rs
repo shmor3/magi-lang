@@ -24,13 +24,13 @@ use magi_lang::telemetry::Telemetry;
 use magi_lang::types::{DataType, OperationType};
 
 /// Maximum output string length (10 MB).
-const MAX_STRING_OUTPUT: usize = 10_000_000;
+const MAX_STRING_OUTPUT: usize = 100_000_000; // 100 MB
 
 /// Maximum array element count.
-const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
+const MAX_ARRAY_ELEMENTS: usize = 100_000_000; // 100 million
 
 /// Maximum number of open connections in the global registry.
-const MAX_CONNECTIONS: usize = 1024;
+const MAX_CONNECTIONS: usize = 65_536; // Match OS file descriptor limits
 
 /// Maximum size of a single SSE line (1 MB).
 const MAX_SSE_LINE_BYTES: usize = 1_048_576;
@@ -44,8 +44,8 @@ const MAX_INSPECT_OUTPUT: usize = 1_048_576;
 /// UTF-8 BOM (byte order mark).
 const UTF8_BOM: &str = "\u{FEFF}";
 
-/// Maximum file write size (#274): 100 MB.
-const MAX_FILE_WRITE_SIZE: usize = 100 * 1024 * 1024;
+/// Maximum file write size: 1 GB (generous like Go/Rust).
+const MAX_FILE_WRITE_SIZE: usize = 1024 * 1024 * 1024;
 
 /// Maximum number of compiled regexes held in the thread-local LRU cache.
 const REGEX_CACHE_CAPACITY: usize = 128;
@@ -453,7 +453,7 @@ fn data_to_bytes(data: &DataType) -> Vec<u8> {
 /// Sleep in 100ms chunks, capped at 1 hour.
 /// Chunking allows future cancellation support without blocking for the full duration.
 fn sleep_chunked(inputs: &HashMap<String, DataType>) -> Result<(), EvalError> {
-    const MAX_SLEEP_MS: i64 = 3_600_000; // 1 hour max
+    const MAX_SLEEP_MS: i64 = 86_400_000; // 24 hours — Go/Rust have no sleep limit
     const CHUNK_MS: u64 = 100;
     let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
     if let Some(ms) = duration.to_i64() {

@@ -7879,7 +7879,7 @@ fn test_max_call_depth() {
     // Infinite recursion should hit max call depth
     // Needs larger stack due to deep recursion in debug mode
     let result = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
+        .stack_size(128 * 1024 * 1024) // 128MB for deep recursion in debug builds
         .spawn(|| {
             let err = run_err(r#"
                 fn boom() { boom() }
@@ -10458,7 +10458,7 @@ fn test_mutual_recursion_is_even_odd() {
 fn test_max_call_depth_mutual_recursion() {
     // Mutual recursion should still hit MaxCallDepth (needs larger stack in debug mode)
     let result = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
+        .stack_size(128 * 1024 * 1024)
         .spawn(|| {
             let err = run_err(r#"
                 fn ping(n) { pong(n) }

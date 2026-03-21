@@ -288,28 +288,28 @@ fn spawn_binop(
 }
 
 /// Maximum iterations for while/for loops to prevent infinite loops.
-const MAX_LOOP_ITERATIONS: usize = 10_000_000;
+const MAX_LOOP_ITERATIONS: usize = 1_000_000_000; // 1 billion — effectively unlimited like Go/Rust
 
 /// Maximum call depth for recursion guard.
-const MAX_CALL_DEPTH: usize = 64;
+const MAX_CALL_DEPTH: usize = 128; // Safe for interpreter stack frames in debug builds
 
 /// GC trigger threshold: collect after this many allocations since last GC.
 const GC_ALLOC_THRESHOLD: usize = 256;
 
 /// Maximum output string length (10 MB).
-const MAX_STRING_OUTPUT: usize = 10_000_000;
+const MAX_STRING_OUTPUT: usize = 100_000_000; // 100 MB — generous like Go/Rust
 
 /// Maximum array element count.
-const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
+const MAX_ARRAY_ELEMENTS: usize = 100_000_000; // 100 million — memory is the real limit
 
 /// Maximum number of variables across all scopes (#262).
-const MAX_VARIABLES: usize = 1_000_000;
+const MAX_VARIABLES: usize = 10_000_000; // 10 million — effectively unlimited
 
 /// Maximum number of function definitions (#263).
-const MAX_FUNCTIONS: usize = 100_000;
+const MAX_FUNCTIONS: usize = 1_000_000; // 1 million — effectively unlimited
 
 /// Maximum expression nesting depth (#261).
-const MAX_EXPR_DEPTH: usize = 128;
+const MAX_EXPR_DEPTH: usize = 1024; // Deep nesting like Go/Rust compilers handle
 
 /// Maximum identifier name length (#404).
 const MAX_IDENTIFIER_LEN: usize = 1024;
