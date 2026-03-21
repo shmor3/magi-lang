@@ -126,7 +126,7 @@ fn conn_remove(id: &str) -> Result<(), EvalError> {
 
 /// Generate a UUID-based connection ID with the given prefix.
 fn conn_id(prefix: &str) -> String {
-    format!("{}:{}", prefix, uuid::Uuid::new_v4())
+    format!("{}:{}", prefix, magi_lang::util::uuid_v4())
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,7 +1807,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
             OperationType::Base64Encode => {
-                use base64::Engine;
                 match &input {
                     DataType::Bytes(b) => {
                         if b.len() * 4 / 3 + 4 > MAX_STRING_OUTPUT {
@@ -1815,16 +1814,15 @@ impl OperationEvaluator for FullEvaluator {
                                 "Base64Encode: output would exceed {} byte limit", MAX_STRING_OUTPUT
                             )));
                         }
-                        Ok(DataType::String(base64::engine::general_purpose::STANDARD.encode(b)))
+                        Ok(DataType::String(magi_lang::util::base64_encode(b)))
                     }
                     _ => Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "base64_encode".to_string() }),
                 }
             },
             OperationType::Base64Decode => {
-                use base64::Engine;
                 match &input {
                     DataType::String(s) => {
-                        match base64::engine::general_purpose::STANDARD.decode(s) {
+                        match magi_lang::util::base64_decode(s) {
                             Ok(bytes) => Ok(DataType::Bytes(bytes)),
                             Err(e) => Err(EvalError::InvalidInput(format!("Base64Decode failed: {}", e))),
                         }
@@ -2936,13 +2934,11 @@ impl OperationEvaluator for FullEvaluator {
             // HashMd5: MD5 hash
             // ================================================================
             OperationType::HashMd5 => {
-                use md5::Md5;
-                use md5::Digest;
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashMd5".to_string() });
                 }
                 let data = data_to_bytes(&input);
-                let hash = Md5::digest(&data);
+                let hash = magi_lang::util::md5_hash(&data);
                 Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
 
@@ -3176,7 +3172,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::RandomUuid => {
-                Ok(DataType::String(uuid::Uuid::new_v4().to_string()))
+                Ok(DataType::String(magi_lang::util::uuid_v4()))
             }
 
             // ================================================================
@@ -3939,7 +3935,7 @@ impl OperationEvaluator for FullEvaluator {
                 match &input {
                     DataType::String(s) => {
                         let width = require_i64_or_default(inputs.get("input_1"), 80, "TextWrap width")?.max(1) as usize;
-                        let result = textwrap::fill(s, width);
+                        let result = magi_lang::util::textwrap_fill(s, width);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "text_wrap: output would exceed {} byte limit", MAX_STRING_OUTPUT
@@ -4119,7 +4115,7 @@ impl OperationEvaluator for FullEvaluator {
             // UUID operations
             // ================================================================
             OperationType::UuidV4 => {
-                Ok(DataType::String(uuid::Uuid::new_v4().to_string()))
+                Ok(DataType::String(magi_lang::util::uuid_v4()))
             }
             OperationType::UuidNil => {
                 Ok(DataType::String("00000000-0000-0000-0000-000000000000".to_string()))
@@ -4129,12 +4125,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let trimmed = s.trim();
                         // Strict validation: must be canonical hyphenated format (8-4-4-4-12)
-                        let valid = trimmed.len() == 36
-                            && trimmed.as_bytes().get(8) == Some(&b'-')
-                            && trimmed.as_bytes().get(13) == Some(&b'-')
-                            && trimmed.as_bytes().get(18) == Some(&b'-')
-                            && trimmed.as_bytes().get(23) == Some(&b'-')
-                            && uuid::Uuid::parse_str(trimmed).is_ok();
+                        let valid = magi_lang::util::uuid_is_valid(trimmed);
                         Ok(DataType::Bool(valid))
                     }
                     _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UuidIsValid".to_string() }),
@@ -4155,13 +4146,11 @@ impl OperationEvaluator for FullEvaluator {
                                 "UuidParse: invalid UUID: expected canonical hyphenated format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)".to_string()
                             ));
                         }
-                        match uuid::Uuid::parse_str(trimmed) {
-                            Ok(parsed) => {
+                        match magi_lang::util::uuid_parse(trimmed) {
+                            Ok((_, version)) => {
                                 let mut m = indexmap::IndexMap::new();
-                                m.insert("full".to_string(), DataType::String(parsed.hyphenated().to_string()));
-                                m.insert("version".to_string(), DataType::Int64(
-                                    parsed.get_version_num() as i64
-                                ));
+                                m.insert("full".to_string(), DataType::String(trimmed.to_lowercase()));
+                                m.insert("version".to_string(), DataType::Int64(version as i64));
                                 Ok(DataType::Map(m))
                             }
                             Err(e) => Err(EvalError::InvalidInput(format!("UuidParse: invalid UUID: {}", e))),
@@ -4816,7 +4805,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => {
                         let indent = require_i64_or_default(inputs.get("input_1"), 4, "TextIndent width")?.clamp(0, 1000) as usize;
                         let pad = " ".repeat(indent);
-                        let result = textwrap::indent(s, &pad).trim_end_matches('\n').to_string();
+                        let result = magi_lang::util::textwrap_indent(s, &pad).trim_end_matches('\n').to_string();
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("text_indent: output would exceed {} byte limit", MAX_STRING_OUTPUT)));
                         }
@@ -4828,7 +4817,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::TextDedent => {
                 match &input {
                     DataType::String(s) => {
-                        let result = textwrap::dedent(s);
+                        let result = magi_lang::util::textwrap_dedent(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!(
                                 "text_dedent: output would exceed {} byte limit", MAX_STRING_OUTPUT
@@ -5065,9 +5054,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Int64(crc as i64))
             }
             OperationType::HmacSha256 => {
-                use hmac::{Hmac, Mac};
-                use sha2::Sha256;
-                type HmacSha256 = Hmac<Sha256>;
                 let key_val = inputs.get("key").cloned().unwrap_or(DataType::Null);
                 let data = match &input {
                     DataType::String(s) => s.as_bytes().to_vec(),
@@ -5079,14 +5065,10 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Bytes(b) => b.clone(),
                     _ => return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: key_val.type_name().to_string(), context: "HmacSha256 key".to_string() }),
                 };
-                let mut mac = HmacSha256::new_from_slice(&key)
-                    .map_err(|e| EvalError::InvalidInput(format!("hmac_sha256: {}", e)))?;
-                mac.update(&data);
-                let result = mac.finalize();
-                Ok(DataType::String(magi_lang::util::hex_encode(&result.into_bytes())))
+                let result = magi_lang::util::hmac_sha256(&key, &data);
+                Ok(DataType::String(magi_lang::util::hex_encode(&result)))
             }
             OperationType::ConstantTimeEq => {
-                use subtle::ConstantTimeEq;
                 let (bytes_a, bytes_b) = match (&a, &b) {
                     (DataType::String(s1), DataType::String(s2)) => {
                         (s1.as_bytes(), s2.as_bytes())
@@ -5096,10 +5078,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     _ => return Ok(DataType::Bool(false)),
                 };
-                if bytes_a.len() != bytes_b.len() {
-                    return Ok(DataType::Bool(false));
-                }
-                Ok(DataType::Bool(bytes_a.ct_eq(bytes_b).into()))
+                Ok(DataType::Bool(magi_lang::util::constant_time_eq(bytes_a, bytes_b)))
             }
 
             // ================================================================
@@ -6451,7 +6430,7 @@ impl OperationEvaluator for FullEvaluator {
             // Sync operations
             // ================================================================
             OperationType::MutexNew => {
-                let id = uuid::Uuid::new_v4().to_string();
+                let id = magi_lang::util::uuid_v4();
                 let mutex: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
                 conn_store(&id, mutex)?;
                 Ok(DataType::String(id))
@@ -6493,7 +6472,7 @@ impl OperationEvaluator for FullEvaluator {
                         });
                     }
                 };
-                let id = uuid::Uuid::new_v4().to_string();
+                let id = magi_lang::util::uuid_v4();
                 let wg = std::sync::Arc::new((
                     std::sync::Mutex::new(count),
                     std::sync::Condvar::new(),
@@ -7312,8 +7291,7 @@ fn datatype_to_serde_json_depth(val: &DataType, depth: usize) -> serde_json::Val
         DataType::Set(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
         DataType::Tuple(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
         DataType::Bytes(b) => {
-            use base64::Engine;
-            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+            serde_json::Value::String(magi_lang::util::base64_encode(b))
         }
     }
 }

@@ -4,6 +4,7 @@
 //! parsing, comparison, and compatibility checking.
 
 use std::fmt;
+use crate::util::SemVer;
 
 /// The current MAGI language version.
 pub const MAJOR: u32 = 0;
@@ -16,16 +17,11 @@ pub const PRE_RELEASE: &str = "";
 /// Returns the current MAGI language version as a `Version`.
 pub fn current() -> Version {
     Version {
-        inner: semver::Version {
+        inner: SemVer {
             major: MAJOR as u64,
             minor: MINOR as u64,
             patch: PATCH as u64,
-            pre: if PRE_RELEASE.is_empty() {
-                semver::Prerelease::EMPTY
-            } else {
-                semver::Prerelease::new(PRE_RELEASE).unwrap_or(semver::Prerelease::EMPTY)
-            },
-            build: semver::BuildMetadata::EMPTY,
+            pre: PRE_RELEASE.to_string(),
         },
     }
 }
@@ -38,25 +34,25 @@ pub fn version_string() -> String {
 /// A semantic version for the MAGI language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
-    inner: semver::Version,
+    inner: SemVer,
 }
 
 impl Version {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
-            inner: semver::Version::new(major as u64, minor as u64, patch as u64),
+            inner: SemVer::new(major as u64, minor as u64, patch as u64),
         }
     }
 
     pub fn with_pre_release(mut self, pre: &str) -> Self {
-        self.inner.pre = semver::Prerelease::new(pre).unwrap_or(semver::Prerelease::EMPTY);
+        self.inner.pre = pre.to_string();
         self
     }
 
     /// Parse a version string like "0.2.0" or "1.0.0-beta.1".
     pub fn parse(s: &str) -> Result<Self, VersionError> {
         let s = s.strip_prefix('v').unwrap_or(s);
-        semver::Version::parse(s)
+        SemVer::parse(s)
             .map(|inner| Self { inner })
             .map_err(|_| VersionError::InvalidFormat(s.to_string()))
     }
@@ -120,12 +116,12 @@ impl Version {
 
     /// Is this a pre-release version?
     pub fn is_pre_release(&self) -> bool {
-        !self.inner.pre.is_empty()
+        self.inner.is_pre_release()
     }
 
     /// Is this a stable (1.0+) release?
     pub fn is_stable(&self) -> bool {
-        self.inner.major >= 1 && self.inner.pre.is_empty()
+        self.inner.major >= 1 && !self.inner.is_pre_release()
     }
 
     /// The pre-release string, if any.
@@ -133,7 +129,7 @@ impl Version {
         if self.inner.pre.is_empty() {
             None
         } else {
-            Some(self.inner.pre.to_string())
+            Some(self.inner.pre.clone())
         }
     }
 }
