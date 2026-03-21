@@ -1283,9 +1283,7 @@ impl<'a> Interpreter<'a> {
 
             // Field assignment: obj.field = value (#7)
             StatementKind::FieldAssignment { object, field, value } => {
-                // Evaluate the object — it must be a mutable variable holding a Map
                 let val = self.eval_expr(value)?;
-                // The object must be a variable so we can modify it in place
                 match &object.kind {
                     ExpressionKind::Variable(name) => {
                         let entry = self.lookup(name).ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: self.suggest_variable(name) })?;
@@ -1293,7 +1291,49 @@ impl<'a> Interpreter<'a> {
                             return Err(InterpError::ImmutableAssignment { name: name.clone(), span: stmt.span });
                         }
                         let addr = entry.addr;
-                        let mut obj = self.heap.read(addr).cloned().ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: None })?;
+                        let obj = self.heap.read(addr).cloned().ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: None })?;
+
+                        // Check for property setter
+                        if let DataType::Map(ref map) = obj {
+                            if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                                if let Some(setter) = self.impl_methods
+                                    .get(struct_name)
+                                    .and_then(|m| m.get(field.as_str()))
+                                    .filter(|m| m.is_setter)
+                                    .cloned()
+                                {
+                                    self.call_depth += 1;
+                                    self.symbols.push(HashMap::new());
+                                    self.heap.push_scope();
+                                    if let Some(p) = setter.params.first() {
+                                        let a = self.heap.alloc(obj.clone());
+                                        self.define(&p.name, a, true);
+                                    }
+                                    if let Some(p) = setter.params.get(1) {
+                                        let a = self.heap.alloc(val.clone());
+                                        self.define(&p.name, a, false);
+                                    }
+                                    let result = self.exec_block(&setter.body);
+                                    // If the setter modified self, write it back
+                                    if let Some(p) = setter.params.first() {
+                                        if let Some(e) = self.lookup(&p.name) {
+                                            if let Some(new_obj) = self.heap.read(e.addr).cloned() {
+                                                self.heap.write(addr, new_obj);
+                                            }
+                                        }
+                                    }
+                                    self.heap.pop_scope();
+                                    self.symbols.pop();
+                                    self.call_depth -= 1;
+                                    return match result {
+                                        Ok(_) | Err(InterpError::ReturnSignal(_)) => Ok(val),
+                                        Err(e) => Err(e),
+                                    };
+                                }
+                            }
+                        }
+
+                        let mut obj = obj;
                         match &mut obj {
                             DataType::Map(map) => { map.insert(field.clone(), val.clone()); }
                             _ => return Err(InterpError::TypeError { expected: "Map or struct".to_string(), actual: obj.type_name().to_string(), context: format!("field assignment .{}", field), span: stmt.span }),
@@ -4384,6 +4424,45 @@ impl<'a> Interpreter<'a> {
                 // Optional chaining: propagate null from ?. through field access
                 if matches!(obj, DataType::Null) && Self::has_optional_chain(&object.kind) {
                     return Ok(DataType::Null);
+                }
+
+                // Check for property getter: if the object is a struct with a getter for this field
+                if let DataType::Map(ref map) = obj {
+                    if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                        if let Some(getter) = self.impl_methods
+                            .get(struct_name)
+                            .and_then(|m| m.get(field.as_str()))
+                            .filter(|m| m.is_getter)
+                            .cloned()
+                        {
+                            // Call the getter with `self` bound to the object
+                            self.call_depth += 1;
+                            if self.call_depth > MAX_CALL_DEPTH {
+                                self.call_depth -= 1;
+                                return Err(InterpError::ResourceLimit {
+                                    limit: format!("{} calls", MAX_CALL_DEPTH),
+                                    actual: format!("{} calls", self.call_depth + 1),
+                                    context: format!("{}.{}", struct_name, field),
+                                    span: expr.span,
+                                });
+                            }
+                            self.symbols.push(HashMap::new());
+                            self.heap.push_scope();
+                            if let Some(p) = getter.params.first() {
+                                let addr = self.heap.alloc(obj.clone());
+                                self.define(&p.name, addr, false);
+                            }
+                            let result = self.exec_block(&getter.body);
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            self.call_depth -= 1;
+                            return match result {
+                                Ok(val) => Ok(val),
+                                Err(InterpError::ReturnSignal(val)) => Ok(val),
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
                 }
 
                 let inputs = HashMap::from([
