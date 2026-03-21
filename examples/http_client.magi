@@ -1,0 +1,68 @@
+// HTTP Client — fetch URLs and inspect responses
+//
+// Run with: magi run examples/http_client.magi
+//
+// Note: Requires network access. Some requests may fail in sandboxed environments.
+
+use std::net::*;
+use std::json::*;
+
+output "=== Simple HTTP GET ===";
+
+// http_get returns a map with status, headers, body
+let response = try {
+    http_get("https://httpbin.org/get")
+} catch err {
+    output f"Request failed: {err}";
+    null
+};
+
+if response != null {
+    output f"Status: {response.status}";
+    output f"Body length: {len(response.body)} chars";
+
+    // Parse the JSON body
+    let data = try { parse_json(response.body) } catch _e { null };
+    if data != null {
+        output f"Origin IP: {data.origin}";
+    }
+}
+
+output "";
+output "=== HTTP POST with JSON ===";
+
+let post_body = to_json({"message": "Hello from MAGI!", "version": "0.9.0"});
+let post_response = try {
+    http_post("https://httpbin.org/post", post_body)
+} catch err {
+    output f"POST failed: {err}";
+    null
+};
+
+if post_response != null {
+    output f"POST status: {post_response.status}";
+    let post_data = try { parse_json(post_response.body) } catch _e { null };
+    if post_data != null {
+        output f"Echoed data: {post_data.data}";
+    }
+}
+
+output "";
+output "=== HTTP Headers ===";
+
+let headers_response = try {
+    http_get("https://httpbin.org/headers")
+} catch err {
+    output f"Headers request failed: {err}";
+    null
+};
+
+if headers_response != null {
+    let hdata = try { parse_json(headers_response.body) } catch _e { null };
+    if hdata != null {
+        output f"User-Agent: {hdata.headers.Host}";
+    }
+}
+
+output "";
+output "HTTP client demo complete.";

@@ -1,0 +1,81 @@
+// JSON API — parse, construct, query, and transform JSON data
+//
+// Run with: magi run examples/json_api.magi
+
+use std::json::*;
+
+output "=== Parse JSON ===";
+
+let json_str = '{"name": "Alice", "age": 30, "skills": ["Rust", "MAGI", "Python"]}';
+let user = parse_json(json_str);
+
+output f"Name: {user.name}";
+output f"Age: {user.age}";
+output f"Skills: {user.skills}";
+output f"First skill: {user.skills[0]}";
+
+output "";
+output "=== Construct JSON ===";
+
+let config = {
+    "database": {
+        "host": "localhost",
+        "port": 5432,
+        "name": "myapp",
+    },
+    "features": {
+        "caching": true,
+        "logging": false,
+    },
+    "tags": ["production", "v2"],
+};
+
+let config_json = to_json(config);
+output f"Config JSON: {config_json}";
+
+output "";
+output "=== Pretty Print ===";
+
+let pretty = json_pretty_print(config);
+output pretty;
+
+output "";
+output "=== Modify JSON Data ===";
+
+// Build up a new map with added field
+let updated_user = json_set(user, "email", "alice@example.com");
+output f"With email: {to_json(updated_user)}";
+
+// Delete a field
+let minimal = json_delete(updated_user, "age");
+output f"Without age: {to_json(minimal)}";
+
+output "";
+output "=== JSON Validation ===";
+
+let valid = json_validate('{"key": "value"}');
+let invalid = json_validate('{bad json}');
+output f"Valid JSON:   {valid}";
+output f"Invalid JSON: {invalid}";
+
+output "";
+output "=== Nested Data Processing ===";
+
+let api_response = parse_json('[
+    {"id": 1, "name": "Alice", "score": 95},
+    {"id": 2, "name": "Bob", "score": 87},
+    {"id": 3, "name": "Charlie", "score": 92}
+]');
+
+// Use collection methods on parsed JSON arrays
+let names = api_response.map(|u| u.name);
+output f"Names: {names}";
+
+let high_scorers = api_response.filter(|u| u.score >= 90);
+output f"High scorers: {high_scorers.map(|u| f"{u.name}: {u.score}")}";
+
+let total_score = api_response.reduce(0, |acc, u| acc + u.score);
+output f"Average score: {total_score / len(api_response)}";
+
+output "";
+output "JSON API demo complete.";

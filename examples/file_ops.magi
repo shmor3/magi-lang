@@ -1,0 +1,78 @@
+// File Operations — read, write, list, and manage files
+//
+// Run with: magi run examples/file_ops.magi
+//
+// Note: Creates and cleans up temporary files in /tmp/magi-demo/
+
+use std::fs::*;
+use std::path::*;
+
+let demo_dir = "/tmp/magi-demo";
+
+output "=== Create Directory ===";
+fs_mkdir(demo_dir);
+output f"Created directory: {demo_dir}";
+
+output "";
+output "=== Write Files ===";
+
+let hello_path = path_join(demo_dir, "hello.txt");
+fs_write(hello_path, "Hello from MAGI!\nThis is a test file.\n");
+output f"Wrote: {hello_path}";
+
+let data_path = path_join(demo_dir, "data.txt");
+fs_write(data_path, "line 1\nline 2\nline 3\n");
+output f"Wrote: {data_path}";
+
+output "";
+output "=== Read Files ===";
+
+let content = fs_read(hello_path);
+output f"Content of hello.txt:";
+output content;
+
+output "";
+output "=== Append to File ===";
+
+fs_append(data_path, "line 4 (appended)\n");
+let updated = fs_read(data_path);
+output f"After append:";
+output updated;
+
+output "";
+output "=== File Checks ===";
+
+output f"hello.txt exists: {fs_exists(hello_path)}";
+output f"hello.txt is file: {fs_is_file(hello_path)}";
+output f"demo dir is dir:  {fs_is_dir(demo_dir)}";
+output f"fake.txt exists:  {fs_exists(path_join(demo_dir, "fake.txt"))}";
+
+output "";
+output "=== List Directory ===";
+
+let files = fs_list(demo_dir);
+output f"Files in {demo_dir}:";
+for file in files {
+    output f"  {file}";
+}
+
+output "";
+output "=== Path Utilities ===";
+
+let p = "/home/user/projects/app/main.magi";
+output f"basename:  {path_basename(p)}";
+output f"dirname:   {path_dirname(p)}";
+output f"extension: {path_extension(p)}";
+output f"stem:      {path_stem(p)}";
+output f"is_abs:    {path_is_absolute(p)}";
+
+output "";
+output "=== Cleanup ===";
+
+fs_remove(hello_path);
+fs_remove(data_path);
+fs_remove(demo_dir);
+output "Cleaned up temporary files.";
+
+output "";
+output "File operations demo complete.";

@@ -1,0 +1,28 @@
+// Hello World — MAGI's entry point and string interpolation
+//
+// Run with: magi run examples/hello.magi
+
+fn main() {
+    let name = "World";
+    output f"Hello, {name}!";
+
+    // String repetition
+    let banner = "=" * 30;
+    output banner;
+
+    // FizzBuzz 1..20
+    for n in 1..=20 {
+        let label = match n {
+            _ if n % 15 == 0 => "FizzBuzz",
+            _ if n % 3 == 0  => "Fizz",
+            _ if n % 5 == 0  => "Buzz",
+            _                => to_string(n),
+        };
+        output f"{n}: {label}";
+    }
+
+    output banner;
+    output "Done!";
+}
+
+main();

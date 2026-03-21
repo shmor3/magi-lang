@@ -1,0 +1,129 @@
+// Error Handling — try/catch, throw, Result/Optional patterns
+//
+// Run with: magi run examples/error_handling.magi
+
+output "=== Try/Catch Basics ===";
+
+fn parse_positive(s) {
+    let n = to_int64(s);
+    if n == null {
+        throw f"'{s}' is not a valid number";
+    }
+    if n <= 0 {
+        throw f"{n} is not positive";
+    }
+    n
+}
+
+let r1 = try {
+    parse_positive("42")
+} catch err {
+    f"Error: {err}"
+};
+output f"parse '42':   {r1}";
+
+let r2 = try {
+    parse_positive("abc")
+} catch err {
+    f"Error: {err}"
+};
+output f"parse 'abc':  {r2}";
+
+let r3 = try {
+    parse_positive("-5")
+} catch err {
+    f"Error: {err}"
+};
+output f"parse '-5':   {r3}";
+
+output "";
+output "=== Try/Catch/Finally ===";
+
+let result = try {
+    let val = 100 / 2;
+    val
+} catch err {
+    output f"Caught: {err}";
+    0
+} finally {
+    output "  (cleanup ran in finally block)";
+};
+output f"Result: {result}";
+
+output "";
+output "=== Optional Pattern (Some/None) ===";
+
+fn find_user(id) {
+    match id {
+        1 => Some({"name": "Alice", "role": "admin"}),
+        2 => Some({"name": "Bob", "role": "user"}),
+        _ => None,
+    }
+}
+
+let user1 = find_user(1);
+let user3 = find_user(3);
+
+output f"User 1 found: {is_some(user1)}";
+output f"User 3 found: {is_some(user3)}";
+output f"User 1 data:  {unwrap(user1)}";
+output f"User 3 fallback: {unwrap_or(user3, {"name": "Guest", "role": "none"})}";
+
+output "";
+output "=== Result Pattern (Ok/Err) ===";
+
+fn safe_divide(a, b) {
+    if b == 0 {
+        Err("division by zero")
+    } else {
+        Ok(a / b)
+    }
+}
+
+let d1 = safe_divide(10, 2);
+let d2 = safe_divide(10, 0);
+
+output f"10 / 2: is_ok={is_ok(d1)}, value={unwrap(d1)}";
+output f"10 / 0: is_err={is_err(d2)}";
+
+output "";
+output "=== Try-Propagate Operator (?) ===";
+
+fn get_user_name(id) {
+    let user = find_user(id)?;
+    let data = unwrap(user);
+    data.name
+}
+
+output f"User 1 name: {get_user_name(1)}";
+
+let user99 = try {
+    get_user_name(99)
+} catch _e {
+    "not found"
+};
+output f"User 99 name: {user99}";
+
+output "";
+output "=== Chained Error Handling ===";
+
+fn process_input(input) {
+    try {
+        let n = parse_positive(input);
+        let result = safe_divide(100, n);
+        match result {
+            Ok(v) => f"Success: 100 / {n} = {unwrap(result)}",
+            Err(msg) => f"Division error: {msg}",
+        }
+    } catch err {
+        f"Parse error: {err}"
+    }
+}
+
+let inputs = ["10", "0", "-3", "abc", "25"];
+for input in inputs {
+    output f"  process('{input}'): {process_input(input)}";
+}
+
+output "";
+output "Error handling demo complete.";

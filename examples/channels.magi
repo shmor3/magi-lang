@@ -1,0 +1,92 @@
+// Channels — spawn + channel producer-consumer patterns
+//
+// Run with: magi run examples/channels.magi
+
+output "=== Basic Channel Send/Receive ===";
+
+// channel() returns [sender, receiver]
+let ch = channel();
+let tx = ch[0];
+let rx = ch[1];
+
+chan_send(tx, "hello from channel!");
+let msg = chan_recv(rx);
+output f"Received: {msg}";
+
+output "";
+output "=== Producer-Consumer with Spawn ===";
+
+// Producer sends values through a channel from a spawned thread
+let ch2 = channel();
+let producer_tx = ch2[0];
+let consumer_rx = ch2[1];
+
+fn produce(sender, count) {
+    let mut i = 0;
+    while i < count {
+        chan_send(sender, i * 10);
+        i = i + 1;
+    }
+}
+
+// Spawn the producer in a separate thread
+let producer = spawn produce(producer_tx, 5);
+
+// Consume values
+let mut results = [];
+let mut i = 0;
+while i < 5 {
+    let val = chan_recv(consumer_rx);
+    results = array_push(results, val);
+    i = i + 1;
+}
+
+await producer;
+output f"Received values: {results}";
+
+output "";
+output "=== Bounded Channel ===";
+
+// channel(capacity) creates a bounded channel
+let bounded = channel(3);
+let btx = bounded[0];
+let brx = bounded[1];
+
+chan_send(btx, "a");
+chan_send(btx, "b");
+chan_send(btx, "c");
+
+output f"  1: {chan_recv(brx)}";
+output f"  2: {chan_recv(brx)}";
+output f"  3: {chan_recv(brx)}";
+
+output "";
+output "=== Try-Receive (Non-blocking) ===";
+
+let ch3 = channel();
+let trx = ch3[1];
+
+// try_recv returns null when channel is empty
+let maybe = chan_try_recv(trx);
+output f"Empty channel try_recv: {maybe}";
+
+// After sending, try_recv returns the value
+chan_send(ch3[0], 42);
+let got = chan_try_recv(trx);
+output f"After send try_recv: {got}";
+
+output "";
+output "=== Channel Close ===";
+
+let ch4 = channel();
+let close_tx = ch4[0];
+let close_rx = ch4[1];
+
+chan_send(close_tx, 99);
+chan_close(close_tx);
+
+let final_val = chan_recv(close_rx);
+output f"Value before close: {final_val}";
+
+output "";
+output "Channels demo complete.";

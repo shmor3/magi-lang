@@ -1,0 +1,7 @@
+// hello_world.magi — minimal MAGI hello world
+// Run with: magi run examples/hello_world.magi
+
+output "Hello, world!";
+
+let name = "MAGI";
+output f"Welcome to {name}!";
