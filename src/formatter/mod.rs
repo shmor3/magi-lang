@@ -238,6 +238,20 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression(value);
                 self.write(";");
             }
+            StatementKind::FieldAssignment { object, field, value } => {
+                self.fmt_expression(object);
+                self.write(&format!(".{} = ", field));
+                self.fmt_expression(value);
+                self.write(";");
+            }
+            StatementKind::IndexAssignment { object, index, value } => {
+                self.fmt_expression(object);
+                self.write("[");
+                self.fmt_expression(index);
+                self.write("] = ");
+                self.fmt_expression(value);
+                self.write(";");
+            }
             StatementKind::ForLoop {
                 pattern,
                 iterable,

@@ -492,6 +492,12 @@ impl Compiler {
                 }
             }
 
+            StatementKind::FieldAssignment { .. } | StatementKind::IndexAssignment { .. } => {
+                // Field/index assignment not yet supported in WASM compilation
+                self.emit(Instruction::PushNull);
+                self.emit(Instruction::Drop);
+            }
+
             StatementKind::ExprStatement(expr) => {
                 self.compile_expr(expr)?;
                 self.emit(Instruction::Drop);

@@ -33,6 +33,15 @@ fn fold_statement(stmt: &mut Statement) {
         StatementKind::CompoundAssign { value, .. } => {
             fold_expr(value);
         }
+        StatementKind::FieldAssignment { object, value, .. } => {
+            fold_expr(object);
+            fold_expr(value);
+        }
+        StatementKind::IndexAssignment { object, index, value } => {
+            fold_expr(object);
+            fold_expr(index);
+            fold_expr(value);
+        }
         StatementKind::ForLoop {
             iterable, body, ..
         } => {

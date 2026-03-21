@@ -124,6 +124,18 @@ pub enum StatementKind {
         op: BinOp,
         value: Expression,
     },
+    /// `obj.field = expr;` — field assignment (#7)
+    FieldAssignment {
+        object: Expression,
+        field: String,
+        value: Expression,
+    },
+    /// `obj[index] = expr;` — index assignment (#7)
+    IndexAssignment {
+        object: Expression,
+        index: Expression,
+        value: Expression,
+    },
     /// `for item in iterable { body }` / `for [a, b] in pairs { }` / `for {k, v} in map { }`
     ForLoop {
         pattern: ForPattern,

@@ -1031,6 +1031,19 @@ impl TypeChecker {
                 }
             }
 
+            // Field assignment: obj.field = value (#7)
+            StatementKind::FieldAssignment { object, field: _, value } => {
+                self.infer_expr(object);
+                self.infer_expr(value);
+            }
+
+            // Index assignment: obj[index] = value (#7)
+            StatementKind::IndexAssignment { object, index, value } => {
+                self.infer_expr(object);
+                self.infer_expr(index);
+                self.infer_expr(value);
+            }
+
             // -----------------------------------------------------------------
             // try { ... } catch err { ... } finally { ... }
             // -----------------------------------------------------------------

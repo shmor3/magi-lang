@@ -983,6 +983,37 @@ impl Parser {
 
     fn parse_expr_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         let expr = self.parse_expression()?;
+
+        // Check for field/index assignment: expr.field = value or expr[idx] = value (#7)
+        if self.at(&TokenKind::Eq) {
+            self.advance(); // consume '='
+            let value = self.parse_expression()?;
+            let end = value.span;
+            self.eat(&TokenKind::Semicolon);
+            match expr.kind {
+                ExpressionKind::FieldAccess { object, field } => {
+                    return Ok(Statement {
+                        kind: StatementKind::FieldAssignment { object: *object, field, value },
+                        span: start.merge(end),
+                    });
+                }
+                ExpressionKind::Index { object, index } => {
+                    return Ok(Statement {
+                        kind: StatementKind::IndexAssignment { object: *object, index: *index, value },
+                        span: start.merge(end),
+                    });
+                }
+                _ => {
+                    return Err(SyntaxError {
+                        line: start.start_line as usize,
+                        column: start.start_col as usize,
+                        message: "Invalid assignment target: only variables, fields, and indices can be assigned to".to_string(),
+                        code: None,
+                    });
+                }
+            }
+        }
+
         let end = self.peek().span;
         self.eat(&TokenKind::Semicolon);
         Ok(Statement {

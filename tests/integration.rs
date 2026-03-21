@@ -19349,3 +19349,64 @@ fn test_map_map_entries() {
         _ => panic!("Expected map"),
     }
 }
+
+// =========================================================================
+// Field and index assignment (#7, #323)
+// =========================================================================
+
+#[test]
+fn test_field_assignment_map() {
+    let result = run(r#"
+        let mut m = {"x": 1, "y": 2};
+        m.x = 10;
+        output m.x;
+    "#);
+    assert_eq!(result, DataType::Int64(10));
+}
+
+#[test]
+fn test_field_assignment_struct() {
+    let result = run(r#"
+        struct Point { x: int64, y: int64 }
+        let mut p = Point { x: 1, y: 2 };
+        p.x = 99;
+        output p.x;
+    "#);
+    assert_eq!(result, DataType::Int64(99));
+}
+
+#[test]
+fn test_index_assignment_array() {
+    let result = run(r#"
+        let mut arr = [10, 20, 30];
+        arr[1] = 99;
+        output arr[1];
+    "#);
+    assert_eq!(result, DataType::Int64(99));
+}
+
+#[test]
+fn test_index_assignment_map_string_key() {
+    let result = run(r#"
+        let mut m = {"a": 1};
+        m["b"] = 2;
+        output m;
+    "#);
+    match result {
+        DataType::Map(m) => {
+            assert_eq!(m.get("a"), Some(&DataType::Int64(1)));
+            assert_eq!(m.get("b"), Some(&DataType::Int64(2)));
+        }
+        _ => panic!("Expected map"),
+    }
+}
+
+#[test]
+fn test_index_assignment_negative() {
+    let result = run(r#"
+        let mut arr = [1, 2, 3];
+        arr[-1] = 99;
+        output arr;
+    "#);
+    assert_eq!(result, DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(99)]));
+}

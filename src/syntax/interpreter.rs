@@ -1108,6 +1108,68 @@ impl<'a> Interpreter<'a> {
                 Ok(result)
             }
 
+            // Field assignment: obj.field = value (#7)
+            StatementKind::FieldAssignment { object, field, value } => {
+                // Evaluate the object — it must be a mutable variable holding a Map
+                let val = self.eval_expr(value)?;
+                // The object must be a variable so we can modify it in place
+                match &object.kind {
+                    ExpressionKind::Variable(name) => {
+                        let entry = self.lookup(name).ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: self.suggest_variable(name) })?;
+                        if !entry.mutable {
+                            return Err(InterpError::ImmutableAssignment { name: name.clone(), span: stmt.span });
+                        }
+                        let addr = entry.addr;
+                        let mut obj = self.heap.read(addr).cloned().ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: None })?;
+                        match &mut obj {
+                            DataType::Map(map) => { map.insert(field.clone(), val.clone()); }
+                            _ => return Err(InterpError::TypeError { expected: "Map or struct".to_string(), actual: obj.type_name().to_string(), context: format!("field assignment .{}", field), span: stmt.span }),
+                        }
+                        self.heap.write(addr, obj);
+                        Ok(val)
+                    }
+                    _ => Err(InterpError::TypeError { expected: "mutable variable".to_string(), actual: "expression".to_string(), context: "field assignment target must be a variable".to_string(), span: stmt.span }),
+                }
+            }
+
+            // Index assignment: obj[index] = value (#7)
+            StatementKind::IndexAssignment { object, index, value } => {
+                let idx_val = self.eval_expr(index)?;
+                let val = self.eval_expr(value)?;
+                match &object.kind {
+                    ExpressionKind::Variable(name) => {
+                        let entry = self.lookup(name).ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: self.suggest_variable(name) })?;
+                        if !entry.mutable {
+                            return Err(InterpError::ImmutableAssignment { name: name.clone(), span: stmt.span });
+                        }
+                        let addr = entry.addr;
+                        let mut obj = self.heap.read(addr).cloned().ok_or_else(|| InterpError::UndefinedVariable { name: name.clone(), span: stmt.span, suggestion: None })?;
+                        match (&mut obj, &idx_val) {
+                            (DataType::Array(arr), _) => {
+                                let i = idx_val.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: idx_val.type_name().to_string(), context: "array index".to_string(), span: stmt.span })?;
+                                let len = arr.len() as i64;
+                                let idx = if i < 0 { (len + i).max(0) as usize } else { i as usize };
+                                if idx < arr.len() {
+                                    arr[idx] = val.clone();
+                                } else {
+                                    return Err(InterpError::TypeError { expected: format!("index 0..{}", arr.len()), actual: format!("{}", i), context: "index assignment out of bounds".to_string(), span: stmt.span });
+                                }
+                            }
+                            (DataType::Map(map), DataType::String(key)) => {
+                                map.insert(key.clone(), val.clone());
+                            }
+                            (DataType::Map(map), other) => {
+                                map.insert(other.to_string_lossy(), val.clone());
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "Array or Map".to_string(), actual: obj.type_name().to_string(), context: "index assignment".to_string(), span: stmt.span }),
+                        }
+                        self.heap.write(addr, obj);
+                        Ok(val)
+                    }
+                    _ => Err(InterpError::TypeError { expected: "mutable variable".to_string(), actual: "expression".to_string(), context: "index assignment target must be a variable".to_string(), span: stmt.span }),
+                }
+            }
+
             StatementKind::TryCatch {
                 try_block,
                 catch_var,

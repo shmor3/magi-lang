@@ -167,6 +167,15 @@ impl<'a> LintContext<'a> {
             StatementKind::CompoundAssign { value, .. } => {
                 self.check_expression(value);
             }
+            StatementKind::FieldAssignment { object, value, .. } => {
+                self.check_expression(object);
+                self.check_expression(value);
+            }
+            StatementKind::IndexAssignment { object, index, value } => {
+                self.check_expression(object);
+                self.check_expression(index);
+                self.check_expression(value);
+            }
             StatementKind::FunctionDef(fdef) => {
                 if let Some(d) = rules::check_naming_snake_case(&fdef.name, fdef.span) {
                     self.emit(d);
