@@ -496,6 +496,28 @@ pub enum OperationType {
     IsSorted,
     BinarySearch,
     SortReverse,
+
+    // Subprocess (3)
+    Exec,
+    ExecStatus,
+    ExecOutput,
+
+    // Sync (6)
+    MutexNew,
+    MutexLock,
+    MutexUnlock,
+    WaitgroupNew,
+    WaitgroupDone,
+    WaitgroupWait,
+
+    // Concurrency (1)
+    AwaitAll,
+
+    // Log (4)
+    LogInfo,
+    LogWarn,
+    LogError,
+    LogDebug,
 }
 
 impl OperationType {
@@ -915,6 +937,24 @@ impl OperationType {
             OperationType::IsSorted => "is_sorted",
             OperationType::BinarySearch => "binary_search",
             OperationType::SortReverse => "sort_reverse",
+            // Subprocess
+            OperationType::Exec => "exec",
+            OperationType::ExecStatus => "exec_status",
+            OperationType::ExecOutput => "exec_output",
+            // Sync
+            OperationType::MutexNew => "mutex_new",
+            OperationType::MutexLock => "mutex_lock",
+            OperationType::MutexUnlock => "mutex_unlock",
+            OperationType::WaitgroupNew => "waitgroup_new",
+            OperationType::WaitgroupDone => "waitgroup_done",
+            OperationType::WaitgroupWait => "waitgroup_wait",
+            // Concurrency
+            OperationType::AwaitAll => "await_all",
+            // Log
+            OperationType::LogInfo => "log_info",
+            OperationType::LogWarn => "log_warn",
+            OperationType::LogError => "log_error",
+            OperationType::LogDebug => "log_debug",
         }
     }
 
@@ -1334,6 +1374,24 @@ impl OperationType {
             "is_sorted" => Some(OperationType::IsSorted),
             "binary_search" => Some(OperationType::BinarySearch),
             "sort_reverse" => Some(OperationType::SortReverse),
+            // Subprocess
+            "exec" => Some(OperationType::Exec),
+            "exec_status" => Some(OperationType::ExecStatus),
+            "exec_output" => Some(OperationType::ExecOutput),
+            // Sync
+            "mutex_new" => Some(OperationType::MutexNew),
+            "mutex_lock" => Some(OperationType::MutexLock),
+            "mutex_unlock" => Some(OperationType::MutexUnlock),
+            "waitgroup_new" => Some(OperationType::WaitgroupNew),
+            "waitgroup_done" => Some(OperationType::WaitgroupDone),
+            "waitgroup_wait" => Some(OperationType::WaitgroupWait),
+            // Concurrency
+            "await_all" => Some(OperationType::AwaitAll),
+            // Log
+            "log_info" => Some(OperationType::LogInfo),
+            "log_warn" => Some(OperationType::LogWarn),
+            "log_error" => Some(OperationType::LogError),
+            "log_debug" => Some(OperationType::LogDebug),
             _ => None,
         }
     }
@@ -1753,6 +1811,24 @@ impl OperationType {
         OperationType::IsSorted,
         OperationType::BinarySearch,
         OperationType::SortReverse,
+        // Subprocess (3)
+        OperationType::Exec,
+        OperationType::ExecStatus,
+        OperationType::ExecOutput,
+        // Sync (6)
+        OperationType::MutexNew,
+        OperationType::MutexLock,
+        OperationType::MutexUnlock,
+        OperationType::WaitgroupNew,
+        OperationType::WaitgroupDone,
+        OperationType::WaitgroupWait,
+        // Concurrency (1)
+        OperationType::AwaitAll,
+        // Log (4)
+        OperationType::LogInfo,
+        OperationType::LogWarn,
+        OperationType::LogError,
+        OperationType::LogDebug,
     ];
 }
 
@@ -1768,7 +1844,7 @@ mod tests {
 
     #[test]
     fn test_operation_type_all_count() {
-        assert_eq!(OperationType::ALL.len(), 374);
+        assert_eq!(OperationType::ALL.len(), 388);
     }
 
     #[test]

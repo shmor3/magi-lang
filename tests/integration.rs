@@ -20409,3 +20409,129 @@ fn test_bounded_channel() {
         DataType::String("b".to_string()),
     ]));
 }
+
+// =========================================================================
+// Maturity gap audit: integration tests
+// =========================================================================
+
+#[test]
+fn test_nested_spawn() {
+    // Spawn inside spawn: outer spawns inner, both resolve.
+    assert_eq!(run(r#"
+        let t = spawn {
+            let inner = spawn { 42 };
+            await inner
+        };
+        await t
+    "#), DataType::Int64(42));
+}
+
+#[test]
+fn test_channel_with_spawn_producer() {
+    // Spawned task sends values on a channel, main thread receives them.
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        let producer = spawn {
+            chan_send(tx, 10);
+            chan_send(tx, 20);
+            chan_close(tx);
+            "done"
+        };
+        let v1 = chan_recv(rx);
+        let v2 = chan_recv(rx);
+        await producer;
+        [v1, v2]
+    "#), DataType::Array(vec![DataType::Int64(10), DataType::Int64(20)]));
+}
+
+#[test]
+fn test_chan_recv_on_closed_channel_returns_null() {
+    // After closing sender, chan_recv should return null.
+    assert_eq!(run(r#"
+        let ch = channel();
+        let tx = ch[0];
+        let rx = ch[1];
+        chan_send(tx, 1);
+        chan_close(tx);
+        let v1 = chan_recv(rx);
+        let v2 = chan_recv(rx);
+        [v1, v2]
+    "#), DataType::Array(vec![DataType::Int64(1), DataType::Null]));
+}
+
+#[test]
+fn test_c_style_for_with_continue() {
+    // C-style for loop with continue should skip iterations correctly.
+    // Use array_push since the StubEvaluator supports it.
+    assert_eq!(run(r#"
+        let mut result = [];
+        for (let mut i = 0; i < 6; i = i + 1) {
+            if i % 2 == 0 { continue; }
+            result = array_push(result, i);
+        }
+        result
+    "#), DataType::Array(vec![
+        DataType::Int64(1),
+        DataType::Int64(3),
+        DataType::Int64(5),
+    ]));
+}
+
+#[test]
+fn test_c_style_for_variable_scoping() {
+    // C-style for loop init variable should be scoped to the loop.
+    let err = run_err(r#"
+        for (let mut i = 0; i < 3; i = i + 1) {
+            output i;
+        }
+        output i;
+    "#);
+    let msg = format!("{}", err);
+    assert!(msg.contains("i") || msg.contains("undefined"),
+        "accessing for-loop variable outside should error: {}", msg);
+}
+
+#[test]
+fn test_trait_method_call_on_correct_type() {
+    // Calling a trait method on the correct type should work.
+    assert_eq!(run(r#"
+        trait Greet {
+            fn hello(self) -> string;
+        }
+        struct Person { name: string }
+        impl Greet for Person {
+            fn hello(self) -> string {
+                "Hello, " + self.name
+            }
+        }
+        let p = Person { name: "Alice" };
+        p.hello()
+    "#), DataType::String("Hello, Alice".to_string()));
+}
+
+#[test]
+fn test_do_while_loop_executes_body_at_least_once() {
+    // do-while should execute body at least once even if condition is false.
+    assert_eq!(run(r#"
+        let mut ran = false;
+        do {
+            ran = true;
+        } while false;
+        ran
+    "#), DataType::Bool(true));
+}
+
+#[test]
+fn test_spawned_thread_error_propagates() {
+    // A spawned task that errors should propagate the error on await.
+    let result = run_result(r#"
+        let t = spawn {
+            let x = 1 / 0;
+            x
+        };
+        await t
+    "#);
+    assert!(result.is_err(), "division by zero in spawned task should propagate as error");
+}

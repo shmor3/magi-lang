@@ -575,7 +575,10 @@ impl OperationEvaluator for FullEvaluator {
                 | OperationType::HttpServerStart
                 | OperationType::HttpServerReceive
                 | OperationType::HttpServerRespond
-                | OperationType::HttpServerStop => {
+                | OperationType::HttpServerStop
+                | OperationType::Exec
+                | OperationType::ExecStatus
+                | OperationType::ExecOutput => {
                     return Err(EvalError::InvalidInput(format!(
                         "operation {:?} is not allowed in sandbox mode",
                         op
@@ -6111,6 +6114,194 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
+            // ================================================================
+            // Subprocess operations
+            // ================================================================
+            OperationType::Exec => {
+                let cmd = get_string(inputs, "command")?;
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .output()
+                    .map_err(|e| EvalError::InvalidInput(format!("exec: {}", e)))?;
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                if stdout.len() > MAX_STRING_OUTPUT || stderr.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "exec: output exceeds {} byte limit",
+                        MAX_STRING_OUTPUT
+                    )));
+                }
+                let mut m = indexmap::IndexMap::new();
+                m.insert("stdout".into(), DataType::String(stdout));
+                m.insert("stderr".into(), DataType::String(stderr));
+                m.insert(
+                    "exit_code".into(),
+                    DataType::Int64(output.status.code().unwrap_or(-1) as i64),
+                );
+                Ok(DataType::Map(m))
+            }
+            OperationType::ExecStatus => {
+                let cmd = get_string(inputs, "command")?;
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .status()
+                    .map_err(|e| EvalError::InvalidInput(format!("exec_status: {}", e)))?;
+                Ok(DataType::Int64(status.code().unwrap_or(-1) as i64))
+            }
+            OperationType::ExecOutput => {
+                let cmd = get_string(inputs, "command")?;
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .output()
+                    .map_err(|e| EvalError::InvalidInput(format!("exec_output: {}", e)))?;
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                if stdout.len() > MAX_STRING_OUTPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "exec_output: output exceeds {} byte limit",
+                        MAX_STRING_OUTPUT
+                    )));
+                }
+                Ok(DataType::String(stdout))
+            }
+
+            // ================================================================
+            // Sync operations
+            // ================================================================
+            OperationType::MutexNew => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let mutex: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+                conn_store(&id, mutex)?;
+                Ok(DataType::String(id))
+            }
+            OperationType::MutexLock => {
+                let id = get_string(inputs, "id")?;
+                conn_with::<std::sync::Mutex<bool>, _>(id, |mutex| {
+                    // Lock the mutex: set the flag to true.
+                    // In this simplified model we use the bool to track locked state.
+                    let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = true;
+                    Ok(DataType::Null)
+                })
+            }
+            OperationType::MutexUnlock => {
+                let id = get_string(inputs, "id")?;
+                conn_with::<std::sync::Mutex<bool>, _>(id, |mutex| {
+                    let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = false;
+                    Ok(DataType::Null)
+                })
+            }
+            OperationType::WaitgroupNew => {
+                let count_val = inputs.get("count").cloned().unwrap_or(DataType::Null);
+                let count = match &count_val {
+                    DataType::Int64(n) => {
+                        if *n < 0 {
+                            return Err(EvalError::InvalidInput(
+                                "waitgroup_new: count must be non-negative".to_string(),
+                            ));
+                        }
+                        *n
+                    }
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int64".to_string(),
+                            actual: count_val.type_name().to_string(),
+                            context: "WaitgroupNew".to_string(),
+                        });
+                    }
+                };
+                let id = uuid::Uuid::new_v4().to_string();
+                let wg = std::sync::Arc::new((
+                    std::sync::Mutex::new(count),
+                    std::sync::Condvar::new(),
+                ));
+                conn_store(&id, wg)?;
+                Ok(DataType::String(id))
+            }
+            OperationType::WaitgroupDone => {
+                let id = get_string(inputs, "id")?;
+                Ok(conn_with::<std::sync::Arc<(std::sync::Mutex<i64>, std::sync::Condvar)>, _>(
+                    id,
+                    |wg| {
+                        let (lock, cvar) = &**wg;
+                        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        if *count > 0 {
+                            *count -= 1;
+                        }
+                        if *count == 0 {
+                            cvar.notify_all();
+                        }
+                        Ok(DataType::Null)
+                    },
+                )?)
+            }
+            OperationType::WaitgroupWait => {
+                let id = get_string(inputs, "id")?;
+                Ok(conn_with::<std::sync::Arc<(std::sync::Mutex<i64>, std::sync::Condvar)>, _>(
+                    id,
+                    |wg| {
+                        let (lock, cvar) = &**wg;
+                        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        while *count > 0 {
+                            count = cvar
+                                .wait(count)
+                                .unwrap_or_else(|e| e.into_inner());
+                        }
+                        Ok(DataType::Null)
+                    },
+                )?)
+            }
+
+            // ================================================================
+            // Concurrency: AwaitAll
+            // ================================================================
+            OperationType::AwaitAll => {
+                let futures_val = inputs.get("futures").cloned().unwrap_or(DataType::Null);
+                match futures_val {
+                    DataType::Array(arr) => {
+                        // AwaitAll simply returns the array as-is in the synchronous evaluator.
+                        // In the interpreter, Future values would be resolved before reaching here.
+                        Ok(DataType::Array(arr))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Array".to_string(),
+                        actual: futures_val.type_name().to_string(),
+                        context: "AwaitAll".to_string(),
+                    }),
+                }
+            }
+
+            // ================================================================
+            // Log operations
+            // ================================================================
+            OperationType::LogInfo => {
+                let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                eprintln!("[{}] [INFO] {}", now, msg.to_string_lossy());
+                Ok(DataType::Null)
+            }
+            OperationType::LogWarn => {
+                let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                eprintln!("[{}] [WARN] {}", now, msg.to_string_lossy());
+                Ok(DataType::Null)
+            }
+            OperationType::LogError => {
+                let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                eprintln!("[{}] [ERROR] {}", now, msg.to_string_lossy());
+                Ok(DataType::Null)
+            }
+            OperationType::LogDebug => {
+                let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
+                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                eprintln!("[{}] [DEBUG] {}", now, msg.to_string_lossy());
+                Ok(DataType::Null)
+            }
+
             // All OperationType variants are now handled above.
         }
     }
@@ -6300,7 +6491,7 @@ fn num_div_op(
             let fa = match av { Ok(i) => i as f64, Err(f) => f };
             Ok(wrap_float_result(float_op(fa, fb), kind))
         }
-        _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "arithmetic".to_string() }),
+        _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "arithmetic".to_string() }),
     }
 }
 
@@ -6403,7 +6594,7 @@ fn num_binop(
             let fb = match bv { Ok(i) => i as f64, Err(f) => f };
             Ok(wrap_float_result(float_op(fa, fb), kind))
         }
-        _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: "non-numeric".to_string(), context: "arithmetic".to_string() }),
+        _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "arithmetic".to_string() }),
     }
 }
 

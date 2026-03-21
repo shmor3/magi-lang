@@ -154,8 +154,8 @@ struct TypeChecker {
     type_aliases: HashMap<String, String>,
     /// Known constant values for const propagation.
     const_values: HashMap<String, ChannelType>,
-    /// Known trait definitions: trait_name → list of (method_name, param_count including self).
-    trait_defs: HashMap<String, Vec<(String, usize, u32, u32)>>,
+    /// Known trait definitions: trait_name → list of (method_name, param_count, line, col, return_type).
+    trait_defs: HashMap<String, Vec<(String, usize, u32, u32, Option<String>)>>,
 }
 
 impl TypeChecker {
@@ -404,8 +404,8 @@ impl TypeChecker {
                 self.struct_defs.insert(name.clone(), field_info);
             }
             if let StatementKind::TraitDef { name, methods } = &stmt.kind {
-                let method_info: Vec<(String, usize, u32, u32)> = methods.iter().map(|m| {
-                    (m.name.clone(), m.params.len(), m.span.start_line, m.span.start_col)
+                let method_info: Vec<(String, usize, u32, u32, Option<String>)> = methods.iter().map(|m| {
+                    (m.name.clone(), m.params.len(), m.span.start_line, m.span.start_col, m.return_type.as_ref().map(|t| t.to_string()))
                 }).collect();
                 self.trait_defs.insert(name.clone(), method_info);
             }
@@ -1349,14 +1349,14 @@ impl TypeChecker {
 
             StatementKind::ImplTrait { trait_name, type_name, methods } => {
                 // Validate trait conformance: check that all required methods are implemented
-                // with correct arity.
+                // with correct arity and matching return types.
                 if let Some(trait_methods) = self.trait_defs.get(trait_name).cloned() {
-                    let impl_method_names: HashMap<&str, usize> = methods.iter()
-                        .map(|m| (m.name.as_str(), m.params.len()))
+                    let impl_method_map: HashMap<&str, &FunctionDef> = methods.iter()
+                        .map(|m| (m.name.as_str(), m))
                         .collect();
 
-                    for (method_name, expected_params, _line, _col) in &trait_methods {
-                        match impl_method_names.get(method_name.as_str()) {
+                    for (method_name, expected_params, _line, _col, expected_return) in &trait_methods {
+                        match impl_method_map.get(method_name.as_str()) {
                             None => {
                                 self.emit_coded(
                                     stmt.span.start_line,
@@ -1370,7 +1370,8 @@ impl TypeChecker {
                                     None,
                                 );
                             }
-                            Some(&actual_params) => {
+                            Some(impl_method) => {
+                                let actual_params = impl_method.params.len();
                                 if actual_params != *expected_params {
                                     self.emit_coded(
                                         stmt.span.start_line,
@@ -1383,6 +1384,39 @@ impl TypeChecker {
                                         super::errors::ErrorCode::E100,
                                         None,
                                     );
+                                }
+                                // Check return type matches if trait specifies one.
+                                if let Some(expected_ret) = expected_return {
+                                    let actual_ret = impl_method.return_type.as_ref().map(|t| t.to_string());
+                                    match &actual_ret {
+                                        None => {
+                                            self.emit_coded(
+                                                stmt.span.start_line,
+                                                stmt.span.start_col,
+                                                format!(
+                                                    "method '{}' for trait '{}' on '{}' is missing return type annotation, trait requires -> {}",
+                                                    method_name, trait_name, type_name, expected_ret
+                                                ),
+                                                DiagnosticSeverity::Warning,
+                                                super::errors::ErrorCode::E100,
+                                                None,
+                                            );
+                                        }
+                                        Some(actual) if actual != expected_ret => {
+                                            self.emit_coded(
+                                                stmt.span.start_line,
+                                                stmt.span.start_col,
+                                                format!(
+                                                    "method '{}' for trait '{}' on '{}' returns '{}', but the trait requires '{}'",
+                                                    method_name, trait_name, type_name, actual, expected_ret
+                                                ),
+                                                DiagnosticSeverity::Error,
+                                                super::errors::ErrorCode::E100,
+                                                None,
+                                            );
+                                        }
+                                        _ => {} // types match
+                                    }
                                 }
                             }
                         }
@@ -1404,7 +1438,17 @@ impl TypeChecker {
             }
 
             StatementKind::DoWhileLoop { condition, body, .. } => {
-                self.infer_expr(condition);
+                let cond_type = self.infer_expr(condition);
+                if cond_type != ChannelType::Bool && cond_type != ChannelType::Null {
+                    self.emit_coded(
+                        condition.span.start_line,
+                        condition.span.start_col,
+                        format!("do-while condition should be bool, got {}", cond_type.as_str()),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E101,
+                        None,
+                    );
+                }
                 self.push_scope();
                 self.loop_depth += 1;
                 self.check_block(body);
@@ -1419,7 +1463,17 @@ impl TypeChecker {
             StatementKind::CStyleFor { init, condition, update, body } => {
                 self.push_scope();
                 self.check_statement(init);
-                self.infer_expr(condition);
+                let cond_type = self.infer_expr(condition);
+                if cond_type != ChannelType::Bool && cond_type != ChannelType::Null {
+                    self.emit_coded(
+                        condition.span.start_line,
+                        condition.span.start_col,
+                        format!("for condition should be bool, got {}", cond_type.as_str()),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::E101,
+                        None,
+                    );
+                }
                 self.loop_depth += 1;
                 self.check_block(body);
                 self.loop_depth -= 1;
@@ -6827,6 +6881,127 @@ test "reads outer" { let r = x + 1; output r; }"#,
         "#);
         let errs = errors(&a);
         assert!(errs.is_empty(), "conforming impl should have no errors, got: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_impl_trait_return_type_mismatch() {
+        let a = check(r#"
+            trait Converter {
+                fn convert(self) -> string;
+            }
+            struct Num { val: int64 }
+            impl Converter for Num {
+                fn convert(self) -> int64 {
+                    let _x = 1;
+                }
+            }
+        "#);
+        let errs = errors(&a);
+        assert!(!errs.is_empty(), "should report return type mismatch");
+        assert!(errs.iter().any(|e| e.message.contains("returns 'int64'") && e.message.contains("requires 'string'")),
+            "error should mention return type mismatch, got: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_impl_trait_missing_return_type_annotation() {
+        let a = check(r#"
+            trait Converter {
+                fn convert(self) -> string;
+            }
+            struct Num { val: int64 }
+            impl Converter for Num {
+                fn convert(self) {
+                    let _x = 1;
+                }
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(!w.is_empty(), "should warn about missing return type annotation");
+        assert!(w.iter().any(|d| d.message.contains("missing return type annotation")),
+            "warning should mention missing return type, got: {:?}",
+            w.iter().map(|d| &d.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_impl_trait_matching_return_type() {
+        let a = check(r#"
+            trait Converter {
+                fn convert(self) -> string;
+            }
+            struct Num { val: int64 }
+            impl Converter for Num {
+                fn convert(self) -> string {
+                    let _x = "hello";
+                }
+            }
+        "#);
+        let errs = errors(&a);
+        // Filter out errors unrelated to return type.
+        let return_errs: Vec<_> = errs.iter().filter(|e| e.message.contains("return")).collect();
+        assert!(return_errs.is_empty(), "matching return type should produce no return-type errors, got: {:?}",
+            return_errs.iter().map(|e| &e.message).collect::<Vec<_>>());
+    }
+
+    // =========================================================================
+    // DoWhileLoop and CStyleFor condition type checking
+    // =========================================================================
+
+    #[test]
+    fn test_do_while_condition_warns_on_non_bool() {
+        let a = check(r#"
+            let mut _x = 0;
+            do {
+                _x = _x + 1;
+            } while "true";
+        "#);
+        let w = warnings(&a);
+        assert!(w.iter().any(|d| d.message.contains("do-while condition should be bool")),
+            "should warn about non-bool do-while condition, got: {:?}",
+            w.iter().map(|d| &d.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_do_while_condition_no_warning_on_bool() {
+        let a = check(r#"
+            let mut _x = 0;
+            do {
+                _x = _x + 1;
+            } while _x < 10;
+        "#);
+        let w = warnings(&a);
+        let cond_warns: Vec<_> = w.iter().filter(|d| d.message.contains("do-while condition")).collect();
+        assert!(cond_warns.is_empty(), "bool condition should produce no do-while warning, got: {:?}",
+            cond_warns.iter().map(|d| &d.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_c_style_for_condition_warns_on_non_bool() {
+        let a = check(r#"
+            for (let mut _i = 0; "yes"; _i = _i + 1) {
+                let _x = 1;
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(w.iter().any(|d| d.message.contains("for condition should be bool")),
+            "should warn about non-bool for condition, got: {:?}",
+            w.iter().map(|d| &d.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_c_style_for_scopes_variables() {
+        // Variables declared in the init clause of a C-style for loop
+        // should not leak into the outer scope.
+        let a = check(r#"
+            for (let mut _i = 0; _i < 10; _i = _i + 1) {
+                let _x = _i;
+            }
+            let _y = _i;
+        "#);
+        let errs = errors(&a);
+        assert!(errs.iter().any(|e| e.message.contains("undefined variable '_i'")),
+            "C-style for init variable should be scoped, got: {:?}",
             errs.iter().map(|e| &e.message).collect::<Vec<_>>());
     }
 }

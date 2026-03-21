@@ -129,6 +129,7 @@ pub struct Statement {
     pub span: Span,
 }
 
+/// The kind of a statement node, determining its semantics and contained data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatementKind {
     /// `import "plugin-id";` — legacy plugin import (deprecated, use `Use` instead)
@@ -359,6 +360,7 @@ pub struct Expression {
     pub span: Span,
 }
 
+/// The kind of an expression node, determining how it evaluates to a value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExpressionKind {
     /// Literal value: integer, float, string, bool, null, array, map

@@ -1438,7 +1438,9 @@ impl Compiler {
             }
             BinOp::And | BinOp::Or => return Err(CompileError::at(0, 0, "And/Or should be handled as short-circuit in compile_expr".to_string())),
             BinOp::In => {
-                self.emit(Instruction::PushNull);
+                // Delegate to runtime for containment check.
+                let name_idx = self.module.intern_string("__in");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
         }
         Ok(())
@@ -3132,5 +3134,65 @@ mod tests {
         let map_set_count = main.instructions.iter()
             .filter(|i| matches!(i, Instruction::MapSet)).count();
         assert!(map_set_count >= 2, "nested field assignment should use at least 2 MapSet ops, got {}", map_set_count);
+    }
+
+    // =========================================================================
+    // WASM compiler: new feature compilation tests
+    // =========================================================================
+
+    #[test]
+    fn test_compile_do_while_loop() {
+        let module = compile(r#"
+            let mut i = 0;
+            do {
+                i = i + 1;
+            } while i < 5;
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Should produce a Loop + Block structure.
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)),
+            "do-while should compile to a Loop instruction");
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::BoolNot)),
+            "do-while condition should be inverted");
+    }
+
+    #[test]
+    fn test_compile_c_style_for() {
+        let module = compile(r#"
+            for (let mut i = 0; i < 10; i = i + 1) {
+                output i;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Loop)),
+            "C-style for should compile to a Loop instruction");
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::Print)),
+            "C-style for body should contain output/print");
+    }
+
+    #[test]
+    fn test_compile_c_style_for_with_continue() {
+        let module = compile(r#"
+            for (let mut i = 0; i < 10; i = i + 1) {
+                if i < 5 { continue; }
+                output i;
+            }
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // Continue produces a Br to the loop's continue target.
+        let br_count = main.instructions.iter().filter(|i| matches!(i, Instruction::Br(_))).count();
+        assert!(br_count >= 2, "expected at least 2 Br instructions (continue + loop back), got {}", br_count);
+    }
+
+    #[test]
+    fn test_compile_in_operator_uses_runtime_call() {
+        let module = compile(r#"
+            let arr = [1, 2, 3];
+            let result = 2 in arr;
+        "#).unwrap();
+        let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
+        // The 'in' operator should emit a RuntimeCall to "__in".
+        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::RuntimeCall { .. })),
+            "in operator should emit a RuntimeCall");
     }
 }

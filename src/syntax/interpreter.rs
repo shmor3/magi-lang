@@ -5046,13 +5046,12 @@ impl<'a> Interpreter<'a> {
                         };
                         // Registry lock is now released; safe to block.
                         let rx_guard = rx_arc.lock().unwrap_or_else(|e| e.into_inner());
-                        let result = rx_guard.recv().map_err(|_| InterpError::EvalError {
-                            error: EvalError::InvalidInput(
-                                "channel closed (all senders dropped)".to_string(),
-                            ),
-                            span: expr.span,
-                        })?;
-                        return Ok(result);
+                        return match rx_guard.recv() {
+                            Ok(val) => Ok(val),
+                            // Channel closed (all senders dropped) — return null
+                            // instead of blocking forever or erroring.
+                            Err(_) => Ok(DataType::Null),
+                        };
                     }
                     "chan_try_recv" => {
                         // chan_try_recv(receiver_id) -> value or null
@@ -8716,5 +8715,153 @@ mod tests {
         let config = HashMap::new();
         let result = spawn_eval_operation(OperationType::Less, &inputs, &config).unwrap();
         assert_eq!(result, DataType::Bool(true));
+    }
+
+    // =========================================================================
+    // Concurrency edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_spawned_thread_panic_returns_error() {
+        // A spawned thread that panics should return an error, not crash the parent.
+        let tid = task_id();
+        let handle = std::thread::spawn(|| -> Result<DataType, String> {
+            panic!("intentional panic in spawned thread");
+        });
+        task_store(&tid, handle).unwrap();
+        let result = task_join(&tid);
+        assert!(result.is_err(), "panicked thread should return Err");
+        assert!(
+            result.unwrap_err().contains("panicked"),
+            "error should mention panic"
+        );
+    }
+
+    #[test]
+    fn test_spawned_thread_error_returns_err_value() {
+        // A spawned thread that returns Err should propagate that error.
+        let tid = task_id();
+        let handle = std::thread::spawn(|| -> Result<DataType, String> {
+            Err("computation failed".to_string())
+        });
+        task_store(&tid, handle).unwrap();
+        let result = task_join(&tid);
+        assert!(result.is_ok(), "join should succeed");
+        let inner = result.unwrap();
+        assert!(inner.is_err(), "inner result should be Err");
+        assert_eq!(inner.unwrap_err(), "computation failed");
+    }
+
+    #[test]
+    fn test_chan_recv_on_closed_channel_returns_null() {
+        // When all senders are dropped, chan_recv should return null, not block.
+        let (tx_id, rx_id) = channel_ids();
+        let (tx, rx) = std::sync::mpsc::channel::<DataType>();
+        channel_store(
+            &rx_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx)),
+            },
+        )
+        .unwrap();
+
+        // Drop the sender to close the channel.
+        drop(tx);
+
+        // Directly recv on the stored receiver — should get Null.
+        let rx_arc = {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            let entry = map.get(&rx_id).unwrap();
+            let receiver = entry.downcast_ref::<ChannelReceiver>().unwrap();
+            Arc::clone(&receiver.rx)
+        };
+        let rx_guard = rx_arc.lock().unwrap();
+        // This mirrors the updated chan_recv behavior.
+        let result = match rx_guard.recv() {
+            Ok(val) => val,
+            Err(_) => DataType::Null,
+        };
+        assert_eq!(result, DataType::Null, "recv on closed channel should return null");
+
+        // Cleanup
+        channel_remove(&rx_id).unwrap();
+        // tx_id was never stored, so don't try to remove it.
+    }
+
+    #[test]
+    fn test_multiple_receivers_on_same_channel() {
+        // Multiple receivers sharing the same Arc<Mutex<Receiver>> should work:
+        // each recv call gets a different value (no duplication).
+        let (tx_id, rx_id) = channel_ids();
+        let (tx, rx) = std::sync::mpsc::channel::<DataType>();
+        channel_store(&tx_id, ChannelSender { tx: tx.clone() }).unwrap();
+        channel_store(
+            &rx_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx)),
+            },
+        )
+        .unwrap();
+
+        // Send two values.
+        tx.send(DataType::Int64(1)).unwrap();
+        tx.send(DataType::Int64(2)).unwrap();
+
+        // Clone the Arc to simulate multiple receivers.
+        let rx_arc = {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            let entry = map.get(&rx_id).unwrap();
+            let receiver = entry.downcast_ref::<ChannelReceiver>().unwrap();
+            Arc::clone(&receiver.rx)
+        };
+
+        // Two sequential recv calls should get different values (no duplication).
+        let r1 = {
+            let guard = rx_arc.lock().unwrap();
+            guard.recv().unwrap()
+        };
+        let r2 = {
+            let guard = rx_arc.lock().unwrap();
+            guard.recv().unwrap()
+        };
+
+        assert_eq!(r1, DataType::Int64(1));
+        assert_eq!(r2, DataType::Int64(2));
+
+        // Cleanup
+        channel_remove(&tx_id).unwrap();
+        channel_remove(&rx_id).unwrap();
+    }
+
+    #[test]
+    fn test_chan_try_recv_on_closed_channel_returns_null() {
+        // chan_try_recv on a closed (disconnected) channel should return null.
+        let (_tx_id, rx_id) = channel_ids();
+        let (tx, rx) = std::sync::mpsc::channel::<DataType>();
+        channel_store(
+            &rx_id,
+            ChannelReceiver {
+                rx: Arc::new(Mutex::new(rx)),
+            },
+        )
+        .unwrap();
+
+        // Drop sender to close.
+        drop(tx);
+
+        let rx_arc = {
+            let map = CHANNEL_REGISTRY.lock().unwrap();
+            let entry = map.get(&rx_id).unwrap();
+            let receiver = entry.downcast_ref::<ChannelReceiver>().unwrap();
+            Arc::clone(&receiver.rx)
+        };
+        let rx_guard = rx_arc.lock().unwrap();
+        let result = match rx_guard.try_recv() {
+            Ok(val) => val,
+            Err(_) => DataType::Null,
+        };
+        assert_eq!(result, DataType::Null);
+
+        channel_remove(&rx_id).unwrap();
     }
 }

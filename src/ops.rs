@@ -283,6 +283,23 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         SortAsc | SortDesc | StableSort | SortReverse | SortBy | SortByKey => ChannelType::Array,
         IsSorted => ChannelType::Bool,
         BinarySearch => ChannelType::Int64,
+
+        // Subprocess
+        Exec => ChannelType::Map,
+        ExecStatus => ChannelType::Int64,
+        ExecOutput => ChannelType::String,
+
+        // Sync
+        MutexNew => ChannelType::String,
+        MutexLock | MutexUnlock => ChannelType::Null,
+        WaitgroupNew => ChannelType::String,
+        WaitgroupDone | WaitgroupWait => ChannelType::Null,
+
+        // Concurrency
+        AwaitAll => ChannelType::Array,
+
+        // Log
+        LogInfo | LogWarn | LogError | LogDebug => ChannelType::Null,
     }
 }
 
@@ -601,6 +618,21 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
             &[("array", Array)]
         }
         BinarySearch => &[("array", Array), ("value", Null)],
+
+        // Subprocess
+        Exec | ExecStatus | ExecOutput => &[("command", String)],
+
+        // Sync
+        MutexNew => &[],
+        MutexLock | MutexUnlock => &[("id", String)],
+        WaitgroupNew => &[("count", Null)],
+        WaitgroupDone | WaitgroupWait => &[("id", String)],
+
+        // Concurrency
+        AwaitAll => &[("futures", Array)],
+
+        // Log
+        LogInfo | LogWarn | LogError | LogDebug => &[("message", Null)],
     }
 }
 
@@ -881,6 +913,21 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         FunctionDef | FunctionCall => &[],
         AsyncSpawn | AsyncAwait => &["input"],
         LoopGroup => &[],
+
+        // Subprocess
+        Exec | ExecStatus | ExecOutput => &["command"],
+
+        // Sync
+        MutexNew => &[],
+        MutexLock | MutexUnlock => &["id"],
+        WaitgroupNew => &["count"],
+        WaitgroupDone | WaitgroupWait => &["id"],
+
+        // Concurrency
+        AwaitAll => &["futures"],
+
+        // Log
+        LogInfo | LogWarn | LogError | LogDebug => &["message"],
     }
 }
 
