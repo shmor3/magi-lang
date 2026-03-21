@@ -83,8 +83,6 @@ pub enum TokenKind {
     // do-while and defer
     Do,
     Defer,
-    // Go keyword (alias for spawn)
-    Go,
     /// A reserved keyword that cannot be used as an identifier.
     Reserved,
 
@@ -196,7 +194,6 @@ impl fmt::Display for TokenKind {
             TokenKind::Trait => "trait",
             TokenKind::Do => "do",
             TokenKind::Defer => "defer",
-            TokenKind::Go => "go",
             TokenKind::Reserved => "reserved keyword",
             TokenKind::IntLiteral => "integer",
             TokenKind::FloatLiteral => "float",
@@ -1588,7 +1585,6 @@ impl<'a> Lexer<'a> {
             "trait" => TokenKind::Trait,
             "do" => TokenKind::Do,
             "defer" => TokenKind::Defer,
-            "go" => TokenKind::Go,
             s if is_reserved_keyword(s) => TokenKind::Reserved,
             _ => TokenKind::Ident,
         };

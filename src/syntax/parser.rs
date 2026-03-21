@@ -149,8 +149,7 @@ impl Parser {
                 | TokenKind::Defer
                 | TokenKind::Impl
                 | TokenKind::Trait
-                | TokenKind::Output
-                | TokenKind::Go => return,
+                | TokenKind::Output => return,
                 _ => {
                     self.advance();
                 }
@@ -320,7 +319,6 @@ impl Parser {
         if tok.kind == TokenKind::Async
             || tok.kind == TokenKind::Await
             || tok.kind == TokenKind::Spawn
-            || tok.kind == TokenKind::Go
         {
             return Err(SyntaxError {
                 line: tok.span.start_line as usize,
@@ -482,25 +480,41 @@ impl Parser {
                     }),
                 }
             }
-            TokenKind::Go => {
-                // `go expr` is an alias for `spawn expr`
-                self.advance(); // consume 'go'
-                let expr = self.parse_expression()?;
-                let end = expr.span;
-                self.eat(&TokenKind::Semicolon);
-                Ok(Statement {
-                    kind: StatementKind::ExprStatement(Expression {
-                        kind: ExpressionKind::Spawn(Box::new(expr)),
-                        span: start.merge(end),
-                    }),
-                    span: start.merge(end),
-                    leading_comments: Vec::new(),
-                    trailing_comment: None,
-                })
-            }
             TokenKind::Ident => {
-                // Could be assignment (x = ...), compound assign (x += ...), or expression
-                self.parse_assignment_or_expr_statement(start)
+                // `go expr` is a soft keyword alias for `spawn expr`
+                if self.peek().text == "go" {
+                    // Peek ahead: if next token after "go" looks like the start
+                    // of an expression (not = or := or ++ etc), treat as spawn
+                    let saved = self.pos;
+                    self.advance(); // consume 'go'
+                    match self.peek_kind() {
+                        // If followed by assignment operators, backtrack — it's a variable named "go"
+                        TokenKind::Eq | TokenKind::ColonEq | TokenKind::PlusEq
+                        | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq
+                        | TokenKind::PercentEq | TokenKind::PlusPlus | TokenKind::MinusMinus
+                        | TokenKind::Semicolon | TokenKind::Eof => {
+                            self.pos = saved;
+                            self.parse_assignment_or_expr_statement(start)
+                        }
+                        _ => {
+                            let expr = self.parse_expression()?;
+                            let end = expr.span;
+                            self.eat(&TokenKind::Semicolon);
+                            Ok(Statement {
+                                kind: StatementKind::ExprStatement(Expression {
+                                    kind: ExpressionKind::Spawn(Box::new(expr)),
+                                    span: start.merge(end),
+                                }),
+                                span: start.merge(end),
+                                leading_comments: Vec::new(),
+                                trailing_comment: None,
+                            })
+                        }
+                    }
+                } else {
+                    // Could be assignment (x = ...), compound assign (x += ...), or expression
+                    self.parse_assignment_or_expr_statement(start)
+                }
             }
             TokenKind::LParen => {
                 // Could be tuple assignment: (a, b) = (expr1, expr2);
@@ -1741,8 +1755,7 @@ impl Parser {
                 | TokenKind::Struct
                 | TokenKind::Test
                 | TokenKind::Do
-                | TokenKind::Defer
-                | TokenKind::Go => {
+                | TokenKind::Defer => {
                     let mut stmt = self.parse_statement()?;
                     stmt.leading_comments = leading;
                     stmt.trailing_comment = self.take_trailing_comment(stmt.span.end_line);
@@ -1975,7 +1988,7 @@ impl Parser {
             });
         }
 
-        if self.at(&TokenKind::Spawn) || self.at(&TokenKind::Go) {
+        if self.at(&TokenKind::Spawn) {
             self.advance();
             let operand = if self.at(&TokenKind::LBrace) {
                 // spawn { block } / go { block }

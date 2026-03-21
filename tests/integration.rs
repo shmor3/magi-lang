@@ -8004,7 +8004,7 @@ fn test_while_break_value() {
 fn test_string_interpolation_resource_limit() {
     // Very large string interpolation should produce ResourceLimit, not TypeError
     let err = run_err(r#"
-        let big = "x".repeat(5000000);
+        let big = "x".repeat(50_000_000);
         output f"{big}{big}{big}";
     "#);
     assert!(matches!(err, InterpError::ResourceLimit { .. }),
@@ -8013,13 +8013,13 @@ fn test_string_interpolation_resource_limit() {
 
 #[test]
 fn test_array_spread_resource_limit() {
-    // Spread operations that exceed the element limit should error
+    // Spread operations that exceed the 100M element limit should error
     let err = run_err(r#"
         fn make_big() {
             let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
             let mut big = arr;
             let mut i = 0;
-            while i < 20 {
+            while i < 24 {
                 big = [...big, ...big];
                 i = i + 1;
             }
@@ -8173,9 +8173,9 @@ fn test_chunk_produces_chunks() {
 
 #[test]
 fn test_pad_start_multibyte_byte_limit() {
-    // Padding with a multibyte fill string should be caught by byte limit
+    // Padding with a multibyte fill string should be caught by byte limit (100MB)
     let err = run_err(r#"
-        let s = "x".pad_start(5_000_000, "你好");
+        let s = "x".pad_start(50_000_000, "你好");
         output s;
     "#);
     let msg = format!("{}", err);
@@ -8186,7 +8186,7 @@ fn test_pad_start_multibyte_byte_limit() {
 #[test]
 fn test_pad_end_multibyte_byte_limit() {
     let err = run_err(r#"
-        let s = "x".pad_end(5_000_000, "你好");
+        let s = "x".pad_end(50_000_000, "你好");
         output s;
     "#);
     let msg = format!("{}", err);
@@ -8948,9 +8948,10 @@ fn test_module_enum_direct_access() {
         output Color::Red;
     "#), DataType::Map({
         let mut m = indexmap::IndexMap::new();
-        m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Color".to_string()));
         m.insert("__variant".to_string(), DataType::String("Red".to_string()));
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__iota".to_string(), DataType::Int64(0));
         m
     }));
 }
@@ -13270,9 +13271,10 @@ fn test_use_glob_imports_module_enums() {
         output make_green();
     "#), DataType::Map({
         let mut m = indexmap::IndexMap::new();
-        m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Color".to_string()));
         m.insert("__variant".to_string(), DataType::String("Green".to_string()));
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__iota".to_string(), DataType::Int64(1));
         m
     }));
 }
@@ -13302,9 +13304,10 @@ fn test_use_enum_by_name() {
         output Shape::Circle();
     "#), DataType::Map({
         let mut m = indexmap::IndexMap::new();
-        m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Shape".to_string()));
         m.insert("__variant".to_string(), DataType::String("Circle".to_string()));
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__iota".to_string(), DataType::Int64(0));
         m
     }));
 }
@@ -13333,9 +13336,10 @@ fn test_use_enum_with_alias() {
         output Hue::Blue();
     "#), DataType::Map({
         let mut m = indexmap::IndexMap::new();
-        m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Hue".to_string()));
         m.insert("__variant".to_string(), DataType::String("Blue".to_string()));
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__iota".to_string(), DataType::Int64(2));
         m
     }));
 }
@@ -13412,9 +13416,10 @@ fn test_nested_module_enum_via_use() {
         output make_ok();
     "#), DataType::Map({
         let mut m = indexmap::IndexMap::new();
-        m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Status".to_string()));
         m.insert("__variant".to_string(), DataType::String("Ok".to_string()));
+        m.insert("__data".to_string(), DataType::Array(vec![]));
+        m.insert("__iota".to_string(), DataType::Int64(0));
         m
     }));
 }
