@@ -76,6 +76,7 @@ struct VarInfo {
     used: bool,
     mutated: bool,
     is_param: bool,
+    is_const: bool,
     def_line: u32,
     def_col: u32,
 }
@@ -129,6 +130,8 @@ struct TypeChecker {
     use_aliases: HashSet<String>,
     /// Type alias definitions: alias name → target type string.
     type_aliases: HashMap<String, String>,
+    /// Known constant values for const propagation.
+    const_values: HashMap<String, ChannelType>,
 }
 
 impl TypeChecker {
@@ -145,6 +148,7 @@ impl TypeChecker {
             seen_imports: HashSet::new(),
             use_aliases: HashSet::new(),
             type_aliases: HashMap::new(),
+            const_values: HashMap::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -178,9 +182,11 @@ impl TypeChecker {
                         line: info.def_line,
                         column: info.def_col,
                         message: if info.is_param {
-                            format!("Unused parameter '{}'", name)
+                            format!("unused parameter '{}'", name)
+                        } else if info.is_const {
+                            format!("unused constant '{}'", name)
                         } else {
-                            format!("Unused variable '{}'", name)
+                            format!("unused variable '{}'", name)
                         },
                         severity: DiagnosticSeverity::Warning,
                         code: Some(code.to_string()),
@@ -192,7 +198,7 @@ impl TypeChecker {
                     self.diagnostics.push(AstDiagnostic {
                         line: info.def_line,
                         column: info.def_col,
-                        message: format!("Variable '{}' declared as mutable but never reassigned", name),
+                        message: format!("variable '{}' declared as mutable but never reassigned", name),
                         severity: DiagnosticSeverity::Warning,
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
@@ -298,6 +304,7 @@ impl TypeChecker {
                     used: false,
                     mutated: false,
                     is_param: false,
+                    is_const: false,
                     def_line: line,
                     def_col: col,
                 },
@@ -542,7 +549,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Undefined variable '{}'", name),
+                        format!("undefined variable '{}'", name),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E200,
                         suggestion,
@@ -551,7 +558,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Cannot assign to immutable variable '{}'", name),
+                        format!("cannot assign to immutable variable '{}'", name),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E404,
                         None,
@@ -567,7 +574,7 @@ impl TypeChecker {
                             stmt.span.start_line,
                             stmt.span.start_col,
                             format!(
-                                "Assigning '{}' to variable '{}' declared as '{}'",
+                                "assigning '{}' to variable '{}' declared as '{}'",
                                 new_type.as_str(),
                                 name,
                                 decl.as_str(),
@@ -605,7 +612,7 @@ impl TypeChecker {
                         iterable.span.start_line,
                         iterable.span.start_col,
                         format!(
-                            "For-loop iterable should be array, map, or string, got {}",
+                            "for-loop iterable should be array, map, or string, got {}",
                             iter_type.as_str()
                         ),
                         DiagnosticSeverity::Warning,
@@ -658,7 +665,7 @@ impl TypeChecker {
                     self.emit_coded(
                         condition.span.start_line,
                         condition.span.start_col,
-                        format!("While condition should be bool, got {}", cond_type.as_str()),
+                        format!("while condition should be bool, got {}", cond_type.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E101,
                         None,
@@ -704,6 +711,25 @@ impl TypeChecker {
                     &mut self.current_return_type,
                     resolved_return,
                 );
+                // Check for duplicate parameter names
+                {
+                    let mut seen_params = HashSet::new();
+                    for param in &def.params {
+                        if !seen_params.insert(param.name.clone()) {
+                            self.emit_coded(
+                                param.span.start_line,
+                                param.span.start_col,
+                                format!(
+                                    "duplicate parameter name '{}' in function '{}'",
+                                    param.name, def.name
+                                ),
+                                DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E100,
+                                None,
+                            );
+                        }
+                    }
+                }
                 // Define params as immutable variables
                 for param in &def.params {
                     let ct = param
@@ -741,7 +767,7 @@ impl TypeChecker {
                         stmt.span.start_line,
                         stmt.span.start_col,
                         format!(
-                            "Function '{}' declares return type '{}' but body evaluates to '{}'",
+                            "function '{}' declares return type '{}' but body evaluates to '{}'",
                             def.name,
                             declared_return.as_str(),
                             body_type.as_str(),
@@ -850,7 +876,7 @@ impl TypeChecker {
                                 stmt.span.start_line,
                                 stmt.span.start_col,
                                 format!(
-                                    "Array destructuring requires array, got {}",
+                                    "array destructuring requires array, got {}",
                                     val_type.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
@@ -887,7 +913,7 @@ impl TypeChecker {
                                 stmt.span.start_line,
                                 stmt.span.start_col,
                                 format!(
-                                    "Map destructuring requires map, got {}",
+                                    "map destructuring requires map, got {}",
                                     val_type.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
@@ -925,7 +951,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Undefined variable '{}'", name),
+                        format!("undefined variable '{}'", name),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E200,
                         suggestion,
@@ -934,7 +960,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Cannot assign to immutable variable '{}'", name),
+                        format!("cannot assign to immutable variable '{}'", name),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E404,
                         None,
@@ -952,7 +978,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        "Division by zero".to_string(),
+                        "division by zero".to_string(),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E104,
                         None,
@@ -963,7 +989,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        "Modulo by 1 always returns 0".to_string(),
+                        "modulo by 1 always returns 0".to_string(),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::W107,
                         None,
@@ -976,7 +1002,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        "Multiplication by 0 always returns 0".to_string(),
+                        "multiplication by 0 always returns 0".to_string(),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::W107,
                         None,
@@ -992,7 +1018,7 @@ impl TypeChecker {
                             stmt.span.start_line,
                             stmt.span.start_col,
                             format!(
-                                "Compound assignment produces '{}' but variable '{}' is declared as '{}'",
+                                "compound assignment produces '{}' but variable '{}' is declared as '{}'",
                                 result_type.as_str(),
                                 name,
                                 decl.as_str(),
@@ -1061,15 +1087,29 @@ impl TypeChecker {
                 value,
             } => {
                 let inferred = self.infer_expr(value);
+                // For simple literal values, track the precise type for const propagation.
+                let precise_type = match &value.kind {
+                    ExpressionKind::Literal(Literal::Int64(_)) => ChannelType::Int64,
+                    ExpressionKind::Literal(Literal::Float64(_)) => ChannelType::Float64,
+                    ExpressionKind::Literal(Literal::String(_)) => ChannelType::String,
+                    ExpressionKind::Literal(Literal::Bool(_)) => ChannelType::Bool,
+                    _ => inferred,
+                };
                 let ct = self.reconcile_annotation(
                     type_annotation.as_deref(),
-                    inferred,
+                    precise_type,
                     stmt.span.start_line,
                     stmt.span.start_col,
                     name,
                 );
+                // Store known const value type for propagation.
+                self.const_values.insert(name.clone(), ct);
                 // Constants are immutable
                 self.define_var(name, ct, false, stmt.span.start_line, stmt.span.start_col);
+                // Mark as const for unused-constant diagnostics.
+                if let Some(info) = self.lookup_mut(name) {
+                    info.is_const = true;
+                }
             }
 
             // -----------------------------------------------------------------
@@ -1081,7 +1121,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Unknown type '{}' in type alias '{}'", target, name),
+                        format!("unknown type '{}' in type alias '{}'", target, name),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E100,
                         None,
@@ -1113,7 +1153,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Duplicate import '{}'", import_key),
+                        format!("duplicate import '{}'", import_key),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::W208,
                         None,
@@ -1127,7 +1167,7 @@ impl TypeChecker {
                     self.emit_coded(
                         stmt.span.start_line,
                         stmt.span.start_col,
-                        format!("Unknown standard library module 'std::{}'", path[1]),
+                        format!("unknown standard library module 'std::{}'", path[1]),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E203,
                         None,
@@ -1158,10 +1198,63 @@ impl TypeChecker {
             StatementKind::EnumDef { name, variants } => {
                 let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
                 self.enum_variants.insert(name.clone(), variant_info);
+                // W235: Duplicate enum variant names
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    for v in variants {
+                        if !seen.insert(&v.name) {
+                            self.emit_coded(
+                                v.span.start_line,
+                                v.span.start_col,
+                                format!("duplicate variant '{}' in enum '{}'", v.name, name),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::W235,
+                                None,
+                            );
+                        }
+                    }
+                }
             }
             StatementKind::StructDef { name, fields } => {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.clone())).collect();
                 self.struct_defs.insert(name.clone(), field_info);
+                // W234: Duplicate struct field names
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    for field in fields {
+                        if !seen.insert(&field.name) {
+                            self.emit_coded(
+                                field.span.start_line,
+                                field.span.start_col,
+                                format!("duplicate field '{}' in struct '{}'", field.name, name),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::W234,
+                                None,
+                            );
+                        }
+                    }
+                }
+                // Validate field type annotations against known types
+                for field in fields {
+                    if let Some(ref ann) = field.type_annotation {
+                        if self.resolve_type(ann).is_none()
+                            && !self.struct_defs.contains_key(ann.as_str())
+                            && !self.enum_variants.contains_key(ann.as_str())
+                        {
+                            self.emit_coded(
+                                field.span.start_line,
+                                field.span.start_col,
+                                format!(
+                                    "unknown type '{}' in struct field '{}.{}'",
+                                    ann, name, field.name
+                                ),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E100,
+                                None,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1334,7 +1427,7 @@ impl TypeChecker {
                             self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
-                                format!("Duplicate key '{}' in map literal", key),
+                                format!("duplicate key '{}' in map literal", key),
                                 DiagnosticSeverity::Error,
                                 super::errors::ErrorCode::E107,
                                 None,
@@ -1350,9 +1443,11 @@ impl TypeChecker {
             // Variable reference
             // -----------------------------------------------------------------
             ExpressionKind::Variable(name) => {
+                // Use const-propagated type if available (more precise than scope lookup).
+                let const_type = self.const_values.get(name.as_str()).copied();
                 // Copy out what we need before the mutable borrow.
                 let ct = match self.lookup(name) {
-                    Some(info) => info.channel_type,
+                    Some(info) => const_type.unwrap_or(info.channel_type),
                     None => {
                         // Check if it's a known function name (first-class function reference).
                         if self.function_sigs.contains_key(name.as_str()) {
@@ -1368,7 +1463,7 @@ impl TypeChecker {
                         self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
-                            format!("Undefined variable '{}'", name),
+                            format!("undefined variable '{}'", name),
                             DiagnosticSeverity::Error,
                             super::errors::ErrorCode::E200,
                             suggestion,
@@ -1401,8 +1496,8 @@ impl TypeChecker {
                 if let ExpressionKind::UnaryOp { op: inner_op, .. } = &operand.kind {
                     if op == inner_op {
                         let msg = match op {
-                            UnOp::Neg => "Double negation is redundant",
-                            UnOp::Not => "Double logical NOT is redundant",
+                            UnOp::Neg => "double negation is redundant",
+                            UnOp::Not => "double logical NOT is redundant",
                         };
                         self.emit_coded(
                             expr.span.start_line,
@@ -1421,7 +1516,7 @@ impl TypeChecker {
                             self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
-                                format!("Logical NOT expects bool, got {}", operand_ty.as_str()),
+                                format!("logical NOT expects bool, got {}", operand_ty.as_str()),
                                 DiagnosticSeverity::Warning,
                                 super::errors::ErrorCode::E101,
                                 None,
@@ -1435,7 +1530,7 @@ impl TypeChecker {
                                 expr.span.start_line,
                                 expr.span.start_col,
                                 format!(
-                                    "Negation expects numeric type, got {}",
+                                    "negation expects numeric type, got {}",
                                     operand_ty.as_str()
                                 ),
                                 DiagnosticSeverity::Warning,
@@ -1470,7 +1565,7 @@ impl TypeChecker {
                             self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
-                                "Range will produce empty array (start >= end)".to_string(),
+                                "range will produce empty array (start >= end)".to_string(),
                                 DiagnosticSeverity::Warning,
                                 super::errors::ErrorCode::W107,
                                 None,
@@ -1499,7 +1594,7 @@ impl TypeChecker {
                             expr.span.start_line,
                             expr.span.start_col,
                             format!(
-                                "Function '{}' expects {} arguments, got {}",
+                                "function '{}' expects {} arguments, got {}",
                                 name,
                                 arity_msg,
                                 arg_types.len()
@@ -1521,7 +1616,7 @@ impl TypeChecker {
                                         arg_span.start_line,
                                         arg_span.start_col,
                                         format!(
-                                            "Type mismatch on '{}': got {} but expected {}",
+                                            "type mismatch on '{}': got {} but expected {}",
                                             param_name,
                                             actual_type.as_str(),
                                             expected_type.as_str(),
@@ -1559,7 +1654,7 @@ impl TypeChecker {
                     if arg_types.len() != expected_inputs.len() {
                         self.emit_coded(
                             expr.span.start_line, expr.span.start_col,
-                            format!("Operation '{}' expects {} arguments, got {}", name, expected_inputs.len(), arg_types.len()),
+                            format!("operation '{}' expects {} arguments, got {}", name, expected_inputs.len(), arg_types.len()),
                             DiagnosticSeverity::Warning,
                             super::errors::ErrorCode::E405, None,
                         );
@@ -1577,7 +1672,7 @@ impl TypeChecker {
                                     arg_span.start_line,
                                     arg_span.start_col,
                                     format!(
-                                        "Type mismatch on '{}': got {} but expected {}",
+                                        "type mismatch on '{}': got {} but expected {}",
                                         port_name,
                                         actual_type.as_str(),
                                         expected_type.as_str(),
@@ -1591,6 +1686,53 @@ impl TypeChecker {
                     }
 
                     return refine_call_output(op, &arg_types);
+                }
+
+                // Is it a module-qualified operation (e.g., Math::sqrt)?
+                // Strip the module prefix and try to resolve via OperationType.
+                if name.contains("::") {
+                    if let Some((_module, func)) = name.rsplit_once("::") {
+                        if let Some(op) = OperationType::parse(func) {
+                            let expected_inputs = op_input_types(op);
+                            if arg_types.len() != expected_inputs.len() {
+                                self.emit_coded(
+                                    expr.span.start_line, expr.span.start_col,
+                                    format!(
+                                        "operation '{}' expects {} arguments, got {}",
+                                        name, expected_inputs.len(), arg_types.len()
+                                    ),
+                                    DiagnosticSeverity::Warning,
+                                    super::errors::ErrorCode::E405, None,
+                                );
+                            }
+                            // Check positional arg types against expected input ports.
+                            for (i, (port_name, expected_type)) in expected_inputs.iter().enumerate() {
+                                if let Some(&actual_type) = arg_types.get(i) {
+                                    if actual_type != ChannelType::Null
+                                        && *expected_type != ChannelType::Null
+                                        && !actual_type.is_compatible_with(expected_type)
+                                    {
+                                        if let Some(arg_span) = args.get(i).map(|a| a.span) {
+                                            self.emit_coded(
+                                                arg_span.start_line,
+                                                arg_span.start_col,
+                                                format!(
+                                                    "type mismatch on '{}': got {} but expected {}",
+                                                    port_name,
+                                                    actual_type.as_str(),
+                                                    expected_type.as_str(),
+                                                ),
+                                                DiagnosticSeverity::Warning,
+                                                super::errors::ErrorCode::E103,
+                                                None,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            return refine_call_output(op, &arg_types);
+                        }
+                    }
                 }
 
                 // Is it a use-imported name?
@@ -1617,7 +1759,7 @@ impl TypeChecker {
                 self.emit_coded(
                     expr.span.start_line,
                     expr.span.start_col,
-                    format!("Undefined function or operation '{}'", name),
+                    format!("undefined function or operation '{}'", name),
                     DiagnosticSeverity::Error,
                     super::errors::ErrorCode::E201,
                     self.suggest_function(name),
@@ -1652,7 +1794,7 @@ impl TypeChecker {
                     self.emit_coded(
                         condition.span.start_line,
                         condition.span.start_col,
-                        format!("If condition should be bool, got {}", cond_ty.as_str()),
+                        format!("if condition should be bool, got {}", cond_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E101,
                         None,
@@ -1677,7 +1819,7 @@ impl TypeChecker {
                         expr.span.start_line,
                         expr.span.start_col,
                         format!(
-                            "If/else branches have mismatched types: '{}' vs '{}'",
+                            "if/else branches have mismatched types: '{}' vs '{}'",
                             then_ty.as_str(),
                             else_ty.as_str(),
                         ),
@@ -1709,7 +1851,7 @@ impl TypeChecker {
                     self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
-                        format!("Indexing requires array, map, or string, got {}", obj_ty.as_str()),
+                        format!("indexing requires array, map, or string, got {}", obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E100,
                         None,
@@ -1726,7 +1868,7 @@ impl TypeChecker {
                     self.emit_coded(
                         index.span.start_line,
                         index.span.start_col,
-                        format!("Array index should be integer, got {}", idx_ty.as_str()),
+                        format!("array index should be integer, got {}", idx_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E103,
                         None,
@@ -1740,7 +1882,7 @@ impl TypeChecker {
                             self.emit_coded(
                                 index.span.start_line,
                                 index.span.start_col,
-                                format!("Negative array index ({})", idx_val),
+                                format!("negative array index ({})", idx_val),
                                 DiagnosticSeverity::Error,
                                 super::errors::ErrorCode::E105,
                                 None,
@@ -1755,7 +1897,7 @@ impl TypeChecker {
                         self.emit_coded(
                             object.span.start_line,
                             object.span.start_col,
-                            "Index into empty array literal".to_string(),
+                            "index into empty array literal".to_string(),
                             DiagnosticSeverity::Error,
                             super::errors::ErrorCode::E106,
                             None,
@@ -1786,7 +1928,7 @@ impl TypeChecker {
                     self.emit_coded(
                         object.span.start_line,
                         object.span.start_col,
-                        format!("Field access requires map or string, got {}", obj_ty.as_str()),
+                        format!("field access requires map or string, got {}", obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E100,
                         None,
@@ -1803,7 +1945,7 @@ impl TypeChecker {
                     self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
-                        "Placeholder '_' can only be used inside pipe expressions".to_string(),
+                        "placeholder '_' can only be used inside pipe expressions".to_string(),
                         DiagnosticSeverity::Error,
                         super::errors::ErrorCode::E303,
                         None,
@@ -1823,7 +1965,7 @@ impl TypeChecker {
                     self.emit_coded(
                         start.span.start_line,
                         start.span.start_col,
-                        format!("Range start should be numeric, got {}", start_ty.as_str()),
+                        format!("range start should be numeric, got {}", start_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E103,
                         None,
@@ -1833,7 +1975,7 @@ impl TypeChecker {
                     self.emit_coded(
                         end.span.start_line,
                         end.span.start_col,
-                        format!("Range end should be numeric, got {}", end_ty.as_str()),
+                        format!("range end should be numeric, got {}", end_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E103,
                         None,
@@ -1847,7 +1989,7 @@ impl TypeChecker {
                         self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
-                            "Range will produce empty array (start >= end)".to_string(),
+                            "range will produce empty array (start >= end)".to_string(),
                             DiagnosticSeverity::Warning,
                             super::errors::ErrorCode::W107,
                             None,
@@ -1964,7 +2106,7 @@ impl TypeChecker {
                     self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
-                        format!("Unknown method '{}' on type '{}'", method, obj_ty.as_str()),
+                        format!("unknown method '{}' on type '{}'", method, obj_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E202,
                         suggestion,
@@ -2022,7 +2164,7 @@ impl TypeChecker {
                     self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
-                        "Empty match expression".to_string(),
+                        "empty match expression".to_string(),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::W206,
                         None,
@@ -2052,10 +2194,10 @@ impl TypeChecker {
                         self.emit_coded(
                             expr.span.start_line,
                             expr.span.start_col,
-                            "Non-exhaustive match: consider adding a wildcard '_' arm".to_string(),
+                            "non-exhaustive match: consider adding a wildcard '_' arm".to_string(),
                             DiagnosticSeverity::Warning,
                             super::errors::ErrorCode::W203,
-                            Some("Add a `_ => ...` arm to handle remaining cases".to_string()),
+                            Some("add a `_ => ...` arm to handle remaining cases".to_string()),
                         );
                     }
                 }
@@ -2071,7 +2213,7 @@ impl TypeChecker {
                             self.emit_coded(
                                 guard.span.start_line,
                                 guard.span.start_col,
-                                format!("Match guard should be bool, got {}", guard_ty.as_str()),
+                                format!("match guard should be bool, got {}", guard_ty.as_str()),
                                 DiagnosticSeverity::Warning,
                                 super::errors::ErrorCode::E101,
                                 None,
@@ -2121,7 +2263,7 @@ impl TypeChecker {
                         object.span.start_line,
                         object.span.start_col,
                         format!(
-                            "Optional chaining requires map or null, got {}",
+                            "optional chaining requires map or null, got {}",
                             obj_ty.as_str()
                         ),
                         DiagnosticSeverity::Warning,
@@ -2145,7 +2287,7 @@ impl TypeChecker {
                     self.emit_coded(
                         expr.span.start_line,
                         expr.span.start_col,
-                        format!("Spread requires array or map, got {}", inner_ty.as_str()),
+                        format!("spread requires array or map, got {}", inner_ty.as_str()),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E103,
                         None,
@@ -2301,12 +2443,85 @@ impl TypeChecker {
                         });
                     }
                 } else if !enum_name.contains("::") && !self.use_aliases.contains(enum_name.as_str()) {
+                    // Check if this is a module-qualified function call (e.g., Math::sqrt).
+                    // The parser treats X::Y(...) as EnumConstruct, but it might be a stdlib call.
+                    let arg_types: Vec<ChannelType> = args.iter().map(|a| self.infer_expr(a)).collect();
+                    if let Some(op) = OperationType::parse(variant) {
+                        let expected_inputs = op_input_types(op);
+                        if arg_types.len() != expected_inputs.len() {
+                            self.emit_coded(
+                                expr.span.start_line, expr.span.start_col,
+                                format!(
+                                    "operation '{}::{}' expects {} arguments, got {}",
+                                    enum_name, variant, expected_inputs.len(), arg_types.len()
+                                ),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E405, None,
+                            );
+                        }
+                        // Check positional arg types against expected input ports.
+                        for (i, (port_name, expected_type)) in expected_inputs.iter().enumerate() {
+                            if let Some(&actual_type) = arg_types.get(i) {
+                                if actual_type != ChannelType::Null
+                                    && *expected_type != ChannelType::Null
+                                    && !actual_type.is_compatible_with(expected_type)
+                                {
+                                    if let Some(arg_span) = args.get(i).map(|a| a.span) {
+                                        self.emit_coded(
+                                            arg_span.start_line,
+                                            arg_span.start_col,
+                                            format!(
+                                                "type mismatch on '{}': got {} but expected {}",
+                                                port_name,
+                                                actual_type.as_str(),
+                                                expected_type.as_str(),
+                                            ),
+                                            DiagnosticSeverity::Warning,
+                                            super::errors::ErrorCode::E103,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        return refine_call_output(op, &arg_types);
+                    }
+                    // Also check user-defined module functions
+                    let qualified_name = format!("{}::{}", enum_name, variant);
+                    if let Some(sig) = self.function_sigs.get(&qualified_name).cloned() {
+                        if let Some(sig_mut) = self.function_sigs.get_mut(&qualified_name) {
+                            sig_mut.used = true;
+                        }
+                        let max_args = if sig.has_rest { usize::MAX } else { sig.params.len() };
+                        if arg_types.len() < sig.required_params || arg_types.len() > max_args {
+                            let arity_msg = if sig.has_rest {
+                                format!("at least {}", sig.required_params)
+                            } else if sig.required_params == sig.params.len() {
+                                format!("{}", sig.params.len())
+                            } else {
+                                format!("{}-{}", sig.required_params, sig.params.len())
+                            };
+                            self.emit_coded(
+                                expr.span.start_line,
+                                expr.span.start_col,
+                                format!(
+                                    "function '{}' expects {} arguments, got {}",
+                                    qualified_name, arity_msg, arg_types.len()
+                                ),
+                                DiagnosticSeverity::Error,
+                                super::errors::ErrorCode::E405,
+                                None,
+                            );
+                        }
+                        return sig.return_type;
+                    }
                     self.emit_coded(
                         expr.span.start_line, expr.span.start_col,
-                        format!("Undefined enum '{}'", enum_name),
+                        format!("undefined enum '{}'", enum_name),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E201, None,
                     );
+                    return ChannelType::Map;
                 }
                 for arg in args {
                     self.infer_expr(arg);
@@ -2339,6 +2554,20 @@ impl TypeChecker {
                     let provided: HashSet<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
                     let defined: HashSet<&str> = def_fields.iter().map(|(f, _)| f.as_str()).collect();
                     let def_names: Vec<&str> = def_fields.iter().map(|(f, _)| f.as_str()).collect();
+                    // Field count mismatch warning
+                    if provided.len() != def_fields.len() {
+                        self.emit_coded(
+                            expr.span.start_line,
+                            expr.span.start_col,
+                            format!(
+                                "struct '{}' expects {} fields, got {}",
+                                name, def_fields.len(), provided.len(),
+                            ),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::E100,
+                            None,
+                        );
+                    }
                     // Check for unknown fields
                     for (field_name, _) in fields {
                         if !defined.contains(field_name.as_str()) {
@@ -2447,7 +2676,7 @@ impl TypeChecker {
                             self.emit_coded(
                                 span.start_line,
                                 span.start_col,
-                                "Or-pattern alternatives bind different variables; all alternatives must bind the same names".to_string(),
+                                "or-pattern alternatives bind different variables; all alternatives must bind the same names".to_string(),
                                 DiagnosticSeverity::Warning,
                                 super::errors::ErrorCode::W113,
                                 None,
@@ -2517,7 +2746,7 @@ impl TypeChecker {
                     self.emit_coded(
                         span.start_line,
                         span.start_col,
-                        format!("Unknown type '{}' in type pattern", type_name),
+                        format!("unknown type '{}' in type pattern", type_name),
                         DiagnosticSeverity::Warning,
                         super::errors::ErrorCode::E100,
                         None,
@@ -2613,7 +2842,7 @@ impl TypeChecker {
                         span.start_line,
                         span.start_col,
                         format!(
-                            "Left operand of '{}' should be bool, got {}",
+                            "left operand of '{}' should be bool, got {}",
                             op,
                             left.as_str()
                         ),
@@ -2627,7 +2856,7 @@ impl TypeChecker {
                         span.start_line,
                         span.start_col,
                         format!(
-                            "Right operand of '{}' should be bool, got {}",
+                            "right operand of '{}' should be bool, got {}",
                             op,
                             right.as_str()
                         ),
@@ -2686,7 +2915,7 @@ impl TypeChecker {
             self.emit_coded(
                 span.start_line,
                 span.start_col,
-                "Division by zero".to_string(),
+                "division by zero".to_string(),
                 DiagnosticSeverity::Error,
                 super::errors::ErrorCode::E104,
                 None,
@@ -2698,7 +2927,7 @@ impl TypeChecker {
             self.emit_coded(
                 span.start_line,
                 span.start_col,
-                "Modulo by 1 always returns 0".to_string(),
+                "modulo by 1 always returns 0".to_string(),
                 DiagnosticSeverity::Warning,
                 super::errors::ErrorCode::W107,
                 None,
@@ -2715,7 +2944,7 @@ impl TypeChecker {
             self.emit_coded(
                 span.start_line,
                 span.start_col,
-                "Multiplication by 0 always returns 0".to_string(),
+                "multiplication by 0 always returns 0".to_string(),
                 DiagnosticSeverity::Warning,
                 super::errors::ErrorCode::W107,
                 None,
@@ -2732,7 +2961,7 @@ impl TypeChecker {
             self.emit_coded(
                 span.start_line,
                 span.start_col,
-                "Comparison with boolean literal is unnecessary".to_string(),
+                "comparison with boolean literal is unnecessary".to_string(),
                 DiagnosticSeverity::Warning,
                 super::errors::ErrorCode::W106,
                 None,
@@ -2757,7 +2986,7 @@ impl TypeChecker {
                             span.start_line,
                             span.start_col,
                             format!(
-                                "Arithmetic operator '{}' expects numeric operands, got {}",
+                                "arithmetic operator '{}' expects numeric operands, got {}",
                                 op,
                                 ty.as_str()
                             ),
@@ -2789,7 +3018,7 @@ impl TypeChecker {
             self.emit_coded(
                 span.start_line,
                 span.start_col,
-                format!("Comparing {} with {}", left_ty.as_str(), right_ty.as_str()),
+                format!("comparing {} with {}", left_ty.as_str(), right_ty.as_str()),
                 DiagnosticSeverity::Warning,
                 super::errors::ErrorCode::E100,
                 None,
@@ -2850,7 +3079,7 @@ impl TypeChecker {
                 self.emit_coded(
                     line,
                     col,
-                    format!("Unknown type annotation '{}' on '{}'", ann_str, var_name),
+                    format!("unknown type annotation '{}' on '{}'", ann_str, var_name),
                     DiagnosticSeverity::Error,
                     super::errors::ErrorCode::E100,
                     None,
@@ -2874,7 +3103,7 @@ impl TypeChecker {
             line,
             col,
             format!(
-                "Type annotation '{}' on '{}' conflicts with inferred type '{}'",
+                "type annotation '{}' on '{}' conflicts with inferred type '{}'",
                 ann_str,
                 var_name,
                 inferred.as_str()
@@ -2913,7 +3142,11 @@ impl TypeChecker {
                     self.diagnostics.push(AstDiagnostic {
                         line: info.def_line,
                         column: info.def_col,
-                        message: format!("Unused variable '{}'", name),
+                        message: if info.is_const {
+                            format!("unused constant '{}'", name)
+                        } else {
+                            format!("unused variable '{}'", name)
+                        },
                         severity: DiagnosticSeverity::Warning,
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
@@ -2924,7 +3157,7 @@ impl TypeChecker {
                     self.diagnostics.push(AstDiagnostic {
                         line: info.def_line,
                         column: info.def_col,
-                        message: format!("Variable '{}' declared as mutable but never reassigned", name),
+                        message: format!("variable '{}' declared as mutable but never reassigned", name),
                         severity: DiagnosticSeverity::Warning,
                         code: Some(code.to_string()),
                         help: Some(code.help().to_string()),
@@ -2941,7 +3174,7 @@ impl TypeChecker {
                 self.diagnostics.push(AstDiagnostic {
                     line: sig.def_line,
                     column: sig.def_col,
-                    message: format!("Unused function '{}'", name),
+                    message: format!("unused function '{}'", name),
                     severity: DiagnosticSeverity::Warning,
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
@@ -2958,7 +3191,7 @@ impl TypeChecker {
                 self.diagnostics.push(AstDiagnostic {
                     line,
                     column: col,
-                    message: format!("Unused import '{}'", import_id),
+                    message: format!("unused import '{}'", import_id),
                     severity: DiagnosticSeverity::Warning,
                     code: Some(code.to_string()),
                     help: Some(code.help().to_string()),
@@ -3565,7 +3798,7 @@ output x;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Logical NOT expects bool")));
+            .any(|d| d.message.contains("logical NOT expects bool")));
     }
 
     #[test]
@@ -3584,7 +3817,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Negation expects numeric")));
+            .any(|d| d.message.contains("negation expects numeric")));
     }
 
     // =========================================================================
@@ -3602,7 +3835,7 @@ output r;"#,
         let a = check("let x = 0;\nx = 42;\noutput x;");
         let e = errors(&a);
         assert_eq!(e.len(), 1);
-        assert!(e[0].message.contains("Cannot assign to immutable"));
+        assert!(e[0].message.contains("cannot assign to immutable"));
     }
 
     #[test]
@@ -3616,7 +3849,7 @@ output r;"#,
     fn test_assignment_undefined_error() {
         let a = check("y = 42;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Undefined variable")));
+        assert!(e.iter().any(|d| d.message.contains("undefined variable")));
     }
 
     // =========================================================================
@@ -3629,7 +3862,7 @@ output r;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Undefined variable 'x'")));
+            .any(|d| d.message.contains("undefined variable 'x'")));
     }
 
     #[test]
@@ -3647,28 +3880,28 @@ output r;"#,
     fn test_unused_variable_warns() {
         let a = check("let x = 42;");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Unused variable 'x'")));
+        assert!(w.iter().any(|d| d.message.contains("unused variable 'x'")));
     }
 
     #[test]
     fn test_used_variable_no_warning() {
         let a = check("let x = 42;\noutput x;");
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused")));
+        assert!(w.iter().all(|d| !d.message.contains("unused")));
     }
 
     #[test]
     fn test_underscore_prefix_no_unused_warning() {
         let a = check("let _x = 42;");
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused")));
+        assert!(w.iter().all(|d| !d.message.contains("unused")));
     }
 
     #[test]
     fn test_variable_used_in_closure_no_warning() {
         let a = check("let x = 42;\nlet add = |n| n + x;\noutput add(1);");
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused variable")),
+        assert!(w.iter().all(|d| !d.message.contains("unused variable")),
             "No variables should be reported as unused. Got: {:?}", w);
     }
 
@@ -3676,7 +3909,7 @@ output r;"#,
     fn test_variable_used_in_nested_function_no_warning() {
         let a = check("let x = 10;\nfn foo() { output x; }\nfoo();");
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused variable 'x'")),
+        assert!(w.iter().all(|d| !d.message.contains("unused variable 'x'")),
             "Variable 'x' used in nested function should not be reported as unused. Got: {:?}", w);
     }
 
@@ -3690,7 +3923,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Unused import 'capture'")));
+            .any(|d| d.message.contains("unused import 'capture'")));
     }
 
     #[test]
@@ -3701,7 +3934,7 @@ let frame = capture();
 output frame;"#,
         );
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused import")));
+        assert!(w.iter().all(|d| !d.message.contains("unused import")));
     }
 
     // =========================================================================
@@ -3725,7 +3958,7 @@ output r;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Undefined function or operation 'foobar'")));
+            .any(|d| d.message.contains("undefined function or operation 'foobar'")));
     }
 
     #[test]
@@ -3738,7 +3971,7 @@ let r = concat(x, y);
 output r;"#,
         );
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Type mismatch")));
+        assert!(w.iter().any(|d| d.message.contains("type mismatch")));
     }
 
     // =========================================================================
@@ -3821,7 +4054,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Indexing requires array")));
+            .any(|d| d.message.contains("indexing requires array")));
     }
 
     #[test]
@@ -3976,21 +4209,21 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Unused function 'unused_fn'")));
+            .any(|d| d.message.contains("unused function 'unused_fn'")));
     }
 
     #[test]
     fn test_fn_used_no_warning() {
         let a = check("fn double(x: int64) -> int64 { x * 2 }\nlet r = double(5);\noutput r;");
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused function")));
+        assert!(w.iter().all(|d| !d.message.contains("unused function")));
     }
 
     #[test]
     fn test_fn_main_no_unused_warning() {
         let a = check("fn main() { let x = 42; output x; }");
         let w = warnings(&a);
-        assert!(w.iter().all(|d| !d.message.contains("Unused function")));
+        assert!(w.iter().all(|d| !d.message.contains("unused function")));
     }
 
     #[test]
@@ -4004,7 +4237,7 @@ output r;"#,
     fn test_fn_unknown_still_errors() {
         let a = check("let r = totally_unknown(42);");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Undefined function or operation")));
+        assert!(e.iter().any(|d| d.message.contains("undefined function or operation")));
     }
 
     #[test]
@@ -4058,7 +4291,7 @@ let r = expects_int("hello");
 output r;"#,
         );
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Type mismatch")));
+        assert!(e.iter().any(|d| d.message.contains("type mismatch")));
     }
 
     // =========================================================================
@@ -4069,28 +4302,28 @@ output r;"#,
     fn test_division_by_zero_error() {
         let a = check("let x = 10;\nlet r = x / 0;\noutput r;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Division by zero")));
+        assert!(e.iter().any(|d| d.message.contains("division by zero")));
     }
 
     #[test]
     fn test_modulo_by_zero_error() {
         let a = check("let x = 10;\nlet r = x % 0;\noutput r;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Division by zero")));
+        assert!(e.iter().any(|d| d.message.contains("division by zero")));
     }
 
     #[test]
     fn test_division_by_float_zero_error() {
         let a = check("let x = 10.0;\nlet r = x / 0.0;\noutput r;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Division by zero")));
+        assert!(e.iter().any(|d| d.message.contains("division by zero")));
     }
 
     #[test]
     fn test_negative_array_index_error() {
         let a = check("let arr = [1, 2, 3];\nlet r = arr[-1];\noutput r;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Negative array index")));
+        assert!(e.iter().any(|d| d.message.contains("negative array index")));
     }
 
     #[test]
@@ -4099,14 +4332,14 @@ output r;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Index into empty array literal")));
+            .any(|d| d.message.contains("index into empty array literal")));
     }
 
     #[test]
     fn test_duplicate_map_keys_error() {
         let a = check(r#"let m = {"a": 1, "a": 2}; output m;"#);
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Duplicate key 'a'")));
+        assert!(e.iter().any(|d| d.message.contains("duplicate key 'a'")));
     }
 
     #[test]
@@ -4115,7 +4348,7 @@ output r;"#,
         let e = errors(&a);
         assert!(e.iter().any(|d| d
             .message
-            .contains("Placeholder '_' can only be used inside pipe")));
+            .contains("placeholder '_' can only be used inside pipe")));
     }
 
     #[test]
@@ -4126,7 +4359,7 @@ let r = x |> to_upper(_);
 output r;"#,
         );
         let e = errors(&a);
-        assert!(e.iter().all(|d| !d.message.contains("Placeholder")));
+        assert!(e.iter().all(|d| !d.message.contains("placeholder")));
     }
 
     #[test]
@@ -4135,7 +4368,7 @@ output r;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Unknown type annotation")));
+            .any(|d| d.message.contains("unknown type annotation")));
     }
 
     // =========================================================================
@@ -4167,7 +4400,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Arithmetic operator") && d.message.contains("string")));
+            .any(|d| d.message.contains("arithmetic operator") && d.message.contains("string")));
     }
 
     #[test]
@@ -4176,7 +4409,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Comparing int64 with string")));
+            .any(|d| d.message.contains("comparing int64 with string")));
     }
 
     #[test]
@@ -4185,7 +4418,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .all(|d| !d.message.starts_with("Comparing") || d.message.contains("variable")));
+            .all(|d| !d.message.starts_with("comparing") || d.message.contains("variable")));
     }
 
     #[test]
@@ -4194,7 +4427,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Comparison with boolean literal")));
+            .any(|d| d.message.contains("comparison with boolean literal")));
     }
 
     #[test]
@@ -4202,7 +4435,7 @@ output r;"#,
         // W104 (empty block) now handled by linter W206
         let a = check("let items = [1, 2, 3];\nfor _x in items {}");
         let w = warnings(&a);
-        assert!(!w.iter().any(|d| d.message.contains("Empty loop body")),
+        assert!(!w.iter().any(|d| d.message.contains("empty loop body")),
             "empty block check should no longer be emitted by type checker");
     }
 
@@ -4211,7 +4444,7 @@ output r;"#,
         // W104 (empty block) now handled by linter W206
         let a = check("let mut c = true;\nwhile c {}");
         let w = warnings(&a);
-        assert!(!w.iter().any(|d| d.message.contains("Empty loop body")),
+        assert!(!w.iter().any(|d| d.message.contains("empty loop body")),
             "empty block check should no longer be emitted by type checker");
     }
 
@@ -4222,7 +4455,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(!w
             .iter()
-            .any(|d| d.message.contains("Loop condition is always true")),
+            .any(|d| d.message.contains("loop condition is always true")),
             "while-true check should no longer be emitted by type checker");
     }
 
@@ -4232,7 +4465,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Range will produce empty array")));
+            .any(|d| d.message.contains("range will produce empty array")));
     }
 
     #[test]
@@ -4241,7 +4474,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Double negation is redundant")));
+            .any(|d| d.message.contains("double negation is redundant")));
     }
 
     #[test]
@@ -4250,7 +4483,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Double logical NOT is redundant")));
+            .any(|d| d.message.contains("double logical NOT is redundant")));
     }
 
     #[test]
@@ -4259,7 +4492,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Modulo by 1 always returns 0")));
+            .any(|d| d.message.contains("modulo by 1 always returns 0")));
     }
 
     #[test]
@@ -4268,7 +4501,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Multiplication by 0 always returns 0")));
+            .any(|d| d.message.contains("multiplication by 0 always returns 0")));
     }
 
     #[test]
@@ -4277,7 +4510,7 @@ output r;"#,
         let a = check("let x = 5;\nlet r = x == x;\noutput r;");
         let w = warnings(&a);
         assert!(
-            !w.iter().any(|d| d.message.contains("Comparing") && d.message.contains("itself")),
+            !w.iter().any(|d| d.message.contains("comparing") && d.message.contains("itself")),
             "Type checker should not emit self-comparison warning (linter handles it as W205)"
         );
     }
@@ -4336,7 +4569,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("If/else branches have mismatched types")));
+            .any(|d| d.message.contains("if/else branches have mismatched types")));
     }
 
     #[test]
@@ -4436,7 +4669,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Array destructuring requires array")));
+            .any(|d| d.message.contains("array destructuring requires array")));
     }
 
     #[test]
@@ -4451,7 +4684,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Map destructuring requires map")));
+            .any(|d| d.message.contains("map destructuring requires map")));
     }
 
     #[test]
@@ -4477,14 +4710,14 @@ output r;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Cannot assign to immutable")));
+            .any(|d| d.message.contains("cannot assign to immutable")));
     }
 
     #[test]
     fn test_compound_assign_undefined_error() {
         let a = check("y += 5;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Undefined variable")));
+        assert!(e.iter().any(|d| d.message.contains("undefined variable")));
     }
 
     // =========================================================================
@@ -4549,6 +4782,36 @@ output result;"#,
         assert!(errors(&a).is_empty());
     }
 
+    #[test]
+    fn test_const_propagation_int() {
+        // Const should propagate its known type to subsequent uses.
+        let a = check("const MAX = 100;\nlet x = MAX + 1;\noutput x;");
+        // MAX is Int64, so MAX + 1 should be Int64
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Int64));
+        assert!(errors(&a).is_empty());
+    }
+
+    #[test]
+    fn test_const_propagation_string() {
+        let a = check(r#"const GREETING = "hello"; let x = GREETING; output x;"#);
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::String));
+        assert!(errors(&a).is_empty());
+    }
+
+    #[test]
+    fn test_const_propagation_bool() {
+        let a = check("const FLAG = true;\nlet x = FLAG;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Bool));
+        assert!(errors(&a).is_empty());
+    }
+
+    #[test]
+    fn test_const_propagation_float() {
+        let a = check("const PI = 3.14;\nlet x = PI * 2.0;\noutput x;");
+        assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Float64));
+        assert!(errors(&a).is_empty());
+    }
+
     // =========================================================================
     // Type alias
     // =========================================================================
@@ -4566,7 +4829,7 @@ output result;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Unknown type 'nonexistent'")));
+            .any(|d| d.message.contains("unknown type 'nonexistent'")));
     }
 
     // =========================================================================
@@ -4594,7 +4857,7 @@ output result;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .all(|d| !d.message.contains("Unknown standard library module")));
+            .all(|d| !d.message.contains("unknown standard library module")));
     }
 
     #[test]
@@ -4603,7 +4866,7 @@ output result;"#,
         let e = errors(&a);
         assert!(e
             .iter()
-            .any(|d| d.message.contains("Unknown standard library module")));
+            .any(|d| d.message.contains("unknown standard library module")));
     }
 
     // =========================================================================
@@ -4639,7 +4902,7 @@ output result;"#,
     fn test_unknown_method_warns() {
         let a = check("let arr = [1, 2, 3];\nlet r = arr.nonexistent();\noutput r;");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Unknown method")));
+        assert!(w.iter().any(|d| d.message.contains("unknown method")));
     }
 
     // =========================================================================
@@ -4657,7 +4920,7 @@ output result;"#,
         // The body of a lambda should be type checked
         let a = check("let _f = |x: int64| x / 0;");
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Division by zero")));
+        assert!(e.iter().any(|d| d.message.contains("division by zero")));
     }
 
     // =========================================================================
@@ -4690,14 +4953,14 @@ let r = match x {
 output r;"#,
         );
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Non-exhaustive match")));
+        assert!(w.iter().any(|d| d.message.contains("non-exhaustive match")));
     }
 
     #[test]
     fn test_match_empty_warns() {
         let a = check("let x = 1;\nlet r = match x {};\noutput r;");
         let w = warnings(&a);
-        assert!(w.iter().any(|d| d.message.contains("Empty match")));
+        assert!(w.iter().any(|d| d.message.contains("empty match")));
     }
 
     #[test]
@@ -4739,7 +5002,7 @@ output r;"#,
         );
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Or-pattern alternatives bind different variables")),
+            w.iter().any(|d| d.message.contains("or-pattern alternatives bind different variables")),
             "expected warning for inconsistent or-pattern vars, got {:?}",
             w.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
@@ -4757,7 +5020,7 @@ output r;"#,
         );
         let w = warnings(&a);
         assert!(
-            !w.iter().any(|d| d.message.contains("Or-pattern alternatives")),
+            !w.iter().any(|d| d.message.contains("or-pattern alternatives")),
             "no warning expected for consistent or-pattern, got {:?}",
             w.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
@@ -4777,7 +5040,7 @@ output r;"#,
     fn test_string_interp_checks_inner_expr() {
         let a = check(r#"let r = f"value: {undefined_var}"; output r;"#);
         let e = errors(&a);
-        assert!(e.iter().any(|d| d.message.contains("Undefined variable")));
+        assert!(e.iter().any(|d| d.message.contains("undefined variable")));
     }
 
     // =========================================================================
@@ -4812,7 +5075,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Optional chaining requires map")));
+            .any(|d| d.message.contains("optional chaining requires map")));
     }
 
     // =========================================================================
@@ -4825,7 +5088,7 @@ output r;"#,
         let w = warnings(&a);
         assert!(w
             .iter()
-            .any(|d| d.message.contains("Spread requires array")));
+            .any(|d| d.message.contains("spread requires array")));
     }
 
     // =========================================================================
@@ -4837,7 +5100,7 @@ output r;"#,
         // W104 (empty block) now handled by linter W206
         let a = check("let _r = loop {};");
         let w = warnings(&a);
-        assert!(!w.iter().any(|d| d.message.contains("Empty loop body")),
+        assert!(!w.iter().any(|d| d.message.contains("empty loop body")),
             "empty block check should no longer be emitted by type checker");
     }
 
@@ -4979,7 +5242,7 @@ output r;"#,
         let errs = errors(&a);
         assert!(!errs.is_empty());
         let d = &errs[0];
-        assert!(d.message.contains("Undefined variable"));
+        assert!(d.message.contains("undefined variable"));
         assert_eq!(d.code.as_deref(), Some("E200"));
         assert!(d.help.is_some());
     }
@@ -4991,7 +5254,7 @@ output r;"#,
         assert!(!errs.is_empty());
         let d = errs
             .iter()
-            .find(|d| d.message.contains("Undefined"))
+            .find(|d| d.message.contains("undefined"))
             .unwrap();
         assert_eq!(d.code.as_deref(), Some("E200"));
         assert_eq!(d.suggestion.as_deref(), Some("did you mean 'count'?"));
@@ -5014,7 +5277,7 @@ output r;"#,
         let warns = warnings(&a);
         let d = warns
             .iter()
-            .find(|d| d.message.contains("Unused variable"))
+            .find(|d| d.message.contains("unused variable"))
             .unwrap();
         assert_eq!(d.code.as_deref(), Some("W100"));
         assert!(d.help.is_some());
@@ -5026,7 +5289,7 @@ output r;"#,
         let warns = warnings(&a);
         let d = warns
             .iter()
-            .find(|d| d.message.contains("Unused function"))
+            .find(|d| d.message.contains("unused function"))
             .unwrap();
         assert_eq!(d.code.as_deref(), Some("W103"));
     }
@@ -5037,7 +5300,7 @@ output r;"#,
         let warns = warnings(&a);
         let d = warns
             .iter()
-            .find(|d| d.message.contains("Unused import"))
+            .find(|d| d.message.contains("unused import"))
             .unwrap();
         assert_eq!(d.code.as_deref(), Some("W101"));
     }
@@ -5057,7 +5320,7 @@ output r;"#,
         let errs = errors(&a);
         let d = errs
             .iter()
-            .find(|d| d.message.contains("Undefined"))
+            .find(|d| d.message.contains("undefined"))
             .unwrap();
         assert!(
             d.suggestion.is_none(),
@@ -5071,7 +5334,7 @@ output r;"#,
         let a = check(r#"test "uses undefined" { let r = xyz + 1; }"#);
         let errs = errors(&a);
         assert!(
-            errs.iter().any(|d| d.message.contains("Undefined")),
+            errs.iter().any(|d| d.message.contains("undefined")),
             "Type checker should find errors inside test body: {:?}",
             errs
         );
@@ -5086,7 +5349,7 @@ let r = inner;"#,
         );
         let errs = errors(&a);
         assert!(
-            errs.iter().any(|d| d.message.contains("Undefined")),
+            errs.iter().any(|d| d.message.contains("undefined")),
             "Variable from test body should not leak to outer scope: {:?}",
             errs
         );
@@ -5102,7 +5365,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let errs = errors(&a);
         let undef_errs: Vec<_> = errs
             .iter()
-            .filter(|d| d.message.contains("Undefined"))
+            .filter(|d| d.message.contains("undefined"))
             .collect();
         assert!(
             undef_errs.is_empty(),
@@ -5148,7 +5411,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
             output arr;
         "#);
         let warns = warnings(&a);
-        let unknown = warns.iter().filter(|d| d.message.contains("Unknown method")).collect::<Vec<_>>();
+        let unknown = warns.iter().filter(|d| d.message.contains("unknown method")).collect::<Vec<_>>();
         assert!(unknown.is_empty(), "Expected no E202 for known array methods, got: {:?}", unknown);
     }
 
@@ -5287,6 +5550,48 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
+    #[test]
+    fn test_struct_field_count_mismatch() {
+        let a = check(r#"
+            struct Point { x: float64, y: float64 }
+            let p = Point { x: 1.0 };
+            output p;
+        "#);
+        let warns = warnings(&a);
+        assert!(
+            warns.iter().any(|d| d.message.contains("expects 2 fields, got 1")),
+            "Expected field count mismatch warning, got: {:?}", warns
+        );
+    }
+
+    #[test]
+    fn test_struct_field_count_exact_no_warning() {
+        let a = check(r#"
+            struct Point { x: float64, y: float64 }
+            let p = Point { x: 1.0, y: 2.0 };
+            output p;
+        "#);
+        let warns = warnings(&a);
+        assert!(
+            !warns.iter().any(|d| d.message.contains("expects") && d.message.contains("fields")),
+            "No field count warning expected, got: {:?}", warns
+        );
+    }
+
+    // =========================================================================
+    // Module-qualified function arity
+    // =========================================================================
+
+    #[test]
+    fn test_module_qualified_call_arity_check() {
+        let a = check("use std::math::*;\nlet r = Math::sqrt(1, 2);\noutput r;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("expects") && d.message.contains("arguments")),
+            "Expected arity warning for module-qualified call, got: {:?}", w
+        );
+    }
+
     // =========================================================================
     // Audit: Binary operation type inference
     // =========================================================================
@@ -5406,7 +5711,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         // Should warn about non-bool operand
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Logical NOT expects bool")),
+            w.iter().any(|d| d.message.contains("logical NOT expects bool")),
             "Expected warning about NOT on non-bool, got: {:?}", w
         );
     }
@@ -5416,7 +5721,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let a = check(r#"let s = "hello"; let x = -s; output x;"#);
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Negation expects numeric")),
+            w.iter().any(|d| d.message.contains("negation expects numeric")),
             "Expected warning about negation on string, got: {:?}", w
         );
     }
@@ -5430,7 +5735,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         // Int64 assigned Int64 - no warning
         let a = check("let mut x: int64 = 1;\nx = 42;\noutput x;");
         let w: Vec<_> = warnings(&a).into_iter()
-            .filter(|d| d.message.contains("Assigning"))
+            .filter(|d| d.message.contains("assigning"))
             .collect();
         assert!(w.is_empty(), "Expected no assignment warning, got: {:?}", w);
     }
@@ -5441,7 +5746,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let a = check(r#"let mut x: int64 = 1; x = "hello"; output x;"#);
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Assigning") && d.message.contains("string") && d.message.contains("int64")),
+            w.iter().any(|d| d.message.contains("assigning") && d.message.contains("string") && d.message.contains("int64")),
             "Expected type incompatibility warning, got: {:?}", w
         );
     }
@@ -5451,7 +5756,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         // Float64 assigned Int64 - compatible (Int64 is compatible with Float64)
         let a = check("let mut x: float64 = 1.0;\nx = 42;\noutput x;");
         let w: Vec<_> = warnings(&a).into_iter()
-            .filter(|d| d.message.contains("Assigning"))
+            .filter(|d| d.message.contains("assigning"))
             .collect();
         assert!(w.is_empty(), "Expected no assignment warning for numeric widening, got: {:?}", w);
     }
@@ -5461,7 +5766,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         // No type annotation - no incompatibility warning even for different types
         let a = check(r#"let mut x = 1; x = "hello"; output x;"#);
         let w: Vec<_> = warnings(&a).into_iter()
-            .filter(|d| d.message.contains("Assigning"))
+            .filter(|d| d.message.contains("assigning"))
             .collect();
         assert!(w.is_empty(), "Expected no assignment warning without annotation, got: {:?}", w);
     }
@@ -5474,7 +5779,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         // The compound assignment x += "hello" does infer_binop(Add, Int64, String) = String
         // String is not compatible with Int64, so should warn
         assert!(
-            w.iter().any(|d| d.message.contains("Compound assignment") && d.message.contains("string") && d.message.contains("int64")),
+            w.iter().any(|d| d.message.contains("compound assignment") && d.message.contains("string") && d.message.contains("int64")),
             "Expected compound assignment type incompatibility warning, got: {:?}", w
         );
     }
@@ -5654,7 +5959,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let a = check("let x = true + 1;\noutput x;");
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Arithmetic operator") && d.message.contains("bool")),
+            w.iter().any(|d| d.message.contains("arithmetic operator") && d.message.contains("bool")),
             "Expected arithmetic on bool warning, got: {:?}", w
         );
     }
@@ -5664,7 +5969,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let a = check(r#"let x = 1 == "hello"; output x;"#);
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Comparing")),
+            w.iter().any(|d| d.message.contains("comparing")),
             "Expected cross-type comparison warning, got: {:?}", w
         );
     }
@@ -5674,7 +5979,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         // Int64 == Float64 should not warn (cross-numeric is allowed)
         let a = check("let x = 1 == 1.0;\noutput x;");
         let w: Vec<_> = warnings(&a).into_iter()
-            .filter(|d| d.message.contains("Comparing"))
+            .filter(|d| d.message.contains("comparing"))
             .collect();
         assert!(w.is_empty(), "Expected no comparison warning for cross-numeric, got: {:?}", w);
     }
@@ -5737,7 +6042,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         let a = check("type Bad = nonexistent;");
         let w = warnings(&a);
         assert!(
-            w.iter().any(|d| d.message.contains("Unknown type 'nonexistent'")),
+            w.iter().any(|d| d.message.contains("unknown type 'nonexistent'")),
             "Expected unknown type warning, got: {:?}", w
         );
     }
@@ -5889,6 +6194,297 @@ test "reads outer" { let r = x + 1; output r; }"#,
         "#);
         let e = errors(&a);
         assert!(e.is_empty(), "Expected no errors for correct struct, got: {:?}", e);
+    }
+
+    // =========================================================================
+    // Item #329: Unused const warning
+    // =========================================================================
+
+    #[test]
+    fn test_unused_const_warns() {
+        let a = check("const MAX = 100;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("unused constant 'MAX'")),
+            "Expected 'unused constant' warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_unused_const_has_w100_code() {
+        let a = check("const MAX = 100;");
+        let w = warnings(&a);
+        let diag = w.iter().find(|d| d.message.contains("unused constant"));
+        assert!(diag.is_some(), "Expected unused constant warning");
+        assert_eq!(diag.unwrap().code.as_deref(), Some("W100"));
+    }
+
+    #[test]
+    fn test_used_const_no_warning() {
+        let a = check("const MAX = 100;\noutput MAX;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unused constant")),
+            "Used const should not trigger unused warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_underscore_const_no_unused_warning() {
+        let a = check("const _INTERNAL = 42;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unused")),
+            "Underscore-prefixed const should not trigger unused warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_unused_const_not_variable_message() {
+        // Ensure the message says "unused constant", not "unused variable"
+        let a = check("const PI = 3.14;");
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unused variable")),
+            "Unused const should say 'unused constant', not 'unused variable', got: {:?}", w
+        );
+        assert!(
+            w.iter().any(|d| d.message.contains("unused constant 'PI'")),
+            "Expected 'unused constant' warning for PI, got: {:?}", w
+        );
+    }
+
+    // =========================================================================
+    // Item #326: Duplicate parameter names
+    // =========================================================================
+
+    /// Helper to build an AST with a function that has duplicate parameter names,
+    /// bypassing the parser's own duplicate check.
+    fn build_fn_with_params(fn_name: &str, param_names: &[&str]) -> Program {
+        use crate::syntax::ast::*;
+        let span = Span::new(1, 1, 1, 1);
+        let params: Vec<FunctionParam> = param_names.iter().enumerate().map(|(i, name)| {
+            FunctionParam {
+                name: name.to_string(),
+                type_annotation: None,
+                default: None,
+                rest: false,
+                span: Span::new(1, (5 + i * 3) as u32, 1, (7 + i * 3) as u32),
+            }
+        }).collect();
+        let body = Block {
+            statements: vec![
+                Statement {
+                    kind: StatementKind::Output(Expression {
+                        kind: ExpressionKind::Variable(param_names[0].to_string()),
+                        span,
+                    }),
+                    span,
+                },
+            ],
+            tail_expr: None,
+            span,
+        };
+        Program {
+            statements: vec![Statement {
+                kind: StatementKind::FunctionDef(FunctionDef {
+                    name: fn_name.to_string(),
+                    params,
+                    return_type: None,
+                    body,
+                    span,
+                }),
+                span,
+            }],
+            span,
+        }
+    }
+
+    #[test]
+    fn test_duplicate_param_names_error() {
+        let ast = build_fn_with_params("foo", &["x", "x"]);
+        let a = check_types(&ast, &HashSet::new());
+        let e = errors(&a);
+        assert!(
+            e.iter().any(|d| d.message.contains("duplicate parameter name 'x' in function 'foo'")),
+            "Expected duplicate parameter name error, got: {:?}", e
+        );
+    }
+
+    #[test]
+    fn test_duplicate_param_names_has_e100_code() {
+        let ast = build_fn_with_params("foo", &["x", "x"]);
+        let a = check_types(&ast, &HashSet::new());
+        let e = errors(&a);
+        let diag = e.iter().find(|d| d.message.contains("duplicate parameter name"));
+        assert!(diag.is_some(), "Expected duplicate parameter name error");
+        assert_eq!(diag.unwrap().code.as_deref(), Some("E100"));
+    }
+
+    #[test]
+    fn test_no_duplicate_param_names_ok() {
+        let a = check("fn foo(x: int64, y: string) { output x; output y; }");
+        let e = errors(&a);
+        assert!(
+            e.iter().all(|d| !d.message.contains("duplicate parameter")),
+            "No duplicate params should produce no error, got: {:?}", e
+        );
+    }
+
+    #[test]
+    fn test_duplicate_param_names_multiple() {
+        let ast = build_fn_with_params("bar", &["a", "b", "a", "b"]);
+        let a = check_types(&ast, &HashSet::new());
+        let e = errors(&a);
+        let dup_errors: Vec<_> = e.iter().filter(|d| d.message.contains("duplicate parameter name")).collect();
+        assert_eq!(dup_errors.len(), 2, "Expected 2 duplicate param errors, got: {:?}", dup_errors);
+    }
+
+    // =========================================================================
+    // Item #330: Struct field type annotations validated
+    // =========================================================================
+
+    #[test]
+    fn test_struct_field_known_type_ok() {
+        let a = check(r#"
+            struct Point {
+                x: float64,
+                y: float64,
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unknown type")),
+            "Known field types should not produce warnings, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_struct_field_unknown_type_warns() {
+        let a = check(r#"
+            struct Foo {
+                x: int64,
+                y: widget,
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().any(|d| d.message.contains("unknown type 'widget' in struct field 'Foo.y'")),
+            "Expected unknown type warning for 'widget', got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_struct_field_unknown_type_has_e100_code() {
+        let a = check(r#"
+            struct Foo {
+                val: badtype,
+            }
+        "#);
+        let w = warnings(&a);
+        let diag = w.iter().find(|d| d.message.contains("unknown type"));
+        assert!(diag.is_some(), "Expected unknown type warning");
+        assert_eq!(diag.unwrap().code.as_deref(), Some("E100"));
+    }
+
+    #[test]
+    fn test_struct_field_struct_type_ok() {
+        // A struct field that references another known struct should not warn
+        let a = check(r#"
+            struct Inner {
+                val: int64,
+            }
+            struct Outer {
+                child: Inner,
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unknown type")),
+            "Struct type reference should not produce unknown type warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_struct_field_enum_type_ok() {
+        // A struct field that references a known enum should not warn
+        let a = check(r#"
+            enum Color { Red, Green, Blue }
+            struct Pixel {
+                color: Color,
+                x: int64,
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unknown type")),
+            "Enum type reference should not produce unknown type warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_struct_field_type_alias_ok() {
+        // A struct field that references a type alias should not warn
+        let a = check(r#"
+            type Number = int64;
+            struct Data {
+                count: Number,
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unknown type")),
+            "Type alias reference should not produce unknown type warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_struct_field_no_annotation_ok() {
+        // A struct field without a type annotation should not produce any warning
+        let a = check(r#"
+            struct Flexible {
+                x,
+                y,
+            }
+        "#);
+        let w = warnings(&a);
+        assert!(
+            w.iter().all(|d| !d.message.contains("unknown type")),
+            "Fields without annotation should not produce unknown type warning, got: {:?}", w
+        );
+    }
+
+    #[test]
+    fn test_duplicate_struct_field_caught_by_parser() {
+        // The parser catches duplicate struct fields before the type checker sees them.
+        // The type checker has a defensive check for programmatic AST construction.
+        use crate::syntax::parser::parse_v2;
+        let result = parse_v2("struct P { x: int64, x: int64 }");
+        assert!(result.is_err(), "Parser should reject duplicate struct fields");
+    }
+
+    #[test]
+    fn test_no_duplicate_struct_field_ok() {
+        let a = check("struct P { x: int64, y: int64 }");
+        let w = warnings(&a);
+        assert!(w.iter().all(|d| !d.message.contains("duplicate field")),
+            "Should not warn about duplicate fields, got: {:?}", w);
+    }
+
+    #[test]
+    fn test_duplicate_enum_variant_caught_by_parser() {
+        // The parser catches duplicate enum variants before the type checker sees them.
+        use crate::syntax::parser::parse_v2;
+        let result = parse_v2("enum E { A, A }");
+        assert!(result.is_err(), "Parser should reject duplicate enum variants");
+    }
+
+    #[test]
+    fn test_no_duplicate_enum_variant_ok() {
+        let a = check("enum E { A, B, C }");
+        let w = warnings(&a);
+        assert!(w.iter().all(|d| !d.message.contains("duplicate variant")),
+            "Should not warn about duplicate variants, got: {:?}", w);
     }
 
 }

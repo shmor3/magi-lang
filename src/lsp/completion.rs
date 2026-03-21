@@ -1,6 +1,7 @@
 //! Completion provider for the MAGI LSP.
 
 use super::analysis::{find_dot_receiver_at_position, find_variable_struct_type, is_ident_char, utf16_to_char_col, DocumentState};
+use strsim::levenshtein;
 use tower_lsp::lsp_types::*;
 
 /// MAGI language keywords.
@@ -365,7 +366,40 @@ pub fn handle_completion(
             .unwrap_or_default();
         if !prefix.is_empty() {
             let prefix_lower = prefix.to_lowercase();
-            items.retain(|item| item.label.to_lowercase().starts_with(&prefix_lower));
+            let exact: Vec<CompletionItem> = items
+                .iter()
+                .filter(|item| item.label.to_lowercase().starts_with(&prefix_lower))
+                .cloned()
+                .collect();
+            if exact.is_empty() {
+                // Fuzzy fallback for dot-access typos (e.g. "lenght" -> "length")
+                let max_distance = match prefix.len() {
+                    0..=2 => 1,
+                    3..=5 => 2,
+                    _ => 3,
+                };
+                let mut scored: Vec<(CompletionItem, usize)> = items
+                    .into_iter()
+                    .filter_map(|item| {
+                        let dist = levenshtein(&prefix_lower, &item.label.to_lowercase());
+                        if dist > 0 && dist <= max_distance {
+                            Some((item, dist))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                scored.sort_by_key(|(_, dist)| *dist);
+                items = scored
+                    .into_iter()
+                    .map(|(mut item, dist)| {
+                        item.sort_text = Some(format!("zz{}{}", dist, item.label));
+                        item
+                    })
+                    .collect();
+            } else {
+                items = exact;
+            }
         }
 
         return CompletionResponse::Array(items);
@@ -387,6 +421,31 @@ pub fn handle_completion(
             label: kw.to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
             detail: Some("keyword".to_string()),
+            ..Default::default()
+        });
+    }
+
+    // Snippet completions (#209)
+    let snippets: &[(&str, &str, &str)] = &[
+        ("fn", "fn ${1:name}(${2:params}) {\n\t$0\n}", "function definition"),
+        ("for", "for ${1:item} in ${2:iterable} {\n\t$0\n}", "for loop"),
+        ("while", "while ${1:condition} {\n\t$0\n}", "while loop"),
+        ("if", "if ${1:condition} {\n\t$0\n}", "if statement"),
+        ("ifelse", "if ${1:condition} {\n\t$2\n} else {\n\t$0\n}", "if/else statement"),
+        ("match", "match ${1:value} {\n\t${2:pattern} => $0\n}", "match expression"),
+        ("test", "test \"${1:name}\" {\n\t$0\n}", "test block"),
+        ("struct", "struct ${1:Name} {\n\t${2:field}: ${3:type},\n}", "struct definition"),
+        ("enum", "enum ${1:Name} {\n\t${2:Variant},\n}", "enum definition"),
+        ("trycatch", "try {\n\t$1\n} catch ${2:e} {\n\t$0\n}", "try/catch block"),
+        ("letfn", "let ${1:name} = |${2:params}| {\n\t$0\n};", "lambda binding"),
+    ];
+    for &(label, body, detail) in snippets {
+        items.push(CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(detail.to_string()),
+            insert_text: Some(body.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         });
     }
@@ -492,10 +551,47 @@ pub fn handle_completion(
     // Filter by prefix if one exists
     if !prefix.is_empty() {
         let prefix_lower = prefix.to_lowercase();
-        items.retain(|item| {
-            let text = item.filter_text.as_ref().unwrap_or(&item.label);
-            text.to_lowercase().starts_with(&prefix_lower)
-        });
+        let mut exact_items: Vec<CompletionItem> = items
+            .iter()
+            .filter(|item| {
+                let text = item.filter_text.as_ref().unwrap_or(&item.label);
+                text.to_lowercase().starts_with(&prefix_lower)
+            })
+            .cloned()
+            .collect();
+
+        // If no exact prefix matches, fall back to fuzzy matching via Levenshtein
+        // distance. This catches common typos like "pirnt" -> "print".
+        if exact_items.is_empty() {
+            let max_distance = match prefix.len() {
+                0..=2 => 1,
+                3..=5 => 2,
+                _ => 3,
+            };
+            let mut scored: Vec<(CompletionItem, usize)> = items
+                .into_iter()
+                .filter_map(|item| {
+                    let label_lower = item.label.to_lowercase();
+                    let dist = levenshtein(&prefix_lower, &label_lower);
+                    if dist > 0 && dist <= max_distance {
+                        Some((item, dist))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by_key(|(_, dist)| *dist);
+            // Mark fuzzy matches with sort text so the editor ranks them correctly
+            exact_items = scored
+                .into_iter()
+                .map(|(mut item, dist)| {
+                    item.sort_text = Some(format!("zz{}{}", dist, item.label));
+                    item
+                })
+                .collect();
+        }
+
+        items = exact_items;
     }
 
     CompletionResponse::Array(items)
@@ -666,5 +762,56 @@ mod tests {
     #[test]
     fn test_find_double_colon_context_with_partial_variant() {
         assert_eq!(find_double_colon_context("Color::Re", 0, 9), Some("Color".to_string()));
+    }
+
+    #[test]
+    fn test_fuzzy_completion_pirnt_suggests_print() {
+        let source = "pirnt";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(0, 5);
+        let items = get_items(handle_completion(&state, &params));
+        let has_print = items.iter().any(|i| i.label == "print");
+        assert!(has_print, "typo 'pirnt' should fuzzy-match 'print', got: {:?}",
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_fuzzy_dot_access_to_strig_suggests_to_string() {
+        // "to_strig" is a typo for "to_string" (Levenshtein distance=1, missing 'n')
+        // Generic methods are always available for dot-access, so no type annotation needed
+        let source = "let x = 42;\nx.to_strig";
+        let (state, _) = analyze_document(source);
+        // Dot-access completion at "to_strig" (line 1, col 10)
+        let params = make_completion_params(1, 10);
+        let items = get_items(handle_completion(&state, &params));
+        let has_to_string = items.iter().any(|i| i.label == "to_string");
+        assert!(has_to_string, "typo 'to_strig' should fuzzy-match 'to_string', got: {:?}",
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_fuzzy_completion_prnt_suggests_print() {
+        let source = "prnt";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(0, 4);
+        let items = get_items(handle_completion(&state, &params));
+        let has_print = items.iter().any(|i| i.label == "print");
+        assert!(has_print, "typo 'prnt' should fuzzy-match 'print', got: {:?}",
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_exact_prefix_takes_priority_over_fuzzy() {
+        let source = "pri";
+        let (state, _) = analyze_document(source);
+        let params = make_completion_params(0, 3);
+        let items = get_items(handle_completion(&state, &params));
+        let has_print = items.iter().any(|i| i.label == "print");
+        assert!(has_print, "exact prefix 'pri' should match 'print'");
+        // Ensure we don't have random fuzzy results polluting exact matches
+        for item in &items {
+            assert!(item.label.to_lowercase().starts_with("pri"),
+                "with exact prefix match, all items should start with 'pri', got '{}'", item.label);
+        }
     }
 }

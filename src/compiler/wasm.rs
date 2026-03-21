@@ -9,12 +9,31 @@ use wasm_encoder::{
     ValType as WasmValType,
 };
 
+use std::collections::HashMap;
+
 use super::ir::*;
 use super::CompileError;
 
 /// Generates WASM binary from an IR module.
+///
+/// # WASM linear memory layout
+///
+/// ```text
+/// 0x0000 .. 0x03FF  (0–1023)    Reserved / scratch area (1 KB)
+/// 0x0400 .. ???     (1024–…)    String data section: each string is stored as
+///                               [4-byte little-endian length][UTF-8 bytes].
+///                               Strings are packed contiguously in insertion order.
+/// ???    .. heap_ptr            (end of strings … heap pointer) — heap area
+///                               for runtime allocations (arrays, maps, etc.).
+/// ```
+///
+/// `string_data_offset` (default 1024) is the byte offset where the first
+/// string constant begins. The heap pointer global (global 0) is initialized
+/// to `string_data_offset + total_string_data_size` so that runtime
+/// allocations start immediately after the last string constant.
 pub struct WasmCodegen {
-    /// Base offset in data section for string constants.
+    /// Base offset in data section for string constants (default: 1024 = 0x400).
+    /// See the memory layout diagram above.
     string_data_offset: u32,
 }
 
@@ -175,7 +194,108 @@ impl WasmCodegen {
         }
         module.section(&data);
 
-        Ok(module.finish())
+        let bytes = module.finish();
+        Self::validate_wasm_bytes(&bytes)?;
+        Ok(bytes)
+    }
+
+    /// Validate the generated WASM binary before returning it.
+    ///
+    /// Checks the WASM magic number (`\0asm`) and version (1) to catch
+    /// obviously corrupt output. This is a structural sanity check that
+    /// runs without requiring the `wasmparser` crate at runtime.
+    fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), CompileError> {
+        const WASM_MAGIC: &[u8; 4] = b"\0asm";
+        const WASM_VERSION: &[u8; 4] = &[1, 0, 0, 0];
+
+        if bytes.len() < 8 {
+            return Err(CompileError::Internal(format!(
+                "generated WASM binary too small ({} bytes, minimum 8)",
+                bytes.len()
+            )));
+        }
+        if &bytes[0..4] != WASM_MAGIC {
+            return Err(CompileError::Internal(
+                "generated WASM binary has invalid magic number (expected \\0asm)".to_string(),
+            ));
+        }
+        if &bytes[4..8] != WASM_VERSION {
+            return Err(CompileError::Internal(format!(
+                "generated WASM binary has unsupported version {:?} (expected [1, 0, 0, 0])",
+                &bytes[4..8]
+            )));
+        }
+
+        // Walk the section headers to verify structural integrity.
+        // Each section is: 1-byte section id, LEB128 size, then `size` bytes of payload.
+        let mut offset = 8;
+        let mut prev_section_id: Option<u8> = None;
+        while offset < bytes.len() {
+            if offset + 1 > bytes.len() {
+                return Err(CompileError::Internal(format!(
+                    "WASM binary truncated at offset {offset} (expected section header)"
+                )));
+            }
+            let section_id = bytes[offset];
+            offset += 1;
+
+            // Section IDs must be 0..=12 (custom=0, type=1, ..., data_count=12).
+            if section_id > 12 {
+                return Err(CompileError::Internal(format!(
+                    "WASM binary contains invalid section id {section_id} at offset {}",
+                    offset - 1
+                )));
+            }
+
+            // Non-custom sections (id > 0) must appear in ascending order.
+            if section_id != 0 {
+                if let Some(prev) = prev_section_id {
+                    if prev != 0 && section_id <= prev {
+                        return Err(CompileError::Internal(format!(
+                            "WASM sections out of order: section {section_id} after section {prev}"
+                        )));
+                    }
+                }
+                prev_section_id = Some(section_id);
+            }
+
+            // Decode LEB128 section size.
+            let (size, leb_len) = Self::decode_leb128(&bytes[offset..])?;
+            offset += leb_len;
+
+            // Verify the section payload doesn't exceed the binary.
+            if offset + size as usize > bytes.len() {
+                return Err(CompileError::Internal(format!(
+                    "WASM section {section_id} claims size {size} but only {} bytes remain",
+                    bytes.len() - offset
+                )));
+            }
+            offset += size as usize;
+        }
+
+        Ok(())
+    }
+
+    /// Decode an unsigned LEB128 value from a byte slice.
+    /// Returns `(value, bytes_consumed)`.
+    fn decode_leb128(bytes: &[u8]) -> Result<(u32, usize), CompileError> {
+        let mut result: u32 = 0;
+        let mut shift: u32 = 0;
+        for (i, &byte) in bytes.iter().enumerate() {
+            if shift >= 35 {
+                return Err(CompileError::Internal(
+                    "WASM LEB128 value too large for u32".to_string(),
+                ));
+            }
+            result |= ((byte & 0x7F) as u32) << shift;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                return Ok((result, i + 1));
+            }
+        }
+        Err(CompileError::Internal(
+            "WASM binary truncated in LEB128 encoding".to_string(),
+        ))
     }
 
     fn calc_string_data_size(&self, ir: &IrModule) -> u32 {
@@ -249,8 +369,17 @@ impl WasmCodegen {
         // Get string data offsets.
         let string_offsets = self.calc_string_offsets(ir);
 
+        // Build a reverse index for O(1) string-content-to-index lookup,
+        // replacing the linear scan that was previously used in typeof codegen.
+        let string_reverse_index: HashMap<&str, u32> = ir
+            .strings
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i as u32))
+            .collect();
+
         for inst in &func.instructions {
-            self.emit_instruction(&mut f, inst, ir, num_imports, &string_offsets, temp_base)?;
+            self.emit_instruction(&mut f, inst, ir, num_imports, &string_offsets, &string_reverse_index, temp_base)?;
         }
 
         // Implicit end.
@@ -307,6 +436,7 @@ impl WasmCodegen {
         ir: &IrModule,
         num_imports: u32,
         string_offsets: &[u32],
+        string_reverse_index: &HashMap<&str, u32>,
         temp_base: u32,
     ) -> Result<(), CompileError> {
         match inst {
@@ -1784,11 +1914,11 @@ impl WasmCodegen {
                         // Check each type:
                         // We need to intern these strings and return tagged string pointers.
                         // Use string_offsets to find them.
-                        // Intern the type name strings.
+                        // Look up type name strings via the reverse index (O(1) per lookup).
                         let type_names = ["null", "bool", "int64", "float64", "string", "array", "map", "int32", "float32"];
                         let mut type_str_indices = Vec::new();
                         for name in &type_names {
-                            type_str_indices.push(ir.strings.iter().position(|s| s == name));
+                            type_str_indices.push(string_reverse_index.get(*name).map(|&idx| idx as usize));
                         }
 
                         // type_str_indices layout: [null=0, bool=1, int64=2, float64=3, string=4, array=5, map=6, int32=7, float32=8]

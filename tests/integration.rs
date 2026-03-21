@@ -387,7 +387,7 @@ impl OperationEvaluator for StubEvaluator {
             OperationType::MapDelete => match (&map, &key) {
                 (DataType::Map(m), DataType::String(k)) => {
                     let mut new_map = m.clone();
-                    new_map.remove(k);
+                    new_map.shift_remove(k);
                     Ok(DataType::Map(new_map))
                 }
                 _ => Ok(DataType::Null),
@@ -2485,7 +2485,7 @@ fn test_index_of_unicode() {
 fn test_index_of_not_found() {
     assert_eq!(
         run(r#""hello".index_of("z")"#),
-        DataType::Int64(-1)
+        DataType::Null
     );
 }
 
@@ -3564,7 +3564,7 @@ fn test_type_checker_division_by_zero_has_error_code() {
     let program = parse_v2(src).unwrap();
     let analysis = check_types(&program, &std::collections::HashSet::new());
     assert!(analysis.diagnostics.iter().any(|d|
-        d.code.as_deref() == Some("E104") && d.message.contains("Division by zero")),
+        d.code.as_deref() == Some("E104") && d.message.contains("division by zero")),
         "Expected E104 for division by zero. Got: {:?}",
         analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
 }
@@ -3576,7 +3576,7 @@ fn test_type_checker_negative_array_index_has_error_code() {
     let program = parse_v2(src).unwrap();
     let analysis = check_types(&program, &std::collections::HashSet::new());
     assert!(analysis.diagnostics.iter().any(|d|
-        d.code.as_deref() == Some("E105") && d.message.contains("Negative array index")),
+        d.code.as_deref() == Some("E105") && d.message.contains("negative array index")),
         "Expected E105 for negative array index. Got: {:?}",
         analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
 }
@@ -3588,7 +3588,7 @@ fn test_type_checker_duplicate_map_key_has_error_code() {
     let program = parse_v2(src).unwrap();
     let analysis = check_types(&program, &std::collections::HashSet::new());
     assert!(analysis.diagnostics.iter().any(|d|
-        d.code.as_deref() == Some("E107") && d.message.contains("Duplicate key")),
+        d.code.as_deref() == Some("E107") && d.message.contains("duplicate key")),
         "Expected E107 for duplicate map key. Got: {:?}",
         analysis.diagnostics.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>());
 }
@@ -5113,16 +5113,13 @@ fn test_block_scope_isolation() {
 }
 
 #[test]
-fn test_and_or_require_bool() {
-    let result = run_err(
-        r#"
-        0 && true
-        "#,
-    );
-    match result {
-        InterpError::TypeError { context, .. } => assert!(context.contains("&&")),
-        other => panic!("expected TypeError, got {:?}", other),
-    }
+fn test_and_or_truthiness() {
+    // && and || use truthiness: any value accepted, not just Bool
+    assert_eq!(run("0 && true"), DataType::Int64(0)); // 0 is falsy, short-circuits
+    assert_eq!(run("1 && true"), DataType::Bool(true)); // 1 is truthy, returns right
+    assert_eq!(run("\"\" || 42"), DataType::Int64(42)); // "" is falsy, returns right
+    assert_eq!(run("\"hi\" || 42"), DataType::String("hi".to_string())); // "hi" is truthy, returns left
+    assert_eq!(run("null && 5"), DataType::Null); // null is falsy, short-circuits
 }
 
 #[test]
@@ -5478,7 +5475,7 @@ for {key} in m {
     match result {
         DataType::Array(arr) => {
             assert_eq!(arr[0], DataType::Int64(2));
-            // BTreeMap is ordered — last key is "b"
+            // IndexMap preserves insertion order — last key is "b"
             assert_eq!(arr[1], DataType::String("b".to_string()));
         }
         other => panic!("expected Array, got {:?}", other),
@@ -6712,7 +6709,7 @@ let m = {"name": "alice", "age": 30}
 m.to_json()
 "#;
     let result = run(src);
-    // JSON output — keys are alphabetical in BTreeMap
+    // JSON output — keys preserve insertion order with IndexMap
     match result {
         DataType::String(s) => {
             assert!(s.contains("\"name\":\"alice\""), "should contain name: {}", s);
@@ -8950,7 +8947,7 @@ fn test_module_enum_direct_access() {
         }
         output Color::Red;
     "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
+        let mut m = indexmap::IndexMap::new();
         m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Color".to_string()));
         m.insert("__variant".to_string(), DataType::String("Red".to_string()));
@@ -10910,7 +10907,7 @@ fn test_e2e_csv_filter_and_aggregate() {
         let count = len(high_scorers);
         output {"total": total, "count": count};
     "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
+        let mut m = indexmap::IndexMap::new();
         m.insert("total".to_string(), DataType::Int64(272));
         m.insert("count".to_string(), DataType::Int64(3));
         m
@@ -11369,7 +11366,7 @@ fn test_e2e_error_handling_validation() {
         output [r1, r2, r3, r4];
     "#), DataType::Array(vec![
         DataType::Map({
-            let mut m = std::collections::BTreeMap::new();
+            let mut m = indexmap::IndexMap::new();
             m.insert("name".to_string(), DataType::String("Alice".to_string()));
             m.insert("age".to_string(), DataType::Int64(30));
             m
@@ -11377,7 +11374,7 @@ fn test_e2e_error_handling_validation() {
         DataType::String("error: age cannot be negative".to_string()),
         DataType::String("error: name cannot be empty".to_string()),
         DataType::Map({
-            let mut m = std::collections::BTreeMap::new();
+            let mut m = indexmap::IndexMap::new();
             m.insert("name".to_string(), DataType::String("Eve".to_string()));
             m.insert("age".to_string(), DataType::Int64(99));
             m
@@ -11849,7 +11846,7 @@ fn test_map_size() {
 
 #[test]
 fn test_map_entries() {
-    // BTreeMap keys are sorted, so entries come out in order
+    // IndexMap preserves insertion order, so entries come out in order
     assert_eq!(run(r#"
         let m = {"a": 1, "b": 2};
         let entries = m.entries();
@@ -12019,7 +12016,7 @@ fn test_string_replace_method() {
 fn test_string_index_of() {
     assert_eq!(run(r#"
         ["hello".index_of("llo"), "hello".index_of("xyz")]
-    "#), DataType::Array(vec![DataType::Int64(2), DataType::Int64(-1)]));
+    "#), DataType::Array(vec![DataType::Int64(2), DataType::Null]));
 }
 
 #[test]
@@ -12859,7 +12856,7 @@ fn test_hof_map_keys_empty_map() {
 
 #[test]
 fn test_hof_map_keys_collision() {
-    // When map_keys produces duplicate keys, last one wins (BTreeMap ordering)
+    // When map_keys produces duplicate keys, last one wins (insertion order)
     let result = run(r#"
         let m = {"a": 1, "b": 2, "c": 3};
         m.map_keys(|k| "same")
@@ -12867,7 +12864,7 @@ fn test_hof_map_keys_collision() {
     match result {
         DataType::Map(m) => {
             assert_eq!(m.len(), 1);
-            // BTreeMap iterates in alphabetical order: a, b, c
+            // IndexMap iterates in insertion order: a, b, c
             // Last one to insert "same" key is c=3
             assert_eq!(m.get("same"), Some(&DataType::Int64(3)));
         }
@@ -13272,7 +13269,7 @@ fn test_use_glob_imports_module_enums() {
         use colors::*;
         output make_green();
     "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
+        let mut m = indexmap::IndexMap::new();
         m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Color".to_string()));
         m.insert("__variant".to_string(), DataType::String("Green".to_string()));
@@ -13304,7 +13301,7 @@ fn test_use_enum_by_name() {
         use shapes::Shape;
         output Shape::Circle();
     "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
+        let mut m = indexmap::IndexMap::new();
         m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Shape".to_string()));
         m.insert("__variant".to_string(), DataType::String("Circle".to_string()));
@@ -13335,7 +13332,7 @@ fn test_use_enum_with_alias() {
         use colors::Color as Hue;
         output Hue::Blue();
     "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
+        let mut m = indexmap::IndexMap::new();
         m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Hue".to_string()));
         m.insert("__variant".to_string(), DataType::String("Blue".to_string()));
@@ -13414,7 +13411,7 @@ fn test_nested_module_enum_via_use() {
         use outer::inner::make_ok;
         output make_ok();
     "#), DataType::Map({
-        let mut m = std::collections::BTreeMap::new();
+        let mut m = indexmap::IndexMap::new();
         m.insert("__data".to_string(), DataType::Array(vec![]));
         m.insert("__enum".to_string(), DataType::String("Status".to_string()));
         m.insert("__variant".to_string(), DataType::String("Ok".to_string()));
@@ -15304,10 +15301,17 @@ fn test_output_statement_returns_value() {
 // ── Additional coverage tests ────────────────────────────────
 
 #[test]
-fn test_assert_non_bool_type_error() {
-    // assert(42) should TypeError because 42 is not Bool
-    let err = run_err("assert(42)").to_string();
-    assert!(err.contains("Bool"), "Expected Bool in error: {err}");
+fn test_assert_truthiness() {
+    // assert() uses truthiness: any truthy value passes, any falsy value fails
+    assert_eq!(run("assert(42)"), DataType::Null); // truthy passes
+    assert_eq!(run(r#"assert("hello")"#), DataType::Null); // truthy passes
+    assert_eq!(run("assert([1])"), DataType::Null); // truthy passes
+    let err = run_err("assert(0)").to_string();
+    assert!(err.contains("Assertion failed"), "Expected assertion failure for 0: {err}");
+    let err = run_err("assert(null)").to_string();
+    assert!(err.contains("Assertion failed"), "Expected assertion failure for null: {err}");
+    let err = run_err(r#"assert("")"#).to_string();
+    assert!(err.contains("Assertion failed"), "Expected assertion failure for empty string: {err}");
 }
 
 #[test]
@@ -15413,10 +15417,10 @@ fn test_assert_throws_success() {
 }
 
 #[test]
-fn test_and_or_require_bool_operands() {
-    // && and || should require Bool operands (not truthy values)
-    let err = run_err("output 42 && true;").to_string();
-    assert!(err.contains("Bool") || err.contains("type") || err.contains("Type"), "Expected type error for && with non-bool: {err}");
+fn test_and_or_truthiness_in_output() {
+    // && and || use truthiness: any value accepted
+    assert_eq!(run("42 && true"), DataType::Bool(true)); // 42 is truthy, returns right
+    assert_eq!(run("42 || false"), DataType::Int64(42)); // 42 is truthy, returns left
 }
 
 #[test]
@@ -17856,7 +17860,7 @@ fn test_parser_duplicate_enum_variant() {
     let result = parse_v2("enum Color { Red, Red }\n");
     assert!(result.is_err(), "Duplicate enum variants should be rejected");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("Duplicate enum variant"), "Error should mention duplicate variant: {}", msg);
+    assert!(msg.to_lowercase().contains("duplicate") && msg.to_lowercase().contains("variant"), "Error should mention duplicate variant: {}", msg);
 }
 
 #[test]
@@ -17864,7 +17868,7 @@ fn test_parser_duplicate_struct_field() {
     let result = parse_v2("struct Point { x: int64, x: float64 }\n");
     assert!(result.is_err(), "Duplicate struct fields should be rejected");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("Duplicate struct field"), "Error should mention duplicate field: {}", msg);
+    assert!(msg.to_lowercase().contains("duplicate"), "Error should mention duplicate field: {}", msg);
 }
 
 #[test]
@@ -18063,17 +18067,13 @@ fn test_lambda_in_loop() {
 }
 
 #[test]
-fn test_assert_type_error_on_non_bool() {
-    // assert() with non-bool should produce a TypeError with E100, not InvalidInput
+fn test_assert_uses_truthiness() {
+    // assert() uses truthiness: 42 is truthy, so assert(42) passes
     let src = r#"assert(42)"#;
     let result = run_result(src);
     match result {
-        Err(e) => {
-            let msg = format!("{}", e);
-            assert!(msg.contains("E100") || msg.contains("Type error") || msg.contains("Bool"),
-                "expected TypeError (E100) for assert(42), got: {}", msg);
-        }
-        Ok(_) => panic!("assert(42) should error"),
+        Ok(_) => {} // 42 is truthy, passes
+        Err(e) => panic!("assert(42) should pass (truthy), got: {}", e),
     }
 }
 
@@ -18966,4 +18966,150 @@ fn test_wasm_stress_nan_boxing_boundaries() {
     "#);
     assert!(err2.contains("NaN-boxing") || err2.contains("range") || err2.contains("exceeds"),
         "Expected NaN-boxing range error for negative boundary, got: {}", err2);
+}
+
+// ── Audit #377: FsWrite creates parent directories ──────────────────────────
+
+#[test]
+fn test_fs_write_creates_parent_directories() {
+    let tmp = std::env::temp_dir().join("_magi_audit_377");
+    // Clean up any leftover from previous runs
+    let _ = std::fs::remove_dir_all(&tmp);
+    let nested_path = tmp.join("a").join("b").join("c").join("test.txt");
+    let src = format!(
+        r#"fs_write("{}", "hello from nested dir")"#,
+        nested_path.display()
+    );
+    let result = run_eval_unique(&src, "audit377_mkdir");
+    // Should not contain an error about missing directory
+    assert!(
+        !result.contains("No such file or directory"),
+        "fs_write should create parent directories, got: {}", result
+    );
+    // Verify file was actually written
+    let content = std::fs::read_to_string(&nested_path)
+        .expect("file should exist after fs_write with nested path");
+    assert_eq!(content, "hello from nested dir");
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── Audit #384: UUID validation strictness ──────────────────────────────────
+
+#[test]
+fn test_uuid_is_valid_rejects_non_hyphenated() {
+    // uuid without hyphens should be rejected by strict validation
+    let result = run_eval_unique(
+        r#"println(uuid_is_valid("550e8400e29b41d4a716446655440000"))"#,
+        "audit384_nohyphen",
+    );
+    assert!(result.contains("false"), "Non-hyphenated UUID should be invalid, got: {}", result);
+}
+
+#[test]
+fn test_uuid_is_valid_rejects_braced() {
+    // braced UUID should be rejected
+    let result = run_eval_unique(
+        r#"println(uuid_is_valid("{550e8400-e29b-41d4-a716-446655440000}"))"#,
+        "audit384_braced",
+    );
+    assert!(result.contains("false"), "Braced UUID should be invalid, got: {}", result);
+}
+
+#[test]
+fn test_uuid_is_valid_accepts_canonical() {
+    let result = run_eval_unique(
+        r#"println(uuid_is_valid("550e8400-e29b-41d4-a716-446655440000"))"#,
+        "audit384_canonical",
+    );
+    assert!(result.contains("true"), "Canonical UUID should be valid, got: {}", result);
+}
+
+#[test]
+fn test_uuid_parse_rejects_non_canonical() {
+    // uuid_parse should reject non-hyphenated format
+    let result = run_eval_unique(
+        r#"uuid_parse("550e8400e29b41d4a716446655440000")"#,
+        "audit384_parse_nohyphen",
+    );
+    assert!(
+        result.contains("Error") || result.contains("error") || result.contains("hyphenated"),
+        "uuid_parse should reject non-canonical UUID, got: {}", result
+    );
+}
+
+#[test]
+fn test_uuid_parse_accepts_canonical() {
+    let result = run_eval_unique(
+        r#"let m = uuid_parse("550e8400-e29b-41d4-a716-446655440000")
+println(m["full"])"#,
+        "audit384_parse_ok",
+    );
+    assert!(
+        result.contains("550e8400-e29b-41d4-a716-446655440000"),
+        "uuid_parse should accept canonical UUID, got: {}", result
+    );
+}
+
+#[test]
+fn test_uuid_v4_generates_valid_uuid() {
+    // Generated UUID should pass strict validation
+    let result = run_eval_unique(
+        r#"let id = uuid_v4()
+println(uuid_is_valid(id))"#,
+        "audit384_v4_valid",
+    );
+    assert!(result.contains("true"), "Generated UUID v4 should be valid, got: {}", result);
+}
+
+// =========================================================================
+// #313: assert_throws with arguments
+// =========================================================================
+
+#[test]
+fn test_assert_throws_with_args() {
+    // Function that throws only with specific args
+    assert_eq!(run(r#"
+        fn divide(a, b) {
+            if b == 0 { throw "division by zero" }
+            a / b
+        }
+        assert_throws("divide", 10, 0);
+        output "passed";
+    "#), DataType::String("passed".to_string()));
+}
+
+#[test]
+fn test_assert_throws_with_args_no_throw() {
+    // Function should NOT throw with valid args
+    let err = run_err(r#"
+        fn divide(a, b) {
+            if b == 0 { throw "division by zero" }
+            a / b
+        }
+        assert_throws("divide", 10, 2);
+    "#).to_string();
+    assert!(err.contains("throw") || err.contains("assert"), "Expected throw assertion error: {err}");
+}
+
+// =========================================================================
+// #311: Functions can access global scope
+// =========================================================================
+
+#[test]
+fn test_function_accesses_global_const() {
+    assert_eq!(run(r#"
+        const PI = 3;
+        fn get_pi() { PI }
+        get_pi()
+    "#), DataType::Int64(3));
+}
+
+#[test]
+fn test_function_accesses_global_let() {
+    assert_eq!(run(r#"
+        let greeting = "hello";
+        fn get_greeting() { greeting }
+        get_greeting()
+    "#), DataType::String("hello".to_string()));
 }

@@ -1,0 +1,208 @@
+// E2E test file for magi test command
+
+test "basic arithmetic" {
+    assert_eq(2 + 3, 5);
+    assert_eq(10 - 3, 7);
+    assert_eq(4 * 5, 20);
+    assert_eq(10 / 2, 5);
+    assert_eq(10 % 3, 1);
+}
+
+test "string operations" {
+    let s = "hello";
+    assert_eq(len(s), 5);
+    assert_eq(s + " world", "hello world");
+}
+
+test "array operations" {
+    let arr = [1, 2, 3, 4, 5];
+    assert_eq(len(arr), 5);
+    assert_eq(arr[0], 1);
+    assert_eq(arr[4], 5);
+
+    let pushed = array_push(arr, 6);
+    assert_eq(len(pushed), 6);
+}
+
+test "map operations" {
+    let m = {"key": "value", "count": 42};
+    assert_eq(m.key, "value");
+    assert_eq(m.count, 42);
+}
+
+test "control flow" {
+    let mut sum = 0;
+    for i in range(1, 11) {
+        sum = sum + i;
+    }
+    assert_eq(sum, 55);
+}
+
+test "functions and closures" {
+    fn double(x) { x * 2 }
+    let triple = |x| x * 3;
+    assert_eq(double(5), 10);
+    assert_eq(triple(5), 15);
+}
+
+test "pattern matching" {
+    fn classify(n) {
+        match n {
+            0 => "zero",
+            1 | 2 | 3 => "small",
+            _ => "other",
+        }
+    }
+    assert_eq(classify(0), "zero");
+    assert_eq(classify(2), "small");
+    assert_eq(classify(99), "other");
+}
+
+test "null coalescing" {
+    let a = null;
+    let b = a ?? "default";
+    assert_eq(b, "default");
+
+    let c = 42;
+    let d = c ?? "default";
+    assert_eq(d, 42);
+}
+
+test "string interpolation" {
+    let name = "MAGI";
+    let version = 3;
+    let msg = f"Hello {name} v{version}";
+    assert_eq(msg, "Hello MAGI v3");
+}
+
+test "destructuring" {
+    let [a, b, c] = [10, 20, 30];
+    assert_eq(a, 10);
+    assert_eq(b, 20);
+    assert_eq(c, 30);
+
+    let {x, y} = {"x": 1, "y": 2, "z": 3};
+    assert_eq(x, 1);
+    assert_eq(y, 2);
+}
+
+test "try-catch" {
+    let result = try {
+        throw "test error";
+    } catch err {
+        f"caught: {err}"
+    };
+    assert_eq(result, "caught: test error");
+}
+
+test "ranges" {
+    let r = 1..5;
+    assert_eq(len(r), 4);
+    assert_eq(r[0], 1);
+    assert_eq(r[3], 4);
+}
+
+test "higher-order methods" {
+    let doubled = [1, 2, 3].map(|x| x * 2);
+    assert_eq(doubled, [2, 4, 6]);
+
+    let evens = [1, 2, 3, 4].filter(|x| x % 2 == 0);
+    assert_eq(evens, [2, 4]);
+
+    let total = [1, 2, 3, 4].reduce(0, |acc, x| acc + x);
+    assert_eq(total, 10);
+}
+
+test "enum construction and matching" {
+    enum Color {
+        Red,
+        Green,
+        Blue,
+        Custom(r, g, b)
+    }
+
+    let c = Color::Red;
+    let label = match c {
+        Color::Red => "red",
+        Color::Green => "green",
+        Color::Blue => "blue",
+        Color::Custom(_, _, _) => "custom",
+    };
+    assert_eq(label, "red");
+}
+
+test "struct construction" {
+    struct Point {
+        x: float64,
+        y: float64
+    }
+
+    let p = Point { x: 3.0, y: 4.0 };
+    assert_eq(p.x, 3.0);
+    assert_eq(p.y, 4.0);
+}
+
+test "compound assignment" {
+    let mut x = 10;
+    x += 5;
+    assert_eq(x, 15);
+    x -= 3;
+    assert_eq(x, 12);
+    x *= 2;
+    assert_eq(x, 24);
+    x /= 6;
+    assert_eq(x, 4);
+    x %= 3;
+    assert_eq(x, 1);
+}
+
+test "loop with break value" {
+    let mut i = 0;
+    let found = loop {
+        if i * i > 50 {
+            break i;
+        }
+        i = i + 1;
+    };
+    assert(found * found > 50);
+    assert((found - 1) * (found - 1) <= 50);
+}
+
+test "optional chaining" {
+    let obj = {"a": {"b": {"c": 42}}};
+    assert_eq(obj?.a?.b?.c, 42);
+    assert_eq(obj?.a?.missing?.c, null);
+}
+
+test "list comprehension" {
+    let squares = [n * n for n in 1..=5];
+    assert_eq(squares, [1, 4, 9, 16, 25]);
+
+    let evens = [n for n in 1..=10 if n % 2 == 0];
+    assert_eq(evens, [2, 4, 6, 8, 10]);
+}
+
+test "spread in arrays" {
+    let a = [1, 2];
+    let b = [3, 4];
+    let c = [...a, ...b];
+    assert_eq(c, [1, 2, 3, 4]);
+}
+
+test "type checking builtins" {
+    assert(is_null(null));
+    assert(is_string("hello"));
+    assert(is_number(42));
+    assert(is_array([1, 2, 3]));
+    assert(is_map({"a": 1}));
+    assert(is_bool(true));
+}
+
+test "recursive functions" {
+    fn fib(n) {
+        if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+    }
+    assert_eq(fib(0), 0);
+    assert_eq(fib(1), 1);
+    assert_eq(fib(10), 55);
+}

@@ -1,6 +1,7 @@
 //! Hover provider for the MAGI LSP.
 
 use super::analysis::{find_enum_variant_at_position, find_word_at_position, DocumentState};
+use crate::syntax::interpreter::{std_module_ops, STD_MODULE_NAMES};
 use tower_lsp::lsp_types::*;
 
 /// Handle a hover request. Looks up the word under the cursor in symbol maps.
@@ -171,6 +172,21 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
         });
     }
 
+    // Check if it's a stdlib operation (imported via `use std::module::*`)
+    if let Some((module, desc)) = find_stdlib_operation(&word) {
+        let info = format!(
+            "```magi\nfn {}(...)\n```\n{}\n\n*From `std::{}`*",
+            word, desc, module
+        );
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: info,
+            }),
+            range: None,
+        });
+    }
+
     None
 }
 
@@ -331,6 +347,145 @@ fn is_keyword(word: &str) -> bool {
             | "enum" | "struct" | "test" | "true" | "false" | "null" | "in" | "as"
             | "spawn" | "await" | "pub"
     )
+}
+
+/// Look up a function name in the standard library modules.
+/// Returns `(module_name, description)` if the name is a known stdlib operation.
+fn find_stdlib_operation(name: &str) -> Option<(&'static str, String)> {
+    for &module in STD_MODULE_NAMES {
+        let ops = std_module_ops(module);
+        if ops.contains(&name) {
+            let desc = stdlib_op_description(name, module);
+            return Some((module, desc));
+        }
+    }
+    None
+}
+
+/// Generate a brief description for a stdlib operation based on its name and module.
+fn stdlib_op_description(name: &str, module: &str) -> String {
+    // Try to produce a human-readable description from the function name
+    match name {
+        // math
+        "add" => "Adds two numbers.".to_string(),
+        "subtract" => "Subtracts two numbers.".to_string(),
+        "multiply" => "Multiplies two numbers.".to_string(),
+        "divide" => "Divides two numbers.".to_string(),
+        "modulo" => "Returns the remainder of division.".to_string(),
+        "power" => "Raises a number to a power.".to_string(),
+        "negate" => "Negates a number.".to_string(),
+        "lerp" => "Linear interpolation between two values.".to_string(),
+        "remap" => "Remaps a value from one range to another.".to_string(),
+        "gcd" => "Returns the greatest common divisor of two integers.".to_string(),
+        "lcm" => "Returns the least common multiple of two integers.".to_string(),
+        "approx_eq" => "Checks approximate equality within an epsilon.".to_string(),
+        "math_sum" => "Returns the sum of an array of numbers.".to_string(),
+        "math_product" => "Returns the product of an array of numbers.".to_string(),
+        "math_average" => "Returns the average of an array of numbers.".to_string(),
+        "math_min_of" => "Returns the minimum of an array of numbers.".to_string(),
+        "math_max_of" => "Returns the maximum of an array of numbers.".to_string(),
+        "math_count" => "Returns the count of elements in an array.".to_string(),
+        "to_radians" => "Converts degrees to radians.".to_string(),
+        "to_degrees" => "Converts radians to degrees.".to_string(),
+        "log" => "Returns the logarithm with a given base.".to_string(),
+        // cmp
+        "equal" => "Checks if two values are equal.".to_string(),
+        "not_equal" => "Checks if two values are not equal.".to_string(),
+        "greater" => "Checks if the first value is greater.".to_string(),
+        "less" => "Checks if the first value is less.".to_string(),
+        "greater_eq" => "Checks if the first value is greater or equal.".to_string(),
+        "less_eq" => "Checks if the first value is less or equal.".to_string(),
+        // logic
+        "and" => "Logical AND of two values.".to_string(),
+        "or" => "Logical OR of two values.".to_string(),
+        "not" => "Logical NOT of a value.".to_string(),
+        "xor" => "Logical XOR of two values.".to_string(),
+        // bits
+        "bit_and" => "Bitwise AND.".to_string(),
+        "bit_or" => "Bitwise OR.".to_string(),
+        "bit_xor" => "Bitwise XOR.".to_string(),
+        "bit_not" => "Bitwise NOT.".to_string(),
+        "bit_shift_left" => "Bitwise left shift.".to_string(),
+        "bit_shift_right" => "Bitwise right shift.".to_string(),
+        // str
+        "string_repeat" => "Repeats a string n times.".to_string(),
+        "string_reverse" => "Reverses a string.".to_string(),
+        "string_lines" => "Splits a string into lines.".to_string(),
+        "string_words" => "Splits a string into words.".to_string(),
+        "string_count" => "Counts occurrences of a substring.".to_string(),
+        "string_chars" => "Returns an array of characters.".to_string(),
+        "string_join" => "Joins an array into a string with a separator.".to_string(),
+        "string_template" => "Template string interpolation.".to_string(),
+        "string_format" => "Formats a string with arguments.".to_string(),
+        "regex_match" => "Tests if a string matches a regex pattern.".to_string(),
+        "regex_replace" => "Replaces matches of a regex pattern.".to_string(),
+        "regex_extract" => "Extracts regex match groups.".to_string(),
+        // convert
+        "default" => "Returns the default value for a type.".to_string(),
+        "from_bytes" => "Converts bytes to a value.".to_string(),
+        "to_bytes" => "Converts a value to bytes.".to_string(),
+        "parse_json" => "Parses a JSON string into a value.".to_string(),
+        // array
+        "array_get" => "Returns the element at an index.".to_string(),
+        "array_set" => "Sets the element at an index.".to_string(),
+        "array_push" => "Appends an element to the array.".to_string(),
+        "array_pop" => "Removes and returns the last element.".to_string(),
+        "array_shift" => "Removes and returns the first element.".to_string(),
+        "array_length" => "Returns the length of the array.".to_string(),
+        "array_slice" => "Returns a sub-array.".to_string(),
+        "array_concat" => "Concatenates two arrays.".to_string(),
+        "array_contains" => "Checks if array contains a value.".to_string(),
+        "array_sort" => "Returns a sorted copy of the array.".to_string(),
+        "array_reverse" => "Returns a reversed copy of the array.".to_string(),
+        "array_flatten" => "Flattens nested arrays one level.".to_string(),
+        "array_filter_nulls" => "Removes null elements.".to_string(),
+        "array_join" => "Joins array elements into a string.".to_string(),
+        "array_unique" => "Returns array with duplicates removed.".to_string(),
+        "array_insert" => "Inserts an element at an index.".to_string(),
+        "array_remove" => "Removes an element at an index.".to_string(),
+        "array_from_map" => "Converts a map to an array of entries.".to_string(),
+        // map
+        "map_get" => "Returns the value for a key.".to_string(),
+        "map_set" => "Sets a key-value pair.".to_string(),
+        "map_delete" => "Removes a key from the map.".to_string(),
+        "map_has" => "Checks if a key exists.".to_string(),
+        "map_keys" => "Returns an array of keys.".to_string(),
+        "map_values" => "Returns an array of values.".to_string(),
+        "map_entries" => "Returns an array of [key, value] pairs.".to_string(),
+        "map_merge" => "Merges another map.".to_string(),
+        "map_size" => "Returns the number of entries.".to_string(),
+        "map_from_entries" => "Creates a map from [key, value] pairs.".to_string(),
+        "map_update" => "Updates a value in the map using a function.".to_string(),
+        // json
+        "json_get" => "Gets a value from a JSON structure by path.".to_string(),
+        "json_set" => "Sets a value in a JSON structure by path.".to_string(),
+        "json_delete" => "Deletes a value from a JSON structure by path.".to_string(),
+        "json_flatten" => "Flattens a nested JSON structure.".to_string(),
+        "json_merge" => "Deep-merges two JSON structures.".to_string(),
+        "json_type" => "Returns the JSON type of a value.".to_string(),
+        "json_validate" => "Validates a JSON string.".to_string(),
+        "json_pretty_print" => "Pretty-prints a JSON value.".to_string(),
+        "json_compact" => "Compacts a JSON value (removes whitespace).".to_string(),
+        "json_query" => "Queries a JSON structure.".to_string(),
+        // time
+        "now_timestamp" => "Returns the current timestamp.".to_string(),
+        "format_timestamp" => "Formats a timestamp as a string.".to_string(),
+        "parse_timestamp" => "Parses a string into a timestamp.".to_string(),
+        "timestamp_add" => "Adds a duration to a timestamp.".to_string(),
+        "timestamp_diff" => "Returns the difference between timestamps.".to_string(),
+        "sleep" => "Pauses execution for a duration.".to_string(),
+        "duration" => "Creates a duration value.".to_string(),
+        "elapsed" => "Returns elapsed time since a timestamp.".to_string(),
+        "time_sleep" => "Pauses execution for a duration.".to_string(),
+        "add_duration" => "Adds a duration to a timestamp.".to_string(),
+        "sub_duration" => "Subtracts a duration from a timestamp.".to_string(),
+        "time_diff" => "Returns the difference between timestamps.".to_string(),
+        "start_of" => "Returns the start of a time period.".to_string(),
+        "end_of" => "Returns the end of a time period.".to_string(),
+        // For operations that already have builtin or method descriptions, provide
+        // a generic fallback mentioning the module.
+        _ => format!("Standard library operation from `std::{}`.", module),
+    }
 }
 
 #[cfg(test)]
@@ -585,6 +740,48 @@ mod tests {
         if let HoverContents::Markup(content) = &hover.contents {
             assert!(content.value.contains("index") || content.value.contains("key"),
                 "get description should mention index or key: {}", content.value);
+        }
+    }
+
+    #[test]
+    fn test_hover_stdlib_operation_array_push() {
+        // "array_push" is in std::array — should show module info on hover
+        let source = "array_push([], 1)";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 2);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some(), "stdlib op 'array_push' should show hover info");
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("array_push"), "should mention function name: {}", content.value);
+            assert!(content.value.contains("std::array"), "should mention module: {}", content.value);
+        }
+    }
+
+    #[test]
+    fn test_hover_stdlib_operation_map_get() {
+        let source = "map_get({}, \"key\")";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 2);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some(), "stdlib op 'map_get' should show hover info");
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("std::map"), "should mention module: {}", content.value);
+        }
+    }
+
+    #[test]
+    fn test_hover_stdlib_operation_json_pretty_print() {
+        let source = "json_pretty_print(\"{}\")";
+        let (state, _) = analyze_document(source);
+        let params = make_hover_params(0, 5);
+        let result = handle_hover(&state, &params);
+        assert!(result.is_some(), "stdlib op 'json_pretty_print' should show hover info");
+        let hover = result.unwrap();
+        if let HoverContents::Markup(content) = &hover.contents {
+            assert!(content.value.contains("std::json"), "should mention module: {}", content.value);
+            assert!(content.value.contains("Pretty-prints"), "should have description: {}", content.value);
         }
     }
 }

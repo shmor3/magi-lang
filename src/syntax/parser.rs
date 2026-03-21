@@ -130,6 +130,7 @@ impl Parser {
                     "Expression nesting exceeds maximum depth ({})",
                     MAX_PARSE_DEPTH
                 ),
+                code: None,
             })
         } else {
             Ok(())
@@ -202,6 +203,7 @@ impl Parser {
                 line: tok.span.start_line as usize,
                 column: tok.span.start_col as usize,
                 message: format!("Expected '{}', got '{}'{}", kind, tok.kind, text_hint),
+                code: None,
             })
         }
     }
@@ -221,6 +223,7 @@ impl Parser {
             line: tok.span.start_line as usize,
             column: tok.span.start_col as usize,
             message: msg.to_string(),
+            code: None,
         }
     }
 
@@ -235,6 +238,7 @@ impl Parser {
                     "'{}' is a reserved keyword and cannot be used as an identifier",
                     tok.text
                 ),
+                code: None,
             });
         }
         if tok.kind == TokenKind::Async
@@ -248,6 +252,7 @@ impl Parser {
                     "'{}' is a keyword and cannot be used as an identifier",
                     tok.text
                 ),
+                code: None,
             });
         }
         let ident = self.expect(&TokenKind::Ident)?;
@@ -259,6 +264,7 @@ impl Parser {
                     "'{}' is a reserved keyword and cannot be used as an identifier",
                     ident.text
                 ),
+                code: None,
             });
         }
         Ok(ident)
@@ -326,11 +332,13 @@ impl Parser {
                         line: start.start_line as usize,
                         column: start.start_col as usize,
                         message: "Duplicate 'pub' modifier".to_string(),
+                        code: None,
                     }),
                     _ => Err(SyntaxError {
                         line: start.start_line as usize,
                         column: start.start_col as usize,
                         message: "'pub' can only be applied to fn, async fn, mod, enum, struct, const, type, or use definitions".to_string(),
+                        code: None,
                     }),
                 }
             }
@@ -350,6 +358,7 @@ impl Parser {
                 line: name_tok.span.start_line as usize,
                 column: name_tok.span.start_col as usize,
                 message: "Import plugin ID cannot be empty".to_string(),
+                code: None,
             });
         }
         let end = name_tok.span;
@@ -435,6 +444,7 @@ impl Parser {
                         message: "Only one rest element (...) is allowed in array destructuring".to_string(),
                         line: self.peek().span.start_line as usize,
                         column: self.peek().span.start_col as usize,
+                        code: None,
                     });
                 }
                 self.advance(); // consume '...'
@@ -515,6 +525,7 @@ impl Parser {
                             message: "Only one rest element (...) is allowed in array destructuring".to_string(),
                             line: self.peek().span.start_line as usize,
                             column: self.peek().span.start_col as usize,
+                            code: None,
                         });
                     }
                     self.advance();
@@ -740,6 +751,7 @@ impl Parser {
                     line: start.start_line as usize,
                     column: start.start_col as usize,
                     message: "Glob import ('*') cannot have an alias".to_string(),
+                    code: None,
                 });
             }
             let alias_tok = self.expect_identifier()?;
@@ -801,6 +813,7 @@ impl Parser {
                     line: param_start.start_line as usize,
                     column: param_start.start_col as usize,
                     message: format!("Duplicate parameter name '{}'", param_tok.text),
+                    code: None,
                 });
             }
             let type_annotation = if self.eat(&TokenKind::Colon) {
@@ -829,6 +842,7 @@ impl Parser {
                         line: param_start.start_line as usize,
                         column: param_start.start_col as usize,
                         message: "Rest parameter must be the last parameter".to_string(),
+                        code: None,
                     });
                 }
                 break;
@@ -878,6 +892,7 @@ impl Parser {
                 line: self.peek().span.start_line as usize,
                 column: self.peek().span.start_col as usize,
                 message: "Expected 'fn' after 'async'".to_string(),
+                code: None,
             });
         }
         self.advance(); // consume 'fn'
@@ -1526,6 +1541,7 @@ impl Parser {
                             line: name_tok.span.start_line as usize,
                             column: name_tok.span.start_col as usize,
                             message: format!("duplicate keyword argument '{}'", name_tok.text),
+                            code: None,
                         });
                     }
                     kwargs.push((name_tok.text, value));
@@ -1554,6 +1570,7 @@ impl Parser {
                     line: callee.span.start_line as usize,
                     column: callee.span.start_col as usize,
                     message: "Expected function name".to_string(),
+                    code: None,
                 });
             }
         };
@@ -1580,6 +1597,7 @@ impl Parser {
                     line: tok.span.start_line as usize,
                     column: tok.span.start_col as usize,
                     message: format!("Invalid integer: {}", tok.text),
+                    code: None,
                 })?;
                 Ok(Expression {
                     kind: ExpressionKind::Literal(Literal::Int64(val)),
@@ -1594,6 +1612,7 @@ impl Parser {
                     line: tok.span.start_line as usize,
                     column: tok.span.start_col as usize,
                     message: format!("Invalid float: {}", tok.text),
+                    code: None,
                 })?;
                 Ok(Expression {
                     kind: ExpressionKind::Literal(Literal::Float64(val)),
@@ -1698,6 +1717,7 @@ impl Parser {
                                 line: field_tok.span.start_line as usize,
                                 column: field_tok.span.start_col as usize,
                                 message: format!("Duplicate field '{}' in struct construction", field_tok.text),
+                                code: None,
                             });
                         }
                         self.expect(&TokenKind::Colon)?;
@@ -2543,6 +2563,7 @@ impl Parser {
                         line: tok.span.start_line as usize,
                         column: tok.span.start_col as usize,
                         message: "Unclosed interpolation brace in f-string".to_string(),
+                        code: None,
                     });
                 }
                 // Parse the inner expression with correct offset
@@ -2554,6 +2575,7 @@ impl Parser {
                     line: e.line,
                     column: e.column,
                     message: format!("Error in f-string expression: {}", e.message),
+                    code: None,
                 })?;
                 let mut inner_parser = Parser::new(inner_tokens);
                 inner_parser.depth = self.depth;
@@ -2561,12 +2583,14 @@ impl Parser {
                     line: e.line,
                     column: e.column,
                     message: format!("Error in f-string expression: {}", e.message),
+                    code: None,
                 })?;
                 if !inner_parser.at(&TokenKind::Eof) {
                     return Err(SyntaxError {
                         line: tok.span.start_line as usize,
                         column: tok.span.start_col as usize,
                         message: format!("Unexpected token in f-string interpolation: '{}'", inner_parser.peek().text),
+                        code: None,
                     });
                 }
                 parts.push(StringPart::Expr(expr));
@@ -2639,6 +2663,7 @@ impl Parser {
                     line: var_start.start_line as usize,
                     column: var_start.start_col as usize,
                     message: format!("Duplicate enum variant '{}'", var_tok.text),
+                    code: None,
                 });
             }
             if var_tok.text.starts_with("__") {
@@ -2646,6 +2671,7 @@ impl Parser {
                     line: var_start.start_line as usize,
                     column: var_start.start_col as usize,
                     message: format!("variant name '{}' is reserved (double-underscore prefix)", var_tok.text),
+                    code: None,
                 });
             }
             let mut fields = Vec::new();
@@ -2693,6 +2719,7 @@ impl Parser {
                     line: field_start.start_line as usize,
                     column: field_start.start_col as usize,
                     message: format!("Duplicate struct field '{}'", field_tok.text),
+                    code: None,
                 });
             }
             if field_tok.text.starts_with("__") {
@@ -2700,6 +2727,7 @@ impl Parser {
                     line: field_start.start_line as usize,
                     column: field_start.start_col as usize,
                     message: format!("field name '{}' is reserved (double-underscore prefix)", field_tok.text),
+                    code: None,
                 });
             }
             let type_annotation = if self.eat(&TokenKind::Colon) {

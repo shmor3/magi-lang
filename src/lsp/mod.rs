@@ -4,6 +4,7 @@
 //! document symbols, and formatting.
 
 pub mod analysis;
+pub mod code_actions;
 pub mod completion;
 pub mod definition;
 pub mod document_symbols;
@@ -85,6 +86,7 @@ impl LanguageServer for MagiLanguageServer {
                     ..Default::default()
                 }),
                 definition_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
@@ -169,6 +171,23 @@ impl LanguageServer for MagiLanguageServer {
             definition::handle_goto_definition(state, &params, uri)
         })) {
             Ok(result) => Ok(result),
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let docs = self.documents.read().await;
+        let state = match docs.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let uri_clone = uri.clone();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            code_actions::handle_code_actions(state, &params, &uri_clone)
+        })) {
+            Ok(actions) if actions.is_empty() => Ok(None),
+            Ok(actions) => Ok(Some(actions)),
             Err(_) => Ok(None),
         }
     }

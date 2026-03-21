@@ -115,6 +115,15 @@ impl Compiler {
 
     /// Compile a MAGI program into an IR module.
     pub fn compile(&mut self, program: &Program) -> Result<IrModule, CompileError> {
+        // Reset all mutable state so the compiler can be reused across modules
+        // without lambda name collisions or stale state from previous compilations.
+        self.module = IrModule::new();
+        self.current_fn = None;
+        self.fn_index = HashMap::new();
+        self.lambda_counter = 0;
+        self.loop_stack.clear();
+        self.block_depth = 0;
+
         // First pass: register all function definitions.
         self.register_functions(program)?;
 
@@ -405,6 +414,28 @@ impl Compiler {
         self.current_fn.as_ref()?.resolve_local(name)
     }
 
+    /// Compile a nested function (lambda, test, etc.) while preserving the
+    /// outer compilation context. Saves and restores `current_fn`,
+    /// `block_depth`, and `loop_stack` even if the inner compilation fails,
+    /// preventing block_depth desync on error paths.
+    fn compile_nested_function<F>(&mut self, body: F) -> Result<(), CompileError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), CompileError>,
+    {
+        let prev_fn = self.current_fn.take();
+        let prev_depth = self.block_depth;
+        let prev_loop_stack = std::mem::take(&mut self.loop_stack);
+
+        let result = body(self);
+
+        // Always restore context, even on error.
+        self.current_fn = prev_fn;
+        self.block_depth = prev_depth;
+        self.loop_stack = prev_loop_stack;
+
+        result
+    }
+
     // ── Compile statements ───────────────────────────────────────────
 
     fn compile_statements(&mut self, stmts: &[Statement]) -> Result<(), CompileError> {
@@ -581,18 +612,15 @@ impl Compiler {
                     return_type: ValType::Tagged,
                 });
 
-                let prev = self.current_fn.take();
-                let prev_depth = self.block_depth;
-                let prev_loop_stack = std::mem::take(&mut self.loop_stack);
-                self.begin_function(&test_name, false);
-                self.compile_block(body)?;
-                self.emit(Instruction::Drop); // discard block result
-                self.emit(Instruction::PushNull);
-                self.emit(Instruction::Return);
-                self.end_function();
-                self.current_fn = prev;
-                self.block_depth = prev_depth;
-                self.loop_stack = prev_loop_stack;
+                self.compile_nested_function(|compiler| {
+                    compiler.begin_function(&test_name, false);
+                    compiler.compile_block(body)?;
+                    compiler.emit(Instruction::Drop); // discard block result
+                    compiler.emit(Instruction::PushNull);
+                    compiler.emit(Instruction::Return);
+                    compiler.end_function();
+                    Ok(())
+                })?;
             }
 
             StatementKind::EnumDef { name, variants } => {
@@ -827,25 +855,23 @@ impl Compiler {
                     return_type: ValType::Tagged,
                 });
 
-                // Save current context.
-                let prev = self.current_fn.take();
-                let prev_depth = self.block_depth;
-                let prev_loop_stack = std::mem::take(&mut self.loop_stack);
-                self.begin_function(&lambda_name, false);
-                {
-                    let fb = self.fb()?;
-                    fb.param_count = params.len() as u32;
-                    fb.has_rest = params.last().is_some_and(|p| p.rest);
-                }
-                for param in params {
-                    self.define_local(&param.name, ValType::Tagged, false)?;
-                }
-                self.compile_expr(body)?;
-                self.emit(Instruction::Return);
-                self.end_function();
-                self.current_fn = prev;
-                self.block_depth = prev_depth;
-                self.loop_stack = prev_loop_stack;
+                // Save current context and compile the lambda body, restoring
+                // context even if compilation fails (prevents block_depth desync).
+                self.compile_nested_function(|compiler| {
+                    compiler.begin_function(&lambda_name, false);
+                    {
+                        let fb = compiler.fb()?;
+                        fb.param_count = params.len() as u32;
+                        fb.has_rest = params.last().is_some_and(|p| p.rest);
+                    }
+                    for param in params {
+                        compiler.define_local(&param.name, ValType::Tagged, false)?;
+                    }
+                    compiler.compile_expr(body)?;
+                    compiler.emit(Instruction::Return);
+                    compiler.end_function();
+                    Ok(())
+                })?;
 
                 // Push function reference.
                 self.emit(Instruction::PushI64(idx as i64));

@@ -14,6 +14,9 @@ pub struct IrModule {
     pub strings: Vec<String>,
     /// Global variable declarations.
     pub globals: Vec<IrGlobal>,
+    /// HashMap index for O(1) string deduplication during interning.
+    #[doc(hidden)]
+    pub string_index: std::collections::HashMap<String, u32>,
 }
 
 impl Default for IrModule {
@@ -28,15 +31,18 @@ impl IrModule {
             functions: Vec::new(),
             strings: Vec::new(),
             globals: Vec::new(),
+            string_index: std::collections::HashMap::new(),
         }
     }
 
     /// Intern a string constant, returning its index.
+    /// Uses a HashMap for O(1) deduplication instead of linear scan.
     pub fn intern_string(&mut self, s: &str) -> u32 {
-        if let Some(idx) = self.strings.iter().position(|x| x == s) {
-            return idx as u32;
+        if let Some(&idx) = self.string_index.get(s) {
+            return idx;
         }
         let idx = self.strings.len() as u32;
+        self.string_index.insert(s.to_string(), idx);
         self.strings.push(s.to_string());
         idx
     }

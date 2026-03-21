@@ -25,6 +25,12 @@ fn is_definition(stmt: &Statement) -> bool {
 /// as their escape sequences (e.g., newline → `\n`). This ensures the
 /// formatter produces valid, parseable string literals.
 fn escape_string_contents(s: &str) -> String {
+    // Fast path: if the string is all ASCII and contains no characters that
+    // need escaping, return it as-is without allocating.
+    if s.is_ascii() && !s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7f) {
+        return s.to_string();
+    }
+
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

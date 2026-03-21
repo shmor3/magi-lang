@@ -126,6 +126,24 @@ pub enum ErrorCode {
     W209,
     /// Return/break/continue/throw in finally block
     W212,
+    /// Infinite loop (loop without break)
+    W214,
+    /// Negated if condition with else branch
+    W215,
+    /// Empty enum definition
+    W216,
+    /// Empty match arm body
+    W229,
+    /// Self-assignment (x = x)
+    W230,
+    /// Redundant boolean if-else
+    W231,
+    /// Deeply nested code
+    W233,
+    /// Duplicate struct field name
+    W234,
+    /// Duplicate enum variant name
+    W235,
 }
 
 impl fmt::Display for ErrorCode {
@@ -180,6 +198,15 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W208 => "W208",
             ErrorCode::W209 => "W209",
             ErrorCode::W212 => "W212",
+            ErrorCode::W214 => "W214",
+            ErrorCode::W215 => "W215",
+            ErrorCode::W216 => "W216",
+            ErrorCode::W229 => "W229",
+            ErrorCode::W230 => "W230",
+            ErrorCode::W231 => "W231",
+            ErrorCode::W233 => "W233",
+            ErrorCode::W234 => "W234",
+            ErrorCode::W235 => "W235",
         };
         write!(f, "{}", code)
     }
@@ -191,7 +218,7 @@ impl ErrorCode {
         match self {
             // Type errors
             ErrorCode::E100 => "A value of the wrong type was used where a specific type was expected. Check the types of your variables and ensure they match what the operation or function expects.",
-            ErrorCode::E101 => "Conditions in `if`, `while`, `&&`, `||`, `!`, and match guards must be boolean (`true`/`false`). If you have a number or string, compare it explicitly: `x != 0` or `s != \"\"`.",
+            ErrorCode::E101 => "Conditions in `if`, `while`, `!`, and match guards must be boolean (`true`/`false`). If you have a number or string, compare it explicitly: `x != 0` or `s != \"\"`. Note: `&&` and `||` accept any value via truthiness.",
             ErrorCode::E102 => "The `for..in` loop requires an iterable (array, map, or string). Use `range(start, end)` for numeric loops, or ensure the value is iterable.",
             ErrorCode::E103 => "An arithmetic operation overflowed or received an argument of the wrong type. Check values are within bounds.",
             ErrorCode::E104 => "Division or modulo by zero is undefined. Check that your divisor is not zero before the operation.",
@@ -249,6 +276,15 @@ impl ErrorCode {
             ErrorCode::W208 => "This import path has already been imported. Remove the duplicate import.",
             ErrorCode::W209 => "A variable with the same name is already declared in this scope. This shadows the previous binding. Use a different name or remove the redundant declaration.",
             ErrorCode::W212 => "Using `return`, `break`, `continue`, or `throw` in a `finally` block overrides the result from `try`/`catch`. This is almost always a bug.",
+            ErrorCode::W214 => "This `loop` has no `break` statement, so it will run forever. Add a `break` condition or use `while` with a termination condition.",
+            ErrorCode::W215 => "`if cond { true } else { false }` can be simplified to just `cond`.",
+            ErrorCode::W216 => "An enum with no variants can never be constructed. Add variants or remove the enum.",
+            ErrorCode::W229 => "This match arm has an empty body. Add an expression or use `null` explicitly.",
+            ErrorCode::W230 => "Assigning a variable to itself has no effect. This is likely a bug.",
+            ErrorCode::W231 => "This `if/else` returns boolean literals that match the condition. Simplify to just the condition expression.",
+            ErrorCode::W233 => "This code is deeply nested (5+ levels). Consider extracting inner blocks into functions for readability.",
+            ErrorCode::W234 => "This struct has duplicate field names. Each field name must be unique within a struct definition.",
+            ErrorCode::W235 => "This enum has duplicate variant names. Each variant name must be unique within an enum definition.",
         }
     }
 }
@@ -322,6 +358,9 @@ mod tests {
             ErrorCode::W200, ErrorCode::W201, ErrorCode::W202, ErrorCode::W203,
             ErrorCode::W204, ErrorCode::W205, ErrorCode::W206, ErrorCode::W207,
             ErrorCode::W208, ErrorCode::W209, ErrorCode::W212,
+            ErrorCode::W214, ErrorCode::W215, ErrorCode::W216,
+            ErrorCode::W229, ErrorCode::W230, ErrorCode::W231, ErrorCode::W233,
+            ErrorCode::W234, ErrorCode::W235,
         ];
         for code in codes {
             let help = code.help();

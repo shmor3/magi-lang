@@ -376,6 +376,7 @@ impl<'a> Lexer<'a> {
                                 line: comment_line as usize,
                                 column: comment_col as usize,
                                 message: "Unterminated block comment".to_string(),
+                                code: None,
                             });
                         }
                         Some('/') if self.peek() == Some(b'*') => {
@@ -656,6 +657,7 @@ impl<'a> Lexer<'a> {
                     line: start_line as usize,
                     column: start_col as usize,
                     message: "Expected '&&', got single '&'".to_string(),
+                    code: None,
                 });
             }
             b'|' => {
@@ -756,6 +758,7 @@ impl<'a> Lexer<'a> {
             line: start_line as usize,
             column: start_col as usize,
             message: format!("Unexpected character: '{}'", display_char),
+            code: None,
         })
     }
 
@@ -769,6 +772,7 @@ impl<'a> Lexer<'a> {
             line: start_line as usize,
             column: start_col as usize,
             message: "Unexpected end of input".to_string(),
+            code: None,
         })?;
         Ok(Token {
             kind,
@@ -800,6 +804,7 @@ impl<'a> Lexer<'a> {
                                 line: self.line as usize,
                                 column: self.col as usize,
                                 message: "Expected two hex digits after \\x".to_string(),
+                                code: None,
                             });
                         }
                     }
@@ -808,6 +813,7 @@ impl<'a> Lexer<'a> {
                     line: self.line as usize,
                     column: self.col as usize,
                     message: format!("Invalid hex escape: \\x{}", hex),
+                    code: None,
                 })?;
                 Ok(code as char)
             }
@@ -818,6 +824,7 @@ impl<'a> Lexer<'a> {
                         line: self.line as usize,
                         column: self.col as usize,
                         message: "Expected '{' after \\u".to_string(),
+                        code: None,
                     });
                 }
                 self.advance(); // consume {
@@ -837,6 +844,7 @@ impl<'a> Lexer<'a> {
                                 line: self.line as usize,
                                 column: self.col as usize,
                                 message: "Invalid unicode escape: expected hex digits and '}'".to_string(),
+                                code: None,
                             });
                         }
                     }
@@ -846,17 +854,20 @@ impl<'a> Lexer<'a> {
                         line: self.line as usize,
                         column: self.col as usize,
                         message: "Empty unicode escape \\u{}".to_string(),
+                        code: None,
                     });
                 }
                 let code = u32::from_str_radix(&hex, 16).map_err(|_| SyntaxError {
                     line: self.line as usize,
                     column: self.col as usize,
                     message: format!("Invalid unicode escape: \\u{{{}}}", hex),
+                    code: None,
                 })?;
                 char::from_u32(code).ok_or_else(|| SyntaxError {
                     line: self.line as usize,
                     column: self.col as usize,
                     message: format!("Invalid unicode code point: U+{:04X}", code),
+                    code: None,
                 })
             }
             Some(ch) => {
@@ -864,6 +875,7 @@ impl<'a> Lexer<'a> {
                     line: self.line as usize,
                     column: (self.col - 1) as usize,
                     message: format!("Invalid escape sequence: \\{}", ch as char),
+                    code: None,
                 })
             }
             None => {
@@ -871,6 +883,7 @@ impl<'a> Lexer<'a> {
                     line: self.line as usize,
                     column: self.col as usize,
                     message: "Unterminated escape sequence".to_string(),
+                    code: None,
                 })
             }
         }
@@ -886,6 +899,7 @@ impl<'a> Lexer<'a> {
                         line: start_line as usize,
                         column: start_col as usize,
                         message: "Unterminated string literal".to_string(),
+                        code: None,
                     });
                 }
                 Some(b'"') => { self.advance(); break; }
@@ -920,6 +934,7 @@ impl<'a> Lexer<'a> {
                         line: start_line as usize,
                         column: start_col as usize,
                         message: "Unterminated triple-quoted string".to_string(),
+                        code: None,
                     });
                 }
                 Some(b'"') if self.peek_at(1) == Some(b'"') && self.peek_at(2) == Some(b'"') => {
@@ -957,6 +972,7 @@ impl<'a> Lexer<'a> {
                         line: start_line as usize,
                         column: start_col as usize,
                         message: "Unterminated raw string literal".to_string(),
+                        code: None,
                     });
                 }
                 Some(b'"') => { self.advance(); break; }
@@ -985,6 +1001,7 @@ impl<'a> Lexer<'a> {
                         line: start_line as usize,
                         column: start_col as usize,
                         message: "Unterminated f-string literal".to_string(),
+                        code: None,
                     });
                 }
                 Some(b'"') if brace_depth == 0 => { self.advance(); break; }
@@ -1002,6 +1019,7 @@ impl<'a> Lexer<'a> {
                             line: self.line as usize,
                             column: self.col as usize,
                             message: "Unmatched '}' in f-string; use '\\}' for a literal brace".to_string(),
+                            code: None,
                         });
                     }
                     value.push('}');
@@ -1159,6 +1177,7 @@ impl<'a> Lexer<'a> {
                 line: start_line as usize,
                 column: start_col as usize,
                 message: "Expected digits after base prefix".to_string(),
+                code: None,
             });
         }
 
@@ -1170,6 +1189,7 @@ impl<'a> Lexer<'a> {
             line: start_line as usize,
             column: start_col as usize,
             message: "Integer literal out of range (max 9223372036854775807)".to_string(),
+            code: None,
         })?;
 
         Ok(Token {

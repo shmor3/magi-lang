@@ -1,7 +1,8 @@
 //! MAGI language CLI — interpret and compile .magi files.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io::Read as _;
@@ -38,6 +39,23 @@ const MAX_INSPECT_OUTPUT: usize = 1_048_576;
 /// UTF-8 BOM (byte order mark).
 const UTF8_BOM: &str = "\u{FEFF}";
 
+/// Maximum number of compiled regexes held in the thread-local LRU cache.
+const REGEX_CACHE_CAPACITY: usize = 128;
+
+// Thread-local LRU cache for compiled regexes.
+// `order` tracks access recency (most-recent at back); `map` stores compiled patterns.
+thread_local! {
+    static REGEX_CACHE: RefCell<RegexCache> = RefCell::new(RegexCache {
+        map: HashMap::with_capacity(REGEX_CACHE_CAPACITY),
+        order: VecDeque::with_capacity(REGEX_CACHE_CAPACITY),
+    });
+}
+
+struct RegexCache {
+    map: HashMap<String, regex::Regex>,
+    order: VecDeque<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Connection registry — global storage for open connections (HTTP clients,
 // WebSocket handles, TLS sessions, etc.) keyed by UUID-based connection IDs.
@@ -51,7 +69,13 @@ static CONNECTIONS: LazyLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> =
 #[allow(dead_code)]
 fn conn_store<T: Send + 'static>(id: &str, conn: T) -> Result<(), EvalError> {
     let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if map.len() >= MAX_CONNECTIONS && !map.contains_key(id) {
+    if map.contains_key(id) {
+        return Err(EvalError::InvalidInput(format!(
+            "connection ID already exists: {}",
+            id
+        )));
+    }
+    if map.len() >= MAX_CONNECTIONS {
         return Err(EvalError::InvalidInput(format!(
             "connection limit reached (max {})",
             MAX_CONNECTIONS
@@ -279,120 +303,32 @@ fn validate_url_with_dns(url_str: &str) -> Result<(), EvalError> {
 /// Extract a port number from an input map.
 #[allow(dead_code)]
 fn get_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalError> {
-    match inputs.get(key) {
-        Some(DataType::Int64(n)) => {
-            let n = *n;
-            if (1..=65535).contains(&n) {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (1-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(DataType::Int32(n)) => {
-            let n = *n as i64;
-            if (1..=65535).contains(&n) {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (1-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(DataType::Uint32(n)) => {
-            let n = *n as u64;
-            if (1..=65535).contains(&n) {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (1-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(DataType::Uint64(n)) => {
-            let n = *n;
-            if (1..=65535).contains(&n) {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (1-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(other) => Err(EvalError::TypeError {
-            expected: "numeric".to_string(),
-            actual: other.type_name().to_string(),
-            context: format!("port '{}'", key),
-        }),
-        None => Err(EvalError::InvalidInput(format!(
-            "Missing required input: {}",
-            key
-        ))),
-    }
+    get_port_range(inputs, key, 1)
 }
 
 /// Extract a port number from an input map, allowing port 0 (OS-assigned).
-#[allow(dead_code)]
 fn get_bind_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalError> {
-    match inputs.get(key) {
-        Some(DataType::Int64(n)) => {
-            let n = *n;
-            if (0..=65535).contains(&n) {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (0-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(DataType::Int32(n)) => {
-            let n = *n as i64;
-            if (0..=65535).contains(&n) {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (0-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(DataType::Uint32(n)) => {
-            let n = *n as u64;
-            if n <= 65535 {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (0-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(DataType::Uint64(n)) => {
-            let n = *n;
-            if n <= 65535 {
-                Ok(n as u16)
-            } else {
-                Err(EvalError::InvalidInput(format!(
-                    "Port out of range (0-65535): {}",
-                    n
-                )))
-            }
-        }
-        Some(other) => Err(EvalError::TypeError {
-            expected: "numeric".to_string(),
-            actual: other.type_name().to_string(),
-            context: format!("port '{}'", key),
-        }),
-        None => Err(EvalError::InvalidInput(format!(
-            "Missing required input: {}",
-            key
-        ))),
+    get_port_range(inputs, key, 0)
+}
+
+/// Extract and validate a port number from an input map.
+/// `min_port` controls the lower bound (0 for bind ports, 1 for connect ports).
+fn get_port_range(inputs: &HashMap<String, DataType>, key: &str, min_port: i64) -> Result<u16, EvalError> {
+    let val = inputs.get(key).ok_or_else(|| {
+        EvalError::InvalidInput(format!("Missing required input: {}", key))
+    })?;
+    let n = val.to_i64().ok_or_else(|| EvalError::TypeError {
+        expected: "numeric".to_string(),
+        actual: val.type_name().to_string(),
+        context: format!("port '{}'", key),
+    })?;
+    if (min_port..=65535).contains(&n) {
+        Ok(n as u16)
+    } else {
+        Err(EvalError::InvalidInput(format!(
+            "Port out of range ({}-65535): {}",
+            min_port, n
+        )))
     }
 }
 
@@ -415,18 +351,40 @@ fn read_http_body(body: ureq::Body, context: &str) -> Result<String, EvalError> 
     limited.read_to_string(&mut buf)
         .map_err(|e| EvalError::InvalidInput(format!("{} read: {}", context, e)))?;
     if buf.len() > MAX_STRING_OUTPUT {
-        return Err(EvalError::InvalidInput(format!(
-            "{}: response body exceeds {} byte limit", context, MAX_STRING_OUTPUT
-        )));
+        buf.truncate(MAX_STRING_OUTPUT);
+        buf.push_str("[truncated]");
     }
     Ok(buf)
 }
 
 /// Compile a user-supplied regex pattern with a size limit.
+/// Uses a thread-local LRU cache (capacity [`REGEX_CACHE_CAPACITY`]) so that
+/// repeated use of the same pattern avoids recompilation.
 fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
-    regex::RegexBuilder::new(pat)
-        .size_limit(1 << 20)  // 1 MB compiled size limit
-        .build()
+    REGEX_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        // Clone the cached regex (if present) before mutating the order queue.
+        if let Some(re) = cache.map.get(pat).cloned() {
+            // Promote to most-recently used.
+            if let Some(pos) = cache.order.iter().position(|k| k == pat) {
+                cache.order.remove(pos);
+            }
+            cache.order.push_back(pat.to_string());
+            return Ok(re);
+        }
+        let re = regex::RegexBuilder::new(pat)
+            .size_limit(1 << 20) // 1 MB compiled NFA size limit
+            .build()?;
+        // Evict least-recently used entry if at capacity.
+        if cache.map.len() >= REGEX_CACHE_CAPACITY {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.map.remove(&oldest);
+            }
+        }
+        cache.order.push_back(pat.to_string());
+        cache.map.insert(pat.to_string(), re.clone());
+        Ok(re)
+    })
 }
 
 /// Extract a string reference from an input map.
@@ -541,23 +499,23 @@ impl OperationEvaluator for FullEvaluator {
             // Comparison
             OperationType::Equal => Ok(DataType::Bool(a == b || numeric_eq(&a, &b))),
             OperationType::NotEqual => Ok(DataType::Bool(a != b && !numeric_eq(&a, &b))),
-            OperationType::Greater => num_cmp(&a, &b, |x, y| x > y, |x, y| x > y, |x, y| x > y),
-            OperationType::Less => num_cmp(&a, &b, |x, y| x < y, |x, y| x < y, |x, y| x < y),
-            OperationType::GreaterEq => num_cmp(&a, &b, |x, y| x >= y, |x, y| x >= y, |x, y| x >= y),
-            OperationType::LessEq => num_cmp(&a, &b, |x, y| x <= y, |x, y| x <= y, |x, y| x <= y),
+            OperationType::Greater => num_cmp(&a, &b, |ord| ord == std::cmp::Ordering::Greater),
+            OperationType::Less => num_cmp(&a, &b, |ord| ord == std::cmp::Ordering::Less),
+            OperationType::GreaterEq => num_cmp(&a, &b, |ord| ord != std::cmp::Ordering::Less),
+            OperationType::LessEq => num_cmp(&a, &b, |ord| ord != std::cmp::Ordering::Greater),
 
             // Logical
             OperationType::And => {
-                let ta = is_truthy(&a);
-                let tb = is_truthy(&b);
+                let ta = a.to_bool();
+                let tb = b.to_bool();
                 Ok(DataType::Bool(ta && tb))
             },
             OperationType::Or => {
-                let ta = is_truthy(&a);
-                let tb = is_truthy(&b);
+                let ta = a.to_bool();
+                let tb = b.to_bool();
                 Ok(DataType::Bool(ta || tb))
             },
-            OperationType::Not => Ok(DataType::Bool(!is_truthy(&input))),
+            OperationType::Not => Ok(DataType::Bool(!input.to_bool())),
             OperationType::Negate => match &input {
                 DataType::Int64(x) => match x.checked_neg() {
                     Some(v) => Ok(DataType::Int64(v)),
@@ -766,14 +724,28 @@ impl OperationEvaluator for FullEvaluator {
                             if result_len > MAX_STRING_OUTPUT {
                                 return Err(EvalError::InvalidInput(format!("replace result exceeds {} byte limit", MAX_STRING_OUTPUT)));
                             }
+                            Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
                         } else if to.len() > from.len() {
-                            let match_count = s.matches(from.as_str()).count();
-                            let growth = match_count.saturating_mul(to.len().saturating_sub(from.len()));
-                            if s.len().saturating_add(growth) > MAX_STRING_OUTPUT {
+                            // Single-pass: replace while checking size to avoid scanning twice
+                            let mut result = String::new();
+                            let mut remainder = s.as_str();
+                            while let Some(pos) = remainder.find(from.as_str()) {
+                                result.push_str(&remainder[..pos]);
+                                result.push_str(to.as_str());
+                                remainder = &remainder[pos + from.len()..];
+                                if result.len() > MAX_STRING_OUTPUT {
+                                    return Err(EvalError::InvalidInput(format!("replace result exceeds {} byte limit", MAX_STRING_OUTPUT)));
+                                }
+                            }
+                            result.push_str(remainder);
+                            if result.len() > MAX_STRING_OUTPUT {
                                 return Err(EvalError::InvalidInput(format!("replace result exceeds {} byte limit", MAX_STRING_OUTPUT)));
                             }
+                            Ok(DataType::String(result))
+                        } else {
+                            // to.len() <= from.len(): result cannot exceed input length
+                            Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
                         }
-                        Ok(DataType::String(s.replace(from.as_str(), to.as_str())))
                     }
                     (DataType::String(_), _, _) => {
                         let bad = if !matches!(&search, DataType::String(_)) { &search } else { &replace };
@@ -869,9 +841,10 @@ impl OperationEvaluator for FullEvaluator {
                 let search = inputs.get("search").cloned().unwrap_or(DataType::Null);
                 match (&input, &search) {
                     (DataType::String(s), DataType::String(sub)) => {
-                        Ok(DataType::Int64(s.find(sub.as_str()).map(|byte_idx| {
-                            s[..byte_idx].chars().count() as i64
-                        }).unwrap_or(-1)))
+                        Ok(match s.find(sub.as_str()) {
+                            Some(byte_idx) => DataType::Int64(s[..byte_idx].chars().count() as i64),
+                            None => DataType::Null,
+                        })
                     }
                     (DataType::String(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: search.type_name().to_string(), context: "IndexOf search".to_string() }),
                     _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "IndexOf".to_string() }),
@@ -891,7 +864,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::MapDelete => match (&map, &key) {
                 (DataType::Map(m), DataType::String(k)) => {
                     let mut new_map = m.clone();
-                    new_map.remove(k);
+                    new_map.shift_remove(k);
                     Ok(DataType::Map(new_map))
                 }
                 (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "String".to_string(), actual: key.type_name().to_string(), context: "MapDelete key".to_string() }),
@@ -912,7 +885,7 @@ impl OperationEvaluator for FullEvaluator {
                             "map_from_entries: array exceeds {} element limit", MAX_ARRAY_ELEMENTS
                         )));
                     }
-                    let mut m = std::collections::BTreeMap::new();
+                    let mut m = indexmap::IndexMap::new();
                     for (i, item) in arr.iter().enumerate() {
                         match item {
                             DataType::Array(pair) if pair.len() >= 2 => {
@@ -1609,13 +1582,11 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Assert => {
                 let condition = inputs.get("condition").unwrap_or(&input);
                 let message = inputs.get("message").and_then(|m| if let DataType::String(s) = m { Some(s.as_str()) } else { None });
-                match condition {
-                    DataType::Bool(true) => Ok(DataType::Null),
-                    DataType::Bool(false) => {
-                        let msg = message.unwrap_or("Assertion failed");
-                        Err(EvalError::InvalidInput(msg.to_string()))
-                    },
-                    _ => Err(EvalError::TypeError { expected: "bool".to_string(), actual: condition.type_name().to_string(), context: "assert".to_string() }),
+                if condition.to_bool() {
+                    Ok(DataType::Null)
+                } else {
+                    let msg = message.unwrap_or("Assertion failed");
+                    Err(EvalError::InvalidInput(msg.to_string()))
                 }
             },
             OperationType::DebugLog => {
@@ -1707,8 +1678,8 @@ impl OperationEvaluator for FullEvaluator {
 
             // Logical Xor
             OperationType::Xor => {
-                let a_bool = is_truthy(&a);
-                let b_bool = is_truthy(&b);
+                let a_bool = a.to_bool();
+                let b_bool = b.to_bool();
                 Ok(DataType::Bool(a_bool ^ b_bool))
             }
 
@@ -2398,10 +2369,18 @@ impl OperationEvaluator for FullEvaluator {
             // Sleep: sleep for duration ms (no-op in sync evaluator, just returns null)
             // ================================================================
             OperationType::Sleep => {
+                const MAX_SLEEP_MS: i64 = 3_600_000; // 1 hour max
+                const CHUNK_MS: u64 = 100; // check cancel every 100ms
                 let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
                 if let Some(ms) = duration.to_i64() {
-                    if ms > 0 && ms <= 30000 {
-                        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                    if ms > 0 {
+                        let total = ms.min(MAX_SLEEP_MS) as u64;
+                        let mut remaining = total;
+                        while remaining > 0 {
+                            let chunk = remaining.min(CHUNK_MS);
+                            std::thread::sleep(std::time::Duration::from_millis(chunk));
+                            remaining -= chunk;
+                        }
                     }
                 }
                 Ok(DataType::Null)
@@ -2622,7 +2601,7 @@ impl OperationEvaluator for FullEvaluator {
                 match (&json_val, &path) {
                     (DataType::Map(m), DataType::String(key)) => {
                         let mut new_map = m.clone();
-                        new_map.remove(key);
+                        new_map.shift_remove(key);
                         Ok(DataType::Map(new_map))
                     }
                     (DataType::Map(_), _) => Err(EvalError::TypeError { expected: "string".to_string(), actual: path.type_name().to_string(), context: "JsonDelete path".to_string() }),
@@ -2686,7 +2665,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::JsonFlatten => {
-                fn json_flatten(val: &DataType, prefix: &str, result: &mut std::collections::BTreeMap<String, DataType>, depth: usize) -> Result<(), ()> {
+                fn json_flatten(val: &DataType, prefix: &str, result: &mut indexmap::IndexMap<String, DataType>, depth: usize) -> Result<(), ()> {
                     if depth > 64 || result.len() > MAX_ARRAY_ELEMENTS { return Err(()); }
                     match val {
                         DataType::Map(m) => {
@@ -2710,7 +2689,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(())
                 }
-                let mut result = std::collections::BTreeMap::new();
+                let mut result = indexmap::IndexMap::new();
                 if json_flatten(&input, "", &mut result, 0).is_err() {
                     return Err(EvalError::InvalidInput(format!("JsonFlatten result exceeds {} elements", MAX_ARRAY_ELEMENTS)));
                 }
@@ -2996,6 +2975,13 @@ impl OperationEvaluator for FullEvaluator {
                                 "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE
                             )));
                         }
+                        if let Some(parent) = std::path::Path::new(p.as_str()).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                if let Err(e) = fs::create_dir_all(parent) {
+                                    return Err(EvalError::InvalidInput(format!("fs_write: cannot create parent directory: {}", e)));
+                                }
+                            }
+                        }
                         match fs::write(p, c) {
                             Ok(_) => Ok(DataType::Bool(true)),
                             Err(e) => Err(EvalError::InvalidInput(format!("fs_write: {}", e))),
@@ -3006,6 +2992,13 @@ impl OperationEvaluator for FullEvaluator {
                             return Err(EvalError::InvalidInput(format!(
                                 "fs_write: content exceeds {} byte limit", MAX_FILE_WRITE
                             )));
+                        }
+                        if let Some(parent) = std::path::Path::new(p.as_str()).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                if let Err(e) = fs::create_dir_all(parent) {
+                                    return Err(EvalError::InvalidInput(format!("fs_write: cannot create parent directory: {}", e)));
+                                }
+                            }
                         }
                         match fs::write(p, b) {
                             Ok(_) => Ok(DataType::Bool(true)),
@@ -3246,7 +3239,7 @@ impl OperationEvaluator for FullEvaluator {
                 match (&a, &b) {
                     (DataType::String(p1), DataType::String(p2)) => {
                         let joined = std::path::Path::new(p1).join(p2);
-                        Ok(DataType::String(joined.to_string_lossy().to_string()))
+                        Ok(DataType::String(normalize_path(&joined)))
                     }
                     _ => Err(EvalError::TypeError { expected: "(String, String)".to_string(), actual: format!("({}, {})", a.type_name(), b.type_name()), context: "PathJoin".to_string() }),
                 }
@@ -3644,7 +3637,7 @@ impl OperationEvaluator for FullEvaluator {
                 let condition = inputs.get("condition").cloned().unwrap_or(DataType::Null);
                 let then_val = inputs.get("then").cloned().unwrap_or(DataType::Null);
                 let else_val = inputs.get("else").cloned().unwrap_or(DataType::Null);
-                if is_truthy(&condition) {
+                if condition.to_bool() {
                     Ok(then_val)
                 } else {
                     Ok(else_val)
@@ -3697,7 +3690,15 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UuidIsValid => {
                 match &input {
                     DataType::String(s) => {
-                        Ok(DataType::Bool(uuid::Uuid::parse_str(s.trim()).is_ok()))
+                        let trimmed = s.trim();
+                        // Strict validation: must be canonical hyphenated format (8-4-4-4-12)
+                        let valid = trimmed.len() == 36
+                            && trimmed.as_bytes().get(8) == Some(&b'-')
+                            && trimmed.as_bytes().get(13) == Some(&b'-')
+                            && trimmed.as_bytes().get(18) == Some(&b'-')
+                            && trimmed.as_bytes().get(23) == Some(&b'-')
+                            && uuid::Uuid::parse_str(trimmed).is_ok();
+                        Ok(DataType::Bool(valid))
                     }
                     _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "UuidIsValid".to_string() }),
                 }
@@ -3705,9 +3706,21 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::UuidParse => {
                 match &input {
                     DataType::String(s) => {
-                        match uuid::Uuid::parse_str(s.trim()) {
+                        let trimmed = s.trim();
+                        // Strict validation: must be canonical hyphenated format (8-4-4-4-12)
+                        if trimmed.len() != 36
+                            || trimmed.as_bytes().get(8) != Some(&b'-')
+                            || trimmed.as_bytes().get(13) != Some(&b'-')
+                            || trimmed.as_bytes().get(18) != Some(&b'-')
+                            || trimmed.as_bytes().get(23) != Some(&b'-')
+                        {
+                            return Err(EvalError::InvalidInput(
+                                "UuidParse: invalid UUID: expected canonical hyphenated format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)".to_string()
+                            ));
+                        }
+                        match uuid::Uuid::parse_str(trimmed) {
                             Ok(parsed) => {
-                                let mut m = std::collections::BTreeMap::new();
+                                let mut m = indexmap::IndexMap::new();
                                 m.insert("full".to_string(), DataType::String(parsed.hyphenated().to_string()));
                                 m.insert("version".to_string(), DataType::Int64(
                                     parsed.get_version_num() as i64
@@ -3934,7 +3947,7 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
-                        let mut counts = std::collections::BTreeMap::new();
+                        let mut counts = indexmap::IndexMap::new();
                         for item in &arr {
                             let key = item.to_string_lossy();
                             if !counts.contains_key(&key) && counts.len() >= MAX_ARRAY_ELEMENTS {
@@ -3978,7 +3991,7 @@ impl OperationEvaluator for FullEvaluator {
                                 "ordered_map: array exceeds {} element limit", MAX_ARRAY_ELEMENTS
                             )));
                         }
-                        let mut m = std::collections::BTreeMap::new();
+                        let mut m = indexmap::IndexMap::new();
                         for (i, item) in arr.iter().enumerate() {
                             match item {
                                 DataType::Array(pair) if pair.len() >= 2 => {
@@ -4451,10 +4464,18 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::TimeSleep => {
+                const MAX_SLEEP_MS: i64 = 3_600_000; // 1 hour max
+                const CHUNK_MS: u64 = 100; // check cancel every 100ms
                 let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
                 if let Some(ms) = duration.to_i64() {
-                    if ms > 0 && ms <= 30000 {
-                        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                    if ms > 0 {
+                        let total = ms.min(MAX_SLEEP_MS) as u64;
+                        let mut remaining = total;
+                        while remaining > 0 {
+                            let chunk = remaining.min(CHUNK_MS);
+                            std::thread::sleep(std::time::Duration::from_millis(chunk));
+                            remaining -= chunk;
+                        }
                     }
                 }
                 Ok(DataType::Null)
@@ -4542,7 +4563,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(url_str) => {
                         match url::Url::parse(url_str) {
                             Ok(parsed) => {
-                                let mut m = std::collections::BTreeMap::new();
+                                let mut m = indexmap::IndexMap::new();
                                 m.insert("raw".into(), DataType::String(url_str.clone()));
                                 m.insert("protocol".into(), DataType::String(parsed.scheme().to_string()));
                                 m.insert("host".into(), DataType::String(parsed.host_str().unwrap_or("").to_string()));
@@ -4565,7 +4586,7 @@ impl OperationEvaluator for FullEvaluator {
                                 Ok(DataType::Map(m))
                             }
                             Err(_) => {
-                                let mut m = std::collections::BTreeMap::new();
+                                let mut m = indexmap::IndexMap::new();
                                 m.insert("raw".into(), DataType::String(url_str.clone()));
                                 Ok(DataType::Map(m))
                             }
@@ -4782,7 +4803,7 @@ impl OperationEvaluator for FullEvaluator {
                                 )));
                             }
                             let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?;
-                            let mut row = std::collections::BTreeMap::new();
+                            let mut row = indexmap::IndexMap::new();
                             for (i, field) in record.iter().enumerate() {
                                 let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{}", i));
                                 row.insert(key, DataType::String(field.to_string()));
@@ -5078,7 +5099,7 @@ impl OperationEvaluator for FullEvaluator {
                 };
                 let status = resp.status().as_u16();
                 let body = read_http_body(resp.into_body(), "http_request")?;
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("status".into(), DataType::Int64(status as i64)),
                     ("body".into(), DataType::String(body)),
                 ])))
@@ -5091,7 +5112,7 @@ impl OperationEvaluator for FullEvaluator {
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_head: {}", e)))?;
                 let status = resp.status().as_u16();
-                let headers: std::collections::BTreeMap<String, DataType> = resp
+                let headers: indexmap::IndexMap<String, DataType> = resp
                     .headers()
                     .keys()
                     .map(|name| {
@@ -5103,7 +5124,7 @@ impl OperationEvaluator for FullEvaluator {
                         (name.as_str().to_string(), DataType::String(value))
                     })
                     .collect();
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("status".into(), DataType::Int64(status as i64)),
                     ("headers".into(), DataType::Map(headers)),
                 ])))
@@ -5118,7 +5139,7 @@ impl OperationEvaluator for FullEvaluator {
                     .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_options: {}", e)))?;
                 let status = resp.status().as_u16();
-                let headers: std::collections::BTreeMap<String, DataType> = resp
+                let headers: indexmap::IndexMap<String, DataType> = resp
                     .headers()
                     .keys()
                     .map(|name| {
@@ -5134,7 +5155,7 @@ impl OperationEvaluator for FullEvaluator {
                     .get("allow")
                     .cloned()
                     .unwrap_or(DataType::String(String::new()));
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("status".into(), DataType::Int64(status as i64)),
                     ("headers".into(), DataType::Map(headers)),
                     ("allow".into(), allow),
@@ -5246,7 +5267,7 @@ impl OperationEvaluator for FullEvaluator {
                     .map_err(|e| EvalError::InvalidInput(format!("cert_generate key: {}", e)))?;
                 let cert = params.self_signed(&key_pair)
                     .map_err(|e| EvalError::InvalidInput(format!("cert_generate: {}", e)))?;
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("cert_pem".into(), DataType::String(cert.pem())),
                     ("key_pem".into(), DataType::String(key_pair.serialize_pem())),
                 ])))
@@ -5257,7 +5278,7 @@ impl OperationEvaluator for FullEvaluator {
                     .map_err(|e| EvalError::InvalidInput(format!("cert_parse pem: {}", e)))?;
                 let cert = pem_block.parse_x509()
                     .map_err(|e| EvalError::InvalidInput(format!("cert_parse x509: {}", e)))?;
-                let mut m = std::collections::BTreeMap::new();
+                let mut m = indexmap::IndexMap::new();
                 m.insert("subject".into(), DataType::String(cert.subject().to_string()));
                 m.insert("issuer".into(), DataType::String(cert.issuer().to_string()));
                 m.insert("serial".into(), DataType::String(cert.tbs_certificate.raw_serial_as_string()));
@@ -5282,25 +5303,25 @@ impl OperationEvaluator for FullEvaluator {
                             let not_before = cert.validity().not_before.timestamp();
                             let not_after = cert.validity().not_after.timestamp();
                             if now < not_before {
-                                std::collections::BTreeMap::from([
+                                indexmap::IndexMap::from([
                                     ("valid".into(), DataType::Bool(false)),
                                     ("error".into(), DataType::String("Certificate not yet valid".into())),
                                 ])
                             } else if now > not_after {
-                                std::collections::BTreeMap::from([
+                                indexmap::IndexMap::from([
                                     ("valid".into(), DataType::Bool(false)),
                                     ("error".into(), DataType::String("Certificate has expired".into())),
                                 ])
                             } else {
-                                std::collections::BTreeMap::from([("valid".into(), DataType::Bool(true))])
+                                indexmap::IndexMap::from([("valid".into(), DataType::Bool(true))])
                             }
                         }
-                        Err(e) => std::collections::BTreeMap::from([
+                        Err(e) => indexmap::IndexMap::from([
                             ("valid".into(), DataType::Bool(false)),
                             ("error".into(), DataType::String(format!("Failed to parse X509: {}", e))),
                         ]),
                     },
-                    Err(e) => std::collections::BTreeMap::from([
+                    Err(e) => indexmap::IndexMap::from([
                         ("valid".into(), DataType::Bool(false)),
                         ("error".into(), DataType::String(format!("Failed to parse PEM: {}", e))),
                     ]),
@@ -5310,7 +5331,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::KeyGenerate => {
                 let key_pair = rcgen::KeyPair::generate()
                     .map_err(|e| EvalError::InvalidInput(format!("key_generate: {}", e)))?;
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("private_pem".into(), DataType::String(key_pair.serialize_pem())),
                     ("public_pem".into(), DataType::String(key_pair.public_key_pem())),
                 ])))
@@ -5455,7 +5476,7 @@ impl OperationEvaluator for FullEvaluator {
                 let _ = stream.set_write_timeout(timeout);
                 let id = conn_id("tcp");
                 conn_store(&id, Mutex::new(stream))?;
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("conn_id".into(), DataType::String(id)),
                     ("address".into(), DataType::String(addr.to_string())),
                 ])))
@@ -5527,7 +5548,7 @@ impl OperationEvaluator for FullEvaluator {
                         EvalError::InvalidInput(format!("udp_recv_from: {}", e))
                     })?;
                     buf.truncate(n);
-                    Ok(DataType::Map(std::collections::BTreeMap::from([
+                    Ok(DataType::Map(indexmap::IndexMap::from([
                         ("data".into(), DataType::Bytes(buf)),
                         ("address".into(), DataType::String(addr.ip().to_string())),
                         ("port".into(), DataType::Int64(addr.port() as i64)),
@@ -5714,7 +5735,7 @@ impl OperationEvaluator for FullEvaluator {
                         let trimmed = line.trim_end();
                         if trimmed.is_empty() {
                             if !data_lines.is_empty() {
-                                let mut m = std::collections::BTreeMap::new();
+                                let mut m = indexmap::IndexMap::new();
                                 if !event_type.is_empty() {
                                     m.insert("event".into(), DataType::String(event_type));
                                 }
@@ -5843,7 +5864,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 let method = req.method.unwrap_or("GET").to_string();
                 let path = req.path.unwrap_or("/").to_string();
-                let mut headers = std::collections::BTreeMap::new();
+                let mut headers = indexmap::IndexMap::new();
                 let mut content_length: usize = 0;
                 let mut seen_content_length = false;
                 for h in req.headers.iter() {
@@ -5887,7 +5908,7 @@ impl OperationEvaluator for FullEvaluator {
                 } else { String::new() };
                 let client_id = conn_id("http-client");
                 conn_store(&client_id, Mutex::new(stream))?;
-                Ok(DataType::Map(std::collections::BTreeMap::from([
+                Ok(DataType::Map(indexmap::IndexMap::from([
                     ("method".into(), DataType::String(method)),
                     ("path".into(), DataType::String(path)),
                     ("headers".into(), DataType::Map(headers)),
@@ -5948,24 +5969,6 @@ impl OperationEvaluator for FullEvaluator {
     }
 }
 
-/// Check whether a DataType value is "truthy" (non-zero, non-empty, non-null, non-false).
-fn is_truthy(val: &DataType) -> bool {
-    match val {
-        DataType::Bool(b) => *b,
-        DataType::Int64(n) => *n != 0,
-        DataType::Int32(n) => *n != 0,
-        DataType::Uint32(n) => *n != 0,
-        DataType::Uint64(n) => *n != 0,
-        DataType::Float64(f) => *f != 0.0 && !f.is_nan(),
-        DataType::Float32(f) => *f != 0.0 && !f.is_nan(),
-        DataType::String(s) => !s.is_empty(),
-        DataType::Null => false,
-        DataType::Array(a) => !a.is_empty(),
-        DataType::Map(m) => !m.is_empty(),
-        DataType::Bytes(b) => !b.is_empty(),
-        DataType::Future(_) => true,
-    }
-}
 
 
 fn promote_numeric(val: &DataType) -> Option<Result<i64, f64>> {
@@ -5979,6 +5982,50 @@ fn promote_numeric(val: &DataType) -> Option<Result<i64, f64>> {
         DataType::Float64(x) => Some(Err(*x)),
         DataType::Float32(x) => Some(Err(*x as f64)),
         _ => None,
+    }
+}
+
+/// Normalize a path by collapsing `.` and `..` components logically
+/// (without touching the filesystem). Preserves absolute/relative prefix.
+fn normalize_path(path: &std::path::Path) -> String {
+    use std::path::Component;
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut prefix_count = 0; // track how many leading `..` we can't collapse
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                if parts.is_empty() || prefix_count == parts.len() {
+                    parts.push(std::ffi::OsStr::new(".."));
+                    prefix_count += 1;
+                } else {
+                    parts.pop();
+                }
+            }
+            Component::CurDir => {} // skip `.`
+            Component::Normal(s) => parts.push(s),
+            Component::RootDir => {
+                parts.clear();
+                prefix_count = 0;
+                parts.push(std::ffi::OsStr::new("/"));
+            }
+            Component::Prefix(p) => {
+                parts.clear();
+                prefix_count = 0;
+                parts.push(p.as_os_str());
+            }
+        }
+    }
+    if parts.is_empty() {
+        return ".".to_string();
+    }
+    let has_root = parts.first().map_or(false, |p| *p == std::ffi::OsStr::new("/"));
+    if has_root {
+        if parts.len() == 1 { return "/".to_string(); }
+        let rest: Vec<&str> = parts[1..].iter().map(|s| s.to_str().unwrap_or("")).collect();
+        format!("/{}", rest.join("/"))
+    } else {
+        let strs: Vec<&str> = parts.iter().map(|s| s.to_str().unwrap_or("")).collect();
+        strs.join("/")
     }
 }
 
@@ -6049,7 +6096,7 @@ fn toml_value_to_datatype_depth(val: &toml::Value, depth: usize) -> DataType {
         toml::Value::Boolean(b) => DataType::Bool(*b),
         toml::Value::Array(arr) => DataType::Array(arr.iter().map(|v| toml_value_to_datatype_depth(v, depth + 1)).collect()),
         toml::Value::Table(t) => {
-            let m: std::collections::BTreeMap<String, DataType> = t.iter()
+            let m: indexmap::IndexMap<String, DataType> = t.iter()
                 .map(|(k, v)| (k.clone(), toml_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
@@ -6213,13 +6260,11 @@ fn num_binop(
 
 fn num_cmp(
     a: &DataType, b: &DataType,
-    int_op: fn(&i64, &i64) -> bool,
-    float_op: fn(&f64, &f64) -> bool,
-    str_op: fn(&str, &str) -> bool,
+    cmp_test: fn(std::cmp::Ordering) -> bool,
 ) -> Result<DataType, EvalError> {
     // String comparison
     if let (DataType::String(x), DataType::String(y)) = (a, b) {
-        return Ok(DataType::Bool(str_op(x, y)));
+        return Ok(DataType::Bool(cmp_test(x.cmp(y))));
     }
     // Use i128 for integer-pair comparisons to avoid f64 precision loss on large Uint64.
     fn to_i128_cmp(val: &DataType) -> Option<i128> {
@@ -6232,20 +6277,14 @@ fn num_cmp(
         }
     }
     if let (Some(ai), Some(bi)) = (to_i128_cmp(a), to_i128_cmp(b)) {
-        // Map i128 ordering to i64 proxy values so int_op gives the correct result.
-        let proxy: i64 = match ai.cmp(&bi) {
-            std::cmp::Ordering::Greater => 1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Less => -1,
-        };
-        return Ok(DataType::Bool(int_op(&proxy, &0)));
+        return Ok(DataType::Bool(cmp_test(ai.cmp(&bi))));
     }
     match (promote_numeric(a), promote_numeric(b)) {
-        (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Bool(int_op(&x, &y))),
+        (Some(Ok(x)), Some(Ok(y))) => Ok(DataType::Bool(cmp_test(x.cmp(&y)))),
         (Some(av), Some(bv)) => {
             let fa = match av { Ok(i) => i as f64, Err(f) => f };
             let fb = match bv { Ok(i) => i as f64, Err(f) => f };
-            Ok(DataType::Bool(float_op(&fa, &fb)))
+            Ok(DataType::Bool(cmp_test(fa.total_cmp(&fb))))
         }
         _ => Err(EvalError::TypeError {
             expected: "number or string".to_string(),
@@ -6292,7 +6331,7 @@ fn yaml_value_to_datatype_depth(val: &serde_yaml_ng::Value, depth: usize) -> Dat
             if map.len() > MAX_ARRAY_ELEMENTS {
                 return DataType::String(format!("[mapping too large: {} entries]", map.len()));
             }
-            let m: std::collections::BTreeMap<String, DataType> = map.iter()
+            let m: indexmap::IndexMap<String, DataType> = map.iter()
                 .map(|(k, v)| {
                     let key = match k {
                         serde_yaml_ng::Value::String(s) => s.clone(),
@@ -6430,7 +6469,7 @@ fn json_value_to_datatype_depth(val: &serde_json::Value, depth: usize) -> DataTy
             if obj.len() > MAX_ARRAY_ELEMENTS {
                 return DataType::String(format!("[object too large: {} entries]", obj.len()));
             }
-            let m: std::collections::BTreeMap<String, DataType> = obj.iter()
+            let m: indexmap::IndexMap<String, DataType> = obj.iter()
                 .map(|(k, v)| (k.clone(), json_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
@@ -6446,9 +6485,13 @@ fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  run <file.magi>             Interpret and execute a .magi file");
+    eprintln!("  test <file.magi>            Run test blocks in a .magi file");
+    eprintln!("  eval '<expression>'         Evaluate an expression and print the result");
+    eprintln!("  repl                        Start interactive REPL");
     eprintln!("  check <file.magi>           Type-check and lint (exit 1 on errors)");
     eprintln!("  lint <file.magi>            Lint for style issues");
     eprintln!("  fmt [options] <file.magi>   Format source code");
+    eprintln!("  init <name>                 Create a new MAGI project");
     eprintln!("  compile <file.magi>         Compile to WebAssembly (.wasm)");
     eprintln!("  run-wasm <file.wasm>        Execute a compiled .wasm file");
     eprintln!("  lsp                         Start the Language Server Protocol server");
@@ -6465,8 +6508,12 @@ fn print_usage() {
     eprintln!("Examples:");
     eprintln!("  magi run main.magi          Run a program");
     eprintln!("  magi main.magi              Shorthand for 'magi run main.magi'");
+    eprintln!("  magi test tests.magi        Run all test blocks");
+    eprintln!("  magi eval '1 + 2'           Evaluate an expression");
+    eprintln!("  magi repl                   Start interactive session");
     eprintln!("  magi check main.magi        Type-check before deploying");
     eprintln!("  magi fmt --write main.magi  Format a file in-place");
+    eprintln!("  magi init my-project        Scaffold a new project");
     eprintln!("  magi compile main.magi      Compile to dist/main.wasm");
 }
 
@@ -6510,12 +6557,22 @@ fn main() {
             cmd_run_wasm(&args[2]);
         }
         "check" => {
-            if args.len() < 3 {
-                eprintln!("error: missing file argument");
-                eprintln!("Usage: magi check <file.magi>");
-                process::exit(1);
+            let mut json_output = false;
+            let mut file_path = None;
+            for arg in &args[2..] {
+                match arg.as_str() {
+                    "--json" => json_output = true,
+                    _ => file_path = Some(arg.as_str()),
+                }
             }
-            cmd_check(&args[2]);
+            match file_path {
+                Some(path) => cmd_check(path, json_output),
+                None => {
+                    eprintln!("error: missing file argument");
+                    eprintln!("Usage: magi check [--json] <file.magi>");
+                    process::exit(1);
+                }
+            }
         }
         "lint" => {
             if args.len() < 3 {
@@ -6552,6 +6609,33 @@ fn main() {
                     process::exit(1);
                 }
             }
+        }
+        "test" => {
+            if args.len() < 3 {
+                eprintln!("error: missing file argument");
+                eprintln!("Usage: magi test <file.magi>");
+                process::exit(1);
+            }
+            cmd_test(&args[2]);
+        }
+        "init" => {
+            if args.len() < 3 {
+                eprintln!("error: missing project name");
+                eprintln!("Usage: magi init <project-name>");
+                process::exit(1);
+            }
+            cmd_init(&args[2]);
+        }
+        "repl" => {
+            cmd_repl();
+        }
+        "eval" => {
+            if args.len() < 3 {
+                eprintln!("error: missing expression argument");
+                eprintln!("Usage: magi eval '<expression>'");
+                process::exit(1);
+            }
+            cmd_eval(&args[2..].join(" "));
         }
         "lsp" => {
             cmd_lsp();
@@ -6716,13 +6800,25 @@ fn resolve_dependency_sources(magi_file_path: &std::path::Path) -> Vec<String> {
     sources
 }
 
-fn cmd_check(path: &str) {
+fn cmd_check(path: &str, json_output: bool) {
     let source = read_source(path);
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
+            if json_output {
+                let diag = serde_json::json!([{
+                    "file": path,
+                    "line": e.line,
+                    "column": e.column,
+                    "severity": "error",
+                    "code": null,
+                    "message": e.message,
+                }]);
+                println!("{}", diag);
+            } else {
+                eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
+            }
             process::exit(1);
         }
     };
@@ -6736,7 +6832,6 @@ fn cmd_check(path: &str) {
     let lint_result = magi_lang::linter::lint(&program, &lint_config);
 
     let mut has_errors = false;
-    let mut count = 0;
 
     // Deduplicate diagnostics from type checker and linter (same as LSP does)
     let mut seen = std::collections::HashSet::new();
@@ -6747,24 +6842,49 @@ fn cmd_check(path: &str) {
         })
         .collect();
 
-    for d in all_diagnostics {
-        let severity = match d.severity {
-            DiagnosticSeverity::Error => { has_errors = true; "error" }
-            DiagnosticSeverity::Warning => "warning",
-            DiagnosticSeverity::Info => "info",
-        };
-        let code = d.code.as_deref().unwrap_or("");
-        eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
-        if let Some(ref help) = d.help {
-            eprintln!("  help: {}", help);
-        }
-        count += 1;
-    }
-
-    if count == 0 {
-        println!("No issues found.");
+    if json_output {
+        let json_diags: Vec<serde_json::Value> = all_diagnostics.iter().map(|d| {
+            let severity = match d.severity {
+                DiagnosticSeverity::Error => { has_errors = true; "error" }
+                DiagnosticSeverity::Warning => "warning",
+                DiagnosticSeverity::Info => "info",
+            };
+            serde_json::json!({
+                "file": path,
+                "line": d.line,
+                "column": d.column,
+                "severity": severity,
+                "code": d.code,
+                "message": d.message,
+                "help": d.help,
+                "suggestion": d.suggestion,
+            })
+        }).collect();
+        println!("{}", serde_json::Value::Array(json_diags));
     } else {
-        eprintln!("{} diagnostic(s) emitted.", count);
+        let count = all_diagnostics.len();
+        for d in &all_diagnostics {
+            match d.severity {
+                DiagnosticSeverity::Error => {
+                    has_errors = true;
+                    magi_lang::diagnostics::render_error(
+                        path, &source, d.line, d.column, &d.message,
+                        d.code.as_deref(), d.help.as_deref(), d.suggestion.as_deref(),
+                    );
+                }
+                DiagnosticSeverity::Warning | DiagnosticSeverity::Info => {
+                    magi_lang::diagnostics::render_warning(
+                        path, &source, d.line, d.column, &d.message,
+                        d.code.as_deref(), d.help.as_deref(),
+                    );
+                }
+            }
+        }
+        if count == 0 {
+            println!("No issues found.");
+        } else {
+            eprintln!("{} diagnostic(s) emitted.", count);
+        }
     }
 
     if has_errors {
@@ -6778,7 +6898,7 @@ fn cmd_lint(path: &str) {
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
+            magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
             process::exit(1);
         }
     };
@@ -6790,16 +6910,10 @@ fn cmd_lint(path: &str) {
         println!("No lint warnings.");
     } else {
         for d in &result.diagnostics {
-            let code = d.code.as_deref().unwrap_or("");
-            let severity = match d.severity {
-                DiagnosticSeverity::Error => "error",
-                DiagnosticSeverity::Warning => "warning",
-                DiagnosticSeverity::Info => "info",
-            };
-            eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
-            if let Some(ref help) = d.help {
-                eprintln!("  help: {}", help);
-            }
+            magi_lang::diagnostics::render_warning(
+                path, &source, d.line, d.column, &d.message,
+                d.code.as_deref(), d.help.as_deref(),
+            );
         }
         eprintln!("{} warning(s) emitted.", result.diagnostics.len());
     }
@@ -6855,7 +6969,7 @@ fn cmd_run(path: &str) {
     let program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
+            magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
             process::exit(1);
         }
     };
@@ -6880,6 +6994,153 @@ fn cmd_run(path: &str) {
     // Print all output/log messages
     for log in &interp.logs {
         println!("{}", log.message);
+    }
+}
+
+fn cmd_eval(expr: &str) {
+    // Wrap the expression as `output <expr>;` so the interpreter captures the result
+    let source = format!("output {}", expr);
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("<eval>:{}:{}: error: {}", e.line, e.column, e.message);
+            process::exit(1);
+        }
+    };
+
+    let evaluator = FullEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+
+    match interp.execute(&program) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("<eval>: runtime error: {}", e);
+            process::exit(1);
+        }
+    }
+
+    for log in &interp.logs {
+        println!("{}", log.message);
+    }
+}
+
+fn cmd_test(path: &str) {
+    let source = read_source(path);
+
+    let program = match parse_v2(&source) {
+        Ok(p) => p,
+        Err(e) => {
+            magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
+            process::exit(1);
+        }
+    };
+
+    let evaluator = FullEvaluator;
+    let file_path = std::path::Path::new(path);
+    let packages = resolve_dependencies(file_path);
+    let mut interp = Interpreter::new(&evaluator).with_packages(packages);
+
+    let results = interp.run_tests(&program);
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for result in &results {
+        if result.passed {
+            passed += 1;
+            println!("  \x1b[32mPASS\x1b[0m {}", result.name);
+        } else {
+            failed += 1;
+            let msg = result.error_message.as_deref().unwrap_or("unknown error");
+            println!("  \x1b[31mFAIL\x1b[0m {} — {}", result.name, msg);
+        }
+    }
+
+    println!();
+    println!("{} passed, {} failed, {} total", passed, failed, passed + failed);
+
+    if failed > 0 {
+        process::exit(1);
+    }
+}
+
+fn cmd_init(name: &str) {
+    let dir = std::path::Path::new(name);
+    if dir.exists() {
+        eprintln!("error: directory '{}' already exists", name);
+        process::exit(1);
+    }
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+        eprintln!("error: failed to create directory '{}': {}", name, e);
+        process::exit(1);
+    });
+
+    let main_path = dir.join("main.magi");
+    std::fs::write(&main_path, "// main.magi\noutput \"Hello, world!\"\n").unwrap_or_else(|e| {
+        eprintln!("error: failed to write main.magi: {}", e);
+        process::exit(1);
+    });
+
+    println!("Created project '{}' with main.magi", name);
+}
+
+fn cmd_repl() {
+    println!("MAGI REPL v{}", magi_lang::version::version_string());
+    println!("Type expressions to evaluate. Press Ctrl+D to exit.");
+    println!();
+
+    let evaluator = FullEvaluator;
+    let mut interp = Interpreter::new(&evaluator);
+
+    let stdin = std::io::stdin();
+    let mut line_buf = String::new();
+
+    loop {
+        eprint!(">>> ");
+        // Flush prompt
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+
+        line_buf.clear();
+        match stdin.read_line(&mut line_buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("read error: {}", e);
+                break;
+            }
+        }
+
+        let trimmed = line_buf.trim();
+        if trimmed.is_empty() { continue; }
+
+        // Try wrapping in `output <expr>` first, fall back to raw statement
+        let source = format!("output {}", trimmed);
+        let program = match parse_v2(&source) {
+            Ok(p) => p,
+            Err(_) => {
+                // Try as raw statement
+                match parse_v2(trimmed) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: {}", e.message);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        match interp.execute(&program) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("error: {}", e);
+                continue;
+            }
+        }
+
+        for log in interp.logs.drain(..) {
+            println!("{}", log.message);
+        }
     }
 }
 

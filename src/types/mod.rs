@@ -7,8 +7,9 @@ pub mod operations;
 
 pub use operations::*;
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 // =============================================================================
 // DataType
@@ -32,7 +33,7 @@ pub enum DataType {
     Bool(bool),
     Bytes(Vec<u8>),
     Array(Vec<DataType>),
-    Map(BTreeMap<String, DataType>),
+    Map(IndexMap<String, DataType>),
     Future(Box<FutureState>),
     #[default]
     Null,
@@ -79,7 +80,7 @@ impl DataType {
         }
     }
 
-    pub fn as_map(&self) -> Option<&BTreeMap<String, DataType>> {
+    pub fn as_map(&self) -> Option<&IndexMap<String, DataType>> {
         match self {
             DataType::Map(map) => Some(map),
             _ => None,
@@ -200,6 +201,30 @@ impl DataType {
             DataType::Uint64(u) => Some(*u as f64),
             DataType::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             DataType::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn to_i128(&self) -> Option<i128> {
+        match self {
+            DataType::Int64(n) => Some(*n as i128),
+            DataType::Int32(n) => Some(*n as i128),
+            DataType::Uint64(n) => Some(*n as i128),
+            DataType::Uint32(n) => Some(*n as i128),
+            DataType::Float64(n) => {
+                if n.is_finite() && *n >= (i128::MIN as f64) && *n < (i128::MAX as f64) {
+                    Some(*n as i128)
+                } else {
+                    None
+                }
+            }
+            DataType::Float32(n) => {
+                if n.is_finite() && *n >= (i128::MIN as f32) && *n < (i128::MAX as f32) {
+                    Some((*n as f64) as i128)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -418,8 +443,8 @@ impl From<Vec<DataType>> for DataType {
     }
 }
 
-impl From<BTreeMap<String, DataType>> for DataType {
-    fn from(map: BTreeMap<String, DataType>) -> Self {
+impl From<IndexMap<String, DataType>> for DataType {
+    fn from(map: IndexMap<String, DataType>) -> Self {
         DataType::Map(map)
     }
 }
@@ -670,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_serialization_with_unsigned() {
-        let dt = DataType::Map(BTreeMap::from([
+        let dt = DataType::Map(IndexMap::from([
             ("u32".to_string(), DataType::Uint32(42)),
             ("u64".to_string(), DataType::Uint64(999)),
         ]));
@@ -1019,7 +1044,7 @@ mod tests {
 
     #[test]
     fn test_datatype_as_map() {
-        let mut map = std::collections::BTreeMap::new();
+        let mut map = indexmap::IndexMap::new();
         map.insert("key".to_string(), DataType::Int64(1));
         let dt = DataType::Map(map.clone());
         assert!(dt.as_map().is_some());
@@ -1043,7 +1068,7 @@ mod tests {
 
     #[test]
     fn test_datatype_get() {
-        let mut map = std::collections::BTreeMap::new();
+        let mut map = indexmap::IndexMap::new();
         map.insert("name".to_string(), DataType::String("Alice".into()));
         let dt = DataType::Map(map);
         assert_eq!(dt.get("name"), Some(&DataType::String("Alice".into())));
@@ -1059,7 +1084,7 @@ mod tests {
             2
         );
         assert_eq!(DataType::Bytes(vec![1, 2, 3]).len(), 3);
-        let mut map = std::collections::BTreeMap::new();
+        let mut map = indexmap::IndexMap::new();
         map.insert("a".to_string(), DataType::Null);
         assert_eq!(DataType::Map(map).len(), 1);
         assert_eq!(DataType::String("hello".into()).len(), 5);

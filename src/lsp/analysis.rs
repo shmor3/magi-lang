@@ -525,6 +525,15 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
         message.push_str(suggestion);
     }
 
+    // #206: Tag unused/deprecated diagnostics so IDEs can render them with fade-out
+    let tags = d.code.as_deref().and_then(|code| match code {
+        "W100" | "W101" | "W103" | "W109" | "W110" | "W202" => {
+            Some(vec![DiagnosticTag::UNNECESSARY])
+        }
+        "W111" => Some(vec![DiagnosticTag::DEPRECATED]),
+        _ => None,
+    });
+
     Diagnostic {
         range: Range {
             start: Position { line, character: start_utf16 },
@@ -534,6 +543,7 @@ pub fn to_lsp_diagnostic_with_source(d: &AstDiagnostic, source: Option<&str>) ->
         code: d.code.as_ref().map(|c| NumberOrString::String(c.clone())),
         source: Some("magi".to_string()),
         message,
+        tags,
         ..Default::default()
     }
 }
@@ -1399,6 +1409,75 @@ mod tests {
         let lsp_d = to_lsp_diagnostic_with_source(&d, Some(source));
         // Line not found — falls back to col-based range
         assert_eq!(lsp_d.range.start.line, 99);
+    }
+
+    // =========================================================================
+    // Diagnostic tags (#206)
+    // =========================================================================
+
+    #[test]
+    fn test_unused_variable_has_unnecessary_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "unused variable 'x'".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W100".to_string()),
+            help: None, suggestion: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[test]
+    fn test_unused_import_has_unnecessary_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "unused import".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W101".to_string()),
+            help: None, suggestion: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[test]
+    fn test_dead_code_has_unnecessary_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "dead code".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W202".to_string()),
+            help: None, suggestion: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[test]
+    fn test_reserved_keyword_has_deprecated_tag() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "reserved keyword".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Warning,
+            code: Some("W111".to_string()),
+            help: None, suggestion: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, Some(vec![DiagnosticTag::DEPRECATED]));
+    }
+
+    #[test]
+    fn test_normal_error_has_no_tags() {
+        let d = AstDiagnostic {
+            line: 1, column: 1,
+            message: "type error".to_string(),
+            severity: crate::eval::DiagnosticSeverity::Error,
+            code: Some("E100".to_string()),
+            help: None, suggestion: None,
+        };
+        let lsp_d = to_lsp_diagnostic(&d);
+        assert_eq!(lsp_d.tags, None);
     }
 
     // =========================================================================

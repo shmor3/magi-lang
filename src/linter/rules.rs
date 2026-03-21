@@ -859,3 +859,247 @@ fn find_control_flow_in_expr(expr: &Expression, diagnostics: &mut Vec<AstDiagnos
         _ => {}
     }
 }
+
+// =============================================================================
+// W216: Empty enum definition
+// =============================================================================
+
+/// W216: Check for empty enum definitions (enum with zero variants).
+pub fn check_empty_enum(variants: &[EnumVariant], name: &str, span: Span) -> Option<AstDiagnostic> {
+    if variants.is_empty() {
+        let code = ErrorCode::W216;
+        return Some(AstDiagnostic {
+            line: span.start_line,
+            column: span.start_col,
+            message: format!("empty enum '{}' has no variants", name),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: None,
+        });
+    }
+    None
+}
+
+// =============================================================================
+// W230: Self-assignment
+// =============================================================================
+
+/// W230: Check `let x = x` patterns (self-assignment in let binding).
+pub fn check_self_assignment_let(name: &str, value: &Expression, span: Span) -> Option<AstDiagnostic> {
+    if let ExpressionKind::Variable(v) = &value.kind {
+        if v == name {
+            let code = ErrorCode::W230;
+            return Some(AstDiagnostic {
+                line: span.start_line,
+                column: span.start_col,
+                message: format!("self-assignment: `{} = {}`", name, name),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: None,
+            });
+        }
+    }
+    None
+}
+
+/// W230: Check `x = x` patterns (self-assignment in assignment statement).
+pub fn check_self_assignment(name: &str, value: &Expression, span: Span) -> Option<AstDiagnostic> {
+    if let ExpressionKind::Variable(v) = &value.kind {
+        if v == name {
+            let code = ErrorCode::W230;
+            return Some(AstDiagnostic {
+                line: span.start_line,
+                column: span.start_col,
+                message: format!("self-assignment: `{} = {}`", name, name),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: None,
+            });
+        }
+    }
+    None
+}
+
+// =============================================================================
+// W231: Boolean literal in if-else return
+// =============================================================================
+
+/// W231: Check for `if cond { true } else { false }` patterns.
+pub fn check_boolean_if_else(expr: &Expression) -> Option<AstDiagnostic> {
+    if let ExpressionKind::IfElse { then_block, else_block: Some(else_block), .. } = &expr.kind {
+        let then_bool = then_block.tail_expr.as_ref().and_then(|e| match &e.kind {
+            ExpressionKind::Literal(Literal::Bool(b)) => Some(*b),
+            _ => None,
+        });
+        let else_bool = else_block.tail_expr.as_ref().and_then(|e| match &e.kind {
+            ExpressionKind::Literal(Literal::Bool(b)) => Some(*b),
+            _ => None,
+        });
+        if then_block.statements.is_empty() && else_block.statements.is_empty() {
+            match (then_bool, else_bool) {
+                (Some(true), Some(false)) => {
+                    let code = ErrorCode::W231;
+                    return Some(AstDiagnostic {
+                        line: expr.span.start_line,
+                        column: expr.span.start_col,
+                        message: "`if cond { true } else { false }` can be simplified to `cond`".to_string(),
+                        severity: DiagnosticSeverity::Warning,
+                        code: Some(code.to_string()),
+                        help: Some(code.help().to_string()),
+                        suggestion: Some("Replace with the condition directly".to_string()),
+                    });
+                }
+                (Some(false), Some(true)) => {
+                    let code = ErrorCode::W231;
+                    return Some(AstDiagnostic {
+                        line: expr.span.start_line,
+                        column: expr.span.start_col,
+                        message: "`if cond { false } else { true }` can be simplified to `!cond`".to_string(),
+                        severity: DiagnosticSeverity::Warning,
+                        code: Some(code.to_string()),
+                        help: Some(code.help().to_string()),
+                        suggestion: Some("Replace with `!cond`".to_string()),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+// =============================================================================
+// W215: Negated if condition with else branch
+// =============================================================================
+
+/// W215: Check for `if !cond { a } else { b }` which should be `if cond { b } else { a }`.
+pub fn check_negated_if_else(condition: &Expression, else_block: Option<&Block>, span: Span) -> Option<AstDiagnostic> {
+    if else_block.is_none() {
+        return None; // Only applies when both branches exist
+    }
+    if let ExpressionKind::UnaryOp { op: UnOp::Not, .. } = &condition.kind {
+        let code = ErrorCode::W215;
+        return Some(AstDiagnostic {
+            line: span.start_line,
+            column: span.start_col,
+            message: "negated condition in `if !cond { ... } else { ... }`".to_string(),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: Some("Swap the branches and remove the `!`".to_string()),
+        });
+    }
+    None
+}
+
+// =============================================================================
+// W233: Deeply nested code
+// =============================================================================
+
+/// W233: Check for deeply nested code blocks.
+pub fn check_deep_nesting(stmts: &[Statement], max_depth: usize) -> Vec<AstDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for stmt in stmts {
+        check_nesting_depth_stmt(stmt, 0, max_depth, &mut diagnostics);
+    }
+    diagnostics
+}
+
+fn check_nesting_depth_stmt(stmt: &Statement, depth: usize, max_depth: usize, diagnostics: &mut Vec<AstDiagnostic>) {
+    match &stmt.kind {
+        StatementKind::ForLoop { body, .. }
+        | StatementKind::WhileLoop { body, .. } => {
+            let new_depth = depth + 1;
+            if new_depth > max_depth {
+                let code = ErrorCode::W233;
+                diagnostics.push(AstDiagnostic {
+                    line: stmt.span.start_line,
+                    column: stmt.span.start_col,
+                    message: format!("code nested {} levels deep", new_depth),
+                    severity: DiagnosticSeverity::Warning,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: None,
+                });
+            }
+            for s in &body.statements {
+                check_nesting_depth_stmt(s, new_depth, max_depth, diagnostics);
+            }
+        }
+        StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
+            for s in &fdef.body.statements {
+                check_nesting_depth_stmt(s, depth, max_depth, diagnostics);
+            }
+        }
+        StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+            for s in &try_block.statements {
+                check_nesting_depth_stmt(s, depth + 1, max_depth, diagnostics);
+            }
+            for s in &catch_block.statements {
+                check_nesting_depth_stmt(s, depth + 1, max_depth, diagnostics);
+            }
+            if let Some(fb) = finally_block {
+                for s in &fb.statements {
+                    check_nesting_depth_stmt(s, depth + 1, max_depth, diagnostics);
+                }
+            }
+        }
+        StatementKind::ExprStatement(expr) => {
+            check_nesting_depth_expr(expr, depth, max_depth, diagnostics);
+        }
+        _ => {}
+    }
+}
+
+// =============================================================================
+// W229: Empty match arm body
+// =============================================================================
+
+/// W229: Check for match arms that have empty bodies.
+pub fn check_empty_match_arms(arms: &[MatchArm]) -> Vec<AstDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for arm in arms {
+        if arm.body.statements.is_empty() && arm.body.tail_expr.is_none() {
+            let code = ErrorCode::W229;
+            diagnostics.push(AstDiagnostic {
+                line: arm.span.start_line,
+                column: arm.span.start_col,
+                message: "empty match arm body".to_string(),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some("Add an expression or use `null` explicitly".to_string()),
+            });
+        }
+    }
+    diagnostics
+}
+
+fn check_nesting_depth_expr(expr: &Expression, depth: usize, max_depth: usize, diagnostics: &mut Vec<AstDiagnostic>) {
+    if let ExpressionKind::IfElse { then_block, else_block, .. } = &expr.kind {
+        let new_depth = depth + 1;
+        if new_depth > max_depth {
+            let code = ErrorCode::W233;
+            diagnostics.push(AstDiagnostic {
+                line: expr.span.start_line,
+                column: expr.span.start_col,
+                message: format!("code nested {} levels deep", new_depth),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: None,
+            });
+        }
+        for s in &then_block.statements {
+            check_nesting_depth_stmt(s, new_depth, max_depth, diagnostics);
+        }
+        if let Some(eb) = else_block {
+            for s in &eb.statements {
+                check_nesting_depth_stmt(s, new_depth, max_depth, diagnostics);
+            }
+        }
+    }
+}

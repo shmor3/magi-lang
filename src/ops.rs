@@ -6,7 +6,7 @@ use crate::types::{ChannelType, OperationType};
 pub fn op_output_type(op: OperationType) -> ChannelType {
     use OperationType::*;
     match op {
-        // Arithmetic — output depends on inputs (Null = polymorphic)
+        // Arithmetic — output depends on inputs (Null port = accepts any type)
         Add | Subtract | Multiply | Modulo | Power | Sqrt | Negate | Abs | Min | Max | Round
         | Floor | Ceil | Divide => ChannelType::Null,
 

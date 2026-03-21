@@ -105,6 +105,10 @@ impl<'a> LintContext<'a> {
         // Check same-scope shadowing at program level
         let diags = rules::check_same_scope_shadowing(&program.statements);
         self.emit_all(diags);
+
+        // W233: deeply nested code (default max depth: 5)
+        let diags = rules::check_deep_nesting(&program.statements, 5);
+        self.emit_all(diags);
     }
 
     fn check_statement(&mut self, stmt: &Statement) {
@@ -113,10 +117,18 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
                     self.emit(d);
                 }
+                // W230: self-assignment
+                if let Some(d) = rules::check_self_assignment_let(name, value, stmt.span) {
+                    self.emit(d);
+                }
                 self.check_expression(value);
             }
             StatementKind::LetMut { name, value, .. } => {
                 if let Some(d) = rules::check_naming_snake_case(name, stmt.span) {
+                    self.emit(d);
+                }
+                // W230: self-assignment
+                if let Some(d) = rules::check_self_assignment_let(name, value, stmt.span) {
                     self.emit(d);
                 }
                 self.check_expression(value);
@@ -145,7 +157,11 @@ impl<'a> LintContext<'a> {
                 }
                 self.check_expression(value);
             }
-            StatementKind::Assignment { value, .. } => {
+            StatementKind::Assignment { name, value } => {
+                // W230: self-assignment
+                if let Some(d) = rules::check_self_assignment(name, value, stmt.span) {
+                    self.emit(d);
+                }
                 self.check_expression(value);
             }
             StatementKind::CompoundAssign { value, .. } => {
@@ -194,6 +210,10 @@ impl<'a> LintContext<'a> {
                     self.enum_defs.push((name.clone(), variant_names));
                 }
                 if let Some(d) = rules::check_naming_pascal_case(name, stmt.span) {
+                    self.emit(d);
+                }
+                // W216: empty enum definition
+                if let Some(d) = rules::check_empty_enum(variants, name, stmt.span) {
                     self.emit(d);
                 }
                 for variant in variants {
@@ -397,6 +417,14 @@ impl<'a> LintContext<'a> {
                         self.emit(d);
                     }
                 }
+                // W231: redundant bool if-else
+                if let Some(d) = rules::check_boolean_if_else(expr) {
+                    self.emit(d);
+                }
+                // W215: negated if condition with else branch
+                if let Some(d) = rules::check_negated_if_else(condition, else_block.as_ref(), expr.span) {
+                    self.emit(d);
+                }
                 self.check_expression(condition);
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
@@ -416,6 +444,10 @@ impl<'a> LintContext<'a> {
 
                 // Check for unreachable arms
                 let diags = rules::check_unreachable_arms(arms);
+                self.emit_all(diags);
+
+                // W229: Check for empty match arm bodies
+                let diags = rules::check_empty_match_arms(arms);
                 self.emit_all(diags);
 
                 // Check exhaustiveness
