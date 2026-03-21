@@ -71,7 +71,10 @@ static CONNECTIONS: LazyLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> =
 
 /// Store a connection in the global registry.
 fn conn_store<T: Send + 'static>(id: &str, conn: T) -> Result<(), EvalError> {
-    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| {
+        eprintln!("warning: connection registry mutex was poisoned, recovering");
+        e.into_inner()
+    });
     if map.contains_key(id) {
         return Err(EvalError::InvalidInput(format!(
             "connection ID already exists: {}",
@@ -93,7 +96,10 @@ fn conn_with<T: Send + 'static, R>(
     id: &str,
     f: impl FnOnce(&mut T) -> Result<R, EvalError>,
 ) -> Result<R, EvalError> {
-    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| {
+        eprintln!("warning: connection registry mutex was poisoned, recovering");
+        e.into_inner()
+    });
     let entry = map
         .get_mut(id)
         .ok_or_else(|| EvalError::InvalidInput(format!("Connection not found: {}", id)))?;
@@ -105,7 +111,10 @@ fn conn_with<T: Send + 'static, R>(
 
 /// Remove a connection from the global registry.
 fn conn_remove(id: &str) -> Result<(), EvalError> {
-    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = CONNECTIONS.lock().unwrap_or_else(|e| {
+        eprintln!("warning: connection registry mutex was poisoned, recovering");
+        e.into_inner()
+    });
     map.remove(id)
         .ok_or_else(|| EvalError::InvalidInput(format!("Connection not found: {}", id)))?;
     Ok(())
