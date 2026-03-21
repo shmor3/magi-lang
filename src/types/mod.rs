@@ -44,7 +44,8 @@ pub enum DataType {
 /// State of an asynchronous computation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FutureState {
-    Pending,
+    /// A pending future with a task ID referencing a spawned thread.
+    Pending(String),
     Resolved(Box<DataType>),
     Rejected(String),
 }
@@ -317,7 +318,7 @@ impl DataType {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
             DataType::Future(state) => match state.as_ref() {
-                FutureState::Pending => serde_json::json!({"state": "pending"}),
+                FutureState::Pending(id) => serde_json::json!({"state": "pending", "task_id": id}),
                 FutureState::Resolved(val) => {
                     serde_json::json!({"state": "resolved", "value": val.to_json()})
                 }
@@ -358,7 +359,7 @@ impl std::fmt::Display for DataType {
                 write!(f, ")")
             }
             DataType::Future(state) => match state.as_ref() {
-                FutureState::Pending => write!(f, "<future:pending>"),
+                FutureState::Pending(_) => write!(f, "<future:pending>"),
                 FutureState::Resolved(val) => write!(f, "<future:resolved({})>", val),
                 FutureState::Rejected(err) => write!(f, "<future:rejected({})>", err),
             },
@@ -938,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_future_type_name() {
-        let pending = DataType::Future(Box::new(FutureState::Pending));
+        let pending = DataType::Future(Box::new(FutureState::Pending(String::new())));
         let resolved = DataType::Future(Box::new(FutureState::Resolved(Box::new(
             DataType::Int64(1),
         ))));
@@ -951,7 +952,7 @@ mod tests {
     #[test]
     fn test_future_is_truthy() {
         // All Future variants are truthy
-        assert!(DataType::Future(Box::new(FutureState::Pending)).to_bool());
+        assert!(DataType::Future(Box::new(FutureState::Pending(String::new()))).to_bool());
         assert!(
             DataType::Future(Box::new(FutureState::Resolved(Box::new(DataType::Null)))).to_bool()
         );
@@ -960,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_future_display_pending() {
-        let dt = DataType::Future(Box::new(FutureState::Pending));
+        let dt = DataType::Future(Box::new(FutureState::Pending(String::new())));
         assert_eq!(format!("{}", dt), "<future:pending>");
     }
 
@@ -980,9 +981,9 @@ mod tests {
 
     #[test]
     fn test_future_to_json_pending() {
-        let dt = DataType::Future(Box::new(FutureState::Pending));
+        let dt = DataType::Future(Box::new(FutureState::Pending(String::new())));
         let json = dt.to_json();
-        assert_eq!(json, serde_json::json!({"state": "pending"}));
+        assert_eq!(json, serde_json::json!({"state": "pending", "task_id": ""}));
     }
 
     #[test]
@@ -1009,8 +1010,8 @@ mod tests {
 
     #[test]
     fn test_future_equality() {
-        let a = DataType::Future(Box::new(FutureState::Pending));
-        let b = DataType::Future(Box::new(FutureState::Pending));
+        let a = DataType::Future(Box::new(FutureState::Pending(String::new())));
+        let b = DataType::Future(Box::new(FutureState::Pending(String::new())));
         assert_eq!(a, b);
 
         let c = DataType::Future(Box::new(FutureState::Resolved(Box::new(DataType::Int64(
@@ -1027,7 +1028,7 @@ mod tests {
 
     #[test]
     fn test_future_not_null() {
-        let dt = DataType::Future(Box::new(FutureState::Pending));
+        let dt = DataType::Future(Box::new(FutureState::Pending(String::new())));
         assert!(!dt.is_null());
     }
 

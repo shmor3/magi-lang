@@ -3748,12 +3748,27 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::ReflectCallable => {
-                // In the evaluator, we can't know if something is callable
-                Ok(DataType::Bool(matches!(&input, DataType::String(_))))
+                // A value is callable if it's a string that names a known stdlib operation.
+                match &input {
+                    DataType::String(name) => {
+                        Ok(DataType::Bool(OperationType::parse(name).is_some()))
+                    }
+                    _ => Ok(DataType::Bool(false)),
+                }
             }
             OperationType::ReflectArity => {
-                // Can't determine arity from evaluator
-                Ok(DataType::Null)
+                // Look up the stdlib operation by name and return its parameter count.
+                match &input {
+                    DataType::String(name) => {
+                        if let Some(op) = OperationType::parse(name) {
+                            let arity = magi_lang::ops::op_input_ports(op).len() as i64;
+                            Ok(DataType::Int64(arity))
+                        } else {
+                            Ok(DataType::Null)
+                        }
+                    }
+                    _ => Ok(DataType::Null),
+                }
             }
             OperationType::ReflectInspect => {
                 let mut s = format!("{:?}", input);
@@ -6780,15 +6795,17 @@ fn main() {
             cmd_lint(&args[2]);
         }
         "fmt" => {
-            // Parse flags: --write, --check
+            // Parse flags: --write, --check, --force
             let mut write_in_place = false;
             let mut check_only = false;
+            let mut force = false;
             let mut file_path = None;
 
             for arg in &args[2..] {
                 match arg.as_str() {
                     "--write" | "-w" => write_in_place = true,
                     "--check" | "-c" => check_only = true,
+                    "--force" | "-f" => force = true,
                     _ => file_path = Some(arg.as_str()),
                 }
             }
@@ -6799,10 +6816,10 @@ fn main() {
             }
 
             match file_path {
-                Some(path) => cmd_fmt(path, write_in_place, check_only),
+                Some(path) => cmd_fmt(path, write_in_place, check_only, force),
                 None => {
                     eprintln!("error: missing file argument");
-                    eprintln!("Usage: magi fmt [--write] [--check] <file.magi>");
+                    eprintln!("Usage: magi fmt [--write] [--check] [--force] <file.magi>");
                     process::exit(1);
                 }
             }
@@ -7333,8 +7350,45 @@ fn cmd_lint(path: &str) {
     }
 }
 
-fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
+/// Returns true if the source contains `//` or `/*` comments.
+fn source_has_comments(source: &str) -> bool {
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                // Skip string literals to avoid false positives on "//" inside strings.
+                while let Some(c) = chars.next() {
+                    if c == '\\' { let _ = chars.next(); }
+                    else if c == '"' { break; }
+                }
+            }
+            '\'' => {
+                // Skip char literals.
+                while let Some(c) = chars.next() {
+                    if c == '\\' { let _ = chars.next(); }
+                    else if c == '\'' { break; }
+                }
+            }
+            '/' => {
+                if chars.peek() == Some(&'/') || chars.peek() == Some(&'*') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool, force: bool) {
     let source = read_source(path);
+
+    // Warn if the source contains comments and --write is used (comments will be lost).
+    if write_in_place && !force && source_has_comments(&source) {
+        eprintln!("Warning: magi fmt does not preserve comments. Your comments will be lost.");
+        eprintln!("Use --force to suppress this warning and proceed anyway.");
+        process::exit(1);
+    }
 
     let program = match parse_v2(&source) {
         Ok(p) => p,
@@ -7806,56 +7860,67 @@ fn cmd_repl() {
     let evaluator = FullEvaluator;
     let mut interp = Interpreter::new(&evaluator);
 
-    let stdin = std::io::stdin();
-    let mut line_buf = String::new();
+    // Set up rustyline with persistent history
+    let mut rl = rustyline::DefaultEditor::new()
+        .expect("Failed to create REPL editor");
+
+    // Load history from ~/.magi_history
+    let history_path = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".magi_history");
+    let _ = rl.load_history(&history_path);
 
     loop {
-        eprint!(">>> ");
-        // Flush prompt
-        use std::io::Write;
-        std::io::stderr().flush().ok();
+        match rl.readline(">>> ") {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() { continue; }
 
-        line_buf.clear();
-        match stdin.read_line(&mut line_buf) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
+                // Try wrapping in `output <expr>` first, fall back to raw statement
+                let source = format!("output {}", trimmed);
+                let program = match parse_v2(&source) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        match parse_v2(trimmed) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("error: {}", e.message);
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                match interp.execute(&program) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        continue;
+                    }
+                }
+
+                for log in interp.logs.drain(..) {
+                    println!("{}", log.message);
+                }
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => break,
             Err(e) => {
                 eprintln!("read error: {}", e);
                 break;
             }
         }
-
-        let trimmed = line_buf.trim();
-        if trimmed.is_empty() { continue; }
-
-        // Try wrapping in `output <expr>` first, fall back to raw statement
-        let source = format!("output {}", trimmed);
-        let program = match parse_v2(&source) {
-            Ok(p) => p,
-            Err(_) => {
-                // Try as raw statement
-                match parse_v2(trimmed) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("error: {}", e.message);
-                        continue;
-                    }
-                }
-            }
-        };
-
-        match interp.execute(&program) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("error: {}", e);
-                continue;
-            }
-        }
-
-        for log in interp.logs.drain(..) {
-            println!("{}", log.message);
-        }
     }
+
+    // Save history
+    let _ = rl.save_history(&history_path);
+}
+
+/// Get the user's home directory for history file storage.
+fn dirs_next() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
 fn cmd_compile(path: &str) {

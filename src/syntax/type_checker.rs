@@ -154,6 +154,8 @@ struct TypeChecker {
     type_aliases: HashMap<String, String>,
     /// Known constant values for const propagation.
     const_values: HashMap<String, ChannelType>,
+    /// Known trait definitions: trait_name → list of (method_name, param_count including self).
+    trait_defs: HashMap<String, Vec<(String, usize, u32, u32)>>,
 }
 
 impl TypeChecker {
@@ -171,6 +173,7 @@ impl TypeChecker {
             use_aliases: HashSet::new(),
             type_aliases: HashMap::new(),
             const_values: HashMap::new(),
+            trait_defs: HashMap::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -390,7 +393,7 @@ impl TypeChecker {
         // Pass 1a: collect type aliases first (so they're available for function sigs)
         self.collect_type_aliases(&program.statements);
 
-        // Pass 1b: collect function signatures, enum definitions, and struct definitions
+        // Pass 1b: collect function signatures, enum definitions, struct definitions, and trait definitions
         for stmt in &program.statements {
             if let StatementKind::EnumDef { name, variants, .. } = &stmt.kind {
                 let variant_info: Vec<(String, usize)> = variants.iter().map(|v| (v.name.clone(), v.fields.len())).collect();
@@ -399,6 +402,12 @@ impl TypeChecker {
             if let StatementKind::StructDef { name, fields, .. } = &stmt.kind {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                 self.struct_defs.insert(name.clone(), field_info);
+            }
+            if let StatementKind::TraitDef { name, methods } = &stmt.kind {
+                let method_info: Vec<(String, usize, u32, u32)> = methods.iter().map(|m| {
+                    (m.name.clone(), m.params.len(), m.span.start_line, m.span.start_col)
+                }).collect();
+                self.trait_defs.insert(name.clone(), method_info);
             }
             if let StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) =
                 &stmt.kind
@@ -1334,9 +1343,53 @@ impl TypeChecker {
                 }
             }
 
-            StatementKind::TraitDef { .. } => {}
+            StatementKind::TraitDef { .. } => {
+                // Trait definitions are collected in pass 1b (check_program).
+            }
 
-            StatementKind::ImplTrait { methods, .. } => {
+            StatementKind::ImplTrait { trait_name, type_name, methods } => {
+                // Validate trait conformance: check that all required methods are implemented
+                // with correct arity.
+                if let Some(trait_methods) = self.trait_defs.get(trait_name).cloned() {
+                    let impl_method_names: HashMap<&str, usize> = methods.iter()
+                        .map(|m| (m.name.as_str(), m.params.len()))
+                        .collect();
+
+                    for (method_name, expected_params, _line, _col) in &trait_methods {
+                        match impl_method_names.get(method_name.as_str()) {
+                            None => {
+                                self.emit_coded(
+                                    stmt.span.start_line,
+                                    stmt.span.start_col,
+                                    format!(
+                                        "trait '{}' requires method '{}' but it is not implemented for '{}'",
+                                        trait_name, method_name, type_name
+                                    ),
+                                    DiagnosticSeverity::Error,
+                                    super::errors::ErrorCode::E100,
+                                    None,
+                                );
+                            }
+                            Some(&actual_params) => {
+                                if actual_params != *expected_params {
+                                    self.emit_coded(
+                                        stmt.span.start_line,
+                                        stmt.span.start_col,
+                                        format!(
+                                            "method '{}' for trait '{}' on '{}' has {} parameter(s), but the trait requires {}",
+                                            method_name, trait_name, type_name, actual_params, expected_params
+                                        ),
+                                        DiagnosticSeverity::Error,
+                                        super::errors::ErrorCode::E100,
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Type-check the method bodies.
                 for method in methods {
                     self.push_scope();
                     for param in &method.params {
@@ -6715,5 +6768,65 @@ test "reads outer" { let r = x + 1; output r; }"#,
             assert_eq!(d.source_file.as_deref(), Some("main.magi"),
                 "All diagnostics should be attributed to the source file");
         }
+    }
+
+    // =========================================================================
+    // Trait conformance validation
+    // =========================================================================
+
+    #[test]
+    fn test_impl_trait_missing_method() {
+        let a = check(r#"
+            trait Greet {
+                fn hello(self);
+            }
+            struct Person { name: string }
+            impl Greet for Person {
+            }
+        "#);
+        let errs = errors(&a);
+        assert!(!errs.is_empty(), "should report missing method");
+        assert!(errs.iter().any(|e| e.message.contains("requires method 'hello'")),
+            "error should mention missing method 'hello'");
+    }
+
+    #[test]
+    fn test_impl_trait_wrong_arity() {
+        let a = check(r#"
+            trait Greet {
+                fn hello(self, name: string);
+            }
+            struct Person { name: string }
+            impl Greet for Person {
+                fn hello(self) {
+                }
+            }
+        "#);
+        let errs = errors(&a);
+        assert!(!errs.is_empty(), "should report arity mismatch");
+        assert!(errs.iter().any(|e| e.message.contains("parameter(s)")),
+            "error should mention parameter count mismatch");
+    }
+
+    #[test]
+    fn test_impl_trait_conforming() {
+        let a = check(r#"
+            trait Greet {
+                fn hello(self);
+                fn goodbye(self, reason: string);
+            }
+            struct Person { name: string }
+            impl Greet for Person {
+                fn hello(self) {
+                    let _x = 1;
+                }
+                fn goodbye(self, reason: string) {
+                    let _y = reason;
+                }
+            }
+        "#);
+        let errs = errors(&a);
+        assert!(errs.is_empty(), "conforming impl should have no errors, got: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>());
     }
 }

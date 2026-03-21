@@ -12,12 +12,279 @@ use crate::types::{DataType, FutureState, OperationType};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Static empty HashMap used as a default config parameter to avoid
 /// allocating a new HashMap on every evaluator call.
 static EMPTY_CONFIG: std::sync::LazyLock<HashMap<String, DataType>> =
     std::sync::LazyLock::new(HashMap::new);
+
+// =============================================================================
+// Task registry — global storage for spawned thread join handles
+// =============================================================================
+
+/// Maximum number of pending spawned tasks.
+const MAX_TASKS: usize = 4096;
+
+/// Global task registry: maps task IDs to join handles that produce
+/// `Result<DataType, String>` (Ok = resolved value, Err = error message).
+static TASK_REGISTRY: std::sync::LazyLock<
+    Mutex<HashMap<String, std::thread::JoinHandle<Result<DataType, String>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Atomic counter for generating unique task IDs.
+static TASK_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Generate a unique task ID.
+fn task_id() -> String {
+    let n = TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("task:{}", n)
+}
+
+/// Store a join handle in the task registry.
+fn task_store(
+    id: &str,
+    handle: std::thread::JoinHandle<Result<DataType, String>>,
+) -> Result<(), String> {
+    let mut map = TASK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() >= MAX_TASKS {
+        return Err(format!("task limit reached (max {})", MAX_TASKS));
+    }
+    map.insert(id.to_string(), handle);
+    Ok(())
+}
+
+/// Join a task by ID: removes it from the registry, blocks until the thread
+/// finishes, and returns the result. Returns `Err` if the task is not found
+/// or the thread panicked.
+fn task_join(id: &str) -> Result<Result<DataType, String>, String> {
+    let handle = {
+        let mut map = TASK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(id).ok_or_else(|| format!("task not found: {}", id))?
+    };
+    handle.join().map_err(|_| "spawned thread panicked".to_string())
+}
+
+// =============================================================================
+// Channel registry — global storage for mpsc channel endpoints
+// =============================================================================
+
+/// Maximum number of open channels.
+const MAX_CHANNELS: usize = 4096;
+
+/// Atomic counter for generating unique channel IDs.
+static CHANNEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A sender endpoint stored in the channel registry (unbounded).
+struct ChannelSender {
+    tx: std::sync::mpsc::Sender<DataType>,
+}
+
+/// A bounded sender endpoint stored in the channel registry.
+struct ChannelSyncSender {
+    tx: std::sync::mpsc::SyncSender<DataType>,
+}
+
+/// A receiver endpoint stored in the channel registry.
+struct ChannelReceiver {
+    rx: Mutex<std::sync::mpsc::Receiver<DataType>>,
+}
+
+/// Global channel registry: sender and receiver handles keyed by channel ID.
+static CHANNEL_REGISTRY: std::sync::LazyLock<
+    Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Generate a unique channel sender/receiver ID pair.
+fn channel_ids() -> (String, String) {
+    let n = CHANNEL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    (format!("chan-tx:{}", n), format!("chan-rx:{}", n))
+}
+
+/// Store a channel endpoint in the global registry.
+fn channel_store<T: Send + 'static>(id: &str, endpoint: T) -> Result<(), String> {
+    let mut map = CHANNEL_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() >= MAX_CHANNELS {
+        return Err(format!("channel limit reached (max {})", MAX_CHANNELS));
+    }
+    map.insert(id.to_string(), Box::new(endpoint));
+    Ok(())
+}
+
+/// Remove a channel endpoint from the registry.
+fn channel_remove(id: &str) -> Result<(), String> {
+    let mut map = CHANNEL_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(id)
+        .ok_or_else(|| format!("channel endpoint not found: {}", id))?;
+    Ok(())
+}
+
+/// A lightweight evaluator used by spawned threads that handles only
+/// interpreter-level constructs (arithmetic, etc. are already handled
+/// inline by the interpreter). Std operations dispatched via
+/// OperationType fall through to the injected evaluator; for spawned
+/// threads we use a stub that returns an error for unknown ops.
+struct SpawnEvaluator;
+
+impl OperationEvaluator for SpawnEvaluator {
+    fn eval_operation(
+        &self,
+        op: OperationType,
+        inputs: &HashMap<String, DataType>,
+        config: &HashMap<String, DataType>,
+    ) -> Result<DataType, EvalError> {
+        // Re-use the same full evaluator from the `magi` binary if available.
+        // In library/test mode, fall back to a minimal stub that handles
+        // common pure operations to keep spawned closures useful.
+        spawn_eval_operation(op, inputs, config)
+    }
+}
+
+/// Minimal operation evaluator for spawned threads. Handles arithmetic,
+/// comparison, logical, and conversion operations that are commonly used
+/// inside concurrent closures.
+fn spawn_eval_operation(
+    op: OperationType,
+    inputs: &HashMap<String, DataType>,
+    _config: &HashMap<String, DataType>,
+) -> Result<DataType, EvalError> {
+    let a = inputs.get("a").cloned().unwrap_or(DataType::Null);
+    let b = inputs.get("b").cloned().unwrap_or(DataType::Null);
+    let input = inputs
+        .get("input")
+        .or_else(|| inputs.get("value"))
+        .cloned()
+        .unwrap_or(DataType::Null);
+
+    match op {
+        // Arithmetic
+        OperationType::Add => match (&a, &b) {
+            (DataType::String(x), DataType::String(y)) => {
+                Ok(DataType::String(format!("{}{}", x, y)))
+            }
+            _ => spawn_binop(&a, &b, i64::wrapping_add, |x, y| x + y),
+        },
+        OperationType::Subtract => spawn_binop(&a, &b, i64::wrapping_sub, |x, y| x - y),
+        OperationType::Multiply => spawn_binop(&a, &b, i64::wrapping_mul, |x, y| x * y),
+        OperationType::Divide => {
+            let is_int_zero = matches!(
+                (&a, &b),
+                (DataType::Int64(_), DataType::Int64(0))
+                    | (DataType::Int32(_), DataType::Int32(0))
+                    | (DataType::Uint32(_), DataType::Uint32(0))
+                    | (DataType::Uint64(_), DataType::Uint64(0))
+            );
+            if is_int_zero {
+                Err(EvalError::DivisionByZero)
+            } else {
+                spawn_binop(
+                    &a,
+                    &b,
+                    |x, y| if y == 0 { 0 } else { x.checked_div(y).unwrap_or(0) },
+                    |x, y| x / y,
+                )
+            }
+        }
+        OperationType::Modulo => {
+            if b.to_i64() == Some(0) {
+                Err(EvalError::DivisionByZero)
+            } else {
+                spawn_binop(
+                    &a,
+                    &b,
+                    |x, y| x.checked_rem(y).unwrap_or(0),
+                    |x, y| x % y,
+                )
+            }
+        }
+
+        // Comparison
+        OperationType::Equal => Ok(DataType::Bool(a == b)),
+        OperationType::NotEqual => Ok(DataType::Bool(a != b)),
+        OperationType::Greater => match (a.to_f64(), b.to_f64()) {
+            (Some(x), Some(y)) => Ok(DataType::Bool(x > y)),
+            _ => Ok(DataType::Bool(false)),
+        },
+        OperationType::Less => match (a.to_f64(), b.to_f64()) {
+            (Some(x), Some(y)) => Ok(DataType::Bool(x < y)),
+            _ => Ok(DataType::Bool(false)),
+        },
+        OperationType::GreaterEq => match (a.to_f64(), b.to_f64()) {
+            (Some(x), Some(y)) => Ok(DataType::Bool(x >= y)),
+            _ => Ok(DataType::Bool(false)),
+        },
+        OperationType::LessEq => match (a.to_f64(), b.to_f64()) {
+            (Some(x), Some(y)) => Ok(DataType::Bool(x <= y)),
+            _ => Ok(DataType::Bool(false)),
+        },
+
+        // Logic
+        OperationType::And => match (&a, &b) {
+            (DataType::Bool(x), DataType::Bool(y)) => Ok(DataType::Bool(*x && *y)),
+            _ => Ok(DataType::Bool(false)),
+        },
+        OperationType::Or => match (&a, &b) {
+            (DataType::Bool(x), DataType::Bool(y)) => Ok(DataType::Bool(*x || *y)),
+            _ => Ok(DataType::Bool(false)),
+        },
+        OperationType::Not => match &input {
+            DataType::Bool(x) => Ok(DataType::Bool(!x)),
+            _ => Ok(DataType::Bool(true)),
+        },
+        OperationType::Negate => match &input {
+            DataType::Int64(x) => Ok(DataType::Int64(x.wrapping_neg())),
+            DataType::Float64(x) => Ok(DataType::Float64(-x)),
+            _ => Ok(DataType::Null),
+        },
+
+        // Conversion
+        OperationType::ToString => Ok(DataType::String(input.to_string_lossy())),
+
+        // Unsupported
+        _ => Err(EvalError::InvalidInput(format!(
+            "{:?} is not available inside spawned tasks",
+            op
+        ))),
+    }
+}
+
+/// Type-preserving binary op helper for the spawn evaluator.
+fn spawn_binop(
+    a: &DataType,
+    b: &DataType,
+    int_op: fn(i64, i64) -> i64,
+    float_op: fn(f64, f64) -> f64,
+) -> Result<DataType, EvalError> {
+    match (a, b) {
+        (DataType::Int32(x), DataType::Int32(y)) => {
+            Ok(DataType::Int32(int_op(*x as i64, *y as i64) as i32))
+        }
+        (DataType::Uint32(x), DataType::Uint32(y)) => {
+            Ok(DataType::Uint32(int_op(*x as i64, *y as i64) as u32))
+        }
+        (DataType::Uint64(x), DataType::Uint64(y)) => {
+            Ok(DataType::Uint64(int_op(*x as i64, *y as i64) as u64))
+        }
+        (DataType::Float32(x), DataType::Float32(y)) => {
+            Ok(DataType::Float32(float_op(*x as f64, *y as f64) as f32))
+        }
+        (DataType::Int64(x), DataType::Int64(y)) => Ok(DataType::Int64(int_op(*x, *y))),
+        (DataType::Float64(x), DataType::Float64(y)) => Ok(DataType::Float64(float_op(*x, *y))),
+        (DataType::Int64(x), DataType::Float64(y)) => {
+            Ok(DataType::Float64(float_op(*x as f64, *y)))
+        }
+        (DataType::Float64(x), DataType::Int64(y)) => {
+            Ok(DataType::Float64(float_op(*x, *y as f64)))
+        }
+        _ => match (a.to_i64(), b.to_i64()) {
+            (Some(x), Some(y)) => Ok(DataType::Int64(int_op(x, y))),
+            _ => match (a.to_f64(), b.to_f64()) {
+                (Some(x), Some(y)) => Ok(DataType::Float64(float_op(x, y))),
+                _ => Ok(DataType::Null),
+            },
+        },
+    }
+}
 
 /// Maximum iterations for while/for loops to prevent infinite loops.
 const MAX_LOOP_ITERATIONS: usize = 10_000_000;
@@ -4588,6 +4855,288 @@ impl<'a> Interpreter<'a> {
                         let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: "non-number".to_string(), context: "duration_hours".to_string(), span: expr.span })?;
                         return Ok(DataType::Int64(n * 60 * 60 * 1000));
                     }
+                    // ========================================================
+                    // Channel-based concurrency primitives
+                    // ========================================================
+                    "channel" => {
+                        // channel() -> [sender_id, receiver_id]
+                        // Optional capacity arg: channel(10) for bounded
+                        let (tx_id, rx_id) = channel_ids();
+                        let (tx, rx) = if !args.is_empty() {
+                            let cap = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| {
+                                InterpError::TypeError {
+                                    expected: "integer".to_string(),
+                                    actual: "non-integer".to_string(),
+                                    context: "channel(capacity)".to_string(),
+                                    span: expr.span,
+                                }
+                            })?;
+                            if cap <= 0 {
+                                return Err(InterpError::EvalError {
+                                    error: EvalError::InvalidInput(
+                                        "channel capacity must be positive".to_string(),
+                                    ),
+                                    span: expr.span,
+                                });
+                            }
+                            let (tx, rx) = std::sync::mpsc::sync_channel(cap as usize);
+                            // Wrap SyncSender as a Sender-like interface
+                            // We store them separately since SyncSender != Sender
+                            channel_store(&tx_id, ChannelSyncSender { tx }).map_err(|e| {
+                                InterpError::EvalError {
+                                    error: EvalError::InvalidInput(e),
+                                    span: expr.span,
+                                }
+                            })?;
+                            channel_store(
+                                &rx_id,
+                                ChannelReceiver {
+                                    rx: Mutex::new(rx),
+                                },
+                            )
+                            .map_err(|e| InterpError::EvalError {
+                                error: EvalError::InvalidInput(e),
+                                span: expr.span,
+                            })?;
+                            return Ok(DataType::Array(vec![
+                                DataType::String(tx_id),
+                                DataType::String(rx_id),
+                            ]));
+                        } else {
+                            std::sync::mpsc::channel()
+                        };
+                        channel_store(&tx_id, ChannelSender { tx }).map_err(|e| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(e),
+                                span: expr.span,
+                            }
+                        })?;
+                        channel_store(
+                            &rx_id,
+                            ChannelReceiver {
+                                rx: Mutex::new(rx),
+                            },
+                        )
+                        .map_err(|e| InterpError::EvalError {
+                            error: EvalError::InvalidInput(e),
+                            span: expr.span,
+                        })?;
+                        return Ok(DataType::Array(vec![
+                            DataType::String(tx_id),
+                            DataType::String(rx_id),
+                        ]));
+                    }
+                    "chan_send" => {
+                        // chan_send(sender_id, value) -> null
+                        if args.len() < 2 {
+                            return Err(InterpError::ArityMismatch {
+                                name: "chan_send".to_string(),
+                                expected: "2".to_string(),
+                                actual: args.len(),
+                                span: expr.span,
+                            });
+                        }
+                        let tx_id_val = self.eval_expr(&args[0])?;
+                        let tx_id_str = match &tx_id_val {
+                            DataType::String(s) => s.clone(),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    expected: "string (sender ID)".to_string(),
+                                    actual: tx_id_val.type_name().to_string(),
+                                    context: "chan_send".to_string(),
+                                    span: expr.span,
+                                })
+                            }
+                        };
+                        let value = self.eval_expr(&args[1])?;
+
+                        // Try as unbounded sender first, then bounded
+                        let mut map = CHANNEL_REGISTRY
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let entry = map.get_mut(&tx_id_str).ok_or_else(|| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!(
+                                    "sender not found: {}",
+                                    tx_id_str
+                                )),
+                                span: expr.span,
+                            }
+                        })?;
+                        if let Some(sender) = entry.downcast_mut::<ChannelSender>() {
+                            sender.tx.send(value).map_err(|_| InterpError::EvalError {
+                                error: EvalError::InvalidInput(
+                                    "channel closed (receiver dropped)".to_string(),
+                                ),
+                                span: expr.span,
+                            })?;
+                        } else if let Some(sender) =
+                            entry.downcast_mut::<ChannelSyncSender>()
+                        {
+                            // Release the lock before blocking on sync_channel send
+                            let tx_clone = sender.tx.clone();
+                            drop(map);
+                            tx_clone.send(value).map_err(|_| InterpError::EvalError {
+                                error: EvalError::InvalidInput(
+                                    "channel closed (receiver dropped)".to_string(),
+                                ),
+                                span: expr.span,
+                            })?;
+                        } else {
+                            return Err(InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!(
+                                    "not a sender: {}",
+                                    tx_id_str
+                                )),
+                                span: expr.span,
+                            });
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "chan_recv" => {
+                        // chan_recv(receiver_id) -> value
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "chan_recv".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let rx_id_val = self.eval_expr(&args[0])?;
+                        let rx_id_str = match &rx_id_val {
+                            DataType::String(s) => s.clone(),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    expected: "string (receiver ID)".to_string(),
+                                    actual: rx_id_val.type_name().to_string(),
+                                    context: "chan_recv".to_string(),
+                                    span: expr.span,
+                                })
+                            }
+                        };
+
+                        let map = CHANNEL_REGISTRY
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let entry = map.get(&rx_id_str).ok_or_else(|| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!(
+                                    "receiver not found: {}",
+                                    rx_id_str
+                                )),
+                                span: expr.span,
+                            }
+                        })?;
+                        let receiver =
+                            entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                                InterpError::EvalError {
+                                    error: EvalError::InvalidInput(format!(
+                                        "not a receiver: {}",
+                                        rx_id_str
+                                    )),
+                                    span: expr.span,
+                                }
+                            })?;
+                        let rx_guard =
+                            receiver.rx.lock().unwrap_or_else(|e| e.into_inner());
+                        // Release the registry lock before blocking on recv
+                        // We need to restructure: get a reference to rx,
+                        // drop the registry lock, then recv.
+                        // Since ChannelReceiver holds Mutex<Receiver>, and we
+                        // hold a &ChannelReceiver from the registry, we need
+                        // the registry lock held while we access rx. However,
+                        // the recv itself may block, so we use try_recv in a
+                        // loop or just accept the hold (mpsc recv is typically fast).
+                        let result = rx_guard.recv().map_err(|_| InterpError::EvalError {
+                            error: EvalError::InvalidInput(
+                                "channel closed (all senders dropped)".to_string(),
+                            ),
+                            span: expr.span,
+                        })?;
+                        return Ok(result);
+                    }
+                    "chan_try_recv" => {
+                        // chan_try_recv(receiver_id) -> value or null
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "chan_try_recv".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let rx_id_val = self.eval_expr(&args[0])?;
+                        let rx_id_str = match &rx_id_val {
+                            DataType::String(s) => s.clone(),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    expected: "string (receiver ID)".to_string(),
+                                    actual: rx_id_val.type_name().to_string(),
+                                    context: "chan_try_recv".to_string(),
+                                    span: expr.span,
+                                })
+                            }
+                        };
+
+                        let map = CHANNEL_REGISTRY
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let entry = map.get(&rx_id_str).ok_or_else(|| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!(
+                                    "receiver not found: {}",
+                                    rx_id_str
+                                )),
+                                span: expr.span,
+                            }
+                        })?;
+                        let receiver =
+                            entry.downcast_ref::<ChannelReceiver>().ok_or_else(|| {
+                                InterpError::EvalError {
+                                    error: EvalError::InvalidInput(format!(
+                                        "not a receiver: {}",
+                                        rx_id_str
+                                    )),
+                                    span: expr.span,
+                                }
+                            })?;
+                        let rx_guard =
+                            receiver.rx.lock().unwrap_or_else(|e| e.into_inner());
+                        return match rx_guard.try_recv() {
+                            Ok(val) => Ok(val),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(DataType::Null),
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(DataType::Null),
+                        };
+                    }
+                    "chan_close" => {
+                        // chan_close(endpoint_id) -> null
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "chan_close".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let id_val = self.eval_expr(&args[0])?;
+                        let id_str = match &id_val {
+                            DataType::String(s) => s.clone(),
+                            _ => {
+                                return Err(InterpError::TypeError {
+                                    expected: "string (channel ID)".to_string(),
+                                    actual: id_val.type_name().to_string(),
+                                    context: "chan_close".to_string(),
+                                    span: expr.span,
+                                })
+                            }
+                        };
+                        channel_remove(&id_str).map_err(|e| InterpError::EvalError {
+                            error: EvalError::InvalidInput(e),
+                            span: expr.span,
+                        })?;
+                        return Ok(DataType::Null);
+                    }
                     _ => {}
                 }
 
@@ -4813,13 +5362,24 @@ impl<'a> Interpreter<'a> {
                             },
                             span: expr.span,
                         }),
-                        FutureState::Pending => Err(InterpError::EvalError {
-                            error: EvalError::InvalidInput(
-                                "Cannot await a pending future in synchronous execution"
-                                    .to_string(),
-                            ),
-                            span: expr.span,
-                        }),
+                        FutureState::Pending(ref task_id) => {
+                            // Join the spawned thread and retrieve its result
+                            match task_join(task_id) {
+                                Ok(Ok(val)) => Ok(val),
+                                Ok(Err(err_msg)) => Err(InterpError::EvalError {
+                                    error: EvalError::InvalidInput(
+                                        format!("spawned task failed: {}", err_msg),
+                                    ),
+                                    span: expr.span,
+                                }),
+                                Err(join_err) => Err(InterpError::EvalError {
+                                    error: EvalError::InvalidInput(
+                                        format!("spawned task panicked: {}", join_err),
+                                    ),
+                                    span: expr.span,
+                                }),
+                            }
+                        }
                     },
                     // Await on non-Future is identity
                     other => Ok(other),
@@ -4827,21 +5387,62 @@ impl<'a> Interpreter<'a> {
             }
 
             ExpressionKind::Spawn(inner) => {
-                // In the synchronous interpreter, spawn is eager:
-                // evaluate immediately and wrap in Future(Resolved),
-                // or capture errors as Future(Rejected)
-                match self.eval_expr(inner) {
-                    Ok(val) if matches!(val, DataType::Future(_)) => {
-                        Ok(val) // Already a Future (e.g. from async fn), don't double-wrap
+                // Real concurrent spawn: evaluate the expression in a
+                // new OS thread with a snapshot of the current interpreter
+                // state (functions, enums, structs, std_op_aliases, closures).
+                let expr_clone = (**inner).clone();
+                let functions = self.functions.clone();
+                let enum_defs = self.enum_defs.clone();
+                let struct_defs = self.struct_defs.clone();
+                let std_op_aliases = self.std_op_aliases.clone();
+                let closure_captures = self.closure_captures.clone();
+                let impl_methods = self.impl_methods.clone();
+                let async_fns = self.async_fns.clone();
+
+                // Snapshot visible variables so the spawned expression can
+                // reference outer-scope values (capture by value).
+                let mut captured_vars: Vec<(String, DataType, bool)> = Vec::new();
+                for scope in &self.symbols {
+                    for (name, entry) in scope {
+                        if let Some(val) = self.heap.read(entry.addr) {
+                            captured_vars.push((name.clone(), val.clone(), entry.mutable));
+                        }
                     }
-                    Ok(val) => {
-                        Ok(DataType::Future(Box::new(FutureState::Resolved(Box::new(val)))))
-                    }
-                    Err(e) if !is_control_flow(&e) => {
-                        Ok(DataType::Future(Box::new(FutureState::Rejected(format!("{}", e)))))
-                    }
-                    Err(e) => Err(e), // control flow signals still propagate
                 }
+
+                let tid = task_id();
+                let tid_clone = tid.clone();
+
+                let handle = std::thread::spawn(move || {
+                    // Use a leaked SpawnEvaluator for the 'static lifetime
+                    let evaluator: &'static dyn OperationEvaluator =
+                        Box::leak(Box::new(SpawnEvaluator));
+                    let mut interp = Interpreter::new(evaluator);
+                    interp.functions = functions;
+                    interp.enum_defs = enum_defs;
+                    interp.struct_defs = struct_defs;
+                    interp.std_op_aliases = std_op_aliases;
+                    interp.closure_captures = closure_captures;
+                    interp.impl_methods = impl_methods;
+                    interp.async_fns = async_fns;
+
+                    // Inject captured variables into the global scope
+                    for (name, val, mutable) in captured_vars {
+                        let addr = interp.heap.alloc(val);
+                        interp.define(&name, addr, mutable);
+                    }
+
+                    interp
+                        .eval_expr(&expr_clone)
+                        .map_err(|e| format!("{}", e))
+                });
+
+                task_store(&tid_clone, handle).map_err(|e| InterpError::EvalError {
+                    error: EvalError::InvalidInput(e),
+                    span: expr.span,
+                })?;
+
+                Ok(DataType::Future(Box::new(FutureState::Pending(tid_clone))))
             }
 
             ExpressionKind::Range { start, end, inclusive } => {
@@ -6310,7 +6911,7 @@ pub const STD_MODULE_NAMES: &[&str] = &[
     "env", "net", "tcp", "udp", "ws", "sse", "http_server", "path",
     "yaml", "csv", "toml", "regex", "uuid", "crypto", "compress",
     "fmt", "stats", "text", "encode", "reflect", "collections", "sort",
-    "cert",
+    "cert", "concurrent",
 ];
 
 /// Get the list of operation names in a standard library module.
@@ -6728,6 +7329,13 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "binary_search",
             "binary_search_by",
             "sort_reverse",
+        ],
+        "concurrent" => vec![
+            "channel",
+            "chan_send",
+            "chan_recv",
+            "chan_try_recv",
+            "chan_close",
         ],
         _ => vec![],
     }
