@@ -19410,3 +19410,40 @@ fn test_index_assignment_negative() {
     "#);
     assert_eq!(result, DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(99)]));
 }
+
+// =========================================================================
+// Math builtins (#121-125)
+// =========================================================================
+
+#[test]
+fn test_factorial() {
+    assert_eq!(run("output factorial(5);"), DataType::Int64(120));
+    assert_eq!(run("output factorial(0);"), DataType::Int64(1));
+}
+
+#[test]
+fn test_fibonacci() {
+    assert_eq!(run("output fibonacci(10);"), DataType::Int64(55));
+    assert_eq!(run("output fibonacci(0);"), DataType::Int64(0));
+    assert_eq!(run("output fibonacci(1);"), DataType::Int64(1));
+}
+
+#[test]
+fn test_is_prime() {
+    assert_eq!(run("output is_prime(7);"), DataType::Bool(true));
+    assert_eq!(run("output is_prime(4);"), DataType::Bool(false));
+    assert_eq!(run("output is_prime(2);"), DataType::Bool(true));
+    assert_eq!(run("output is_prime(1);"), DataType::Bool(false));
+}
+
+#[test]
+fn test_ncr() {
+    assert_eq!(run("output ncr(5, 2);"), DataType::Int64(10));
+    assert_eq!(run("output ncr(10, 3);"), DataType::Int64(120));
+}
+
+#[test]
+fn test_npr() {
+    assert_eq!(run("output npr(5, 2);"), DataType::Int64(20));
+    assert_eq!(run("output npr(10, 3);"), DataType::Int64(720));
+}

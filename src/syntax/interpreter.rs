@@ -3527,6 +3527,54 @@ impl<'a> Interpreter<'a> {
                             Err(e) => return Err(e),
                         }
                     }
+                    // Math builtins (#121-125)
+                    "factorial" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "factorial".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "factorial".to_string(), span: expr.span })?;
+                        if n < 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("factorial of negative number".to_string()), span: expr.span }); }
+                        if n > 20 { return Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("factorial overflow (max 20!)".to_string()), span: expr.span }); }
+                        let mut result: i64 = 1;
+                        for i in 2..=(n as u64) { result = result.saturating_mul(i as i64); }
+                        return Ok(DataType::Int64(result));
+                    }
+                    "fibonacci" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "fibonacci".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "fibonacci".to_string(), span: expr.span })?;
+                        if n < 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("fibonacci of negative number".to_string()), span: expr.span }); }
+                        if n > 92 { return Err(InterpError::EvalError { error: crate::eval::EvalError::Overflow("fibonacci overflow (max fib(92))".to_string()), span: expr.span }); }
+                        let (mut a, mut b): (i64, i64) = (0, 1);
+                        for _ in 0..n { let t = b; b = a.saturating_add(b); a = t; }
+                        return Ok(DataType::Int64(a));
+                    }
+                    "is_prime" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_prime".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "is_prime".to_string(), span: expr.span })?;
+                        if n < 2 { return Ok(DataType::Bool(false)); }
+                        if n < 4 { return Ok(DataType::Bool(true)); }
+                        if n % 2 == 0 || n % 3 == 0 { return Ok(DataType::Bool(false)); }
+                        let mut i = 5i64;
+                        while i * i <= n { if n % i == 0 || n % (i + 2) == 0 { return Ok(DataType::Bool(false)); } i += 6; }
+                        return Ok(DataType::Bool(true));
+                    }
+                    "ncr" | "combinations" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ncr".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "ncr(n)".to_string(), span: expr.span })?;
+                        let r = self.eval_expr(&args[1])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "ncr(r)".to_string(), span: expr.span })?;
+                        if n < 0 || r < 0 || r > n { return Ok(DataType::Int64(0)); }
+                        let r = r.min(n - r) as u64; // Optimize: C(n,r) = C(n,n-r)
+                        let mut result: i64 = 1;
+                        for i in 0..r { result = result.saturating_mul((n as u64 - i) as i64) / (i as i64 + 1); }
+                        return Ok(DataType::Int64(result));
+                    }
+                    "npr" | "permutations" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "npr".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "npr(n)".to_string(), span: expr.span })?;
+                        let r = self.eval_expr(&args[1])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "integer".to_string(), actual: "non-integer".to_string(), context: "npr(r)".to_string(), span: expr.span })?;
+                        if n < 0 || r < 0 || r > n { return Ok(DataType::Int64(0)); }
+                        let mut result: i64 = 1;
+                        for i in 0..(r as u64) { result = result.saturating_mul((n as u64 - i) as i64); }
+                        return Ok(DataType::Int64(result));
+                    }
                     _ => {}
                 }
 
@@ -5185,6 +5233,13 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "math_min_of",
             "math_max_of",
             "math_count",
+            "factorial",
+            "fibonacci",
+            "is_prime",
+            "ncr",
+            "npr",
+            "combinations",
+            "permutations",
         ],
         "cmp" => vec![
             "equal",
@@ -6171,6 +6226,36 @@ impl std::fmt::Display for InterpError {
             InterpError::AssertionFailed { message, span } => {
                 write!(f, "{} [E402]: {}", span, message)
             }
+        }
+    }
+}
+
+impl InterpError {
+    /// Returns the source span associated with this error, if any.
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            InterpError::UndefinedVariable { span, .. }
+            | InterpError::ImmutableAssignment { span, .. }
+            | InterpError::UnknownOperation { span, .. }
+            | InterpError::TypeError { span, .. }
+            | InterpError::EvalError { span, .. }
+            | InterpError::MaxIterations { span, .. }
+            | InterpError::InvalidPlaceholder { span, .. }
+            | InterpError::InvalidPipeStage { span, .. }
+            | InterpError::UndefinedFunction { span, .. }
+            | InterpError::MaxCallDepth { span, .. }
+            | InterpError::ArityMismatch { span, .. }
+            | InterpError::BreakOutsideLoop { span, .. }
+            | InterpError::ContinueOutsideLoop { span, .. }
+            | InterpError::ReturnOutsideFunction { span, .. }
+            | InterpError::ResourceLimit { span, .. }
+            | InterpError::NotImplemented { span, .. }
+            | InterpError::ThrownError { span, .. }
+            | InterpError::AssertionFailed { span, .. } => Some(*span),
+            InterpError::Cancelled
+            | InterpError::BreakSignal(_)
+            | InterpError::ContinueSignal
+            | InterpError::ReturnSignal(_) => None,
         }
     }
 }
