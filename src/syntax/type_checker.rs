@@ -1668,6 +1668,10 @@ impl TypeChecker {
             Pattern::EnumPattern { bindings, .. } => {
                 for sub in bindings { Self::collect_pattern_var_names_inner(sub, names); }
             }
+            Pattern::Binding { name, pattern } => {
+                names.insert(name.clone());
+                Self::collect_pattern_var_names_inner(pattern, names);
+            }
             Pattern::Literal(_) | Pattern::Wildcard | Pattern::Rest(None) | Pattern::RangePattern { .. } => {}
         }
     }
@@ -3189,6 +3193,10 @@ impl TypeChecker {
                 }
                 self.define_var(name, ct, false, span.start_line, span.start_col);
             }
+            Pattern::Binding { name, pattern } => {
+                self.define_var(name, val_type, false, span.start_line, span.start_col);
+                self.bind_pattern_vars(pattern, val_type, span);
+            }
             Pattern::RangePattern { start, end, .. } => {
                 // No variables to bind, but walk the bound expressions for type checking
                 self.infer_expr(start);
@@ -3245,6 +3253,12 @@ impl TypeChecker {
                     let ct = self.resolve_type(type_name).unwrap_or(ChannelType::Null);
                     self.define_var(name, ct, false, span.start_line, span.start_col);
                 }
+            }
+            Pattern::Binding { name, pattern } => {
+                if bound.insert(name.clone()) {
+                    self.define_var(name, val_type, false, span.start_line, span.start_col);
+                }
+                self.bind_pattern_vars_collecting(pattern, val_type, span, bound);
             }
             Pattern::RangePattern { start, end, .. } => {
                 self.infer_expr(start);
@@ -3309,6 +3323,11 @@ impl TypeChecker {
 
                 // Polymorphic: promote from inputs.
                 promote_numeric(&[left, right])
+            }
+
+            // Bitwise operators always return Int64.
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AndNot => {
+                ChannelType::Int64
             }
         }
     }

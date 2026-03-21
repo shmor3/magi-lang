@@ -557,6 +557,13 @@ pub enum BinOp {
     Or,
     // Containment
     In,
+    // Bitwise
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    AndNot,
 }
 
 impl BinOp {
@@ -577,6 +584,12 @@ impl BinOp {
             BinOp::And => "and",
             BinOp::Or => "or",
             BinOp::In => "contains",
+            BinOp::BitAnd => "bit_and",
+            BinOp::BitOr => "bit_or",
+            BinOp::BitXor => "bit_xor",
+            BinOp::Shl => "bit_shift_left",
+            BinOp::Shr => "bit_shift_right",
+            BinOp::AndNot => "bit_and_not",
         }
     }
 
@@ -588,6 +601,9 @@ impl BinOp {
             BinOp::NotEq => "__ne__", BinOp::Gt => "__gt__", BinOp::Lt => "__lt__",
             BinOp::GtEq => "__ge__", BinOp::LtEq => "__le__", BinOp::And => "__and__",
             BinOp::Or => "__or__", BinOp::In => "__contains__",
+            BinOp::BitAnd => "__band__", BinOp::BitOr => "__bor__",
+            BinOp::BitXor => "__bxor__", BinOp::Shl => "__shl__",
+            BinOp::Shr => "__shr__", BinOp::AndNot => "__bandnot__",
         }
     }
 
@@ -598,6 +614,10 @@ impl BinOp {
             BinOp::In => 3,
             BinOp::Eq | BinOp::NotEq => 3,
             BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq => 4,
+            BinOp::BitOr => 3,
+            BinOp::BitXor => 4,
+            BinOp::BitAnd | BinOp::AndNot => 4,
+            BinOp::Shl | BinOp::Shr => 5,
             BinOp::Add | BinOp::Sub => 5,
             BinOp::Mul | BinOp::Div | BinOp::Mod => 6,
         }
@@ -621,6 +641,12 @@ impl fmt::Display for BinOp {
             BinOp::And => "&&",
             BinOp::Or => "||",
             BinOp::In => "in",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::AndNot => "&^",
         };
         write!(f, "{}", s)
     }
@@ -711,6 +737,11 @@ pub enum Pattern {
     TypePattern {
         name: String,
         type_name: String,
+    },
+    /// Binding pattern: `name @ pattern` — binds the matched value to name while also matching pattern
+    Binding {
+        name: String,
+        pattern: Box<Pattern>,
     },
     /// Range pattern: `0..10` or `0..=10` — matches if value is in range
     RangePattern {

@@ -1489,8 +1489,17 @@ impl Compiler {
             }
             BinOp::And | BinOp::Or => return Err(CompileError::at(0, 0, "And/Or should be handled as short-circuit in compile_expr".to_string())),
             BinOp::In => {
-                // Delegate to runtime for containment check.
                 let name_idx = self.module.intern_string("__in");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AndNot => {
+                let op_name = match op {
+                    BinOp::BitAnd => "__bit_and", BinOp::BitOr => "__bit_or",
+                    BinOp::BitXor => "__bit_xor", BinOp::Shl => "__bit_shl",
+                    BinOp::Shr => "__bit_shr", BinOp::AndNot => "__bit_andnot",
+                    _ => unreachable!(),
+                };
+                let name_idx = self.module.intern_string(op_name);
                 self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
         }

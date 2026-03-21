@@ -1382,6 +1382,11 @@ impl<'a> Formatter<'a> {
                 }
                 self.fmt_expression(end);
             }
+            Pattern::Binding { name, pattern } => {
+                self.write(name);
+                self.write(" @ ");
+                self.fmt_pattern(pattern);
+            }
         }
     }
 

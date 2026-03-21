@@ -130,6 +130,19 @@ pub enum TokenKind {
     PlusPlus,         // ++ (post-increment)
     MinusMinus,       // -- (post-decrement)
     ColonEq,          // := (short variable declaration)
+    // Bitwise operators
+    Ampersand,        // &
+    Caret,            // ^
+    Shl,              // <<
+    Shr,              // >>
+    AmpCaret,         // &^ (AND NOT)
+    AmpEq,            // &=
+    BarEq,            // |=
+    CaretEq,          // ^=
+    ShlEq,            // <<=
+    ShrEq,            // >>=
+    AmpCaretEq,       // &^=
+    At,               // @ (pattern binding)
 
     // Delimiters
     LParen,     // (
@@ -233,6 +246,18 @@ impl fmt::Display for TokenKind {
             TokenKind::PlusPlus => "++",
             TokenKind::MinusMinus => "--",
             TokenKind::ColonEq => ":=",
+            TokenKind::Ampersand => "&",
+            TokenKind::Caret => "^",
+            TokenKind::Shl => "<<",
+            TokenKind::Shr => ">>",
+            TokenKind::AmpCaret => "&^",
+            TokenKind::AmpEq => "&=",
+            TokenKind::BarEq => "|=",
+            TokenKind::CaretEq => "^=",
+            TokenKind::ShlEq => "<<=",
+            TokenKind::ShrEq => ">>=",
+            TokenKind::AmpCaretEq => "&^=",
+            TokenKind::At => "@",
             TokenKind::LParen => "(",
             TokenKind::RParen => ")",
             TokenKind::LBracket => "[",
@@ -514,6 +539,23 @@ impl<'a> Lexer<'a> {
             b';' => return self.single_char_token(TokenKind::Semicolon, start_line, start_col),
             b',' => return self.single_char_token(TokenKind::Comma, start_line, start_col),
             b'#' => return self.single_char_token(TokenKind::Hash, start_line, start_col),
+            b'@' => return self.single_char_token(TokenKind::At, start_line, start_col),
+            b'^' => {
+                self.advance();
+                if self.peek() == Some(b'=') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::CaretEq,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "^=".to_string(),
+                    });
+                }
+                return Ok(Token {
+                    kind: TokenKind::Caret,
+                    span: self.span_point(start_line, start_col),
+                    text: "^".to_string(),
+                });
+            }
             _ => {}
         }
 
@@ -718,6 +760,22 @@ impl<'a> Lexer<'a> {
             }
             b'>' => {
                 self.advance();
+                if self.peek() == Some(b'>') {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok(Token {
+                            kind: TokenKind::ShrEq,
+                            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                            text: ">>=".to_string(),
+                        });
+                    }
+                    return Ok(Token {
+                        kind: TokenKind::Shr,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: ">>".to_string(),
+                    });
+                }
                 if self.peek() == Some(b'=') {
                     self.advance();
                     return Ok(Token {
@@ -734,6 +792,22 @@ impl<'a> Lexer<'a> {
             }
             b'<' => {
                 self.advance();
+                if self.peek() == Some(b'<') {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok(Token {
+                            kind: TokenKind::ShlEq,
+                            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                            text: "<<=".to_string(),
+                        });
+                    }
+                    return Ok(Token {
+                        kind: TokenKind::Shl,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "<<".to_string(),
+                    });
+                }
                 if self.peek() == Some(b'=') {
                     self.advance();
                     return Ok(Token {
@@ -758,11 +832,34 @@ impl<'a> Lexer<'a> {
                         text: "&&".to_string(),
                     });
                 }
-                return Err(SyntaxError {
-                    line: start_line as usize,
-                    column: start_col as usize,
-                    message: "Expected '&&', got single '&'".to_string(),
-                    code: None,
+                if self.peek() == Some(b'^') {
+                    self.advance();
+                    if self.peek() == Some(b'=') {
+                        self.advance();
+                        return Ok(Token {
+                            kind: TokenKind::AmpCaretEq,
+                            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                            text: "&^=".to_string(),
+                        });
+                    }
+                    return Ok(Token {
+                        kind: TokenKind::AmpCaret,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "&^".to_string(),
+                    });
+                }
+                if self.peek() == Some(b'=') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::AmpEq,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "&=".to_string(),
+                    });
+                }
+                return Ok(Token {
+                    kind: TokenKind::Ampersand,
+                    span: self.span_point(start_line, start_col),
+                    text: "&".to_string(),
                 });
             }
             b'|' => {
@@ -783,7 +880,15 @@ impl<'a> Lexer<'a> {
                         text: "||".to_string(),
                     });
                 }
-                // Single | for lambda params and or-patterns
+                if self.peek() == Some(b'=') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::BarEq,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "|=".to_string(),
+                    });
+                }
+                // Single | for lambda params, or-patterns, and bitwise OR
                 return Ok(Token {
                     kind: TokenKind::Bar,
                     span: self.span_point(start_line, start_col),
@@ -2025,7 +2130,7 @@ mod tests {
 
     #[test]
     fn test_invalid_char() {
-        let err = tokenize("let x = @;").unwrap_err();
+        let err = tokenize("let x = ~;").unwrap_err();
         assert!(err.message.contains("Unexpected character"));
     }
 
@@ -2036,9 +2141,10 @@ mod tests {
     }
 
     #[test]
-    fn test_single_ampersand() {
-        let err = tokenize("&x").unwrap_err();
-        assert!(err.message.contains("&&"));
+    fn test_single_ampersand_is_bitwise_and() {
+        let tokens = tokenize("&x").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Ampersand);
+        assert_eq!(tokens[1].kind, TokenKind::Ident);
     }
 
     #[test]

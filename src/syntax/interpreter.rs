@@ -4442,6 +4442,31 @@ impl<'a> Interpreter<'a> {
                     return Ok(DataType::Bool(result));
                 }
 
+                // Bitwise operators: &, |, ^, <<, >>, &^
+                match op {
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AndNot => {
+                        let a = lhs.to_i64().ok_or_else(|| InterpError::TypeError {
+                            expected: "integer".to_string(), actual: lhs.type_name().to_string(),
+                            context: format!("left operand of '{}'", op), span: expr.span,
+                        })?;
+                        let b = rhs.to_i64().ok_or_else(|| InterpError::TypeError {
+                            expected: "integer".to_string(), actual: rhs.type_name().to_string(),
+                            context: format!("right operand of '{}'", op), span: expr.span,
+                        })?;
+                        let result = match op {
+                            BinOp::BitAnd => a & b,
+                            BinOp::BitOr => a | b,
+                            BinOp::BitXor => a ^ b,
+                            BinOp::Shl => a.checked_shl(b as u32).unwrap_or(0),
+                            BinOp::Shr => a.checked_shr(b as u32).unwrap_or(if a < 0 { -1 } else { 0 }),
+                            BinOp::AndNot => a & !b,
+                            _ => unreachable!(),
+                        };
+                        return Ok(DataType::Int64(result));
+                    }
+                    _ => {}
+                }
+
                 // String multiplication: "ha" * 3 => "hahaha" (#289)
                 if *op == BinOp::Mul {
                     if let DataType::String(ref s) = lhs {
@@ -8813,6 +8838,13 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
     match pattern {
         Pattern::Wildcard => Some(vec![]),
         Pattern::Variable(name) => Some(vec![(name.clone(), value.clone())]),
+        Pattern::Binding { name, pattern: inner_pat } => {
+            // Match the inner pattern; if it matches, also bind the whole value to name
+            match_pattern_depth(value, inner_pat, depth + 1).map(|mut bindings| {
+                bindings.push((name.clone(), value.clone()));
+                bindings
+            })
+        }
         Pattern::Literal(lit) => {
             let matches = match (lit, value) {
                 (Literal::Int64(a), DataType::Int64(b)) => a == b,

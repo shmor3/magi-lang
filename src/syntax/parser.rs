@@ -945,6 +945,12 @@ impl Parser {
                 TokenKind::StarEq => Some(BinOp::Mul),
                 TokenKind::SlashEq => Some(BinOp::Div),
                 TokenKind::PercentEq => Some(BinOp::Mod),
+                TokenKind::AmpEq => Some(BinOp::BitAnd),
+                TokenKind::BarEq => Some(BinOp::BitOr),
+                TokenKind::CaretEq => Some(BinOp::BitXor),
+                TokenKind::ShlEq => Some(BinOp::Shl),
+                TokenKind::ShrEq => Some(BinOp::Shr),
+                TokenKind::AmpCaretEq => Some(BinOp::AndNot),
                 _ => None,
             };
             if let Some(op) = compound_op {
@@ -1589,6 +1595,12 @@ impl Parser {
                 TokenKind::StarEq => Some(BinOp::Mul),
                 TokenKind::SlashEq => Some(BinOp::Div),
                 TokenKind::PercentEq => Some(BinOp::Mod),
+                TokenKind::AmpEq => Some(BinOp::BitAnd),
+                TokenKind::BarEq => Some(BinOp::BitOr),
+                TokenKind::CaretEq => Some(BinOp::BitXor),
+                TokenKind::ShlEq => Some(BinOp::Shl),
+                TokenKind::ShrEq => Some(BinOp::Shr),
+                TokenKind::AmpCaretEq => Some(BinOp::AndNot),
                 _ => None,
             };
             if let Some(op) = compound_op {
@@ -1942,6 +1954,11 @@ impl Parser {
                 TokenKind::Slash => BinOp::Div,
                 TokenKind::Percent => BinOp::Mod,
                 TokenKind::In => BinOp::In,
+                TokenKind::Ampersand => BinOp::BitAnd,
+                TokenKind::Caret => BinOp::BitXor,
+                TokenKind::Shl => BinOp::Shl,
+                TokenKind::Shr => BinOp::Shr,
+                TokenKind::AmpCaret => BinOp::AndNot,
                 _ => break,
             };
 
@@ -3205,6 +3222,15 @@ impl Parser {
                         });
                     }
                     self.pos = saved;
+                }
+                // Check for @ binding: `name @ pattern`
+                if self.at(&TokenKind::At) {
+                    self.advance(); // consume @
+                    let inner = self.parse_single_pattern_inner()?;
+                    return Ok(Pattern::Binding {
+                        name: tok.text.clone(),
+                        pattern: Box::new(inner),
+                    });
                 }
                 Ok(Pattern::Variable(tok.text.clone()))
             }
