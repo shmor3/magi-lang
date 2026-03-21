@@ -4478,18 +4478,25 @@ output result;
 
     #[test]
     fn test_parse_deeply_nested_parens_within_limit() {
-        // 30 levels of nesting — well within the 128 depth limit (~64 paren levels)
-        let mut code = String::new();
-        for _ in 0..30 {
-            code.push('(');
-        }
-        code.push('1');
-        for _ in 0..30 {
-            code.push(')');
-        }
-        code.push(';');
-        let prog = parse(&code);
-        assert_eq!(prog.statements.len(), 1);
+        // Run in a thread with a larger stack to avoid stack overflow in debug mode
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024) // 16MB stack
+            .spawn(|| {
+                // 30 levels of nesting — well within the 128 depth limit (~64 paren levels)
+                let mut code = String::new();
+                for _ in 0..30 {
+                    code.push('(');
+                }
+                code.push('1');
+                for _ in 0..30 {
+                    code.push(')');
+                }
+                code.push(';');
+                let prog = parse(&code);
+                assert_eq!(prog.statements.len(), 1);
+            })
+            .expect("failed to spawn thread");
+        handle.join().expect("thread panicked");
     }
 
     #[test]

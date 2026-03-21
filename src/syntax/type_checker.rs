@@ -2004,6 +2004,12 @@ impl TypeChecker {
                     "is_some" | "is_none" | "is_ok" | "is_err" => return ChannelType::Bool,
                     "unwrap" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
                     "unwrap_or" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
+                    // Concurrency: channel operations
+                    "channel" => return ChannelType::Array,
+                    "chan_send" => return ChannelType::Null,
+                    "chan_recv" => return ChannelType::Null,
+                    "chan_try_recv" => return ChannelType::Null,
+                    "chan_close" => return ChannelType::Null,
                     _ => {}
                 }
 
@@ -3132,6 +3138,14 @@ impl TypeChecker {
                     return ChannelType::String;
                 }
 
+                // String repetition: "abc" * 3 or 3 * "abc" returns String.
+                if op == BinOp::Mul
+                    && ((left == ChannelType::String && is_numeric(right))
+                        || (is_numeric(left) && right == ChannelType::String))
+                {
+                    return ChannelType::String;
+                }
+
                 // Division: uses numeric promotion for all cases (int/int = int, preserves Float32)
                 if op == BinOp::Div {
                     return promote_numeric(&[left, right]);
@@ -3236,7 +3250,10 @@ impl TypeChecker {
         ) {
             let is_string_concat = op == BinOp::Add
                 && (left_ty == ChannelType::String || right_ty == ChannelType::String);
-            if !is_string_concat {
+            let is_string_repeat = op == BinOp::Mul
+                && ((left_ty == ChannelType::String && is_numeric(right_ty))
+                    || (is_numeric(left_ty) && right_ty == ChannelType::String));
+            if !is_string_concat && !is_string_repeat {
                 for ty in [left_ty, right_ty] {
                     if ty != ChannelType::Null && !is_numeric(ty) {
                         self.emit_coded(

@@ -3861,6 +3861,11 @@ impl<'a> Interpreter<'a> {
         self.heap.push_scope();
         self.call_depth += 1;
 
+        // Reset expression nesting depth per function call so recursive calls
+        // do not accumulate expression depth across the entire call stack.
+        let saved_expr_depth = self.expr_depth;
+        self.expr_depth = 0;
+
         // Track call stack for debugger
         if let Some(ref mut debug) = self.debug {
             debug.call_stack.push(name.to_string());
@@ -3899,6 +3904,7 @@ impl<'a> Interpreter<'a> {
             .unwrap_or_else(|| vec![HashMap::new()]);
         self.heap.pop_scope();
         self.call_depth -= 1;
+        self.expr_depth = saved_expr_depth;
 
         // Pop call stack for diagnostics (#133) and debugger
         self.call_stack_names.pop();

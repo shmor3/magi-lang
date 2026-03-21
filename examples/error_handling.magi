@@ -111,9 +111,10 @@ fn process_input(input) {
     try {
         let n = parse_positive(input);
         let result = safe_divide(100, n);
-        match result {
-            Ok(v) => f"Success: 100 / {n} = {unwrap(result)}",
-            Err(msg) => f"Division error: {msg}",
+        if is_ok(result) {
+            f"Success: 100 / {n} = {unwrap(result)}"
+        } else {
+            f"Division error: {unwrap(result)}"
         }
     } catch err {
         f"Parse error: {err}"

@@ -7131,6 +7131,27 @@ fn print_usage() {
 }
 
 fn main() {
+    // Spawn the real main on a thread with a larger stack to support deep
+    // recursion in the interpreter (debug builds use far more stack per frame).
+    let builder = std::thread::Builder::new()
+        .name("magi-main".to_string())
+        .stack_size(32 * 1024 * 1024); // 32 MB
+    let handler = builder
+        .spawn(main_inner)
+        .expect("failed to spawn main thread");
+    if let Err(e) = handler.join() {
+        if let Some(msg) = e.downcast_ref::<&str>() {
+            eprintln!("fatal: {}", msg);
+        } else if let Some(msg) = e.downcast_ref::<String>() {
+            eprintln!("fatal: {}", msg);
+        } else {
+            eprintln!("fatal: unexpected panic");
+        }
+        process::exit(1);
+    }
+}
+
+fn main_inner() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {

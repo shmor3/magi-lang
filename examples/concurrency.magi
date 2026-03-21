@@ -38,7 +38,7 @@ fn worker(id, sender, value) {
 }
 
 // Spawn 5 workers
-let workers = [];
+let mut workers = [];
 let mut i = 0;
 while i < 5 {
     let t = spawn worker(i, tx, i * 3);

@@ -6,7 +6,7 @@ use std::json::*;
 
 output "=== Parse JSON ===";
 
-let json_str = '{"name": "Alice", "age": 30, "skills": ["Rust", "MAGI", "Python"]}';
+let json_str = "{\"name\": \"Alice\", \"age\": 30, \"skills\": [\"Rust\", \"MAGI\", \"Python\"]}";
 let user = parse_json(json_str);
 
 output f"Name: {user.name}";
@@ -53,19 +53,19 @@ output f"Without age: {to_json(minimal)}";
 output "";
 output "=== JSON Validation ===";
 
-let valid = json_validate('{"key": "value"}');
-let invalid = json_validate('{bad json}');
+let valid = json_validate("{\"key\": \"value\"}");
+let invalid = json_validate("{bad json}");
 output f"Valid JSON:   {valid}";
 output f"Invalid JSON: {invalid}";
 
 output "";
 output "=== Nested Data Processing ===";
 
-let api_response = parse_json('[
-    {"id": 1, "name": "Alice", "score": 95},
-    {"id": 2, "name": "Bob", "score": 87},
-    {"id": 3, "name": "Charlie", "score": 92}
-]');
+let api_response = parse_json("[
+    {\"id\": 1, \"name\": \"Alice\", \"score\": 95},
+    {\"id\": 2, \"name\": \"Bob\", \"score\": 87},
+    {\"id\": 3, \"name\": \"Charlie\", \"score\": 92}
+]");
 
 // Use collection methods on parsed JSON arrays
 let names = api_response.map(|u| u.name);
