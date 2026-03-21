@@ -1608,7 +1608,7 @@ fn test_type_check_enum_struct() {
 fn test_version_info() {
     let v = magi_lang::version::current();
     assert_eq!(v.major(), 0);
-    assert_eq!(v.minor(), 3);
+    assert_eq!(v.minor(), 9);
     assert!(!v.is_stable());
 }
 

@@ -7,5 +7,6 @@ pub mod lsp;
 pub mod ops;
 pub mod optimizer;
 pub mod syntax;
+pub mod telemetry;
 pub mod types;
 pub mod version;
