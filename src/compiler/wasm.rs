@@ -5,8 +5,8 @@
 use wasm_encoder::{
     CodeSection, DataSection, ElementSection, Elements, ExportKind, ExportSection,
     FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction as WasmInst,
-    MemorySection, MemoryType, Module, TableSection, TableType, TypeSection,
-    ValType as WasmValType,
+    MemorySection, MemoryType, Module, NameMap, NameSection, TableSection, TableType,
+    TypeSection, ValType as WasmValType,
 };
 
 use std::collections::HashMap;
@@ -193,6 +193,20 @@ impl WasmCodegen {
             offset = offset.saturating_add(4u32.saturating_add(bytes.len() as u32));
         }
         module.section(&data);
+
+        // ── Name section (debug info) ───────────────────────
+        let mut names = NameSection::new();
+        let mut func_names = NameMap::new();
+        // Name the imported functions first (indices 0..num_imports).
+        func_names.append(0, "print");
+        func_names.append(1, "runtime_call");
+        func_names.append(2, "__to_string");
+        // Name each IR function (indices num_imports..).
+        for (i, func) in ir.functions.iter().enumerate() {
+            func_names.append(i as u32 + num_imports, &func.name);
+        }
+        names.functions(&func_names);
+        module.section(&names);
 
         let bytes = module.finish();
         Self::validate_wasm_bytes(&bytes)?;
