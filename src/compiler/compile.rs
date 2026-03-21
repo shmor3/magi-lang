@@ -842,6 +842,27 @@ impl Compiler {
                 self.emit(Instruction::End); // Block
                 self.loop_stack.pop();
             }
+
+            StatementKind::TupleAssignment { names, value } => {
+                // Evaluate the RHS, store in a temp, then assign each element.
+                self.compile_expr(value)?;
+                let tmp = self.define_local("__tuple_assign", ValType::Tagged, false)?;
+                self.emit(Instruction::LocalSet(tmp));
+                for (i, name) in names.iter().enumerate() {
+                    self.emit(Instruction::LocalGet(tmp));
+                    self.emit(Instruction::PushI64(i as i64));
+                    self.emit(Instruction::ArrayGet);
+                    if let Some(idx) = self.fb()?.resolve_local(name) {
+                        self.emit(Instruction::LocalSet(idx));
+                    } else {
+                        return Err(CompileError::at(
+                            stmt.span.start_line,
+                            stmt.span.start_col,
+                            &format!("undefined variable in tuple assignment: {}", name),
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1890,6 +1911,33 @@ impl Compiler {
                     let bind_name = alias.as_deref().unwrap_or(key);
                     let idx = self.define_local(bind_name, ValType::Tagged, mutable)?;
                     self.emit(Instruction::LocalSet(idx));
+                }
+            }
+            DestructurePattern::Tuple(elements) => {
+                for (i, elem) in elements.iter().enumerate() {
+                    match elem {
+                        DestructureElement::Name(name) => {
+                            self.emit(Instruction::LocalGet(val_local));
+                            self.emit(Instruction::PushI64(i as i64));
+                            self.emit(Instruction::ArrayGet);
+                            let idx = self.define_local(name, ValType::Tagged, mutable)?;
+                            self.emit(Instruction::LocalSet(idx));
+                        }
+                        DestructureElement::Rest(name) => {
+                            self.emit(Instruction::LocalGet(val_local));
+                            self.emit(Instruction::PushI64(i as i64));
+                            self.emit(Instruction::LocalGet(val_local));
+                            self.emit(Instruction::ArrayLen);
+                            self.emit(Instruction::PushBool(false));
+                            let slice_name = self.module.intern_string("__slice");
+                            self.emit(Instruction::RuntimeCall {
+                                name: slice_name,
+                                arg_count: 4,
+                            });
+                            let idx = self.define_local(name, ValType::Tagged, mutable)?;
+                            self.emit(Instruction::LocalSet(idx));
+                        }
+                    }
                 }
             }
         }

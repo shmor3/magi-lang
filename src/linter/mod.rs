@@ -135,7 +135,7 @@ impl<'a> LintContext<'a> {
             }
             StatementKind::LetDestructure { pattern, value, .. } => {
                 match pattern {
-                    DestructurePattern::Array(elements) => {
+                    DestructurePattern::Array(elements) | DestructurePattern::Tuple(elements) => {
                         for elem in elements {
                             let name = match elem {
                                 DestructureElement::Name(n) => n,

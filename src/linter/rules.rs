@@ -586,7 +586,7 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
                 vec![(name.clone(), stmt.span)]
             }
             StatementKind::LetDestructure { pattern, .. } => match pattern {
-                DestructurePattern::Array(elements) => elements
+                DestructurePattern::Array(elements) | DestructurePattern::Tuple(elements) => elements
                     .iter()
                     .map(|elem| {
                         let name = match elem {

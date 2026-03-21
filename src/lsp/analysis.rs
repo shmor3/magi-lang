@@ -440,6 +440,16 @@ fn destructure_names(pattern: &DestructurePattern) -> Vec<String> {
                 alias.as_ref().unwrap_or(key).clone()
             }).collect()
         }
+        DestructurePattern::Tuple(elems) => {
+            let mut names = Vec::new();
+            for elem in elems {
+                match elem {
+                    DestructureElement::Name(n) => names.push(n.clone()),
+                    DestructureElement::Rest(n) => names.push(n.clone()),
+                }
+            }
+            names
+        }
     }
 }
 

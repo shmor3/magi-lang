@@ -336,6 +336,9 @@ fn find_calls_in_statement(stmt: &Statement, target_name: &str, spans: &mut Vec<
         StatementKind::TestDef { body, .. } | StatementKind::ModuleDef { body, .. } => {
             spans.extend(find_calls_in_block(body, target_name));
         }
+        StatementKind::TupleAssignment { value, .. } => {
+            find_calls_in_expr(value, target_name, spans);
+        }
         StatementKind::Return(None)
         | StatementKind::Break { .. }
         | StatementKind::Continue { .. }
@@ -344,7 +347,8 @@ fn find_calls_in_statement(stmt: &Statement, target_name: &str, spans: &mut Vec<
         | StatementKind::TypeAlias { .. }
         | StatementKind::EnumDef { .. }
         | StatementKind::StructDef { .. }
-        | StatementKind::TraitDef { .. } => {}
+        | StatementKind::TraitDef { .. }
+        | StatementKind::TupleAssignment { .. } => {}
     }
 }
 

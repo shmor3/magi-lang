@@ -18,6 +18,19 @@ use std::collections::{HashMap, HashSet};
 pub use crate::eval::DiagnosticSeverity;
 
 // =============================================================================
+// Constant expression values (for constant folding)
+// =============================================================================
+
+/// A compile-time constant value produced by constant folding.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstLiteral {
+    Int64(i64),
+    Float64(f64),
+    String(String),
+    Bool(bool),
+}
+
+// =============================================================================
 // Public types
 // =============================================================================
 
@@ -154,6 +167,8 @@ struct TypeChecker {
     type_aliases: HashMap<String, String>,
     /// Known constant values for const propagation.
     const_values: HashMap<String, ChannelType>,
+    /// Computed constant literal values for constant folding.
+    const_literals: HashMap<String, ConstLiteral>,
     /// Known trait definitions: trait_name → list of (method_name, param_count, line, col, return_type).
     trait_defs: HashMap<String, Vec<(String, usize, u32, u32, Option<String>)>>,
 }
@@ -173,6 +188,7 @@ impl TypeChecker {
             use_aliases: HashSet::new(),
             type_aliases: HashMap::new(),
             const_values: HashMap::new(),
+            const_literals: HashMap::new(),
             trait_defs: HashMap::new(),
             pipe_depth: 0,
             loop_depth: 0,
@@ -990,6 +1006,44 @@ impl TypeChecker {
                             );
                         }
                     }
+                    DestructurePattern::Tuple(elements) => {
+                        // Tuple destructuring desugars same as array destructuring
+                        if val_type != ChannelType::Array && val_type != ChannelType::Null {
+                            self.emit_coded(
+                                stmt.span.start_line,
+                                stmt.span.start_col,
+                                format!(
+                                    "tuple destructuring requires array/tuple, got {}",
+                                    val_type.as_str()
+                                ),
+                                DiagnosticSeverity::Warning,
+                                super::errors::ErrorCode::E100,
+                                None,
+                            );
+                        }
+                        for elem in elements {
+                            match elem {
+                                DestructureElement::Name(name) => {
+                                    self.define_var(
+                                        name,
+                                        ChannelType::Null,
+                                        *mutable,
+                                        stmt.span.start_line,
+                                        stmt.span.start_col,
+                                    );
+                                }
+                                DestructureElement::Rest(name) => {
+                                    self.define_var(
+                                        name,
+                                        ChannelType::Array,
+                                        *mutable,
+                                        stmt.span.start_line,
+                                        stmt.span.start_col,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1158,13 +1212,21 @@ impl TypeChecker {
                 value,
             } => {
                 let inferred = self.infer_expr(value);
+                // Try constant folding to compute and record the actual value.
+                let folded = self.try_const_fold(value);
                 // For simple literal values, track the precise type for const propagation.
-                let precise_type = match &value.kind {
-                    ExpressionKind::Literal(Literal::Int64(_)) => ChannelType::Int64,
-                    ExpressionKind::Literal(Literal::Float64(_)) => ChannelType::Float64,
-                    ExpressionKind::Literal(Literal::String(_)) => ChannelType::String,
-                    ExpressionKind::Literal(Literal::Bool(_)) => ChannelType::Bool,
-                    _ => inferred,
+                let precise_type = match &folded {
+                    Some(ConstLiteral::Int64(_)) => ChannelType::Int64,
+                    Some(ConstLiteral::Float64(_)) => ChannelType::Float64,
+                    Some(ConstLiteral::String(_)) => ChannelType::String,
+                    Some(ConstLiteral::Bool(_)) => ChannelType::Bool,
+                    None => match &value.kind {
+                        ExpressionKind::Literal(Literal::Int64(_)) => ChannelType::Int64,
+                        ExpressionKind::Literal(Literal::Float64(_)) => ChannelType::Float64,
+                        ExpressionKind::Literal(Literal::String(_)) => ChannelType::String,
+                        ExpressionKind::Literal(Literal::Bool(_)) => ChannelType::Bool,
+                        _ => inferred,
+                    },
                 };
                 let ct = self.reconcile_annotation(
                     type_annotation.as_ref(),
@@ -1175,6 +1237,10 @@ impl TypeChecker {
                 );
                 // Store known const value type for propagation.
                 self.const_values.insert(name.clone(), ct);
+                // Store computed literal for use in match patterns and array sizes.
+                if let Some(lit) = folded {
+                    self.const_literals.insert(name.clone(), lit);
+                }
                 // Constants are immutable
                 self.define_var(name, ct, false, stmt.span.start_line, stmt.span.start_col);
                 // Mark as const for unused-constant diagnostics.
@@ -1479,6 +1545,43 @@ impl TypeChecker {
                 self.loop_depth -= 1;
                 self.check_statement(update);
                 self.pop_scope();
+            }
+
+            // -----------------------------------------------------------------
+            // (a, b) = (expr1, expr2); — tuple/swap assignment
+            // -----------------------------------------------------------------
+            StatementKind::TupleAssignment { names, value } => {
+                let _ = self.infer_expr(value);
+                for name in names {
+                    let (exists, is_mutable) = match self.lookup(name) {
+                        Some(info) => (true, info.mutable),
+                        None => (false, false),
+                    };
+                    if !exists {
+                        let suggestion = self.suggest_variable(name);
+                        self.emit_coded(
+                            stmt.span.start_line,
+                            stmt.span.start_col,
+                            format!("undefined variable '{}'", name),
+                            DiagnosticSeverity::Error,
+                            super::errors::ErrorCode::E200,
+                            suggestion,
+                        );
+                    } else if !is_mutable {
+                        self.emit_coded(
+                            stmt.span.start_line,
+                            stmt.span.start_col,
+                            format!("cannot assign to immutable variable '{}'", name),
+                            DiagnosticSeverity::Error,
+                            super::errors::ErrorCode::E404,
+                            None,
+                        );
+                    }
+                    if let Some(info) = self.lookup_mut(name) {
+                        info.used = true;
+                        info.mutated = true;
+                    }
+                }
             }
         }
     }
@@ -3410,6 +3513,71 @@ impl TypeChecker {
             None,
         );
         ann_type
+    }
+
+    // =========================================================================
+    // Constant folding
+    // =========================================================================
+
+    /// Try to evaluate an expression at compile time, returning a constant
+    /// literal if the expression is a literal or simple arithmetic on constants.
+    fn try_const_fold(&self, expr: &Expression) -> Option<ConstLiteral> {
+        match &expr.kind {
+            ExpressionKind::Literal(Literal::Int64(n)) => Some(ConstLiteral::Int64(*n)),
+            ExpressionKind::Literal(Literal::Float64(n)) => Some(ConstLiteral::Float64(*n)),
+            ExpressionKind::Literal(Literal::String(s)) => Some(ConstLiteral::String(s.clone())),
+            ExpressionKind::Literal(Literal::Bool(b)) => Some(ConstLiteral::Bool(*b)),
+            ExpressionKind::Variable(name) => self.const_literals.get(name.as_str()).cloned(),
+            ExpressionKind::UnaryOp { op, operand } => {
+                let val = self.try_const_fold(operand)?;
+                match (op, &val) {
+                    (UnOp::Neg, ConstLiteral::Int64(n)) => Some(ConstLiteral::Int64(-n)),
+                    (UnOp::Neg, ConstLiteral::Float64(n)) => Some(ConstLiteral::Float64(-n)),
+                    (UnOp::Not, ConstLiteral::Bool(b)) => Some(ConstLiteral::Bool(!b)),
+                    _ => None,
+                }
+            }
+            ExpressionKind::BinaryOp { op, left, right } => {
+                let lhs = self.try_const_fold(left)?;
+                let rhs = self.try_const_fold(right)?;
+                match (op, &lhs, &rhs) {
+                    // Integer arithmetic
+                    (BinOp::Add, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Int64(a.wrapping_add(*b))),
+                    (BinOp::Sub, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Int64(a.wrapping_sub(*b))),
+                    (BinOp::Mul, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Int64(a.wrapping_mul(*b))),
+                    (BinOp::Div, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) if *b != 0 => Some(ConstLiteral::Int64(a / b)),
+                    (BinOp::Mod, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) if *b != 0 => Some(ConstLiteral::Int64(a % b)),
+                    // Float arithmetic
+                    (BinOp::Add, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(a + b)),
+                    (BinOp::Sub, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(a - b)),
+                    (BinOp::Mul, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(a * b)),
+                    (BinOp::Div, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) if *b != 0.0 => Some(ConstLiteral::Float64(a / b)),
+                    // Mixed int/float
+                    (BinOp::Add, ConstLiteral::Int64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(*a as f64 + b)),
+                    (BinOp::Add, ConstLiteral::Float64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Float64(a + *b as f64)),
+                    (BinOp::Sub, ConstLiteral::Int64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(*a as f64 - b)),
+                    (BinOp::Sub, ConstLiteral::Float64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Float64(a - *b as f64)),
+                    (BinOp::Mul, ConstLiteral::Int64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(*a as f64 * b)),
+                    (BinOp::Mul, ConstLiteral::Float64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Float64(a * *b as f64)),
+                    (BinOp::Div, ConstLiteral::Int64(a), ConstLiteral::Float64(b)) if *b != 0.0 => Some(ConstLiteral::Float64(*a as f64 / b)),
+                    (BinOp::Div, ConstLiteral::Float64(a), ConstLiteral::Int64(b)) if *b != 0 => Some(ConstLiteral::Float64(a / *b as f64)),
+                    // String concatenation
+                    (BinOp::Add, ConstLiteral::String(a), ConstLiteral::String(b)) => Some(ConstLiteral::String(format!("{}{}", a, b))),
+                    // Boolean logic
+                    (BinOp::And, ConstLiteral::Bool(a), ConstLiteral::Bool(b)) => Some(ConstLiteral::Bool(*a && *b)),
+                    (BinOp::Or, ConstLiteral::Bool(a), ConstLiteral::Bool(b)) => Some(ConstLiteral::Bool(*a || *b)),
+                    // Integer comparison
+                    (BinOp::Eq, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a == b)),
+                    (BinOp::NotEq, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a != b)),
+                    (BinOp::Lt, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a < b)),
+                    (BinOp::Gt, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a > b)),
+                    (BinOp::LtEq, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a <= b)),
+                    (BinOp::GtEq, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a >= b)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     // =========================================================================

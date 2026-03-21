@@ -554,6 +554,18 @@ impl<'a> Formatter<'a> {
                 self.dedent();
                 self.write("}");
             }
+            StatementKind::TupleAssignment { names, value } => {
+                self.write("(");
+                for (i, name) in names.iter().enumerate() {
+                    self.write(name);
+                    if i < names.len() - 1 {
+                        self.write(", ");
+                    }
+                }
+                self.write(") = ");
+                self.fmt_expression(value);
+                self.write(";");
+            }
         }
     }
 
@@ -1413,6 +1425,22 @@ impl<'a> Formatter<'a> {
                     }
                 }
                 self.write("}");
+            }
+            DestructurePattern::Tuple(elems) => {
+                self.write("(");
+                for (i, elem) in elems.iter().enumerate() {
+                    match elem {
+                        DestructureElement::Name(name) => self.write(name),
+                        DestructureElement::Rest(name) => {
+                            self.write("...");
+                            self.write(name);
+                        }
+                    }
+                    if i < elems.len() - 1 {
+                        self.write(", ");
+                    }
+                }
+                self.write(")");
             }
         }
     }

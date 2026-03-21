@@ -795,10 +795,21 @@ impl<'a> Lexer<'a> {
             _ => {}
         }
 
-        // Raw string: r"no\escape"
-        if ch == b'r' && self.peek_at(1) == Some(b'"') {
-            self.advance(); // consume 'r'
-            return self.lex_raw_string(start_line, start_col);
+        // Raw string: r"no\escape" or r#"can contain "quotes""#
+        if ch == b'r' {
+            if self.peek_at(1) == Some(b'"') {
+                self.advance(); // consume 'r'
+                return self.lex_raw_string(start_line, start_col);
+            }
+            if self.peek_at(1) == Some(b'#') {
+                self.advance(); // consume 'r'
+                return self.lex_raw_string_hashed(start_line, start_col);
+            }
+        }
+
+        // Byte literal: b'x'
+        if ch == b'b' && self.peek_at(1) == Some(b'\'') {
+            return self.lex_byte_literal(start_line, start_col);
         }
 
         // f-string: f"hello {name}"
@@ -1093,6 +1104,176 @@ impl<'a> Lexer<'a> {
             kind: TokenKind::StringLiteral,
             span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text: value,
+        })
+    }
+
+    /// Lex `r#"..."#`, `r##"..."##`, etc. — raw strings delimited by matching `#` counts.
+    fn lex_raw_string_hashed(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        // Count the number of '#' characters
+        let mut hash_count = 0usize;
+        while self.peek() == Some(b'#') {
+            self.advance();
+            hash_count += 1;
+        }
+        // Expect opening '"'
+        if self.peek() != Some(b'"') {
+            return Err(SyntaxError {
+                line: self.line as usize,
+                column: self.col as usize,
+                message: format!("Expected '\"' after 'r{}'", "#".repeat(hash_count)),
+                code: None,
+            });
+        }
+        self.advance(); // consume opening '"'
+
+        let mut value = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(SyntaxError {
+                        line: start_line as usize,
+                        column: start_col as usize,
+                        message: "Unterminated raw string literal".to_string(),
+                        code: None,
+                    });
+                }
+                Some(b'"') => {
+                    // Check if followed by the right number of '#' chars
+                    let mut matched = true;
+                    for i in 1..=hash_count {
+                        if self.peek_at(i) != Some(b'#') {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if matched {
+                        self.advance(); // consume '"'
+                        for _ in 0..hash_count {
+                            self.advance(); // consume each '#'
+                        }
+                        break;
+                    } else {
+                        // Not a terminator — include the '"' in the value
+                        self.advance();
+                        value.push('"');
+                    }
+                }
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
+                }
+            }
+        }
+        Ok(Token {
+            kind: TokenKind::StringLiteral,
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+            text: value,
+        })
+    }
+
+    /// Lex `b'x'` — byte literal producing an integer value.
+    fn lex_byte_literal(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        self.advance(); // consume 'b'
+        self.advance(); // consume opening '\''
+
+        let byte_val = match self.peek() {
+            None => {
+                return Err(SyntaxError {
+                    line: start_line as usize,
+                    column: start_col as usize,
+                    message: "Unterminated byte literal".to_string(),
+                    code: None,
+                });
+            }
+            Some(b'\\') => {
+                // Escape sequence
+                self.advance(); // consume backslash
+                match self.advance() {
+                    Some(b'n') => b'\n',
+                    Some(b't') => b'\t',
+                    Some(b'r') => b'\r',
+                    Some(b'\\') => b'\\',
+                    Some(b'\'') => b'\'',
+                    Some(b'0') => b'\0',
+                    Some(b'x') => {
+                        // \xHH hex escape
+                        let mut hex = String::with_capacity(2);
+                        for _ in 0..2 {
+                            match self.advance() {
+                                Some(ch) if (ch as char).is_ascii_hexdigit() => hex.push(ch as char),
+                                _ => {
+                                    return Err(SyntaxError {
+                                        line: self.line as usize,
+                                        column: self.col as usize,
+                                        message: "Expected two hex digits after \\x in byte literal".to_string(),
+                                        code: None,
+                                    });
+                                }
+                            }
+                        }
+                        u8::from_str_radix(&hex, 16).map_err(|_| SyntaxError {
+                            line: self.line as usize,
+                            column: self.col as usize,
+                            message: format!("Invalid hex escape in byte literal: \\x{}", hex),
+                            code: None,
+                        })?
+                    }
+                    Some(ch) => {
+                        return Err(SyntaxError {
+                            line: self.line as usize,
+                            column: self.col as usize,
+                            message: format!("Invalid escape sequence in byte literal: \\{}", ch as char),
+                            code: None,
+                        });
+                    }
+                    None => {
+                        return Err(SyntaxError {
+                            line: start_line as usize,
+                            column: start_col as usize,
+                            message: "Unterminated byte literal escape".to_string(),
+                            code: None,
+                        });
+                    }
+                }
+            }
+            Some(b'\'') => {
+                return Err(SyntaxError {
+                    line: self.line as usize,
+                    column: self.col as usize,
+                    message: "Empty byte literal".to_string(),
+                    code: None,
+                });
+            }
+            Some(ch) if ch > 0x7F => {
+                return Err(SyntaxError {
+                    line: self.line as usize,
+                    column: self.col as usize,
+                    message: "Byte literal must be ASCII".to_string(),
+                    code: None,
+                });
+            }
+            Some(ch) => {
+                self.advance(); // consume the character
+                ch
+            }
+        };
+
+        // Expect closing '\''
+        if self.peek() != Some(b'\'') {
+            return Err(SyntaxError {
+                line: self.line as usize,
+                column: self.col as usize,
+                message: "Expected closing ' for byte literal".to_string(),
+                code: None,
+            });
+        }
+        self.advance(); // consume closing '\''
+
+        Ok(Token {
+            kind: TokenKind::IntLiteral,
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+            text: byte_val.to_string(),
         })
     }
 

@@ -484,6 +484,11 @@ impl Parser {
                 // Could be assignment (x = ...), compound assign (x += ...), or expression
                 self.parse_assignment_or_expr_statement(start)
             }
+            TokenKind::LParen => {
+                // Could be tuple assignment: (a, b) = (expr1, expr2);
+                // Or just a parenthesized expression statement.
+                self.parse_tuple_assign_or_expr_statement(start)
+            }
             _ => self.parse_expr_statement(start),
         }
     }
@@ -592,12 +597,15 @@ impl Parser {
 
         let is_mut = self.eat(&TokenKind::Mut);
 
-        // Check for destructuring: let [a, b] = expr; or let {x, y} = expr;
+        // Check for destructuring: let [a, b] = expr; or let {x, y} = expr; or let (a, b) = expr;
         if self.at(&TokenKind::LBracket) {
             return self.parse_let_destructure_array(start, is_mut);
         }
         if self.at(&TokenKind::LBrace) {
             return self.parse_let_destructure_map(start, is_mut);
+        }
+        if self.at(&TokenKind::LParen) {
+            return self.parse_let_destructure_tuple(start, is_mut);
         }
 
         let name_tok = self.expect_identifier()?;
@@ -713,6 +721,37 @@ impl Parser {
         Ok(Statement {
             kind: StatementKind::LetDestructure {
                 pattern: DestructurePattern::Map(entries),
+                mutable,
+                value,
+            },
+            span: start.merge(end),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
+        })
+    }
+
+    fn parse_let_destructure_tuple(
+        &mut self,
+        start: Span,
+        mutable: bool,
+    ) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume '('
+        let mut elements = Vec::new();
+        while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+            let name = self.expect_identifier()?;
+            elements.push(DestructureElement::Name(name.text));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        self.expect(&TokenKind::Eq)?;
+        let value = self.parse_expression()?;
+        let end = self.peek().span;
+        self.eat(&TokenKind::Semicolon);
+        Ok(Statement {
+            kind: StatementKind::LetDestructure {
+                pattern: DestructurePattern::Tuple(elements),
                 mutable,
                 value,
             },
@@ -1444,6 +1483,58 @@ impl Parser {
             }
 
             // Not assignment — backtrack and parse as expression
+            self.pos = saved_pos;
+        }
+
+        self.parse_expr_statement(start)
+    }
+
+    /// Try to parse `(name1, name2, ...) = expr;` as a tuple assignment.
+    /// Falls back to expression statement if the pattern doesn't match.
+    fn parse_tuple_assign_or_expr_statement(
+        &mut self,
+        start: Span,
+    ) -> Result<Statement, SyntaxError> {
+        // Try: save position, parse (ident, ident, ...) then expect '='
+        let saved_pos = self.pos;
+
+        if self.eat(&TokenKind::LParen) {
+            let mut names = Vec::new();
+            let mut all_idents = true;
+
+            while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                if self.at(&TokenKind::Ident) {
+                    let tok = self.advance().clone();
+                    names.push(tok.text);
+                } else {
+                    all_idents = false;
+                    break;
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+
+            if all_idents
+                && names.len() >= 2
+                && self.at(&TokenKind::RParen)
+            {
+                self.advance(); // consume ')'
+                if self.at(&TokenKind::Eq) {
+                    self.advance(); // consume '='
+                    let value = self.parse_expression()?;
+                    let end = value.span;
+                    self.eat(&TokenKind::Semicolon);
+                    return Ok(Statement {
+                        kind: StatementKind::TupleAssignment { names, value },
+                        span: start.merge(end),
+                        leading_comments: Vec::new(),
+                        trailing_comment: None,
+                    });
+                }
+            }
+
+            // Not a tuple assignment — backtrack and fall through
             self.pos = saved_pos;
         }
 

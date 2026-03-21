@@ -296,6 +296,11 @@ pub enum StatementKind {
         update: Box<Statement>,
         body: Block,
     },
+    /// `(a, b) = (expr1, expr2);` — tuple/swap assignment
+    TupleAssignment {
+        names: Vec<String>,
+        value: Expression,
+    },
 }
 
 /// Pattern for for-loop iteration variable binding.
@@ -735,6 +740,8 @@ pub enum DestructurePattern {
     Array(Vec<DestructureElement>),
     /// `let {x, y} = expr;` or `let {x: alias} = expr;`
     Map(Vec<(String, Option<String>)>),
+    /// `let (a, b) = expr;` — tuple destructuring (desugars same as array)
+    Tuple(Vec<DestructureElement>),
 }
 
 /// An element in an array destructuring pattern.

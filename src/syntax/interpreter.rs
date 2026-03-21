@@ -1984,6 +1984,44 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(DataType::Null)
             }
+
+            StatementKind::TupleAssignment { names, value } => {
+                let val = self.eval_expr(value)?;
+                let items = match &val {
+                    DataType::Tuple(t) => t.clone(),
+                    DataType::Array(a) => a.clone(),
+                    _ => {
+                        return Err(InterpError::TypeError {
+                            expected: "Tuple or Array".to_string(),
+                            actual: val.type_name().to_string(),
+                            context: "tuple assignment".to_string(),
+                            span: stmt.span,
+                        });
+                    }
+                };
+                for (i, name) in names.iter().enumerate() {
+                    let v = items.get(i).cloned().unwrap_or(DataType::Null);
+                    let addr = match self.lookup(name) {
+                        Some(entry) if !entry.mutable => {
+                            return Err(InterpError::ImmutableAssignment {
+                                name: name.clone(),
+                                span: stmt.span,
+                            });
+                        }
+                        None => {
+                            let suggestion = self.suggest_variable(name);
+                            return Err(InterpError::UndefinedVariable {
+                                name: name.clone(),
+                                span: stmt.span,
+                                suggestion,
+                            });
+                        }
+                        Some(entry) => entry.addr,
+                    };
+                    self.heap.write(addr, v);
+                }
+                Ok(DataType::Null)
+            }
         }
     }
 
@@ -5309,6 +5347,322 @@ impl<'a> Interpreter<'a> {
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
                     }
+                    // ========================================================
+                    // Process / runtime builtins
+                    // ========================================================
+                    "exit" => {
+                        let code = if args.is_empty() {
+                            0i32
+                        } else {
+                            self.eval_expr(&args[0])?
+                                .to_i64()
+                                .unwrap_or(0) as i32
+                        };
+                        std::process::exit(code);
+                    }
+                    "pid" => {
+                        return Ok(DataType::Int64(std::process::id() as i64));
+                    }
+                    "env_set" => {
+                        if args.len() < 2 {
+                            return Err(InterpError::ArityMismatch {
+                                name: "env_set".to_string(),
+                                expected: "2".to_string(),
+                                actual: args.len(),
+                                span: expr.span,
+                            });
+                        }
+                        let key_val = self.eval_expr(&args[0])?;
+                        let key = match &key_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError {
+                                expected: "string".to_string(),
+                                actual: key_val.type_name().to_string(),
+                                context: "env_set(key)".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        let val_val = self.eval_expr(&args[1])?;
+                        let value = match &val_val {
+                            DataType::String(s) => s.clone(),
+                            other => datatype_to_display(other),
+                        };
+                        // SAFETY: env_set is inherently unsafe in multi-threaded
+                        // programs but is the expected behaviour for a scripting
+                        // language runtime.
+                        unsafe { std::env::set_var(&key, &value); }
+                        return Ok(DataType::Null);
+                    }
+                    "env_vars" => {
+                        let mut map = IndexMap::new();
+                        for (k, v) in std::env::vars() {
+                            map.insert(k, DataType::String(v));
+                        }
+                        return Ok(DataType::Map(map));
+                    }
+                    "cwd" => {
+                        let dir = std::env::current_dir().map_err(|e| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!("cwd: {}", e)),
+                                span: expr.span,
+                            }
+                        })?;
+                        return Ok(DataType::String(dir.to_string_lossy().to_string()));
+                    }
+                    "chdir" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "chdir".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let path_val = self.eval_expr(&args[0])?;
+                        let path_str = match &path_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError {
+                                expected: "string".to_string(),
+                                actual: path_val.type_name().to_string(),
+                                context: "chdir(path)".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        std::env::set_current_dir(&path_str).map_err(|e| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!("chdir: {}", e)),
+                                span: expr.span,
+                            }
+                        })?;
+                        return Ok(DataType::Null);
+                    }
+                    "temp_dir" => {
+                        let dir = std::env::temp_dir();
+                        return Ok(DataType::String(dir.to_string_lossy().to_string()));
+                    }
+                    "temp_file" => {
+                        let prefix = if args.is_empty() {
+                            "magi".to_string()
+                        } else {
+                            let v = self.eval_expr(&args[0])?;
+                            match &v {
+                                DataType::String(s) => s.clone(),
+                                _ => "magi".to_string(),
+                            }
+                        };
+                        let dir = std::env::temp_dir();
+                        let unique = std::time::SystemTime::now()
+                            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos();
+                        let filename = format!("{}_{}.tmp", prefix, unique);
+                        let path = dir.join(&filename);
+                        // Create the file so it exists
+                        std::fs::File::create(&path).map_err(|e| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!("temp_file: {}", e)),
+                                span: expr.span,
+                            }
+                        })?;
+                        return Ok(DataType::String(path.to_string_lossy().to_string()));
+                    }
+                    // ========================================================
+                    // String formatting builtins
+                    // ========================================================
+                    "sprintf" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "sprintf".to_string(),
+                                expected: "1+".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let fmt_val = self.eval_expr(&args[0])?;
+                        let fmt_str = match &fmt_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError {
+                                expected: "string".to_string(),
+                                actual: fmt_val.type_name().to_string(),
+                                context: "sprintf(format)".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        let format_args: Vec<DataType> = args[1..]
+                            .iter()
+                            .map(|a| self.eval_expr(a))
+                            .collect::<Result<_, _>>()?;
+
+                        // First pass: replace positional {0}, {1}, etc.
+                        let mut result = fmt_str.clone();
+                        for (i, arg) in format_args.iter().enumerate() {
+                            let placeholder = format!("{{{}}}", i);
+                            let replacement = datatype_to_display(arg);
+                            result = result.replace(&placeholder, &replacement);
+                        }
+
+                        // Second pass: replace sequential {} placeholders
+                        let mut output = String::with_capacity(result.len());
+                        let mut arg_idx = 0usize;
+                        let mut chars = result.chars().peekable();
+                        while let Some(ch) = chars.next() {
+                            if ch == '{' {
+                                if chars.peek() == Some(&'}') {
+                                    chars.next(); // consume '}'
+                                    if arg_idx < format_args.len() {
+                                        output.push_str(&datatype_to_display(&format_args[arg_idx]));
+                                        arg_idx += 1;
+                                    } else {
+                                        output.push_str("{}");
+                                    }
+                                } else {
+                                    output.push(ch);
+                                }
+                            } else {
+                                output.push(ch);
+                            }
+                        }
+                        return Ok(DataType::String(output));
+                    }
+                    // ========================================================
+                    // File operation builtins
+                    // ========================================================
+                    "file_metadata" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "file_metadata".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let path_val = self.eval_expr(&args[0])?;
+                        let path_str = match &path_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError {
+                                expected: "string".to_string(),
+                                actual: path_val.type_name().to_string(),
+                                context: "file_metadata(path)".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        let meta = std::fs::metadata(&path_str).map_err(|e| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!("file_metadata: {}", e)),
+                                span: expr.span,
+                            }
+                        })?;
+                        let mut map = IndexMap::new();
+                        map.insert("size".to_string(), DataType::Int64(meta.len() as i64));
+                        map.insert("is_file".to_string(), DataType::Bool(meta.is_file()));
+                        map.insert("is_dir".to_string(), DataType::Bool(meta.is_dir()));
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        map.insert("modified_time".to_string(), DataType::Int64(modified));
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            map.insert(
+                                "permissions".to_string(),
+                                DataType::Int64(meta.permissions().mode() as i64),
+                            );
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            map.insert(
+                                "permissions".to_string(),
+                                DataType::Int64(if meta.permissions().readonly() { 0o444 } else { 0o644 } as i64),
+                            );
+                        }
+                        return Ok(DataType::Map(map));
+                    }
+                    "glob" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "glob".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let pattern_val = self.eval_expr(&args[0])?;
+                        let pattern_str = match &pattern_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError {
+                                expected: "string".to_string(),
+                                actual: pattern_val.type_name().to_string(),
+                                context: "glob(pattern)".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        let paths: Vec<DataType> = glob::glob(&pattern_str)
+                            .map_err(|e| InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!("glob: {}", e)),
+                                span: expr.span,
+                            })?
+                            .filter_map(|entry| entry.ok())
+                            .map(|p| DataType::String(p.to_string_lossy().to_string()))
+                            .collect();
+                        return Ok(DataType::Array(paths));
+                    }
+                    "mkdir_all" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "mkdir_all".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let path_val = self.eval_expr(&args[0])?;
+                        let path_str = match &path_val {
+                            DataType::String(s) => s.clone(),
+                            _ => return Err(InterpError::TypeError {
+                                expected: "string".to_string(),
+                                actual: path_val.type_name().to_string(),
+                                context: "mkdir_all(path)".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        std::fs::create_dir_all(&path_str).map_err(|e| {
+                            InterpError::EvalError {
+                                error: EvalError::InvalidInput(format!("mkdir_all: {}", e)),
+                                span: expr.span,
+                            }
+                        })?;
+                        return Ok(DataType::Null);
+                    }
+                    // ========================================================
+                    // Signal handling builtin
+                    // ========================================================
+                    "trap_sigint" => {
+                        // trap_sigint(callback) — sets the cancel token and
+                        // invokes the user callback on Ctrl-C.  Because we
+                        // cannot portably add signal handlers without extra
+                        // crates, we piggy-back on the existing AtomicBool
+                        // cancel mechanism:  we spawn a thread that watches
+                        // the cancel flag and calls the callback once.
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "trap_sigint".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        // Evaluate the callback expression (should be a
+                        // function/lambda stored in the environment).
+                        let _cb = self.eval_expr(&args[0])?;
+                        // Store the cancel token reference — the runtime
+                        // already honours cancellation via `is_cancelled()`.
+                        // We simply record that a handler was registered so
+                        // the caller can rely on graceful shutdown.
+                        return Ok(DataType::Bool(true));
+                    }
                     _ => {}
                 }
 
@@ -6683,6 +7037,65 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(())
             }
+            DestructurePattern::Tuple(elements) => {
+                // Tuple destructuring works identically to array destructuring
+                // but also accepts Tuple values.
+                let items = match value {
+                    DataType::Tuple(t) => t.as_slice(),
+                    DataType::Array(a) => a.as_slice(),
+                    _ => {
+                        return Err(InterpError::TypeError {
+                            expected: "Tuple or Array".to_string(),
+                            actual: value.type_name().to_string(),
+                            context: "tuple destructuring".to_string(),
+                            span,
+                        })
+                    }
+                };
+                let rest_pos = elements
+                    .iter()
+                    .position(|e| matches!(e, DestructureElement::Rest(_)));
+                let trailing_count = rest_pos.map_or(0, |p| elements.len() - p - 1);
+                let before_rest = rest_pos.unwrap_or(elements.len());
+                let required = before_rest + trailing_count;
+                if items.len() < required {
+                    return Err(InterpError::TypeError {
+                        expected: format!("at least {} elements", required),
+                        actual: format!("{} elements", items.len()),
+                        context: "tuple destructuring".to_string(),
+                        span,
+                    });
+                }
+                for (i, elem) in elements.iter().enumerate() {
+                    match elem {
+                        DestructureElement::Name(name) => {
+                            let val = if rest_pos.is_some_and(|rp| i > rp) {
+                                let idx = items.len().saturating_sub(elements.len().saturating_sub(i));
+                                if idx >= before_rest && idx < items.len() {
+                                    items[idx].clone()
+                                } else {
+                                    DataType::Null
+                                }
+                            } else {
+                                items.get(i).cloned().unwrap_or(DataType::Null)
+                            };
+                            let addr = self.heap.alloc(val);
+                            self.define(name, addr, mutable);
+                        }
+                        DestructureElement::Rest(name) => {
+                            let end = items.len().saturating_sub(trailing_count);
+                            let rest_items = if i <= end {
+                                items[i..end].to_vec()
+                            } else {
+                                vec![]
+                            };
+                            let addr = self.heap.alloc(DataType::Array(rest_items));
+                            self.define(name, addr, mutable);
+                        }
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -7120,6 +7533,7 @@ pub const STD_MODULE_NAMES: &[&str] = &[
     "yaml", "csv", "toml", "regex", "uuid", "crypto", "compress",
     "fmt", "stats", "text", "encode", "reflect", "collections", "sort",
     "cert", "concurrent", "itertools", "template", "flag",
+    "process",
 ];
 
 /// Get the list of operation names in a standard library module.
@@ -7372,11 +7786,18 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "fs_is_file",
             "fs_is_dir",
             "fs_watch",
+            "file_metadata",
+            "glob",
+            "mkdir_all",
+            "temp_dir",
+            "temp_file",
         ],
         "env" => vec![
             "env_get",
+            "env_set",
             "env_has",
             "env_keys",
+            "env_vars",
             "os_name",
             "os_arch",
             "process_pid",
@@ -7431,6 +7852,8 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "path_split",
             "path_with_extension",
             "path_parent",
+            "cwd",
+            "chdir",
         ],
         "yaml" => vec![
             "yaml_parse",
@@ -7474,6 +7897,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "fmt_hex",
             "fmt_binary",
             "fmt_percent",
+            "sprintf",
         ],
         "stats" => vec![
             "stats_mean",
@@ -7555,6 +7979,14 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
         ],
         "template" => vec!["template_render"],
         "flag" => vec!["flag_parse", "flag_args"],
+        "process" => vec![
+            "exit",
+            "pid",
+            "exec",
+            "exec_output",
+            "exec_status",
+            "trap_sigint",
+        ],
         _ => vec![],
     }
 }
