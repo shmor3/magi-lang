@@ -149,6 +149,7 @@ impl Parser {
                 | TokenKind::Static
                 | TokenKind::Impl
                 | TokenKind::Trait
+                | TokenKind::Interface
                 | TokenKind::Output => return,
                 _ => {
                     self.advance();
@@ -410,7 +411,7 @@ impl Parser {
             TokenKind::Asm => self.parse_asm_expression_stmt(start),
             TokenKind::Static => self.parse_static_def(start),
             TokenKind::Impl => self.parse_impl_block(start),
-            TokenKind::Trait => self.parse_trait_def(start),
+            TokenKind::Trait | TokenKind::Interface => self.parse_trait_def(start),
             TokenKind::Pub => {
                 // pub fn / pub mod / pub enum / pub struct / pub const
                 // Also accepts pub(crate) and pub(super) visibility qualifiers

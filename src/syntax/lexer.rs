@@ -74,6 +74,7 @@ pub enum TokenKind {
     Struct,
     Impl,
     Trait,
+    Interface,
     // do-while and defer
     Do,
     Defer,
@@ -205,6 +206,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Struct => "struct",
             TokenKind::Impl => "impl",
             TokenKind::Trait => "trait",
+            TokenKind::Interface => "interface",
             TokenKind::Do => "do",
             TokenKind::Defer => "defer",
             TokenKind::Unsafe => "unsafe",
@@ -1706,6 +1708,7 @@ impl<'a> Lexer<'a> {
             "struct" => TokenKind::Struct,
             "impl" => TokenKind::Impl,
             "trait" => TokenKind::Trait,
+            "interface" => TokenKind::Interface,
             "do" => TokenKind::Do,
             "defer" => TokenKind::Defer,
             "unsafe" => TokenKind::Unsafe,

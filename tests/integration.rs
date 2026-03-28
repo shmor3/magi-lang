@@ -21429,3 +21429,13 @@ fn test_func_keyword() {
     let result = run_eval_unique("func add(a, b) { a + b } output add(1, 2);", "func_kw");
     assert!(result.contains("3"));
 }
+
+#[test]
+fn test_interface_keyword() {
+    let result = run_eval_unique(r#"
+        interface Greetable { func greet(self) -> string }
+        struct Dog { name: string }
+        output "interface works"
+    "#, "interface_kw");
+    assert!(result.contains("interface works"));
+}
