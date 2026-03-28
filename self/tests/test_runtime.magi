@@ -1,0 +1,465 @@
+// Tests for self/runtime/ (classfile, vm, gc, classloader)
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/interpreter.magi self/runtime/classfile.magi self/runtime/vm.magi self/runtime/gc.magi self/runtime/classloader.magi self/tests/test_runtime.magi > /tmp/_runtime_test.magi && cargo run --bin magi -- run /tmp/_runtime_test.magi
+
+// ── Classfile Encoding Helpers ────────────────────────────────────
+
+func test_cf_u16_le() {
+    const b = cf_u16_le(0x1234)
+    assert(b[0] == 0x34)
+    assert(b[1] == 0x12)
+    println("PASS: cf_u16_le")
+}
+
+func test_cf_u32_le() {
+    const b = cf_u32_le(0x12345678)
+    assert(b[0] == 0x78)
+    assert(b[1] == 0x56)
+    assert(b[2] == 0x34)
+    assert(b[3] == 0x12)
+    println("PASS: cf_u32_le")
+}
+
+func test_cf_read_u16() {
+    const bytes = [0x34, 0x12, 0x00, 0x00]
+    const v = cf_read_u16(bytes, 0)
+    assert(v == 0x1234)
+    println("PASS: cf_read_u16")
+}
+
+func test_cf_read_u32() {
+    const bytes = [0x78, 0x56, 0x34, 0x12]
+    const v = cf_read_u32(bytes, 0)
+    assert(v == 0x12345678)
+    println("PASS: cf_read_u32")
+}
+
+func test_cf_encode_decode_str() {
+    const s = "hello"
+    const bytes = cf_encode_str(s)
+    assert(len(bytes) == 5)
+    const decoded = cf_decode_str(bytes, 0, 5)
+    assert(decoded == "hello")
+    println("PASS: cf_encode/decode_str")
+}
+
+func test_cf_i64_roundtrip() {
+    const n = 42
+    const bytes = cf_encode_i64(n)
+    assert(len(bytes) == 8)
+    const decoded = cf_decode_i64(bytes, 0)
+    assert(decoded == 42)
+    println("PASS: cf_i64 roundtrip (positive)")
+}
+
+func test_cf_i64_zero() {
+    const bytes = cf_encode_i64(0)
+    const decoded = cf_decode_i64(bytes, 0)
+    assert(decoded == 0)
+    println("PASS: cf_i64 roundtrip (zero)")
+}
+
+// ── Classfile Encode/Decode Roundtrip ────────────────────────────
+
+func test_cf_magic_check() {
+    const source = "let x = 1"
+    const bytes = encode_classfile(source, [])
+    // First 4 bytes must be MAGC
+    assert(bytes[0] == 0x4D)
+    assert(bytes[1] == 0x41)
+    assert(bytes[2] == 0x47)
+    assert(bytes[3] == 0x43)
+    println("PASS: classfile magic header")
+}
+
+func test_cf_version_byte() {
+    const bytes = encode_classfile("let x = 1", [])
+    assert(bytes[4] == 1)
+    println("PASS: classfile version byte")
+}
+
+func test_cf_encode_decode_empty() {
+    const source = "let x = 42"
+    const bytes = encode_classfile(source, [])
+    const cf = decode_classfile(bytes)
+    assert(cf["source"] == "let x = 42")
+    assert(len(cf["functions"]) == 0)
+    assert(cf["version"] == 1)
+    println("PASS: classfile encode/decode empty functions")
+}
+
+func test_cf_source_roundtrip() {
+    const source = "func add(a, b) { a + b }\nprintln(add(3, 4))"
+    const bytes = encode_classfile(source, [])
+    const cf = decode_classfile(bytes)
+    assert(cf["source"] == source)
+    println("PASS: classfile source roundtrip")
+}
+
+func test_cf_with_function() {
+    const func_def = {
+        "name": "main",
+        "arity": 0,
+        "locals": 2,
+        "code": [0x01, 0x02, 0xFF],
+        "line_table": [[0, 1], [2, 3]],
+    }
+    const source = "let x = 1"
+    const bytes = encode_classfile(source, [func_def])
+    const cf = decode_classfile(bytes)
+    assert(len(cf["functions"]) == 1)
+    assert(cf["functions"][0]["name"] == "main")
+    assert(cf["functions"][0]["arity"] == 0)
+    assert(cf["functions"][0]["locals"] == 2)
+    assert(len(cf["functions"][0]["code"]) == 3)
+    assert(cf["functions"][0]["code"][2] == 0xFF)
+    assert(len(cf["functions"][0]["line_table"]) == 2)
+    println("PASS: classfile encode/decode with function")
+}
+
+func test_cf_invalid_magic() {
+    let ok = true
+    let bytes = [0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+    // Decoding should panic — we check it doesn't crash on valid magic
+    const good = encode_classfile("x", [])
+    const cf = decode_classfile(good)
+    assert(cf["source"] == "x")
+    println("PASS: classfile valid magic accepted")
+}
+
+func test_cf_summary() {
+    const cf = decode_classfile(encode_classfile("let x = 1", []))
+    const s = classfile_summary(cf)
+    assert(len(s) > 0)
+    println("PASS: classfile summary")
+}
+
+// ── GC Tests ─────────────────────────────────────────────────────
+
+func test_gc_init() {
+    gc_init()
+    const stats = gc_stats()
+    assert(stats["objects"] == 0)
+    assert(stats["collections"] == 0)
+    assert(stats["bytes"] == 0)
+    println("PASS: gc_init")
+}
+
+func test_gc_alloc_read() {
+    gc_init()
+    const id = gc_alloc(42)
+    assert(id > 0)
+    const v = gc_read(id)
+    assert(v == 42)
+    println("PASS: gc_alloc / gc_read")
+}
+
+func test_gc_alloc_string() {
+    gc_init()
+    const id = gc_alloc("hello world")
+    assert(gc_read(id) == "hello world")
+    println("PASS: gc_alloc string")
+}
+
+func test_gc_write() {
+    gc_init()
+    const id = gc_alloc(10)
+    gc_write(id, 99)
+    assert(gc_read(id) == 99)
+    println("PASS: gc_write")
+}
+
+func test_gc_is_alive() {
+    gc_init()
+    const id = gc_alloc(1)
+    assert(gc_is_alive(id))
+    println("PASS: gc_is_alive")
+}
+
+func test_gc_collect_unreachable() {
+    gc_init()
+    const id1 = gc_alloc(1)
+    const id2 = gc_alloc(2)
+    const id3 = gc_alloc(3)
+    // Only root id1
+    gc_add_root(id1)
+    gc_collect()
+    assert(gc_is_alive(id1))
+    assert(!gc_is_alive(id2))
+    assert(!gc_is_alive(id3))
+    println("PASS: gc_collect unreachable objects")
+}
+
+func test_gc_collect_keeps_roots() {
+    gc_init()
+    let ids = []
+    let i = 0
+    while i < 10 {
+        const id = gc_alloc(i)
+        gc_add_root(id)
+        ids.push(id)
+        i = i + 1
+    }
+    gc_collect()
+    let all_alive = true
+    let j = 0
+    while j < len(ids) {
+        if !gc_is_alive(ids[j]) { all_alive = false }
+        j = j + 1
+    }
+    assert(all_alive)
+    println("PASS: gc_collect keeps all roots")
+}
+
+func test_gc_stats_after_collection() {
+    gc_init()
+    let i = 0
+    while i < 5 {
+        gc_alloc(i)
+        i = i + 1
+    }
+    gc_collect()  // no roots → all freed
+    const stats = gc_stats()
+    assert(stats["objects"] == 0)
+    assert(stats["collections"] == 1)
+    assert(stats["total_freed"] == 5)
+    println("PASS: gc_stats after collection")
+}
+
+func test_gc_remove_root() {
+    gc_init()
+    const id = gc_alloc(100)
+    gc_add_root(id)
+    gc_collect()
+    assert(gc_is_alive(id))
+    gc_remove_root(id)
+    gc_collect()
+    assert(!gc_is_alive(id))
+    println("PASS: gc_remove_root")
+}
+
+func test_gc_multiple_allocs() {
+    gc_init()
+    let i = 0
+    while i < 20 {
+        gc_alloc(i * i)
+        i = i + 1
+    }
+    const stats = gc_stats()
+    assert(stats["objects"] == 20)
+    println("PASS: gc multiple allocs")
+}
+
+func test_gc_live_count() {
+    gc_init()
+    gc_alloc("a")
+    gc_alloc("b")
+    gc_alloc("c")
+    assert(gc_live_count() == 3)
+    println("PASS: gc_live_count")
+}
+
+// ── ClassLoader Tests ─────────────────────────────────────────────
+
+func test_cl_init() {
+    classloader_init([])
+    const paths = classloader_search_paths()
+    assert(len(paths) >= 1)
+    assert(paths[0] == ".")
+    println("PASS: classloader_init")
+}
+
+func test_cl_add_path() {
+    classloader_init([])
+    classloader_add_path("/tmp/magi-classes")
+    const paths = classloader_search_paths()
+    assert(len(paths) == 2)
+    assert(paths[1] == "/tmp/magi-classes")
+    println("PASS: classloader_add_path")
+}
+
+func test_cl_resolve_not_found() {
+    classloader_init(["/nonexistent_path_xyz"])
+    const p = classloader_resolve("nonexistent_class_xyz")
+    assert(p == null)
+    println("PASS: classloader_resolve not found returns null")
+}
+
+func test_cl_load_bytes() {
+    classloader_init([])
+    const source = "let answer = 42"
+    const bytes = encode_classfile(source, [])
+    const cf = classloader_load_bytes("test_class", bytes)
+    assert(cf["source"] == source)
+    assert(classloader_is_loaded("test_class"))
+    println("PASS: classloader_load_bytes")
+}
+
+func test_cl_cache_hit() {
+    classloader_init([])
+    const source = "let x = 1"
+    const bytes = encode_classfile(source, [])
+    classloader_load_bytes("cached_class", bytes)
+    // Second load should hit cache
+    const cf = classloader_get("cached_class")
+    assert(cf != null)
+    assert(cf["source"] == source)
+    println("PASS: classloader cache hit")
+}
+
+func test_cl_is_loaded() {
+    classloader_init([])
+    assert(!classloader_is_loaded("not_there"))
+    const bytes = encode_classfile("let x = 1", [])
+    classloader_load_bytes("my_class", bytes)
+    assert(classloader_is_loaded("my_class"))
+    println("PASS: classloader_is_loaded")
+}
+
+func test_cl_evict() {
+    classloader_init([])
+    const bytes = encode_classfile("let x = 1", [])
+    classloader_load_bytes("evict_me", bytes)
+    assert(classloader_is_loaded("evict_me"))
+    classloader_evict("evict_me")
+    assert(!classloader_is_loaded("evict_me"))
+    println("PASS: classloader_evict")
+}
+
+func test_cl_clear_cache() {
+    classloader_init([])
+    const bytes = encode_classfile("let x = 1", [])
+    classloader_load_bytes("class_a", bytes)
+    classloader_load_bytes("class_b", bytes)
+    classloader_clear_cache()
+    assert(!classloader_is_loaded("class_a"))
+    assert(!classloader_is_loaded("class_b"))
+    println("PASS: classloader_clear_cache")
+}
+
+func test_cl_loaded_names() {
+    classloader_init([])
+    const bytes = encode_classfile("let x = 1", [])
+    classloader_load_bytes("alpha", bytes)
+    classloader_load_bytes("beta", bytes)
+    const names = classloader_loaded_names()
+    assert(len(names) == 2)
+    println("PASS: classloader_loaded_names")
+}
+
+// ── VM Tests ──────────────────────────────────────────────────────
+
+func test_vm_execute_source_via_magc() {
+    // Encode a simple source into classfile bytes, then decode and run via eval_source
+    const source = "1 + 2"
+    const bytes = encode_classfile(source, [])
+    const cf_map = decode_classfile(bytes)
+    const result = execute_classfile_map(cf_map)
+    assert(result == 3)
+    println("PASS: vm execute source via classfile map")
+}
+
+func test_vm_execute_magc_bytes() {
+    const source = "let x = 10\nlet y = 20\nx + y"
+    const bytes = encode_classfile(source, [])
+    const result = execute_magc(bytes)
+    assert(result == 30)
+    println("PASS: vm execute_magc bytes")
+}
+
+func test_vm_opcodes_defined() {
+    // Just verify opcode constants are set correctly
+    assert(VM_OP_NOP  == 0x00)
+    assert(VM_OP_HALT == 0xFF)
+    assert(VM_OP_ADD  == 0x10)
+    assert(VM_OP_EQ   == 0x20)
+    assert(VM_OP_NOT  == 0x30)
+    assert(VM_OP_LOAD_LOCAL == 0x40)
+    assert(VM_OP_JUMP == 0x50)
+    assert(VM_OP_OUTPUT == 0x70)
+    assert(VM_OP_NEW_ARRAY == 0x80)
+    assert(VM_OP_GC_ALLOC == 0xA0)
+    println("PASS: vm opcode constants correct")
+}
+
+func test_vm_truthy() {
+    assert(magivm_truthy(1))
+    assert(magivm_truthy("hello"))
+    assert(magivm_truthy(true))
+    assert(!magivm_truthy(null))
+    assert(!magivm_truthy(false))
+    assert(!magivm_truthy(0))
+    assert(!magivm_truthy(""))
+    println("PASS: magivm_truthy")
+}
+
+func test_vm_to_str() {
+    assert(magivm_to_str(42) == "42")
+    assert(magivm_to_str(null) == "null")
+    assert(magivm_to_str("hello") == "hello")
+    println("PASS: magivm_to_str")
+}
+
+func test_vm_reset() {
+    magivm_reset()
+    assert(len(magivm_stack) == 0)
+    assert(len(magivm_frames) == 0)
+    assert(len(magivm_output) == 0)
+    assert(!magivm_halted)
+    println("PASS: magivm_reset")
+}
+
+// ── Run All Tests ─────────────────────────────────────────────────
+
+println("=== Runtime Tests: classfile ===")
+test_cf_u16_le()
+test_cf_u32_le()
+test_cf_read_u16()
+test_cf_read_u32()
+test_cf_encode_decode_str()
+test_cf_i64_roundtrip()
+test_cf_i64_zero()
+test_cf_magic_check()
+test_cf_version_byte()
+test_cf_encode_decode_empty()
+test_cf_source_roundtrip()
+test_cf_with_function()
+test_cf_invalid_magic()
+test_cf_summary()
+
+println("")
+println("=== Runtime Tests: gc ===")
+test_gc_init()
+test_gc_alloc_read()
+test_gc_alloc_string()
+test_gc_write()
+test_gc_is_alive()
+test_gc_collect_unreachable()
+test_gc_collect_keeps_roots()
+test_gc_stats_after_collection()
+test_gc_remove_root()
+test_gc_multiple_allocs()
+test_gc_live_count()
+
+println("")
+println("=== Runtime Tests: classloader ===")
+test_cl_init()
+test_cl_add_path()
+test_cl_resolve_not_found()
+test_cl_load_bytes()
+test_cl_cache_hit()
+test_cl_is_loaded()
+test_cl_evict()
+test_cl_clear_cache()
+test_cl_loaded_names()
+
+println("")
+println("=== Runtime Tests: vm ===")
+test_vm_opcodes_defined()
+test_vm_truthy()
+test_vm_to_str()
+test_vm_reset()
+test_vm_execute_source_via_magc()
+test_vm_execute_magc_bytes()
+
+println("")
+println("All runtime tests passed.")

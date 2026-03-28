@@ -1,0 +1,558 @@
+// MAGI Self-Hosted Runtime — MagiVM Execution Engine
+//
+// This VM executes .magc classfiles. It differs from self/compiler/vm.magi
+// (which runs IR instructions) in that it:
+//   1. Loads a .magc classfile (which embeds full source in stage-0)
+//   2. Re-parses the source through the interpreter (eval_source)
+//   3. Returns the result
+//
+// STAGE 0 DESIGN: .magc files embed the full source. The VM achieves 100%
+// spec conformance by delegating execution to the full interpreter rather
+// than running raw bytecode. Bytecode execution (IR opcodes) is handled
+// by self/compiler/vm.magi.
+//
+// For a future stage-1, this VM would run actual stack-machine opcodes.
+// The opcode table below is defined for documentation and forward compatibility.
+
+// ── Opcode Table (stage-1 forward reference) ──────────────────────
+
+const VM_OP_NOP         = 0x00
+const VM_OP_CONST       = 0x01
+const VM_OP_NULL        = 0x02
+const VM_OP_TRUE        = 0x03
+const VM_OP_FALSE       = 0x04
+const VM_OP_POP         = 0x05
+const VM_OP_DUP         = 0x06
+
+const VM_OP_ADD         = 0x10
+const VM_OP_SUB         = 0x11
+const VM_OP_MUL         = 0x12
+const VM_OP_DIV         = 0x13
+const VM_OP_MOD         = 0x14
+const VM_OP_NEG         = 0x15
+
+const VM_OP_EQ          = 0x20
+const VM_OP_NE          = 0x21
+const VM_OP_LT          = 0x22
+const VM_OP_LE          = 0x23
+const VM_OP_GT          = 0x24
+const VM_OP_GE          = 0x25
+
+const VM_OP_NOT         = 0x30
+const VM_OP_AND         = 0x31
+const VM_OP_OR          = 0x32
+
+const VM_OP_LOAD_LOCAL  = 0x40
+const VM_OP_STORE_LOCAL = 0x41
+const VM_OP_LOAD_GLOBAL = 0x42
+const VM_OP_STORE_GLOBAL = 0x43
+
+const VM_OP_JUMP        = 0x50
+const VM_OP_JUMP_FALSE  = 0x51
+const VM_OP_JUMP_TRUE   = 0x52
+const VM_OP_CALL        = 0x53
+const VM_OP_RETURN      = 0x54
+
+const VM_OP_OUTPUT      = 0x70
+
+const VM_OP_NEW_ARRAY   = 0x80
+const VM_OP_NEW_MAP     = 0x81
+const VM_OP_INDEX_GET   = 0x82
+const VM_OP_INDEX_SET   = 0x83
+const VM_OP_LENGTH      = 0x87
+
+const VM_OP_CONCAT      = 0x90
+const VM_OP_TO_STRING   = 0x91
+
+const VM_OP_GC_ALLOC    = 0xA0
+const VM_OP_GC_READ     = 0xA1
+const VM_OP_GC_WRITE    = 0xA2
+
+const VM_OP_HALT        = 0xFF
+
+// ── VM State (module-level mutable) ──────────────────────────────
+
+let magivm_stack   = []
+let magivm_locals  = []
+let magivm_globals = {"__init": true}
+let magivm_output  = []
+let magivm_halted  = false
+
+// Call frames: each = { "func": func_def, "ip": int, "base": int, "constants": [] }
+let magivm_frames  = []
+
+// ── Stack Helpers ─────────────────────────────────────────────────
+
+func magivm_push(v) {
+    magivm_stack.push(v)
+}
+
+func magivm_pop() {
+    const n = len(magivm_stack)
+    if n == 0 { return null }
+    const v = magivm_stack[n - 1]
+    magivm_stack = magivm_stack.slice(0, n - 1)
+    v
+}
+
+func magivm_peek() {
+    const n = len(magivm_stack)
+    if n == 0 { null } else { magivm_stack[n - 1] }
+}
+
+// ── Value Helpers ─────────────────────────────────────────────────
+
+func magivm_truthy(v) {
+    if v == null  { return false }
+    if v == false { return false }
+    if v == 0     { return false }
+    if v == ""    { return false }
+    true
+}
+
+func magivm_to_str(v) {
+    if v == null { return "null" }
+    to_string(v)
+}
+
+func magivm_numeric(v) {
+    if typeof(v) == "int"   { return v }
+    if typeof(v) == "float" { return v }
+    0
+}
+
+// ── Frame Helpers ─────────────────────────────────────────────────
+
+func magivm_current_frame() {
+    const n = len(magivm_frames)
+    if n == 0 { return null }
+    magivm_frames[n - 1]
+}
+
+func magivm_set_frame(f) {
+    const n = len(magivm_frames)
+    if n == 0 { return null }
+    magivm_frames[n - 1] = f
+}
+
+func magivm_push_frame(f) {
+    magivm_frames.push(f)
+}
+
+func magivm_pop_frame() {
+    const n = len(magivm_frames)
+    if n == 0 { return null }
+    const f = magivm_frames[n - 1]
+    magivm_frames = magivm_frames.slice(0, n - 1)
+    f
+}
+
+// ── Constant Access ───────────────────────────────────────────────
+
+func magivm_read_constant(frame, idx) {
+    const pool = frame["constants"]
+    if idx >= len(pool) { return null }
+    const c = pool[idx]
+    const tag = c["tag"]
+    if tag == 0 { return null }         // CONST_NULL
+    if tag == 1 { return c["value"] }   // CONST_BOOL
+    if tag == 2 { return c["value"] }   // CONST_INT
+    if tag == 3 { return c["value"] }   // CONST_FLOAT
+    if tag == 4 { return c["value"] }   // CONST_STRING
+    null
+}
+
+// ── Bytecode Reader ───────────────────────────────────────────────
+
+// Read one byte from current frame's code at ip, advance ip
+func magivm_read_byte() {
+    let frame = magivm_current_frame()
+    if frame == null { return 0 }
+    const code = frame["func"]["code"]
+    const ip = frame["ip"]
+    if ip >= len(code) { return 0 }
+    const b = code[ip] & 0xFF
+    frame["ip"] = ip + 1
+    magivm_set_frame(frame)
+    b
+}
+
+// Read two bytes as big-endian u16
+func magivm_read_u16() {
+    const hi = magivm_read_byte()
+    const lo = magivm_read_byte()
+    cf_bor(hi << 8, lo)
+}
+
+// ── Stage-0 Execution (source re-interpretation) ──────────────────
+
+// Execute a decoded classfile map (from decode_classfile).
+// Stage-0: if source is embedded, re-parse and run via eval_source.
+// Returns the result value.
+func execute_classfile_map(cf_map) {
+    const source = cf_map["source"]
+    if len(source) == 0 {
+        panic("classfile has no embedded source (stage-0 requires source embedding)")
+    }
+    eval_source(source)
+}
+
+// Execute raw .magc bytes (decode first, then run).
+func execute_magc(bytes) {
+    const cf_map = decode_classfile(bytes)
+    execute_classfile_map(cf_map)
+}
+
+// Load a .magc file from path and execute it.
+// Returns the result of the program.
+func run_classfile(path) {
+    const raw = file.read_bytes(path)
+    execute_magc(raw)
+}
+
+// ── Stage-1 Bytecode Interpreter ─────────────────────────────────
+//
+// Runs actual stack-machine opcodes from a function's code array.
+// Used when the classfile has compiled functions (not just embedded source).
+
+func magivm_reset() {
+    magivm_stack   = []
+    magivm_locals  = []
+    magivm_globals = {"__init": true}
+    magivm_output  = []
+    magivm_halted  = false
+    magivm_frames  = []
+}
+
+func magivm_execute_function(func_def, constants, args) {
+    // Set up locals: params first, then fill to func_def["locals"] slots
+    let locals = []
+    let i = 0
+    while i < len(args) {
+        locals.push(args[i])
+        i = i + 1
+    }
+    while len(locals) < func_def["locals"] {
+        locals.push(null)
+    }
+
+    const frame = {
+        "func": func_def,
+        "ip": 0,
+        "base": len(magivm_stack),
+        "constants": constants,
+        "locals": locals,
+    }
+    magivm_push_frame(frame)
+
+    const max_steps = 10000000
+    let steps = 0
+
+    while !magivm_halted && len(magivm_frames) > 0 {
+        steps = steps + 1
+        if steps > max_steps {
+            panic("MagiVM: execution limit exceeded")
+        }
+
+        let cur = magivm_current_frame()
+        if cur == null { break }
+
+        const code = cur["func"]["code"]
+        const ip = cur["ip"]
+
+        if ip >= len(code) {
+            // Implicit return null
+            const result = magivm_pop()
+            magivm_pop_frame()
+            if len(magivm_frames) > 0 {
+                magivm_push(result)
+            } else {
+                return result
+            }
+            continue
+        }
+
+        const op = code[ip] & 0xFF
+        cur["ip"] = ip + 1
+        magivm_set_frame(cur)
+
+        if op == VM_OP_NOP {
+            // nothing
+
+        } else if op == VM_OP_HALT {
+            magivm_halted = true
+
+        } else if op == VM_OP_NULL {
+            magivm_push(null)
+
+        } else if op == VM_OP_TRUE {
+            magivm_push(true)
+
+        } else if op == VM_OP_FALSE {
+            magivm_push(false)
+
+        } else if op == VM_OP_POP {
+            magivm_pop()
+
+        } else if op == VM_OP_DUP {
+            magivm_push(magivm_peek())
+
+        } else if op == VM_OP_CONST {
+            const idx = magivm_read_u16()
+            let f2 = magivm_current_frame()
+            magivm_push(magivm_read_constant(f2, idx))
+
+        } else if op == VM_OP_LOAD_LOCAL {
+            const slot = magivm_read_byte()
+            let f2 = magivm_current_frame()
+            const locs = f2["locals"]
+            if slot < len(locs) {
+                magivm_push(locs[slot])
+            } else {
+                magivm_push(null)
+            }
+
+        } else if op == VM_OP_STORE_LOCAL {
+            const slot = magivm_read_byte()
+            const val = magivm_peek()
+            let f2 = magivm_current_frame()
+            let locs = f2["locals"]
+            while len(locs) <= slot {
+                locs.push(null)
+            }
+            locs[slot] = val
+            f2["locals"] = locs
+            magivm_set_frame(f2)
+
+        } else if op == VM_OP_LOAD_GLOBAL {
+            const idx = magivm_read_u16()
+            let f2 = magivm_current_frame()
+            const gname = magivm_read_constant(f2, idx)
+            if magivm_globals.has(gname) {
+                magivm_push(magivm_globals[gname])
+            } else {
+                magivm_push(null)
+            }
+
+        } else if op == VM_OP_STORE_GLOBAL {
+            const idx = magivm_read_u16()
+            let f2 = magivm_current_frame()
+            const gname = magivm_read_constant(f2, idx)
+            magivm_globals[gname] = magivm_peek()
+
+        } else if op == VM_OP_ADD {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            if typeof(a) == "string" || typeof(b) == "string" {
+                magivm_push(magivm_to_str(a) + magivm_to_str(b))
+            } else if typeof(a) == "float" || typeof(b) == "float" {
+                magivm_push(to_float(a) + to_float(b))
+            } else {
+                magivm_push(a + b)
+            }
+
+        } else if op == VM_OP_SUB {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a - b)
+
+        } else if op == VM_OP_MUL {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a * b)
+
+        } else if op == VM_OP_DIV {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            if b == 0 { panic("MagiVM: division by zero") }
+            magivm_push(a / b)
+
+        } else if op == VM_OP_MOD {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            if b == 0 { panic("MagiVM: modulo by zero") }
+            magivm_push(a % b)
+
+        } else if op == VM_OP_NEG {
+            const a = magivm_pop()
+            magivm_push(-a)
+
+        } else if op == VM_OP_EQ {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a == b)
+
+        } else if op == VM_OP_NE {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a != b)
+
+        } else if op == VM_OP_LT {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a < b)
+
+        } else if op == VM_OP_LE {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a <= b)
+
+        } else if op == VM_OP_GT {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a > b)
+
+        } else if op == VM_OP_GE {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(a >= b)
+
+        } else if op == VM_OP_NOT {
+            const a = magivm_pop()
+            magivm_push(!magivm_truthy(a))
+
+        } else if op == VM_OP_AND {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            if !magivm_truthy(a) { magivm_push(a) } else { magivm_push(b) }
+
+        } else if op == VM_OP_OR {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            if magivm_truthy(a) { magivm_push(a) } else { magivm_push(b) }
+
+        } else if op == VM_OP_JUMP {
+            const target = magivm_read_u16()
+            let f2 = magivm_current_frame()
+            f2["ip"] = target
+            magivm_set_frame(f2)
+
+        } else if op == VM_OP_JUMP_FALSE {
+            const target = magivm_read_u16()
+            if !magivm_truthy(magivm_peek()) {
+                let f2 = magivm_current_frame()
+                f2["ip"] = target
+                magivm_set_frame(f2)
+            }
+
+        } else if op == VM_OP_JUMP_TRUE {
+            const target = magivm_read_u16()
+            if magivm_truthy(magivm_peek()) {
+                let f2 = magivm_current_frame()
+                f2["ip"] = target
+                magivm_set_frame(f2)
+            }
+
+        } else if op == VM_OP_RETURN {
+            const result = magivm_pop()
+            magivm_pop_frame()
+            if len(magivm_frames) > 0 {
+                magivm_push(result)
+            } else {
+                return result
+            }
+
+        } else if op == VM_OP_OUTPUT {
+            const val = magivm_pop()
+            const s = magivm_to_str(val)
+            magivm_output.push(s)
+            println(s)
+
+        } else if op == VM_OP_NEW_ARRAY {
+            const count = magivm_read_u16()
+            let arr = []
+            let ai = 0
+            while ai < count {
+                arr.push(null)
+                ai = ai + 1
+            }
+            // Fill from stack in reverse
+            let bi = count - 1
+            while bi >= 0 {
+                arr[bi] = magivm_pop()
+                bi = bi - 1
+            }
+            magivm_push(arr)
+
+        } else if op == VM_OP_INDEX_GET {
+            const idx = magivm_pop()
+            const obj = magivm_pop()
+            if typeof(obj) == "array" {
+                magivm_push(obj[idx])
+            } else if typeof(obj) == "map" {
+                if obj.has(magivm_to_str(idx)) {
+                    magivm_push(obj[magivm_to_str(idx)])
+                } else {
+                    magivm_push(null)
+                }
+            } else if typeof(obj) == "string" {
+                magivm_push(obj[idx])
+            } else {
+                magivm_push(null)
+            }
+
+        } else if op == VM_OP_LENGTH {
+            const obj = magivm_pop()
+            magivm_push(len(obj))
+
+        } else if op == VM_OP_CONCAT {
+            const b = magivm_pop()
+            const a = magivm_pop()
+            magivm_push(magivm_to_str(a) + magivm_to_str(b))
+
+        } else if op == VM_OP_TO_STRING {
+            const val = magivm_pop()
+            magivm_push(magivm_to_str(val))
+
+        } else if op == VM_OP_GC_ALLOC {
+            // Allocate via GC, returns object ID
+            const val = magivm_pop()
+            const id = gc_alloc(val)
+            magivm_push(id)
+
+        } else if op == VM_OP_GC_READ {
+            const id = magivm_pop()
+            magivm_push(gc_read(id))
+
+        } else if op == VM_OP_GC_WRITE {
+            const val = magivm_pop()
+            const id = magivm_pop()
+            gc_write(id, val)
+
+        } else {
+            panic(f"MagiVM: unknown opcode 0x{op}")
+        }
+    }
+
+    magivm_pop()
+}
+
+// ── Public Entry Points ───────────────────────────────────────────
+
+// Run a classfile map that was already decoded.
+// Returns output lines array.
+func magivm_run_map(cf_map) {
+    magivm_reset()
+    const source = cf_map["source"]
+    if len(source) > 0 {
+        // Stage-0: re-parse and interpret
+        eval_source(source)
+        return magivm_output
+    }
+    // Stage-1: run compiled functions
+    const funcs = cf_map["functions"]
+    if len(funcs) == 0 {
+        return magivm_output
+    }
+    const entry = cf_map["entry"]
+    if entry >= len(funcs) {
+        panic("classfile: invalid entry point")
+    }
+    magivm_execute_function(funcs[entry], cf_map["constants"], [])
+    magivm_output
+}
+
+// Get VM output collected during execution
+func magivm_get_output() {
+    magivm_output
+}

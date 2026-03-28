@@ -1,0 +1,418 @@
+// MAGI Self-Hosted Runtime — .magc Classfile Format
+//
+// .magc binary format:
+//   Magic:         4 bytes: 0x4D, 0x41, 0x47, 0x43 ("MAGC")
+//   Version:       1 byte
+//   Const count:   4 bytes (little-endian u32)
+//   Constants:     tag + data per entry
+//   Func count:    4 bytes
+//   Functions:     name len(2) + name + arity(2) + locals(2) + code len(4) + code + line count(4) + lines
+//   Entry:         4 bytes (function index)
+//   Source len:    4 bytes
+//   Source bytes:  utf-8 source string
+//
+// STAGE 0 DESIGN: .magc embeds the full source. Execution re-parses via the
+// interpreter. This guarantees 100% spec conformance identical to `magi run`.
+//
+// NOTE: MAGI arrays are value-typed (copied on pass). All encoding uses a
+// module-level output buffer (cf_out) appended to via cf_push / cf_push_bytes.
+
+// ── Magic & Version ───────────────────────────────────────────────
+
+const MAGC_MAGIC_0 = 0x4D   // 'M'
+const MAGC_MAGIC_1 = 0x41   // 'A'
+const MAGC_MAGIC_2 = 0x47   // 'G'
+const MAGC_MAGIC_3 = 0x43   // 'C'
+const MAGC_VERSION = 1
+
+// ── Constant Tags ─────────────────────────────────────────────────
+
+const CONST_NULL    = 0
+const CONST_BOOL    = 1
+const CONST_INT     = 2
+const CONST_FLOAT   = 3
+const CONST_STRING  = 4
+
+// ── Module-level encode buffer ────────────────────────────────────
+
+let cf_out = []
+
+func cf_push(b) {
+    cf_out.push(b)
+}
+
+func cf_push_u16_le(n) {
+    cf_out.push(n & 0xFF)
+    cf_out.push((n >> 8) & 0xFF)
+}
+
+func cf_push_u32_le(n) {
+    cf_out.push(n & 0xFF)
+    cf_out.push((n >> 8) & 0xFF)
+    cf_out.push((n >> 16) & 0xFF)
+    cf_out.push((n >> 24) & 0xFF)
+}
+
+func cf_push_str(s) {
+    let i = 0
+    while i < len(s) {
+        cf_out.push(char_code(s[i]))
+        i = i + 1
+    }
+}
+
+func cf_push_bytes(arr) {
+    let i = 0
+    while i < len(arr) {
+        cf_out.push(arr[i])
+        i = i + 1
+    }
+}
+
+// ── Utility functions (non-mutating) ─────────────────────────────
+
+// Encode a string to byte array (returns []int)
+func cf_encode_str(s) {
+    let out = []
+    let i = 0
+    while i < len(s) {
+        out.push(char_code(s[i]))
+        i = i + 1
+    }
+    out
+}
+
+// Bitwise OR via arithmetic (| not valid in expression position inside functions)
+// a | b == a + b - (a & b)  for non-negative integers
+func cf_bor(a, b) {
+    a + b - (a & b)
+}
+
+// Encode little-endian u16 as array (for tests)
+func cf_u16_le(n) {
+    [n & 0xFF, (n >> 8) & 0xFF]
+}
+
+// Encode little-endian u32 as array (for tests)
+func cf_u32_le(n) {
+    [n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]
+}
+
+// Decode little-endian u16 from bytes array at offset
+func cf_read_u16(bytes, offset) {
+    const lo = bytes[offset] & 0xFF
+    const hi = (bytes[offset + 1] & 0xFF) << 8
+    cf_bor(lo, hi)
+}
+
+// Decode little-endian u32 from bytes array at offset
+func cf_read_u32(bytes, offset) {
+    const b0 = bytes[offset] & 0xFF
+    const b1 = (bytes[offset + 1] & 0xFF) << 8
+    const b2 = (bytes[offset + 2] & 0xFF) << 16
+    const b3 = (bytes[offset + 3] & 0xFF) << 24
+    cf_bor(cf_bor(b0, b1), cf_bor(b2, b3))
+}
+
+// Decode byte array slice to string
+func cf_decode_str(bytes, offset, length) {
+    let s = ""
+    let i = 0
+    while i < length {
+        s = s + char_from_code(bytes[offset + i])
+        i = i + 1
+    }
+    s
+}
+
+// Encode a float as 8 bytes.
+// Stage-0: store as u8 length + up to 7 ASCII bytes of decimal string.
+func cf_encode_float_bytes(f) {
+    let s = to_string(f)
+    let slen = len(s)
+    if slen > 7 { slen = 7 }
+    let out = [slen]
+    let i = 0
+    while i < 7 {
+        if i < slen {
+            out.push(char_code(s[i]))
+        } else {
+            out.push(0)
+        }
+        i = i + 1
+    }
+    out
+}
+
+func cf_decode_float(bytes, offset) {
+    const slen = bytes[offset] & 0xFF
+    if slen == 0 { return 0.0 }
+    let s = ""
+    let i = 0
+    while i < slen {
+        s = s + char_from_code(bytes[offset + 1 + i])
+        i = i + 1
+    }
+    to_float(s)
+}
+
+// Encode an i64 integer as 8 bytes (little-endian).
+func cf_encode_i64_bytes(n) {
+    let v = n
+    let out = []
+    let i = 0
+    while i < 8 {
+        out.push(v & 0xFF)
+        v = v >> 8
+        i = i + 1
+    }
+    out
+}
+
+// Alias for tests
+func cf_encode_i64(n) {
+    cf_encode_i64_bytes(n)
+}
+
+func cf_decode_i64(bytes, offset) {
+    let v = 0
+    let i = 7
+    while i >= 0 {
+        v = v << 8
+        v = cf_bor(v, bytes[offset + i] & 0xFF)
+        i = i - 1
+    }
+    v
+}
+
+// ── Encode a single constant into cf_out ─────────────────────────
+
+func cf_encode_constant(c) {
+    const tag = c["tag"]
+    cf_push(tag)
+    if tag == CONST_NULL {
+        // no extra data
+    } else if tag == CONST_BOOL {
+        if c["value"] { cf_push(1) } else { cf_push(0) }
+    } else if tag == CONST_INT {
+        cf_push_bytes(cf_encode_i64_bytes(c["value"]))
+    } else if tag == CONST_FLOAT {
+        cf_push_bytes(cf_encode_float_bytes(c["value"]))
+    } else if tag == CONST_STRING {
+        const s = c["value"]
+        cf_push_u32_le(len(s))
+        cf_push_str(s)
+    }
+}
+
+// Decode one constant from bytes, return { "constant", "next_offset" }
+func cf_decode_constant(bytes, offset) {
+    const tag = bytes[offset] & 0xFF
+    let pos = offset + 1
+    let value = null
+
+    if tag == CONST_NULL {
+        value = null
+    } else if tag == CONST_BOOL {
+        value = bytes[pos] != 0
+        pos = pos + 1
+    } else if tag == CONST_INT {
+        value = cf_decode_i64(bytes, pos)
+        pos = pos + 8
+    } else if tag == CONST_FLOAT {
+        value = cf_decode_float(bytes, pos)
+        pos = pos + 8
+    } else if tag == CONST_STRING {
+        const slen = cf_read_u32(bytes, pos)
+        pos = pos + 4
+        value = cf_decode_str(bytes, pos, slen)
+        pos = pos + slen
+    }
+
+    {"constant": {"tag": tag, "value": value}, "next_offset": pos}
+}
+
+// ── Encode a single function into cf_out ─────────────────────────
+
+func cf_encode_function(func_def) {
+    const name = func_def["name"]
+    cf_push_u16_le(len(name))
+    cf_push_str(name)
+    cf_push_u16_le(func_def["arity"])
+    cf_push_u16_le(func_def["locals"])
+    const code = func_def["code"]
+    cf_push_u32_le(len(code))
+    cf_push_bytes(code)
+    const lines = func_def["line_table"]
+    cf_push_u32_le(len(lines))
+    let i = 0
+    while i < len(lines) {
+        cf_push_u32_le(lines[i][0])
+        cf_push_u32_le(lines[i][1])
+        i = i + 1
+    }
+}
+
+// Decode one function from bytes, return { "func", "next_offset" }
+func cf_decode_function(bytes, offset) {
+    let pos = offset
+    const name_len = cf_read_u16(bytes, pos)
+    pos = pos + 2
+    const name = cf_decode_str(bytes, pos, name_len)
+    pos = pos + name_len
+    const arity = cf_read_u16(bytes, pos)
+    pos = pos + 2
+    const locals = cf_read_u16(bytes, pos)
+    pos = pos + 2
+    const code_len = cf_read_u32(bytes, pos)
+    pos = pos + 4
+    let code = []
+    let i = 0
+    while i < code_len {
+        code.push(bytes[pos + i] & 0xFF)
+        i = i + 1
+    }
+    pos = pos + code_len
+    const line_count = cf_read_u32(bytes, pos)
+    pos = pos + 4
+    let line_table = []
+    let j = 0
+    while j < line_count {
+        const loff = cf_read_u32(bytes, pos)
+        pos = pos + 4
+        const lline = cf_read_u32(bytes, pos)
+        pos = pos + 4
+        line_table.push([loff, lline])
+        j = j + 1
+    }
+    {"func": {"name": name, "arity": arity, "locals": locals, "code": code, "line_table": line_table}, "next_offset": pos}
+}
+
+// ── Top-Level Encode ──────────────────────────────────────────────
+
+// Encode source code + optional functions list to .magc bytes.
+// Returns a []int (byte array).
+func encode_classfile(source, functions) {
+    cf_out = []
+
+    // Magic
+    cf_push(MAGC_MAGIC_0)
+    cf_push(MAGC_MAGIC_1)
+    cf_push(MAGC_MAGIC_2)
+    cf_push(MAGC_MAGIC_3)
+
+    // Version
+    cf_push(MAGC_VERSION)
+
+    // Constants (empty for source-embedding mode)
+    cf_push_u32_le(0)
+
+    // Functions
+    cf_push_u32_le(len(functions))
+    let i = 0
+    while i < len(functions) {
+        cf_encode_function(functions[i])
+        i = i + 1
+    }
+
+    // Entry point
+    cf_push_u32_le(0)
+
+    // Embedded source
+    cf_push_u32_le(len(source))
+    cf_push_str(source)
+
+    // Return a copy of cf_out
+    cf_out.slice(0, len(cf_out))
+}
+
+// ── Top-Level Decode ──────────────────────────────────────────────
+
+// Decode .magc bytes back to { "source", "functions", "constants", "entry", "version" }
+func decode_classfile(bytes) {
+    if len(bytes) < 9 {
+        panic("classfile too short")
+    }
+
+    // Check magic
+    if bytes[0] != MAGC_MAGIC_0 || bytes[1] != MAGC_MAGIC_1 ||
+       bytes[2] != MAGC_MAGIC_2 || bytes[3] != MAGC_MAGIC_3 {
+        panic("invalid magic: not a .magc file")
+    }
+
+    const version = bytes[4] & 0xFF
+    if version != MAGC_VERSION {
+        panic(f"unsupported .magc version: {version}")
+    }
+
+    let pos = 5
+
+    // Constant pool
+    const const_count = cf_read_u32(bytes, pos)
+    pos = pos + 4
+    let constants = []
+    let ci = 0
+    while ci < const_count {
+        const r = cf_decode_constant(bytes, pos)
+        constants.push(r["constant"])
+        pos = r["next_offset"]
+        ci = ci + 1
+    }
+
+    // Functions
+    const func_count = cf_read_u32(bytes, pos)
+    pos = pos + 4
+    let functions = []
+    let fi = 0
+    while fi < func_count {
+        const r = cf_decode_function(bytes, pos)
+        functions.push(r["func"])
+        pos = r["next_offset"]
+        fi = fi + 1
+    }
+
+    // Entry point
+    const entry = cf_read_u32(bytes, pos)
+    pos = pos + 4
+
+    // Embedded source
+    let source = ""
+    if pos + 4 <= len(bytes) {
+        const src_len = cf_read_u32(bytes, pos)
+        pos = pos + 4
+        if src_len > 0 && pos + src_len <= len(bytes) {
+            source = cf_decode_str(bytes, pos, src_len)
+        }
+    }
+
+    {"source": source, "functions": functions, "constants": constants, "entry": entry, "version": version}
+}
+
+// ── File I/O ──────────────────────────────────────────────────────
+
+// Write .magc to file (converts byte array to binary string).
+func write_classfile(path, source, functions) {
+    const bytes = encode_classfile(source, functions)
+    let s = ""
+    let i = 0
+    while i < len(bytes) {
+        s = s + char_from_code(bytes[i])
+        i = i + 1
+    }
+    file.write(path, s)
+}
+
+// Read a .magc file from path.
+func read_classfile(path) {
+    const raw = file.read_bytes(path)
+    decode_classfile(raw)
+}
+
+// ── Utility ───────────────────────────────────────────────────────
+
+func classfile_summary(cf) {
+    const src_len = len(cf["source"])
+    const func_count = len(cf["functions"])
+    const const_count = len(cf["constants"])
+    f".magc v{cf["version"]}: {func_count} function(s), {const_count} constant(s), {src_len} source bytes"
+}
