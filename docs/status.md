@@ -14,8 +14,8 @@
 | Lint codes (W) | 49 |
 | Error codes (E) | 27 |
 | CLI commands | 40+ |
-| Lib tests | 1,657 |
-| Integration tests | 1,558 |
+| Lib tests | 1,663 |
+| Integration tests | 1,600 |
 | Source lines | ~93,000 |
 | Total lines (with tests) | ~114,000 |
 

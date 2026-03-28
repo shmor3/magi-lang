@@ -32,7 +32,7 @@ magi-lang/
 │   ├── interpreter.magi    # Tree-walking interpreter + virtual heap
 │   ├── ops.magi            # 468 operation dispatches
 │   ├── optimizer.magi      # Constant folding, DCE, TCO, inlining
-│   ├── linter.magi         # 33 lint rules
+│   ├── linter.magi         # 49 lint rules
 │   ├── formatter.magi      # AST pretty-printer
 │   ├── diagnostics.magi    # Error/warning rendering
 │   ├── eval.magi           # Evaluator traits and error types
@@ -198,7 +198,7 @@ AST nodes are heap-allocated via the interpreter runtime. Recursive references (
 
 **MILESTONE**: After Phase 6, `magi run self/cli.magi -- run <file>` executes MAGI programs.
 
-**Test**: All 1,558 integration tests produce identical output through stage 1
+**Test**: All 1,600 integration tests produce identical output through stage 1
 
 ### Phase 7: Optimizer + Linter + Formatter
 **Depends on**: Phase 3
@@ -338,7 +338,7 @@ AST nodes are heap-allocated via the interpreter runtime. Recursive references (
 
 **MILESTONE**: Full self-hosting achieved. `self/cli.magi` is a complete replacement for the stage 0 binary.
 
-**Test**: All 3,211 tests (1,653 lib + 1,558 integration) pass through stage 1. User-visible behavior is identical.
+**Test**: All 3,263 tests (1,663 lib + 1,600 integration) pass through stage 1. User-visible behavior is identical.
 
 ## Technical Decisions
 
@@ -353,7 +353,7 @@ Try/catch with Result-like maps: `{"ok": value}` or `{"error": message}`. Consis
 
 ### Testing Strategy
 - Unit tests per module in `self/tests/`
-- Conformance: all 1,558 integration tests must produce identical output
+- Conformance: all 1,600 integration tests must produce identical output
 - Self-hosting proof: `magi run self/cli.magi -- run self/cli.magi -- eval '1 + 1'` returns `2`
 
 ### Feature Freeze
@@ -363,13 +363,13 @@ No new language features during the rewrite. Bug fixes to stage 0 are allowed. T
 
 The self-hosting is complete when ALL of the following are true:
 
-1. `magi run self/cli.magi -- run <file>` produces identical output to `magi run <file>` for all 1,558 integration tests
+1. `magi run self/cli.magi -- run <file>` produces identical output to `magi run <file>` for all 1,600 integration tests
 2. All 40+ CLI commands work through stage 1
 3. All 468 OperationType variants dispatch correctly
 4. All 105 stdlib modules with 1,355 operations/functions are accessible
 5. All 43 LSP handlers respond correctly
 6. All 7 MCP tools are functional
-7. All 33 lint rules fire correctly
+7. All 49 lint rules fire correctly
 8. All 27 error codes are reported
 9. All 5 execution modes work (interpreted, runtime, bytecode, WASM, native) with full language coverage
 10. Debugger, package registry, formatter, optimizer all functional
@@ -415,7 +415,7 @@ All polish work has been completed. Summary of what was done:
 
 **Verification**:
 - Zero compilation errors, zero warnings
-- 1,657 lib tests passing (4 new native compiler tests added)
+- 1,663 lib tests passing (4 new native compiler tests added)
 - All 468 OperationType variants have real implementations
 - All CLI commands functional
 - All LSP handlers respond with real data
