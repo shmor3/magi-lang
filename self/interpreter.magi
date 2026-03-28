@@ -8104,3 +8104,1506 @@ func i_bimap_get_reverse(bm, value) {
     if rev.has(v) { return rev[v] }
     null
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 50: Complete String Method Dispatch
+// All string methods from src/syntax/interpreter.rs
+// ═══════════════════════════════════════════════════════════════════
+
+func i_string_method(obj, method, args) {
+    match method {
+        "len" => len(obj),
+        "length" => len(obj),
+        "is_empty" => len(obj) == 0,
+        "trim" => obj.trim(),
+        "trim_start" => {
+            let s = obj
+            while len(s) > 0 && (s[0] == " " || s[0] == "\t" || s[0] == "\n" || s[0] == "\r") {
+                s = s.substring(1, len(s))
+            }
+            s
+        },
+        "trim_end" => {
+            let s = obj
+            while len(s) > 0 {
+                const last = s[len(s) - 1]
+                if last == " " || last == "\t" || last == "\n" || last == "\r" {
+                    s = s.substring(0, len(s) - 1)
+                } else {
+                    break
+                }
+            }
+            s
+        },
+        "to_upper" => to_upper(obj),
+        "to_lower" => to_lower(obj),
+        "to_uppercase" => to_upper(obj),
+        "to_lowercase" => to_lower(obj),
+        "split" => {
+            const sep = if len(args) > 0 { args[0] } else { " " }
+            obj.split(sep)
+        },
+        "contains" => {
+            const sub = args[0]
+            obj.contains(sub)
+        },
+        "starts_with" => starts_with(obj, args[0]),
+        "ends_with" => ends_with(obj, args[0]),
+        "replace" => {
+            const from_str = args[0]
+            const to_str = args[1]
+            obj.replace(from_str, to_str)
+        },
+        "replace_first" => {
+            const from_str = args[0]
+            const to_str = args[1]
+            const idx = obj.index_of(from_str)
+            if idx < 0 { return obj }
+            obj.substring(0, idx) + to_str + obj.substring(idx + len(from_str), len(obj))
+        },
+        "substring" => {
+            const start = op_to_i64(args[0])
+            const end_val = if len(args) > 1 { op_to_i64(args[1]) } else { len(obj) }
+            obj.substring(start, end_val)
+        },
+        "substr" => {
+            const start = op_to_i64(args[0])
+            const length = if len(args) > 1 { op_to_i64(args[1]) } else { len(obj) - start }
+            obj.substring(start, start + length)
+        },
+        "char_at" => {
+            const idx = op_to_i64(args[0])
+            if idx < 0 || idx >= len(obj) { return null }
+            obj[idx]
+        },
+        "index_of" => {
+            const sub = args[0]
+            const start = if len(args) > 1 { op_to_i64(args[1]) } else { 0 }
+            let i = start
+            while i <= len(obj) - len(sub) {
+                if obj.substring(i, i + len(sub)) == sub { return i }
+                i = i + 1
+            }
+            -1
+        },
+        "last_index_of" => {
+            const sub = args[0]
+            let i = len(obj) - len(sub)
+            while i >= 0 {
+                if obj.substring(i, i + len(sub)) == sub { return i }
+                i = i - 1
+            }
+            -1
+        },
+        "pad_start" => {
+            const target_len = op_to_i64(args[0])
+            const fill_char = if len(args) > 1 { args[1] } else { " " }
+            let result = obj
+            while len(result) < target_len {
+                result = fill_char + result
+            }
+            result
+        },
+        "pad_end" => {
+            const target_len = op_to_i64(args[0])
+            const fill_char = if len(args) > 1 { args[1] } else { " " }
+            let result = obj
+            while len(result) < target_len {
+                result = result + fill_char
+            }
+            result
+        },
+        "pad_left" => {
+            const target_len = op_to_i64(args[0])
+            const fill_char = if len(args) > 1 { args[1] } else { " " }
+            let result = obj
+            while len(result) < target_len {
+                result = fill_char + result
+            }
+            result
+        },
+        "pad_right" => {
+            const target_len = op_to_i64(args[0])
+            const fill_char = if len(args) > 1 { args[1] } else { " " }
+            let result = obj
+            while len(result) < target_len {
+                result = result + fill_char
+            }
+            result
+        },
+        "repeat" => {
+            const count = op_to_i64(args[0])
+            let result = ""
+            let i = 0
+            while i < count {
+                result = result + obj
+                i = i + 1
+            }
+            result
+        },
+        "reverse" => {
+            let result = ""
+            let i = len(obj) - 1
+            while i >= 0 {
+                result = result + obj[i]
+                i = i - 1
+            }
+            result
+        },
+        "lines" => {
+            obj.split("\n")
+        },
+        "words" => {
+            let result = []
+            let current = ""
+            for c in obj.chars() {
+                if c == " " || c == "\t" || c == "\n" || c == "\r" {
+                    if len(current) > 0 {
+                        result.push(current)
+                        current = ""
+                    }
+                } else {
+                    current = current + c
+                }
+            }
+            if len(current) > 0 { result.push(current) }
+            result
+        },
+        "chars" => obj.chars(),
+        "bytes" => {
+            let result = []
+            for c in obj.chars() {
+                result.push(char_code(c))
+            }
+            result
+        },
+        "count" => {
+            const sub = args[0]
+            if len(sub) == 0 { return len(obj) + 1 }
+            let count = 0
+            let i = 0
+            while i <= len(obj) - len(sub) {
+                if obj.substring(i, i + len(sub)) == sub {
+                    count = count + 1
+                    i = i + len(sub)
+                } else {
+                    i = i + 1
+                }
+            }
+            count
+        },
+        "join" => {
+            if len(args) > 0 && typeof(args[0]) == "array" {
+                return args[0].join(obj)
+            }
+            obj
+        },
+        "format" => {
+            let result = obj
+            let idx = 0
+            for arg in args {
+                const placeholder = "{}"
+                const pos = result.index_of(placeholder)
+                if pos >= 0 {
+                    result = result.substring(0, pos) + i_display(arg) + result.substring(pos + 2, len(result))
+                }
+                idx = idx + 1
+            }
+            result
+        },
+        "template" => {
+            let result = obj
+            if len(args) > 0 && typeof(args[0]) == "map" {
+                const ctx = args[0]
+                for k in ctx.keys() {
+                    if k == "__s" || k == "__struct" { continue }
+                    const placeholder = "${" + k + "}"
+                    result = result.replace(placeholder, i_display(ctx[k]))
+                }
+            }
+            result
+        },
+        "to_int" => to_int(obj),
+        "to_float" => to_float(obj),
+        "to_bool" => obj == "true",
+        "to_string" => obj,
+        "char_code" => {
+            if len(obj) > 0 { char_code(obj[0]) } else { 0 }
+        },
+        "char_code_at" => {
+            const idx = op_to_i64(args[0])
+            if idx >= 0 && idx < len(obj) { char_code(obj[idx]) } else { 0 }
+        },
+        "capitalize" => {
+            if len(obj) == 0 { return "" }
+            to_upper(obj[0]) + obj.substring(1, len(obj))
+        },
+        "title_case" => {
+            let result = ""
+            let capitalize_next = true
+            for c in obj.chars() {
+                if c == " " || c == "\t" || c == "-" || c == "_" {
+                    result = result + c
+                    capitalize_next = true
+                } else if capitalize_next {
+                    result = result + to_upper(c)
+                    capitalize_next = false
+                } else {
+                    result = result + to_lower(c)
+                }
+            }
+            result
+        },
+        "camel_case" => {
+            let parts = []
+            let current = ""
+            for c in obj.chars() {
+                if c == " " || c == "_" || c == "-" {
+                    if len(current) > 0 { parts.push(current) }
+                    current = ""
+                } else {
+                    current = current + c
+                }
+            }
+            if len(current) > 0 { parts.push(current) }
+            if len(parts) == 0 { return "" }
+            let result = to_lower(parts[0])
+            let i = 1
+            while i < len(parts) {
+                const p = parts[i]
+                if len(p) > 0 {
+                    result = result + to_upper(p[0]) + to_lower(p.substring(1, len(p)))
+                }
+                i = i + 1
+            }
+            result
+        },
+        "snake_case" => {
+            let result = ""
+            let prev_lower = false
+            for c in obj.chars() {
+                if c == " " || c == "-" {
+                    result = result + "_"
+                    prev_lower = false
+                } else if c >= "A" && c <= "Z" {
+                    if prev_lower { result = result + "_" }
+                    result = result + to_lower(c)
+                    prev_lower = false
+                } else {
+                    result = result + c
+                    prev_lower = (c >= "a" && c <= "z")
+                }
+            }
+            result
+        },
+        "kebab_case" => {
+            let result = ""
+            let prev_lower = false
+            for c in obj.chars() {
+                if c == " " || c == "_" {
+                    result = result + "-"
+                    prev_lower = false
+                } else if c >= "A" && c <= "Z" {
+                    if prev_lower { result = result + "-" }
+                    result = result + to_lower(c)
+                    prev_lower = false
+                } else {
+                    result = result + c
+                    prev_lower = (c >= "a" && c <= "z")
+                }
+            }
+            result
+        },
+        "match" => {
+            if len(args) > 0 {
+                regex_match(args[0], obj)
+            } else {
+                null
+            }
+        },
+        "match_all" => {
+            if len(args) > 0 {
+                regex_match_all(args[0], obj)
+            } else {
+                []
+            }
+        },
+        "encode_uri" => encode_uri(obj),
+        "decode_uri" => decode_uri(obj),
+        "encode_base64" => base64_encode(obj),
+        "decode_base64" => base64_decode(obj),
+        "md5" => md5(obj),
+        "sha256" => sha256(obj),
+        "slice" => {
+            const start = op_to_i64(args[0])
+            const end_val = if len(args) > 1 { op_to_i64(args[1]) } else { len(obj) }
+            obj.substring(start, end_val)
+        },
+        "to_array" => obj.chars(),
+        "is_ascii" => {
+            let result = true
+            for c in obj.chars() {
+                if char_code(c) > 127 { result = false; break }
+            }
+            result
+        },
+        "is_numeric" => {
+            if len(obj) == 0 { return false }
+            let result = true
+            let has_dot = false
+            let i = 0
+            if obj[0] == "-" { i = 1 }
+            while i < len(obj) {
+                const c = obj[i]
+                if c == "." {
+                    if has_dot { result = false; break }
+                    has_dot = true
+                } else if c < "0" || c > "9" {
+                    result = false
+                    break
+                }
+                i = i + 1
+            }
+            result
+        },
+        "is_alpha" => {
+            if len(obj) == 0 { return false }
+            let result = true
+            for c in obj.chars() {
+                if !((c >= "a" && c <= "z") || (c >= "A" && c <= "Z")) {
+                    result = false; break
+                }
+            }
+            result
+        },
+        "is_alphanumeric" => {
+            if len(obj) == 0 { return false }
+            let result = true
+            for c in obj.chars() {
+                if !((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9")) {
+                    result = false; break
+                }
+            }
+            result
+        },
+        "is_whitespace" => {
+            if len(obj) == 0 { return true }
+            let result = true
+            for c in obj.chars() {
+                if c != " " && c != "\t" && c != "\n" && c != "\r" {
+                    result = false; break
+                }
+            }
+            result
+        },
+        "center" => {
+            const width = op_to_i64(args[0])
+            const fill = if len(args) > 1 { args[1] } else { " " }
+            if len(obj) >= width { return obj }
+            const padding = width - len(obj)
+            const left_pad = padding / 2
+            const right_pad = padding - left_pad
+            let result = ""
+            let i = 0
+            while i < left_pad { result = result + fill; i = i + 1 }
+            result = result + obj
+            i = 0
+            while i < right_pad { result = result + fill; i = i + 1 }
+            result
+        },
+        "truncate" => {
+            const max_len = op_to_i64(args[0])
+            const suffix = if len(args) > 1 { args[1] } else { "..." }
+            if len(obj) <= max_len { return obj }
+            obj.substring(0, max_len - len(suffix)) + suffix
+        },
+        "remove_prefix" => {
+            const prefix = args[0]
+            if starts_with(obj, prefix) {
+                obj.substring(len(prefix), len(obj))
+            } else {
+                obj
+            }
+        },
+        "remove_suffix" => {
+            const suffix = args[0]
+            if ends_with(obj, suffix) {
+                obj.substring(0, len(obj) - len(suffix))
+            } else {
+                obj
+            }
+        },
+        _ => panic(f"string has no method '{method}'")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 51: Complete Array Method Dispatch
+// ═══════════════════════════════════════════════════════════════════
+
+func i_array_method(obj, method, args) {
+    match method {
+        "len" => len(obj),
+        "length" => len(obj),
+        "is_empty" => len(obj) == 0,
+        "push" => { obj.push(args[0]); obj },
+        "pop" => obj.pop(),
+        "shift" => {
+            if len(obj) == 0 { return null }
+            const first = obj[0]
+            obj.splice(0, 1)
+            first
+        },
+        "unshift" => { obj.splice(0, 0, args[0]); obj },
+        "first" => { if len(obj) > 0 { obj[0] } else { null } },
+        "last" => { if len(obj) > 0 { obj[len(obj) - 1] } else { null } },
+        "map" => {
+            if len(args) == 0 { panic("map requires a function argument") }
+            const fn_val = args[0]
+            let result = []
+            let i = 0
+            for item in obj {
+                result.push(i_call_any(fn_val, [item, i]))
+                i = i + 1
+            }
+            result
+        },
+        "filter" => {
+            if len(args) == 0 { panic("filter requires a function argument") }
+            const fn_val = args[0]
+            let result = []
+            let i = 0
+            for item in obj {
+                if i_truthy(i_call_any(fn_val, [item, i])) {
+                    result.push(item)
+                }
+                i = i + 1
+            }
+            result
+        },
+        "reduce" => {
+            if len(args) == 0 { panic("reduce requires a function argument") }
+            const fn_val = args[0]
+            let acc = if len(args) > 1 { args[1] } else {
+                if len(obj) > 0 { obj[0] } else { null }
+            }
+            let start = if len(args) > 1 { 0 } else { 1 }
+            let i = start
+            while i < len(obj) {
+                acc = i_call_any(fn_val, [acc, obj[i], i])
+                i = i + 1
+            }
+            acc
+        },
+        "find" => {
+            const fn_val = args[0]
+            for item in obj {
+                if i_truthy(i_call_any(fn_val, [item])) { return item }
+            }
+            null
+        },
+        "find_index" => {
+            const fn_val = args[0]
+            let i = 0
+            for item in obj {
+                if i_truthy(i_call_any(fn_val, [item])) { return i }
+                i = i + 1
+            }
+            -1
+        },
+        "every" => {
+            const fn_val = args[0]
+            for item in obj {
+                if !i_truthy(i_call_any(fn_val, [item])) { return false }
+            }
+            true
+        },
+        "some" => {
+            const fn_val = args[0]
+            for item in obj {
+                if i_truthy(i_call_any(fn_val, [item])) { return true }
+            }
+            false
+        },
+        "contains" => {
+            const target = args[0]
+            for item in obj { if item == target { return true } }
+            false
+        },
+        "includes" => {
+            const target = args[0]
+            for item in obj { if item == target { return true } }
+            false
+        },
+        "index_of" => {
+            const target = args[0]
+            let i = 0
+            for item in obj { if item == target { return i }; i = i + 1 }
+            -1
+        },
+        "last_index_of" => {
+            const target = args[0]
+            let result = -1
+            let i = 0
+            for item in obj { if item == target { result = i }; i = i + 1 }
+            result
+        },
+        "sort" => {
+            if len(args) > 0 { i_sort_insertion(obj, args[0]) } else { obj.sort() }
+        },
+        "sort_by" => { i_stable_sort(obj, args[0]) },
+        "reverse" => {
+            let result = []
+            let i = len(obj) - 1
+            while i >= 0 { result.push(obj[i]); i = i - 1 }
+            result
+        },
+        "concat" => obj.concat(args[0]),
+        "slice" => {
+            const start = op_to_i64(args[0])
+            const end_val = if len(args) > 1 { op_to_i64(args[1]) } else { len(obj) }
+            obj.slice(start, end_val)
+        },
+        "splice" => {
+            const index = op_to_i64(args[0])
+            const delete_count = if len(args) > 1 { op_to_i64(args[1]) } else { 0 }
+            let new_items = if len(args) > 2 { args.slice(2, len(args)) } else { [] }
+            let result = []
+            let i = 0
+            while i < index && i < len(obj) { result.push(obj[i]); i = i + 1 }
+            for item in new_items { result.push(item) }
+            i = index + delete_count
+            while i < len(obj) { result.push(obj[i]); i = i + 1 }
+            result
+        },
+        "flat_map" => {
+            const fn_val = args[0]
+            let result = []
+            for item in obj {
+                const mapped = i_call_any(fn_val, [item])
+                if typeof(mapped) == "array" {
+                    for sub in mapped { result.push(sub) }
+                } else { result.push(mapped) }
+            }
+            result
+        },
+        "flatten" => {
+            let result = []
+            for item in obj {
+                if typeof(item) == "array" { for sub in item { result.push(sub) } }
+                else { result.push(item) }
+            }
+            result
+        },
+        "join" => {
+            const sep = if len(args) > 0 { args[0] } else { "" }
+            obj.join(sep)
+        },
+        "unique" => {
+            let seen = {"__init": true}
+            let result = []
+            for item in obj {
+                const key = i_display(item)
+                if !seen.has(key) { seen[key] = true; result.push(item) }
+            }
+            result
+        },
+        "dedup" => {
+            if len(obj) == 0 { return [] }
+            let result = [obj[0]]
+            let i = 1
+            while i < len(obj) { if obj[i] != obj[i - 1] { result.push(obj[i]) }; i = i + 1 }
+            result
+        },
+        "chunk" => {
+            const size = op_to_i64(args[0])
+            if size <= 0 { panic("chunk size must be positive") }
+            let result = []
+            let i = 0
+            while i < len(obj) { result.push(obj.slice(i, min(i + size, len(obj)))); i = i + size }
+            result
+        },
+        "window" => {
+            const size = op_to_i64(args[0])
+            if size <= 0 { panic("window size must be positive") }
+            let result = []
+            let i = 0
+            while i + size <= len(obj) { result.push(obj.slice(i, i + size)); i = i + 1 }
+            result
+        },
+        "scan" => {
+            const fn_val = args[0]
+            const initial = if len(args) > 1 { args[1] } else { null }
+            let acc = initial
+            let result = []
+            for item in obj { acc = i_call_any(fn_val, [acc, item]); result.push(acc) }
+            result
+        },
+        "partition" => {
+            const fn_val = args[0]
+            let yes_list = []
+            let no_list = []
+            for item in obj {
+                if i_truthy(i_call_any(fn_val, [item])) { yes_list.push(item) }
+                else { no_list.push(item) }
+            }
+            [yes_list, no_list]
+        },
+        "group_by" => {
+            const key_fn = args[0]
+            let groups = {"__init": true}
+            for item in obj {
+                const key = i_display(i_call_any(key_fn, [item]))
+                if !groups.has(key) { groups[key] = [] }
+                let g = groups[key]
+                g.push(item)
+                groups[key] = g
+            }
+            groups
+        },
+        "binary_search" => {
+            const target = args[0]
+            let lo = 0
+            let hi = len(obj) - 1
+            while lo <= hi {
+                const mid = (lo + hi) / 2
+                if obj[mid] == target { return mid }
+                if obj[mid] < target { lo = mid + 1 } else { hi = mid - 1 }
+            }
+            -1
+        },
+        "min" => {
+            if len(obj) == 0 { return null }
+            let m = obj[0]
+            for item in obj { if item < m { m = item } }
+            m
+        },
+        "max" => {
+            if len(obj) == 0 { return null }
+            let m = obj[0]
+            for item in obj { if item > m { m = item } }
+            m
+        },
+        "min_by" => {
+            if len(obj) == 0 { return null }
+            const fn_val = args[0]
+            let best = obj[0]
+            let best_key = i_call_any(fn_val, [obj[0]])
+            let i = 1
+            while i < len(obj) {
+                const key = i_call_any(fn_val, [obj[i]])
+                if key < best_key { best = obj[i]; best_key = key }
+                i = i + 1
+            }
+            best
+        },
+        "max_by" => {
+            if len(obj) == 0 { return null }
+            const fn_val = args[0]
+            let best = obj[0]
+            let best_key = i_call_any(fn_val, [obj[0]])
+            let i = 1
+            while i < len(obj) {
+                const key = i_call_any(fn_val, [obj[i]])
+                if key > best_key { best = obj[i]; best_key = key }
+                i = i + 1
+            }
+            best
+        },
+        "sum" => { let t = 0; for item in obj { t = t + item }; t },
+        "product" => { let t = 1; for item in obj { t = t * item }; t },
+        "average" => {
+            if len(obj) == 0 { return 0.0 }
+            let t = 0.0
+            for item in obj { t = t + to_float(item) }
+            t / to_float(len(obj))
+        },
+        "take" => { const n = op_to_i64(args[0]); obj.slice(0, min(n, len(obj))) },
+        "skip" => { const n = op_to_i64(args[0]); obj.slice(min(n, len(obj)), len(obj)) },
+        "take_while" => {
+            const fn_val = args[0]
+            let result = []
+            for item in obj {
+                if !i_truthy(i_call_any(fn_val, [item])) { break }
+                result.push(item)
+            }
+            result
+        },
+        "skip_while" => {
+            const fn_val = args[0]
+            let result = []
+            let skipping = true
+            for item in obj {
+                if skipping && i_truthy(i_call_any(fn_val, [item])) { continue }
+                skipping = false
+                result.push(item)
+            }
+            result
+        },
+        "enumerate" => { i_iter_enumerate(obj) },
+        "zip" => { i_iter_zip(obj, args[0]) },
+        "each" => {
+            const fn_val = args[0]
+            let i = 0
+            for item in obj { i_call_any(fn_val, [item, i]); i = i + 1 }
+            obj
+        },
+        "for_each" => {
+            const fn_val = args[0]
+            let i = 0
+            for item in obj { i_call_any(fn_val, [item, i]); i = i + 1 }
+            null
+        },
+        "to_map" => {
+            let result = {"__init": true}
+            for pair in obj {
+                if typeof(pair) == "array" && len(pair) >= 2 {
+                    const k = if typeof(pair[0]) == "string" { pair[0] } else { to_string(pair[0]) }
+                    result[k] = pair[1]
+                }
+            }
+            result
+        },
+        "frequencies" => { i_array_frequencies(obj) },
+        "permutations" => { i_array_permutations(obj) },
+        "combinations" => { i_array_combinations(obj, op_to_i64(args[0])) },
+        "cartesian" => { i_array_cartesian(obj, args[0]) },
+        "to_string" => { i_display(obj) },
+        "clone" => { let r = []; for item in obj { r.push(item) }; r },
+        "fill" => {
+            const val = args[0]
+            let result = []
+            let i = 0
+            while i < len(obj) { result.push(val); i = i + 1 }
+            result
+        },
+        "rotate_left" => {
+            const n = op_to_i64(args[0]) % len(obj)
+            if n == 0 || len(obj) == 0 { return obj }
+            obj.slice(n, len(obj)).concat(obj.slice(0, n))
+        },
+        "rotate_right" => {
+            const n = op_to_i64(args[0]) % len(obj)
+            if n == 0 || len(obj) == 0 { return obj }
+            obj.slice(len(obj) - n, len(obj)).concat(obj.slice(0, len(obj) - n))
+        },
+        "interleave" => {
+            const other = args[0]
+            let result = []
+            let i = 0
+            while i < len(obj) || i < len(other) {
+                if i < len(obj) { result.push(obj[i]) }
+                if i < len(other) { result.push(other[i]) }
+                i = i + 1
+            }
+            result
+        },
+        "intersperse" => {
+            const sep = args[0]
+            if len(obj) <= 1 { return obj }
+            let result = [obj[0]]
+            let i = 1
+            while i < len(obj) { result.push(sep); result.push(obj[i]); i = i + 1 }
+            result
+        },
+        "flat" => {
+            let result = []
+            for item in obj {
+                if typeof(item) == "array" { for sub in item { result.push(sub) } }
+                else { result.push(item) }
+            }
+            result
+        },
+        _ => panic(f"array has no method '{method}'")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 52: Complete Map Method Dispatch
+// ═══════════════════════════════════════════════════════════════════
+
+func i_map_method(obj, method, args) {
+    match method {
+        "len" => {
+            let count = 0
+            for k in obj.keys() {
+                if k != "__s" && k != "__init" && k != "__struct" && k != "__enum" { count = count + 1 }
+            }
+            count
+        },
+        "is_empty" => {
+            let count = 0
+            for k in obj.keys() {
+                if k != "__s" && k != "__init" && k != "__struct" && k != "__enum" { count = count + 1 }
+            }
+            count == 0
+        },
+        "keys" => obj.keys(),
+        "values" => obj.values(),
+        "has" => obj.has(args[0]),
+        "contains_key" => obj.has(args[0]),
+        "contains_value" => {
+            const target = args[0]
+            for k in obj.keys() { if obj[k] == target { return true } }
+            false
+        },
+        "get" => {
+            const key = args[0]
+            const default_val = if len(args) > 1 { args[1] } else { null }
+            if obj.has(key) { obj[key] } else { default_val }
+        },
+        "delete" => obj.delete(args[0]),
+        "remove" => obj.delete(args[0]),
+        "merge" => {
+            let result = {}
+            for k in obj.keys() { result[k] = obj[k] }
+            const other = args[0]
+            for k in other.keys() { result[k] = other[k] }
+            result
+        },
+        "deep_merge" => i_map_deep_merge(obj, args[0]),
+        "filter" => {
+            const fn_val = args[0]
+            let result = {"__init": true}
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                if i_truthy(i_call_any(fn_val, [k, obj[k]])) { result[k] = obj[k] }
+            }
+            result
+        },
+        "map_values" => {
+            const fn_val = args[0]
+            let result = {"__init": true}
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                result[k] = i_call_any(fn_val, [obj[k]])
+            }
+            result
+        },
+        "map_keys" => {
+            const fn_val = args[0]
+            let result = {"__init": true}
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                const nk = to_string(i_call_any(fn_val, [k]))
+                result[nk] = obj[k]
+            }
+            result
+        },
+        "entries" => {
+            let result = []
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" { continue }
+                result.push([k, obj[k]])
+            }
+            result
+        },
+        "to_entries" => {
+            let result = []
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" { continue }
+                result.push({"key": k, "value": obj[k]})
+            }
+            result
+        },
+        "from_entries" => {
+            let result = {"__init": true}
+            const entries = args[0]
+            for entry in entries {
+                if typeof(entry) == "array" && len(entry) >= 2 {
+                    result[to_string(entry[0])] = entry[1]
+                } else if typeof(entry) == "map" && entry.has("key") {
+                    result[entry["key"]] = entry["value"]
+                }
+            }
+            result
+        },
+        "invert" => i_map_invert(obj),
+        "select" => i_map_select(obj, args[0]),
+        "reject" => i_map_reject(obj, args[0]),
+        "flatten" => i_map_flatten(obj, ""),
+        "unflatten" => i_map_unflatten(obj),
+        "each" => {
+            const fn_val = args[0]
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                i_call_any(fn_val, [k, obj[k]])
+            }
+            obj
+        },
+        "reduce" => {
+            const fn_val = args[0]
+            let acc = if len(args) > 1 { args[1] } else { null }
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                acc = i_call_any(fn_val, [acc, k, obj[k]])
+            }
+            acc
+        },
+        "find" => {
+            const fn_val = args[0]
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                if i_truthy(i_call_any(fn_val, [k, obj[k]])) { return [k, obj[k]] }
+            }
+            null
+        },
+        "every" => {
+            const fn_val = args[0]
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                if !i_truthy(i_call_any(fn_val, [k, obj[k]])) { return false }
+            }
+            true
+        },
+        "some" => {
+            const fn_val = args[0]
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" || k == "__struct" { continue }
+                if i_truthy(i_call_any(fn_val, [k, obj[k]])) { return true }
+            }
+            false
+        },
+        "clone" => { let r = {}; for k in obj.keys() { r[k] = obj[k] }; r },
+        "to_string" => i_display(obj),
+        "to_json" => i_to_json(obj),
+        "to_array" => {
+            let result = []
+            for k in obj.keys() {
+                if k == "__s" || k == "__init" { continue }
+                result.push([k, obj[k]])
+            }
+            result
+        },
+        "update" => {
+            const key = args[0]
+            const fn_val = args[1]
+            let result = {}
+            for k in obj.keys() { result[k] = obj[k] }
+            if result.has(key) { result[key] = i_call_any(fn_val, [result[key]]) }
+            result
+        },
+        "set" => {
+            let result = {}
+            for k in obj.keys() { result[k] = obj[k] }
+            result[args[0]] = args[1]
+            result
+        },
+        _ => panic(f"map has no method '{method}'")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 53: Numeric Coercion for All Type Combinations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_coerce_numeric(a, b) {
+    const at = typeof(a)
+    const bt = typeof(b)
+    if at == bt { return [a, b] }
+    if at == "int64" && bt == "float64" { return [to_float64(a), b] }
+    if at == "float64" && bt == "int64" { return [a, to_float64(b)] }
+    if at == "int32" && bt == "int64" { return [to_int64(a), b] }
+    if at == "int64" && bt == "int32" { return [a, to_int64(b)] }
+    if at == "int32" && bt == "float64" { return [to_float64(a), b] }
+    if at == "float64" && bt == "int32" { return [a, to_float64(b)] }
+    if at == "uint32" && bt == "int64" { return [to_int64(a), b] }
+    if at == "int64" && bt == "uint32" { return [a, to_int64(b)] }
+    if at == "uint64" && bt == "int64" { return [to_int64(a), b] }
+    if at == "int64" && bt == "uint64" { return [a, to_int64(b)] }
+    if at == "float32" && bt == "float64" { return [to_float64(a), b] }
+    if at == "float64" && bt == "float32" { return [a, to_float64(b)] }
+    [a, b]
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 54: Bytes Type Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_bytes_new(size) {
+    let data = []
+    let i = 0
+    while i < size { data.push(0); i = i + 1 }
+    {"__bytes": true, "__data": data}
+}
+
+func i_bytes_from_array(arr) { {"__bytes": true, "__data": arr} }
+
+func i_bytes_from_string(s) {
+    let data = []
+    for c in s.chars() { data.push(char_code(c)) }
+    {"__bytes": true, "__data": data}
+}
+
+func i_is_bytes(val) { typeof(val) == "map" && val.has("__bytes") }
+func i_bytes_len(b) { len(b["__data"]) }
+
+func i_bytes_get(b, idx) {
+    const data = b["__data"]
+    if idx < 0 || idx >= len(data) { panic("bytes index out of bounds") }
+    data[idx]
+}
+
+func i_bytes_set(b, idx, val) {
+    let data = b["__data"]
+    if idx < 0 || idx >= len(data) { panic("bytes index out of bounds") }
+    data[idx] = val & 255
+    b["__data"] = data
+    b
+}
+
+func i_bytes_slice(b, start, end_val) {
+    {"__bytes": true, "__data": b["__data"].slice(start, end_val)}
+}
+
+func i_bytes_concat(a, b) {
+    {"__bytes": true, "__data": a["__data"].concat(b["__data"])}
+}
+
+func i_bytes_to_string(b) {
+    let result = ""
+    for byte in b["__data"] { result = result + from_char_code(byte) }
+    result
+}
+
+func i_bytes_to_hex(b) {
+    const hex_chars = "0123456789abcdef"
+    let result = ""
+    for byte in b["__data"] { result = result + hex_chars[byte / 16] + hex_chars[byte % 16] }
+    result
+}
+
+func i_bytes_equals(a, b) {
+    const ad = a["__data"]
+    const bd = b["__data"]
+    if len(ad) != len(bd) { return false }
+    let i = 0
+    while i < len(ad) { if ad[i] != bd[i] { return false }; i = i + 1 }
+    true
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 55: Set Operations (using maps as backing store)
+// ═══════════════════════════════════════════════════════════════════
+
+func i_set_new() { {"__set": true, "__elements": {"__init": true}} }
+
+func i_set_from(arr) {
+    let elements = {"__init": true}
+    for item in arr { elements[i_display(item)] = item }
+    {"__set": true, "__elements": elements}
+}
+
+func i_set_add(s, val) {
+    let elements = s["__elements"]
+    elements[i_display(val)] = val
+    s["__elements"] = elements
+    s
+}
+
+func i_set_remove(s, val) {
+    let elements = s["__elements"]
+    const key = i_display(val)
+    if elements.has(key) { elements = elements.delete(key); s["__elements"] = elements }
+    s
+}
+
+func i_set_contains(s, val) { s["__elements"].has(i_display(val)) }
+
+func i_set_size(s) {
+    let count = 0
+    for k in s["__elements"].keys() { if k != "__init" { count = count + 1 } }
+    count
+}
+
+func i_set_to_array(s) {
+    let result = []
+    for k in s["__elements"].keys() {
+        if k != "__init" { result.push(s["__elements"][k]) }
+    }
+    result
+}
+
+func i_set_union_set(a, b) {
+    let result = i_set_new()
+    for k in a["__elements"].keys() { if k != "__init" { i_set_add(result, a["__elements"][k]) } }
+    for k in b["__elements"].keys() { if k != "__init" { i_set_add(result, b["__elements"][k]) } }
+    result
+}
+
+func i_set_intersection_set(a, b) {
+    let result = i_set_new()
+    for k in a["__elements"].keys() {
+        if k != "__init" && b["__elements"].has(k) { i_set_add(result, a["__elements"][k]) }
+    }
+    result
+}
+
+func i_set_difference_set(a, b) {
+    let result = i_set_new()
+    for k in a["__elements"].keys() {
+        if k != "__init" && !b["__elements"].has(k) { i_set_add(result, a["__elements"][k]) }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 56: Tuple Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_tuple_new(elements) { {"__tuple": true, "__elements": elements} }
+func i_is_tuple(val) { typeof(val) == "map" && val.has("__tuple") }
+func i_tuple_get(tup, idx) {
+    const elements = tup["__elements"]
+    if idx < 0 || idx >= len(elements) { panic("tuple index out of bounds") }
+    elements[idx]
+}
+func i_tuple_len(tup) { len(tup["__elements"]) }
+func i_tuple_to_array(tup) { let r = []; for item in tup["__elements"] { r.push(item) }; r }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 57: Future/Promise State Handling
+// ═══════════════════════════════════════════════════════════════════
+
+func i_future_new() {
+    {"__future": true, "__state": "pending", "__value": null, "__error": null, "__callbacks": []}
+}
+
+func i_future_resolve(future, value) {
+    if future["__state"] != "pending" { panic("cannot resolve a non-pending future") }
+    future["__state"] = "resolved"
+    future["__value"] = value
+    for cb in future["__callbacks"] { i_call_any(cb, [value]) }
+    future["__callbacks"] = []
+    future
+}
+
+func i_future_reject(future, error) {
+    if future["__state"] != "pending" { panic("cannot reject a non-pending future") }
+    future["__state"] = "rejected"
+    future["__error"] = error
+    future
+}
+
+func i_future_is_pending(f) { f["__state"] == "pending" }
+func i_future_is_resolved(f) { f["__state"] == "resolved" }
+func i_future_is_rejected(f) { f["__state"] == "rejected" }
+func i_future_value(f) { if f["__state"] != "resolved" { panic("not resolved") }; f["__value"] }
+func i_future_error(f) { if f["__state"] != "rejected" { panic("not rejected") }; f["__error"] }
+
+func i_future_then(future, callback) {
+    if future["__state"] == "resolved" {
+        const result = i_call_any(callback, [future["__value"]])
+        let nf = i_future_new()
+        i_future_resolve(nf, result)
+        return nf
+    }
+    let callbacks = future["__callbacks"]
+    let nf = i_future_new()
+    callbacks.push(val => {
+        const result = i_call_any(callback, [val])
+        i_future_resolve(nf, result)
+    })
+    future["__callbacks"] = callbacks
+    nf
+}
+
+func i_future_all(futures) {
+    let results = []
+    for f in futures {
+        if f["__state"] == "resolved" { results.push(f["__value"]) }
+        else if f["__state"] == "rejected" {
+            let r = i_future_new(); i_future_reject(r, f["__error"]); return r
+        }
+        else { results.push(null) }
+    }
+    let r = i_future_new()
+    i_future_resolve(r, results)
+    r
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 58: Error Boundary and Result Types
+// ═══════════════════════════════════════════════════════════════════
+
+func i_make_error(message) { {"__error": true, "__message": message} }
+func i_is_error_value(val) { typeof(val) == "map" && val.has("__error") }
+func i_error_message(err) { if i_is_error_value(err) { err["__message"] } else { to_string(err) } }
+func i_result_ok(value) { {"__result": true, "__ok": true, "__value": value} }
+func i_result_err(error) { {"__result": true, "__ok": false, "__error": error} }
+func i_result_is_ok(r) { typeof(r) == "map" && r.has("__result") && r["__ok"] }
+func i_result_is_err(r) { typeof(r) == "map" && r.has("__result") && !r["__ok"] }
+func i_result_unwrap(r) {
+    if i_result_is_ok(r) { return r["__value"] }
+    if i_result_is_err(r) { panic(f"unwrap on Err: {i_error_message(r['__error'])}") }
+    r
+}
+func i_result_unwrap_or(r, default_val) { if i_result_is_ok(r) { r["__value"] } else { default_val } }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 59: Import Resolution
+// ═══════════════════════════════════════════════════════════════════
+
+let i_module_cache = {"__init": true}
+
+func i_resolve_module_path(module_path) {
+    const parts = module_path.split(".")
+    if len(parts) >= 2 && parts[0] == "std" {
+        return {"kind": "stdlib", "name": parts[1]}
+    }
+    {"kind": "file", "path": parts.join("/") + ".magi"}
+}
+
+func i_load_module(module_path) {
+    if i_module_cache.has(module_path) { return i_module_cache[module_path] }
+    const resolved = i_resolve_module_path(module_path)
+    const mod_result = {"__module": true, "__name": module_path, "__exports": {"__init": true}}
+    i_module_cache[module_path] = mod_result
+    mod_result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 60: REPL Mode Support
+// ═══════════════════════════════════════════════════════════════════
+
+let i_repl_active = false
+
+func i_repl_init() {
+    i_repl_active = true
+    i_scopes = [i_new_scope()]
+    i_functions = {"__init": true}
+    i_structs = {"__init": true}
+    i_enums = {"__init": true}
+}
+
+func i_repl_evaluate(input_text) {
+    if !i_repl_active { i_repl_init() }
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+    p_tokens = tokenize(input_text)
+    p_pos = 0
+    let result = null
+    if len(p_tokens) > 0 {
+        const program = parse_program()
+        result = eval_program(program)
+    }
+    p_tokens = save_tokens
+    p_pos = save_pos
+    result
+}
+
+func i_repl_reset() {
+    i_repl_active = false
+    i_scopes = [i_new_scope()]
+}
+
+func i_repl_bindings() {
+    let names = []
+    for scope in i_scopes {
+        for k in scope.keys() { if k != "__s" { names.push(k) } }
+    }
+    for k in i_functions.keys() {
+        if k != "__init" { names.push(k) }
+    }
+    names
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 61: Statistics Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_stats_mean(arr) {
+    if len(arr) == 0 { return 0.0 }
+    let sum = 0.0
+    for item in arr { sum = sum + to_float(item) }
+    sum / to_float(len(arr))
+}
+
+func i_stats_median(arr) {
+    if len(arr) == 0 { return 0.0 }
+    let sorted = arr.sort()
+    const n = len(sorted)
+    if n % 2 == 1 { to_float(sorted[n / 2]) }
+    else { (to_float(sorted[n / 2 - 1]) + to_float(sorted[n / 2])) / 2.0 }
+}
+
+func i_stats_variance(arr) {
+    if len(arr) <= 1 { return 0.0 }
+    const mean = i_stats_mean(arr)
+    let sum_sq = 0.0
+    for item in arr {
+        const diff = to_float(item) - mean
+        sum_sq = sum_sq + diff * diff
+    }
+    sum_sq / to_float(len(arr) - 1)
+}
+
+func i_stats_stddev(arr) { sqrt(i_stats_variance(arr)) }
+
+func i_stats_covariance(xs, ys) {
+    if len(xs) != len(ys) || len(xs) <= 1 { return 0.0 }
+    const mx = i_stats_mean(xs)
+    const my = i_stats_mean(ys)
+    let sum = 0.0
+    let i = 0
+    while i < len(xs) {
+        sum = sum + (to_float(xs[i]) - mx) * (to_float(ys[i]) - my)
+        i = i + 1
+    }
+    sum / to_float(len(xs) - 1)
+}
+
+func i_stats_correlation(xs, ys) {
+    const cov = i_stats_covariance(xs, ys)
+    const sx = i_stats_stddev(xs)
+    const sy = i_stats_stddev(ys)
+    if sx == 0.0 || sy == 0.0 { return 0.0 }
+    cov / (sx * sy)
+}
+
+func i_stats_percentile(arr, p) {
+    if len(arr) == 0 { return 0.0 }
+    let sorted = arr.sort()
+    const idx = to_float(p) / 100.0 * to_float(len(sorted) - 1)
+    const lower = floor(idx)
+    const upper = ceil(idx)
+    if lower == upper { return to_float(sorted[lower]) }
+    const frac = idx - to_float(lower)
+    to_float(sorted[lower]) * (1.0 - frac) + to_float(sorted[upper]) * frac
+}
+
+func i_stats_z_score(arr, value) {
+    const mean = i_stats_mean(arr)
+    const sd = i_stats_stddev(arr)
+    if sd == 0.0 { return 0.0 }
+    (to_float(value) - mean) / sd
+}
+
+func i_stats_mode(arr) {
+    if len(arr) == 0 { return null }
+    let counts = {"__init": true}
+    for item in arr {
+        const key = i_display(item)
+        if counts.has(key) { counts[key] = counts[key] + 1 } else { counts[key] = 1 }
+    }
+    let best_count = 0
+    let best_val = null
+    for item in arr {
+        if counts[i_display(item)] > best_count {
+            best_count = counts[i_display(item)]
+            best_val = item
+        }
+    }
+    best_val
+}
+
+func i_stats_quartiles(arr) {
+    [i_stats_percentile(arr, 25.0), i_stats_percentile(arr, 50.0), i_stats_percentile(arr, 75.0)]
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 62: Format Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_fmt_number(n, decimals) {
+    const factor = power(10.0, to_float(decimals))
+    to_string(round(to_float(n) * factor) / factor)
+}
+
+func i_fmt_bytes_size(n) {
+    const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    let val = to_float(n)
+    let ui = 0
+    while val >= 1024.0 && ui < len(units) - 1 { val = val / 1024.0; ui = ui + 1 }
+    if ui == 0 { f"{to_int(val)} {units[ui]}" }
+    else { f"{round(val * 100.0) / 100.0} {units[ui]}" }
+}
+
+func i_fmt_duration(ms) {
+    const total = to_int(ms)
+    if total < 1000 { return f"{total}ms" }
+    const s = total / 1000
+    if s < 60 { return f"{s}.{(total % 1000) / 100}s" }
+    const m = s / 60
+    if m < 60 { return f"{m}m {s % 60}s" }
+    const h = m / 60
+    if h < 24 { return f"{h}h {m % 60}m" }
+    f"{h / 24}d {h % 24}h"
+}
+
+func i_fmt_hex(n) {
+    const hex_chars = "0123456789abcdef"
+    let val = to_int(n)
+    if val == 0 { return "0x0" }
+    let neg = val < 0
+    if neg { val = 0 - val }
+    let result = ""
+    while val > 0 { result = hex_chars[val % 16] + result; val = val / 16 }
+    if neg { "0x-" + result } else { "0x" + result }
+}
+
+func i_fmt_binary(n) {
+    let val = to_int(n)
+    if val == 0 { return "0b0" }
+    let neg = val < 0
+    if neg { val = 0 - val }
+    let result = ""
+    while val > 0 { result = to_string(val % 2) + result; val = val / 2 }
+    if neg { "0b-" + result } else { "0b" + result }
+}
+
+func i_fmt_percent(n, decimals) { i_fmt_number(to_float(n) * 100.0, decimals) + "%" }
+
+func i_fmt_with_commas(n) {
+    const s = to_string(to_int(n))
+    let result = ""
+    let count = 0
+    let i = len(s) - 1
+    while i >= 0 {
+        if count > 0 && count % 3 == 0 { result = "," + result }
+        result = s[i] + result
+        count = count + 1
+        i = i - 1
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 63: JSON Serialization
+// ═══════════════════════════════════════════════════════════════════
+
+func i_to_json(val) {
+    if val == null { return "null" }
+    const t = typeof(val)
+    if t == "string" { return i_json_escape_string(val) }
+    if t == "int64" || t == "int" { return to_string(val) }
+    if t == "float64" || t == "float" { return to_string(val) }
+    if t == "bool" { return if val { "true" } else { "false" } }
+    if t == "array" {
+        let parts = []
+        for item in val { parts.push(i_to_json(item)) }
+        return "[" + parts.join(",") + "]"
+    }
+    if t == "map" {
+        let parts = []
+        for k in val.keys() {
+            if k == "__s" || k == "__init" || k == "__struct" || k == "__enum" { continue }
+            parts.push(i_json_escape_string(k) + ":" + i_to_json(val[k]))
+        }
+        return "{" + parts.join(",") + "}"
+    }
+    to_string(val)
+}
+
+func i_json_escape_string(s) {
+    let result = "\""
+    for c in to_string(s).chars() {
+        if c == "\"" { result = result + "\\\"" }
+        else if c == "\\" { result = result + "\\\\" }
+        else if c == "\n" { result = result + "\\n" }
+        else if c == "\r" { result = result + "\\r" }
+        else if c == "\t" { result = result + "\\t" }
+        else { result = result + c }
+    }
+    result + "\""
+}
