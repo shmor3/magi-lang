@@ -2380,3 +2380,2920 @@ const LSP_HANDLERS = [
     "textDocument/colorPresentation",
     "codeLens/resolve", "completionItem/resolve", "inlayHint/resolve"
 ]
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Completion Implementation ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Keyword completions with detail text for each keyword
+const KEYWORD_DETAILS = {
+    "__s": true,
+    "let": "Declare a mutable variable",
+    "const": "Declare an immutable constant",
+    "func": "Define a function",
+    "return": "Return from a function",
+    "if": "Conditional branch",
+    "else": "Alternative branch for if",
+    "while": "Loop while condition is true",
+    "for": "Iterate over a collection",
+    "in": "Membership test or for-in binding",
+    "match": "Pattern matching expression",
+    "enum": "Define an enumeration type",
+    "struct": "Define a structure type",
+    "trait": "Define an interface/trait",
+    "impl": "Implement methods for a type",
+    "import": "Import a module",
+    "use": "Bring names into scope",
+    "break": "Exit a loop",
+    "continue": "Skip to next iteration",
+    "true": "Boolean literal true",
+    "false": "Boolean literal false",
+    "null": "Null literal",
+    "async": "Declare an asynchronous function",
+    "await": "Await an asynchronous result",
+    "yield": "Yield a value from a generator",
+    "try": "Begin an error-handling block",
+    "catch": "Handle an error from try",
+    "finally": "Always-execute block after try/catch",
+    "throw": "Throw an error value",
+    "module": "Define a module",
+    "pub": "Mark a declaration as public",
+    "type": "Define a type alias",
+    "as": "Type cast or import alias",
+    "from": "Import source specifier",
+    "test": "Define a test block",
+    "defer": "Defer execution until scope exit",
+    "spawn": "Spawn an asynchronous task",
+    "select": "Select from multiple channels",
+    "interface": "Define an interface (alias for trait)",
+    "class": "Define a class",
+    "extend": "Extend a type",
+    "override": "Override a parent method",
+    "static": "Declare a static member",
+    "self": "Reference to the current instance"
+}
+
+// Builtin function signatures for completion detail
+const BUILTIN_SIGNATURES = {
+    "__s": true,
+    "len": "func len(value) -> int",
+    "push": "func push(array, value)",
+    "pop": "func pop(array) -> value",
+    "println": "func println(...args)",
+    "print": "func print(...args)",
+    "output": "func output(value)",
+    "assert": "func assert(condition, msg?)",
+    "to_string": "func to_string(value) -> string",
+    "to_int": "func to_int(value) -> int",
+    "to_float": "func to_float(value) -> float",
+    "typeof": "func typeof(value) -> string",
+    "panic": "func panic(msg) -> never",
+    "input": "func input(prompt?) -> string",
+    "range": "func range(start, end, step?) -> array",
+    "map": "func map(array, fn) -> array",
+    "filter": "func filter(array, fn) -> array",
+    "reduce": "func reduce(array, fn, init?) -> value",
+    "keys": "func keys(map) -> array",
+    "values": "func values(map) -> array",
+    "contains": "func contains(collection, value) -> bool",
+    "append": "func append(array, ...values) -> array",
+    "slice": "func slice(array, start, end?) -> array",
+    "reverse": "func reverse(array) -> array",
+    "sort": "func sort(array, cmp?) -> array",
+    "min": "func min(a, b) -> value",
+    "max": "func max(a, b) -> value",
+    "abs": "func abs(n) -> number",
+    "floor": "func floor(n) -> int",
+    "ceil": "func ceil(n) -> int",
+    "round": "func round(n) -> int",
+    "join": "func join(array, sep) -> string",
+    "split": "func split(string, sep) -> array",
+    "trim": "func trim(string) -> string",
+    "replace": "func replace(string, from, to) -> string",
+    "starts_with": "func starts_with(string, prefix) -> bool",
+    "ends_with": "func ends_with(string, suffix) -> bool",
+    "char_at": "func char_at(string, index) -> string",
+    "char_code": "func char_code(string) -> int",
+    "from_char_code": "func from_char_code(int) -> string"
+}
+
+// Snippet completions for common code patterns
+func get_snippet_completions(prefix) {
+    let snippets = []
+
+    // if snippet
+    if prefix == "" || "if".starts_with(prefix) {
+        snippets.push({
+            "label": "if",
+            "kind": CIK_SNIPPET,
+            "detail": "if statement",
+            "insertText": "if ${1:condition} {\n    ${2}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // if-else snippet
+    if prefix == "" || "if".starts_with(prefix) {
+        snippets.push({
+            "label": "ifelse",
+            "kind": CIK_SNIPPET,
+            "detail": "if-else statement",
+            "insertText": "if ${1:condition} {\n    ${2}\n} else {\n    ${3}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // for loop snippet
+    if prefix == "" || "for".starts_with(prefix) {
+        snippets.push({
+            "label": "for",
+            "kind": CIK_SNIPPET,
+            "detail": "for-in loop",
+            "insertText": "for ${1:item} in ${2:collection} {\n    ${3}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // while loop snippet
+    if prefix == "" || "while".starts_with(prefix) {
+        snippets.push({
+            "label": "while",
+            "kind": CIK_SNIPPET,
+            "detail": "while loop",
+            "insertText": "while ${1:condition} {\n    ${2}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // func snippet
+    if prefix == "" || "func".starts_with(prefix) {
+        snippets.push({
+            "label": "func",
+            "kind": CIK_SNIPPET,
+            "detail": "function definition",
+            "insertText": "func ${1:name}(${2:params}) {\n    ${3}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // match snippet
+    if prefix == "" || "match".starts_with(prefix) {
+        snippets.push({
+            "label": "match",
+            "kind": CIK_SNIPPET,
+            "detail": "match expression",
+            "insertText": "match ${1:value} {\n    ${2:pattern} => ${3:expr},\n    _ => ${4:default}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // struct snippet
+    if prefix == "" || "struct".starts_with(prefix) {
+        snippets.push({
+            "label": "struct",
+            "kind": CIK_SNIPPET,
+            "detail": "struct definition",
+            "insertText": "struct ${1:Name} {\n    ${2:field}: ${3:type}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // enum snippet
+    if prefix == "" || "enum".starts_with(prefix) {
+        snippets.push({
+            "label": "enum",
+            "kind": CIK_SNIPPET,
+            "detail": "enum definition",
+            "insertText": "enum ${1:Name} {\n    ${2:Variant}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // interface/trait snippet
+    if prefix == "" || "interface".starts_with(prefix) || "trait".starts_with(prefix) {
+        snippets.push({
+            "label": "interface",
+            "kind": CIK_SNIPPET,
+            "detail": "interface definition",
+            "insertText": "interface ${1:Name} {\n    func ${2:method}(${3:self})\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // test snippet
+    if prefix == "" || "test".starts_with(prefix) {
+        snippets.push({
+            "label": "test",
+            "kind": CIK_SNIPPET,
+            "detail": "test definition",
+            "insertText": "test \"${1:description}\" {\n    ${2:assert(true)}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // try-catch snippet
+    if prefix == "" || "try".starts_with(prefix) {
+        snippets.push({
+            "label": "trycatch",
+            "kind": CIK_SNIPPET,
+            "detail": "try-catch block",
+            "insertText": "try {\n    ${1}\n} catch err {\n    ${2}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // import snippet
+    if prefix == "" || "import".starts_with(prefix) {
+        snippets.push({
+            "label": "import",
+            "kind": CIK_SNIPPET,
+            "detail": "import statement",
+            "insertText": "import std.${1:module}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // const snippet
+    if prefix == "" || "const".starts_with(prefix) {
+        snippets.push({
+            "label": "const",
+            "kind": CIK_SNIPPET,
+            "detail": "constant declaration",
+            "insertText": "const ${1:name} = ${2:value}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // let snippet
+    if prefix == "" || "let".starts_with(prefix) {
+        snippets.push({
+            "label": "let",
+            "kind": CIK_SNIPPET,
+            "detail": "mutable variable declaration",
+            "insertText": "let ${1:name} = ${2:value}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // async func snippet
+    if prefix == "" || "async".starts_with(prefix) {
+        snippets.push({
+            "label": "async func",
+            "kind": CIK_SNIPPET,
+            "detail": "async function definition",
+            "insertText": "async func ${1:name}(${2:params}) {\n    ${3}\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    // impl snippet
+    if prefix == "" || "impl".starts_with(prefix) {
+        snippets.push({
+            "label": "impl",
+            "kind": CIK_SNIPPET,
+            "detail": "implementation block",
+            "insertText": "impl ${1:Type} {\n    func ${2:method}(self) {\n        ${3}\n    }\n}",
+            "insertTextFormat": 2
+        })
+    }
+
+    snippets
+}
+
+// Method completions based on receiver type
+func get_method_completions_for_type(type_str) {
+    let methods = []
+
+    if type_str == "string" || type_str == "String" {
+        methods.push({"label": "len", "kind": CIK_METHOD, "detail": "func len() -> int", "documentation": "Returns the length of the string"})
+        methods.push({"label": "trim", "kind": CIK_METHOD, "detail": "func trim() -> string", "documentation": "Removes leading and trailing whitespace"})
+        methods.push({"label": "trim_start", "kind": CIK_METHOD, "detail": "func trim_start() -> string", "documentation": "Removes leading whitespace"})
+        methods.push({"label": "trim_end", "kind": CIK_METHOD, "detail": "func trim_end() -> string", "documentation": "Removes trailing whitespace"})
+        methods.push({"label": "to_upper", "kind": CIK_METHOD, "detail": "func to_upper() -> string", "documentation": "Converts to uppercase"})
+        methods.push({"label": "to_lower", "kind": CIK_METHOD, "detail": "func to_lower() -> string", "documentation": "Converts to lowercase"})
+        methods.push({"label": "split", "kind": CIK_METHOD, "detail": "func split(sep: string) -> array", "documentation": "Splits string by separator"})
+        methods.push({"label": "contains", "kind": CIK_METHOD, "detail": "func contains(sub: string) -> bool", "documentation": "Checks if string contains substring"})
+        methods.push({"label": "starts_with", "kind": CIK_METHOD, "detail": "func starts_with(prefix: string) -> bool", "documentation": "Checks if string starts with prefix"})
+        methods.push({"label": "ends_with", "kind": CIK_METHOD, "detail": "func ends_with(suffix: string) -> bool", "documentation": "Checks if string ends with suffix"})
+        methods.push({"label": "replace", "kind": CIK_METHOD, "detail": "func replace(from: string, to: string) -> string", "documentation": "Replaces all occurrences"})
+        methods.push({"label": "substring", "kind": CIK_METHOD, "detail": "func substring(start: int, end?: int) -> string", "documentation": "Extracts substring by indices"})
+        methods.push({"label": "char_at", "kind": CIK_METHOD, "detail": "func char_at(index: int) -> string", "documentation": "Returns character at index"})
+        methods.push({"label": "index_of", "kind": CIK_METHOD, "detail": "func index_of(sub: string) -> int", "documentation": "Finds index of first occurrence"})
+        methods.push({"label": "last_index_of", "kind": CIK_METHOD, "detail": "func last_index_of(sub: string) -> int", "documentation": "Finds index of last occurrence"})
+        methods.push({"label": "pad_start", "kind": CIK_METHOD, "detail": "func pad_start(len: int, fill?: string) -> string", "documentation": "Pads the start to target length"})
+        methods.push({"label": "pad_end", "kind": CIK_METHOD, "detail": "func pad_end(len: int, fill?: string) -> string", "documentation": "Pads the end to target length"})
+        methods.push({"label": "repeat", "kind": CIK_METHOD, "detail": "func repeat(count: int) -> string", "documentation": "Repeats string count times"})
+        methods.push({"label": "reverse", "kind": CIK_METHOD, "detail": "func reverse() -> string", "documentation": "Reverses the string"})
+        methods.push({"label": "lines", "kind": CIK_METHOD, "detail": "func lines() -> array", "documentation": "Splits string into lines"})
+        methods.push({"label": "words", "kind": CIK_METHOD, "detail": "func words() -> array", "documentation": "Splits string into words"})
+        methods.push({"label": "chars", "kind": CIK_METHOD, "detail": "func chars() -> array", "documentation": "Returns array of characters"})
+        methods.push({"label": "bytes", "kind": CIK_METHOD, "detail": "func bytes() -> array", "documentation": "Returns array of byte values"})
+        methods.push({"label": "is_empty", "kind": CIK_METHOD, "detail": "func is_empty() -> bool", "documentation": "Returns true if string is empty"})
+        methods.push({"label": "count", "kind": CIK_METHOD, "detail": "func count(sub: string) -> int", "documentation": "Counts occurrences of substring"})
+        methods.push({"label": "format", "kind": CIK_METHOD, "detail": "func format(...args) -> string", "documentation": "Formats string with arguments"})
+        methods.push({"label": "match", "kind": CIK_METHOD, "detail": "func match(pattern: string) -> array?", "documentation": "Match against a regex pattern"})
+        methods.push({"label": "match_all", "kind": CIK_METHOD, "detail": "func match_all(pattern: string) -> array", "documentation": "Find all regex matches"})
+    }
+
+    if type_str == "array" || type_str == "Array" {
+        methods.push({"label": "len", "kind": CIK_METHOD, "detail": "func len() -> int", "documentation": "Returns the array length"})
+        methods.push({"label": "push", "kind": CIK_METHOD, "detail": "func push(value)", "documentation": "Appends a value to the end"})
+        methods.push({"label": "pop", "kind": CIK_METHOD, "detail": "func pop() -> value", "documentation": "Removes and returns the last element"})
+        methods.push({"label": "shift", "kind": CIK_METHOD, "detail": "func shift() -> value", "documentation": "Removes and returns the first element"})
+        methods.push({"label": "unshift", "kind": CIK_METHOD, "detail": "func unshift(value)", "documentation": "Prepends a value to the beginning"})
+        methods.push({"label": "map", "kind": CIK_METHOD, "detail": "func map(fn: (item) -> value) -> array", "documentation": "Transforms each element"})
+        methods.push({"label": "filter", "kind": CIK_METHOD, "detail": "func filter(fn: (item) -> bool) -> array", "documentation": "Keeps elements matching predicate"})
+        methods.push({"label": "reduce", "kind": CIK_METHOD, "detail": "func reduce(fn: (acc, item) -> value, init?) -> value", "documentation": "Folds array into single value"})
+        methods.push({"label": "find", "kind": CIK_METHOD, "detail": "func find(fn: (item) -> bool) -> value?", "documentation": "Finds first matching element"})
+        methods.push({"label": "find_index", "kind": CIK_METHOD, "detail": "func find_index(fn: (item) -> bool) -> int", "documentation": "Finds index of first match"})
+        methods.push({"label": "every", "kind": CIK_METHOD, "detail": "func every(fn: (item) -> bool) -> bool", "documentation": "True if all elements match"})
+        methods.push({"label": "some", "kind": CIK_METHOD, "detail": "func some(fn: (item) -> bool) -> bool", "documentation": "True if any element matches"})
+        methods.push({"label": "sort", "kind": CIK_METHOD, "detail": "func sort(cmp?: (a, b) -> int) -> array", "documentation": "Returns sorted copy"})
+        methods.push({"label": "sort_by", "kind": CIK_METHOD, "detail": "func sort_by(key_fn: (item) -> value) -> array", "documentation": "Sorts by key function"})
+        methods.push({"label": "reverse", "kind": CIK_METHOD, "detail": "func reverse() -> array", "documentation": "Reverses the array"})
+        methods.push({"label": "concat", "kind": CIK_METHOD, "detail": "func concat(other: array) -> array", "documentation": "Concatenates two arrays"})
+        methods.push({"label": "slice", "kind": CIK_METHOD, "detail": "func slice(start: int, end?: int) -> array", "documentation": "Extracts a sub-array"})
+        methods.push({"label": "splice", "kind": CIK_METHOD, "detail": "func splice(index: int, count: int, ...items) -> array", "documentation": "Inserts/removes elements"})
+        methods.push({"label": "flat_map", "kind": CIK_METHOD, "detail": "func flat_map(fn: (item) -> array) -> array", "documentation": "Maps and flattens result"})
+        methods.push({"label": "flatten", "kind": CIK_METHOD, "detail": "func flatten() -> array", "documentation": "Flattens nested arrays by one level"})
+        methods.push({"label": "contains", "kind": CIK_METHOD, "detail": "func contains(value) -> bool", "documentation": "Checks if array contains value"})
+        methods.push({"label": "index_of", "kind": CIK_METHOD, "detail": "func index_of(value) -> int", "documentation": "Finds index of first occurrence"})
+        methods.push({"label": "join", "kind": CIK_METHOD, "detail": "func join(sep: string) -> string", "documentation": "Joins elements with separator"})
+        methods.push({"label": "unique", "kind": CIK_METHOD, "detail": "func unique() -> array", "documentation": "Removes duplicates"})
+        methods.push({"label": "chunk", "kind": CIK_METHOD, "detail": "func chunk(size: int) -> array", "documentation": "Splits into chunks of size"})
+        methods.push({"label": "window", "kind": CIK_METHOD, "detail": "func window(size: int) -> array", "documentation": "Sliding window over elements"})
+        methods.push({"label": "zip", "kind": CIK_METHOD, "detail": "func zip(other: array) -> array", "documentation": "Pairs elements from two arrays"})
+        methods.push({"label": "enumerate", "kind": CIK_METHOD, "detail": "func enumerate() -> array", "documentation": "Pairs each element with its index"})
+        methods.push({"label": "group_by", "kind": CIK_METHOD, "detail": "func group_by(key_fn: (item) -> value) -> map", "documentation": "Groups elements by key"})
+        methods.push({"label": "partition", "kind": CIK_METHOD, "detail": "func partition(fn: (item) -> bool) -> [array, array]", "documentation": "Splits into matching/non-matching"})
+        methods.push({"label": "scan", "kind": CIK_METHOD, "detail": "func scan(fn: (acc, item) -> value, init) -> array", "documentation": "Like reduce but keeps intermediates"})
+        methods.push({"label": "dedup", "kind": CIK_METHOD, "detail": "func dedup() -> array", "documentation": "Removes consecutive duplicates"})
+        methods.push({"label": "min", "kind": CIK_METHOD, "detail": "func min() -> value", "documentation": "Returns minimum element"})
+        methods.push({"label": "max", "kind": CIK_METHOD, "detail": "func max() -> value", "documentation": "Returns maximum element"})
+        methods.push({"label": "sum", "kind": CIK_METHOD, "detail": "func sum() -> number", "documentation": "Returns sum of elements"})
+        methods.push({"label": "product", "kind": CIK_METHOD, "detail": "func product() -> number", "documentation": "Returns product of elements"})
+        methods.push({"label": "is_empty", "kind": CIK_METHOD, "detail": "func is_empty() -> bool", "documentation": "True if array is empty"})
+        methods.push({"label": "first", "kind": CIK_METHOD, "detail": "func first() -> value?", "documentation": "Returns the first element"})
+        methods.push({"label": "last", "kind": CIK_METHOD, "detail": "func last() -> value?", "documentation": "Returns the last element"})
+        methods.push({"label": "take", "kind": CIK_METHOD, "detail": "func take(n: int) -> array", "documentation": "Takes first n elements"})
+        methods.push({"label": "skip", "kind": CIK_METHOD, "detail": "func skip(n: int) -> array", "documentation": "Skips first n elements"})
+        methods.push({"label": "min_by", "kind": CIK_METHOD, "detail": "func min_by(fn: (item) -> value) -> value?", "documentation": "Min by key function"})
+        methods.push({"label": "max_by", "kind": CIK_METHOD, "detail": "func max_by(fn: (item) -> value) -> value?", "documentation": "Max by key function"})
+        methods.push({"label": "binary_search", "kind": CIK_METHOD, "detail": "func binary_search(value) -> int?", "documentation": "Searches sorted array"})
+        methods.push({"label": "frequencies", "kind": CIK_METHOD, "detail": "func frequencies() -> map", "documentation": "Count occurrences of each element"})
+    }
+
+    if type_str == "map" || type_str == "Map" {
+        methods.push({"label": "keys", "kind": CIK_METHOD, "detail": "func keys() -> array", "documentation": "Returns all keys"})
+        methods.push({"label": "values", "kind": CIK_METHOD, "detail": "func values() -> array", "documentation": "Returns all values"})
+        methods.push({"label": "has", "kind": CIK_METHOD, "detail": "func has(key: string) -> bool", "documentation": "Checks if key exists"})
+        methods.push({"label": "get", "kind": CIK_METHOD, "detail": "func get(key: string, default?) -> value", "documentation": "Gets value with optional default"})
+        methods.push({"label": "delete", "kind": CIK_METHOD, "detail": "func delete(key: string) -> map", "documentation": "Removes a key"})
+        methods.push({"label": "merge", "kind": CIK_METHOD, "detail": "func merge(other: map) -> map", "documentation": "Merges two maps"})
+        methods.push({"label": "len", "kind": CIK_METHOD, "detail": "func len() -> int", "documentation": "Returns number of entries"})
+        methods.push({"label": "filter", "kind": CIK_METHOD, "detail": "func filter(fn: (key, value) -> bool) -> map", "documentation": "Filters entries by predicate"})
+        methods.push({"label": "map_values", "kind": CIK_METHOD, "detail": "func map_values(fn: (value) -> value) -> map", "documentation": "Transforms all values"})
+        methods.push({"label": "map_keys", "kind": CIK_METHOD, "detail": "func map_keys(fn: (key) -> key) -> map", "documentation": "Transforms all keys"})
+        methods.push({"label": "entries", "kind": CIK_METHOD, "detail": "func entries() -> array", "documentation": "Returns [key, value] pairs"})
+        methods.push({"label": "from_entries", "kind": CIK_METHOD, "detail": "func from_entries(entries: array) -> map", "documentation": "Creates map from [key, value] pairs"})
+        methods.push({"label": "to_entries", "kind": CIK_METHOD, "detail": "func to_entries() -> array", "documentation": "Converts to [key, value] pairs"})
+        methods.push({"label": "contains_key", "kind": CIK_METHOD, "detail": "func contains_key(key: string) -> bool", "documentation": "Checks if key exists"})
+        methods.push({"label": "contains_value", "kind": CIK_METHOD, "detail": "func contains_value(value) -> bool", "documentation": "Checks if value exists"})
+        methods.push({"label": "is_empty", "kind": CIK_METHOD, "detail": "func is_empty() -> bool", "documentation": "True if map is empty"})
+        methods.push({"label": "invert", "kind": CIK_METHOD, "detail": "func invert() -> map", "documentation": "Swaps keys and values"})
+        methods.push({"label": "select", "kind": CIK_METHOD, "detail": "func select(keys: array) -> map", "documentation": "Select only specified keys"})
+        methods.push({"label": "reject", "kind": CIK_METHOD, "detail": "func reject(keys: array) -> map", "documentation": "Remove specified keys"})
+        methods.push({"label": "deep_merge", "kind": CIK_METHOD, "detail": "func deep_merge(other: map) -> map", "documentation": "Recursively merges maps"})
+    }
+
+    methods
+}
+
+// Enhanced completion: variable completions with type info
+func get_variable_completions(program, prefix, line) {
+    let completions = []
+    if program == null { return completions }
+
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        if sl > line { break }
+
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SConst(name, expr) => {
+                if prefix == "" || name.starts_with(prefix) {
+                    let type_info = infer_simple_type(expr)
+                    completions.push({
+                        "label": name,
+                        "kind": CIK_CONSTANT,
+                        "detail": f"const {name}: {type_info}",
+                        "documentation": f"Immutable constant defined at line {sl + 1}",
+                        "sortText": "0" + name
+                    })
+                }
+            },
+            StmtKind::SLet(name, expr) => {
+                if prefix == "" || name.starts_with(prefix) {
+                    let type_info = infer_simple_type(expr)
+                    completions.push({
+                        "label": name,
+                        "kind": CIK_VARIABLE,
+                        "detail": f"let {name}: {type_info}",
+                        "documentation": f"Immutable variable defined at line {sl + 1}",
+                        "sortText": "0" + name
+                    })
+                }
+            },
+            StmtKind::SLetMut(name, expr) => {
+                if prefix == "" || name.starts_with(prefix) {
+                    let type_info = infer_simple_type(expr)
+                    completions.push({
+                        "label": name,
+                        "kind": CIK_VARIABLE,
+                        "detail": f"let mut {name}: {type_info}",
+                        "documentation": f"Mutable variable defined at line {sl + 1}",
+                        "sortText": "0" + name
+                    })
+                }
+            },
+            _ => {}
+        }
+    }
+
+    completions
+}
+
+// Simple type inference for completion detail
+func infer_simple_type(expr) {
+    if expr == null { return "unknown" }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EIntLiteral(_) => "int",
+        ExprKind::EFloatLiteral(_) => "float",
+        ExprKind::EStringLiteral(_) => "string",
+        ExprKind::EBoolLiteral(_) => "bool",
+        ExprKind::EArrayLiteral(_) => "array",
+        ExprKind::EMapLiteral(_) => "map",
+        ExprKind::ENullLiteral => "null",
+        ExprKind::ECall(name, _, _) => f"result of {name}()",
+        ExprKind::ELambda(_, _) => "function",
+        _ => "unknown"
+    }
+}
+
+// Function completions with full signatures
+func get_function_completions(program, prefix) {
+    let completions = []
+    if program == null { return completions }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if prefix == "" || fdef.name.starts_with(prefix) {
+                    let param_strs = []
+                    for p in fdef.params {
+                        if p.rest {
+                            param_strs.push("..." + p.name)
+                        } else if p.type_ann != "" {
+                            param_strs.push(p.name + ": " + p.type_ann)
+                        } else {
+                            param_strs.push(p.name)
+                        }
+                    }
+                    let ret_type = if fdef.return_type != "" { " -> " + fdef.return_type } else { "" }
+                    const sig = f"func {fdef.name}({param_strs.join(', ')}){ret_type}"
+                    const sl = stmt.span.start_line
+
+                    // Build insert text with parameter placeholders
+                    let insert_params = []
+                    let idx = 1
+                    for p in fdef.params {
+                        insert_params.push(f"${{{idx}:{p.name}}}")
+                        idx = idx + 1
+                    }
+
+                    completions.push({
+                        "label": fdef.name,
+                        "kind": CIK_FUNCTION,
+                        "detail": sig,
+                        "documentation": f"Defined at line {sl}",
+                        "insertText": fdef.name + "(" + insert_params.join(", ") + ")",
+                        "insertTextFormat": 2,
+                        "sortText": "1" + fdef.name
+                    })
+                }
+            },
+            StmtKind::SAsyncFuncDef(fdef) => {
+                if prefix == "" || fdef.name.starts_with(prefix) {
+                    let param_strs = []
+                    for p in fdef.params {
+                        param_strs.push(p.name)
+                    }
+                    const sig = f"async func {fdef.name}({param_strs.join(', ')})"
+                    completions.push({
+                        "label": fdef.name,
+                        "kind": CIK_FUNCTION,
+                        "detail": sig,
+                        "documentation": "Async function",
+                        "sortText": "1" + fdef.name
+                    })
+                }
+            },
+            _ => {}
+        }
+    }
+
+    completions
+}
+
+// Struct field completions
+func get_struct_field_completions(program, struct_name) {
+    let completions = []
+    if program == null { return completions }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SStructDef(name, fields, _) => {
+                if name == struct_name {
+                    for field in fields {
+                        const fname = field[0]
+                        const ftype = if len(field) > 1 { field[1] } else { "unknown" }
+                        completions.push({
+                            "label": fname,
+                            "kind": CIK_FIELD,
+                            "detail": f"{fname}: {ftype}",
+                            "documentation": f"Field of struct {struct_name}"
+                        })
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    completions
+}
+
+// Enum variant completions
+func get_enum_variant_completions(program, enum_name) {
+    let completions = []
+    if program == null { return completions }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SEnumDef(name, variants, _) => {
+                if name == enum_name {
+                    for variant in variants {
+                        const vname = if typeof(variant) == "string" { variant } else { variant[0] }
+                        completions.push({
+                            "label": vname,
+                            "kind": CIK_ENUM_MEMBER,
+                            "detail": f"{enum_name}::{vname}",
+                            "documentation": f"Variant of enum {enum_name}",
+                            "insertText": f"{enum_name}::{vname}"
+                        })
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    completions
+}
+
+// Import path completions
+func get_import_completions(prefix) {
+    let completions = []
+    const modules = [
+        "array", "array_ext", "big", "binary", "bits", "bloom", "bufio",
+        "build", "bytes", "cert", "cmp", "collections", "complex", "compress",
+        "concurrent", "container", "control", "conv", "crypto", "csv",
+        "debug", "embed", "encoding", "env", "error_chain", "errors",
+        "expvar", "filepath", "flag", "fmt", "fs", "glob", "graph", "hash",
+        "heap", "hex", "html", "http", "image", "inspect", "io", "iter",
+        "json", "lazy", "log", "map", "math", "matrix", "memo", "mime",
+        "multipart", "net", "number", "observe", "option", "os", "path",
+        "pattern", "pipe", "platform", "pool", "process", "profile",
+        "protocol", "ptr", "queue", "rand", "reflect", "regex", "result",
+        "ring", "runtime", "semver", "serialize", "signal", "simd", "slice",
+        "sort", "sql", "state", "stream", "string", "string_ext", "struct",
+        "sync", "sysinfo", "template", "test", "text", "thread", "time",
+        "tls", "trace", "tuple", "type", "unicode", "unsafe", "url",
+        "uuid", "validate", "wasm", "xml", "yaml", "zip"
+    ]
+
+    for mod_name in modules {
+        const full = "std." + mod_name
+        if prefix == "" || full.starts_with(prefix) || mod_name.starts_with(prefix) {
+            completions.push({
+                "label": full,
+                "kind": CIK_MODULE,
+                "detail": f"Standard library module: {mod_name}",
+                "insertText": full
+            })
+        }
+    }
+
+    completions
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Hover Implementation ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Keyword documentation for hover
+const KEYWORD_DOCS = {
+    "__s": true,
+    "let": "## let\n\nDeclares a variable (immutable by default).\n\n```magi\nlet x = 5\nlet name = \"hello\"\n```",
+    "const": "## const\n\nDeclares an immutable constant. Cannot be reassigned.\n\n```magi\nconst PI = 3.14159\nconst MAX = 100\n```",
+    "func": "## func\n\nDeclares a function.\n\n```magi\nfunc add(a, b) {\n    a + b\n}\n```",
+    "return": "## return\n\nReturns a value from the current function.\n\n```magi\nfunc double(x) {\n    return x * 2\n}\n```",
+    "if": "## if\n\nConditional branch. Can be used as a statement or expression.\n\n```magi\nif condition {\n    // ...\n} else {\n    // ...\n}\n\nconst result = if x > 0 { \"positive\" } else { \"non-positive\" }\n```",
+    "else": "## else\n\nAlternative branch for `if` statement.\n\n```magi\nif condition {\n    // ...\n} else {\n    // ...\n}\n```",
+    "while": "## while\n\nLoop while condition is true.\n\n```magi\nwhile count < 10 {\n    count = count + 1\n}\n```",
+    "for": "## for\n\nIterate over a collection or range.\n\n```magi\nfor item in array {\n    println(item)\n}\n\nfor i in range(0, 10) {\n    println(i)\n}\n```",
+    "in": "## in\n\nUsed in `for-in` loops and membership tests.\n\n```magi\nfor x in array { ... }\nif \"key\" in map { ... }\n```",
+    "match": "## match\n\nPattern matching expression. Must be exhaustive for enums.\n\n```magi\nmatch value {\n    1 => \"one\",\n    2 => \"two\",\n    _ => \"other\"\n}\n```",
+    "enum": "## enum\n\nDefines an enumeration type with variants.\n\n```magi\nenum Color {\n    Red,\n    Green,\n    Blue\n}\n```",
+    "struct": "## struct\n\nDefines a structured data type with named fields.\n\n```magi\nstruct Point {\n    x: float,\n    y: float\n}\n```",
+    "trait": "## trait\n\nDefines an interface that types can implement.\n\n```magi\ntrait Printable {\n    func to_string(self) -> string\n}\n```",
+    "impl": "## impl\n\nImplement methods for a type.\n\n```magi\nimpl Point {\n    func distance(self, other) {\n        // ...\n    }\n}\n```",
+    "import": "## import\n\nImport a module or specific names.\n\n```magi\nimport std.math\nimport std.io\n```",
+    "async": "## async\n\nDeclare an asynchronous function.\n\n```magi\nasync func fetch_data(url) {\n    // ...\n}\n```",
+    "await": "## await\n\nAwait the result of an asynchronous operation.\n\n```magi\nconst result = await fetch_data(url)\n```",
+    "try": "## try\n\nBegin an error-handling block.\n\n```magi\ntry {\n    risky_operation()\n} catch err {\n    println(f\"Error: {err}\")\n}\n```",
+    "catch": "## catch\n\nHandle errors from a try block.\n\n```magi\ntry { ... } catch err { ... }\n```",
+    "finally": "## finally\n\nBlock that always executes after try/catch.\n\n```magi\ntry { ... } catch err { ... } finally { cleanup() }\n```",
+    "break": "## break\n\nExit the current loop.\n\n```magi\nwhile true {\n    if done { break }\n}\n```",
+    "continue": "## continue\n\nSkip to the next iteration of the current loop.\n\n```magi\nfor item in items {\n    if item == null { continue }\n    process(item)\n}\n```",
+    "spawn": "## spawn\n\nSpawn an asynchronous task.\n\n```magi\nconst task = spawn fetch_data(url)\nconst result = await task\n```",
+    "defer": "## defer\n\nDefer execution until the enclosing scope exits.\n\n```magi\nfunc process() {\n    const file = open(\"data.txt\")\n    defer close(file)\n    // file is automatically closed when function returns\n}\n```",
+    "yield": "## yield\n\nYield a value from a generator function.\n\n```magi\nfunc fibonacci() {\n    let a = 0\n    let b = 1\n    while true {\n        yield a\n        let tmp = a\n        a = b\n        b = tmp + b\n    }\n}\n```",
+    "module": "## module\n\nDefine a module namespace.\n\n```magi\nmodule math {\n    func add(a, b) { a + b }\n}\n```",
+    "pub": "## pub\n\nMark a declaration as publicly visible outside the module.\n\n```magi\npub func api_handler(request) { ... }\n```",
+    "self": "## self\n\nReference to the current instance in methods.\n\n```magi\nimpl Vec2 {\n    func length(self) {\n        sqrt(self.x * self.x + self.y * self.y)\n    }\n}\n```"
+}
+
+// Builtin function documentation for hover
+const BUILTIN_DOCS = {
+    "__s": true,
+    "len": "## len\n\n```magi\nfunc len(value) -> int\n```\n\nReturns the length of a string, array, or map.\n\n```magi\nlen(\"hello\")  // 5\nlen([1, 2, 3]) // 3\n```",
+    "println": "## println\n\n```magi\nfunc println(...args)\n```\n\nPrints values to stdout followed by a newline.\n\n```magi\nprintln(\"Hello\", \"world\") // Hello world\n```",
+    "print": "## print\n\n```magi\nfunc print(...args)\n```\n\nPrints values to stdout without trailing newline.",
+    "typeof": "## typeof\n\n```magi\nfunc typeof(value) -> string\n```\n\nReturns the type name of a value as a string.\n\n```magi\ntypeof(42)      // \"int64\"\ntypeof(\"hi\")    // \"string\"\ntypeof([1,2])   // \"array\"\n```",
+    "panic": "## panic\n\n```magi\nfunc panic(message: string) -> never\n```\n\nAborts execution with an error message.",
+    "assert": "## assert\n\n```magi\nfunc assert(condition: bool, message?: string)\n```\n\nAsserts that condition is true; panics otherwise.",
+    "to_string": "## to_string\n\n```magi\nfunc to_string(value) -> string\n```\n\nConverts any value to its string representation.",
+    "to_int": "## to_int\n\n```magi\nfunc to_int(value) -> int\n```\n\nConverts a value to an integer.",
+    "to_float": "## to_float\n\n```magi\nfunc to_float(value) -> float\n```\n\nConverts a value to a floating-point number.",
+    "range": "## range\n\n```magi\nfunc range(start: int, end: int, step?: int) -> array\n```\n\nCreates an array of integers from start (inclusive) to end (exclusive).\n\n```magi\nrange(0, 5)    // [0, 1, 2, 3, 4]\nrange(0, 10, 2) // [0, 2, 4, 6, 8]\n```",
+    "map": "## map\n\n```magi\nfunc map(array, fn: (item) -> value) -> array\n```\n\nApplies a function to each element and returns a new array.\n\n```magi\n[1, 2, 3].map(x => x * 2) // [2, 4, 6]\n```",
+    "filter": "## filter\n\n```magi\nfunc filter(array, fn: (item) -> bool) -> array\n```\n\nReturns elements for which the predicate returns true.\n\n```magi\n[1, 2, 3, 4].filter(x => x > 2) // [3, 4]\n```",
+    "reduce": "## reduce\n\n```magi\nfunc reduce(array, fn: (acc, item) -> value, initial?) -> value\n```\n\nFolds an array into a single value.\n\n```magi\n[1, 2, 3].reduce((acc, x) => acc + x, 0) // 6\n```",
+    "keys": "## keys\n\n```magi\nfunc keys(map) -> array\n```\n\nReturns an array of all keys in a map.",
+    "values": "## values\n\n```magi\nfunc values(map) -> array\n```\n\nReturns an array of all values in a map.",
+    "sort": "## sort\n\n```magi\nfunc sort(array, cmp?: (a, b) -> int) -> array\n```\n\nReturns a sorted copy of the array.\n\n```magi\nsort([3, 1, 2]) // [1, 2, 3]\n```",
+    "input": "## input\n\n```magi\nfunc input(prompt?: string) -> string\n```\n\nReads a line of text from stdin."
+}
+
+// Get hover info for a function definition
+func get_function_hover(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name == name {
+                    let param_strs = []
+                    for p in fdef.params {
+                        if p.rest {
+                            param_strs.push("..." + p.name)
+                        } else if p.type_ann != "" {
+                            param_strs.push(p.name + ": " + p.type_ann)
+                        } else {
+                            param_strs.push(p.name)
+                        }
+                    }
+                    let ret_str = if fdef.return_type != "" { " -> " + fdef.return_type } else { "" }
+                    const sig = f"func {name}({param_strs.join(', ')}){ret_str}"
+
+                    // Extract preceding doc comments
+                    const doc = extract_doc_comment(program, stmt.span.start_line)
+
+                    let md = "```magi\n" + sig + "\n```"
+                    if doc != "" {
+                        md = md + "\n\n" + doc
+                    }
+                    return md
+                }
+            },
+            StmtKind::SAsyncFuncDef(fdef) => {
+                if fdef.name == name {
+                    let param_strs = []
+                    for p in fdef.params { param_strs.push(p.name) }
+                    const sig = f"async func {name}({param_strs.join(', ')})"
+                    return "```magi\n" + sig + "\n```\n\nAsynchronous function."
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Get hover info for a struct
+func get_struct_hover(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SStructDef(sname, fields, _) => {
+                if sname == name {
+                    let field_strs = []
+                    for field in fields {
+                        const fname = field[0]
+                        const ftype = if len(field) > 1 { field[1] } else { "unknown" }
+                        field_strs.push(f"    {fname}: {ftype}")
+                    }
+                    const body = field_strs.join(",\n")
+                    return f"```magi\nstruct {name} {{\n{body}\n}}\n```"
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Get hover info for an enum
+func get_enum_hover(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SEnumDef(ename, variants, _) => {
+                if ename == name {
+                    let variant_strs = []
+                    for v in variants {
+                        const vname = if typeof(v) == "string" { v } else { v[0] }
+                        variant_strs.push("    " + vname)
+                    }
+                    const body = variant_strs.join(",\n")
+                    return f"```magi\nenum {name} {{\n{body}\n}}\n```"
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Get hover info for a variable
+func get_variable_hover(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SConst(vname, expr) => {
+                if vname == name {
+                    let type_info = infer_simple_type(expr)
+                    return f"```magi\nconst {name}: {type_info}\n```\n\nImmutable constant."
+                }
+            },
+            StmtKind::SLet(vname, expr) => {
+                if vname == name {
+                    let type_info = infer_simple_type(expr)
+                    return f"```magi\nlet {name}: {type_info}\n```\n\nImmutable variable."
+                }
+            },
+            StmtKind::SLetMut(vname, expr) => {
+                if vname == name {
+                    let type_info = infer_simple_type(expr)
+                    return f"```magi\nlet mut {name}: {type_info}\n```\n\nMutable variable."
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Get hover info for an interface/trait
+func get_interface_hover(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SInterfaceDef(iname, methods, _) => {
+                if iname == name {
+                    let method_strs = []
+                    for m in methods {
+                        method_strs.push("    func " + to_string(m))
+                    }
+                    const body = method_strs.join("\n")
+                    return f"```magi\ninterface {name} {{\n{body}\n}}\n```"
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Extract doc comments preceding a given line
+func extract_doc_comment(program, target_line) {
+    // Doc comments are lines starting with /// or // immediately before the definition
+    // For now, return empty string (would need source text access)
+    ""
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Definition (Jump to Definition) Across Files ───────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Multi-file import resolution: try to resolve imported names
+func resolve_import_definition(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SImport(module_path, alias) => {
+                // Check if the name matches the module or alias
+                const parts = module_path.split(".")
+                const last_part = if len(parts) > 0 { parts[len(parts) - 1] } else { module_path }
+                const effective_name = if alias != null && alias != "" { alias } else { last_part }
+                if effective_name == name {
+                    return {
+                        "module": module_path,
+                        "name": name,
+                        "kind": "import"
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Find definition in all open workspace documents
+func find_definition_across_files(name) {
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+        const def = find_definition(doc["program"], name)
+        if def != null {
+            return {"uri": uri, "def": def}
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full References (Find All Occurrences) Across Files ─────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Find references across all open documents
+func find_references_across_files(name) {
+    let all_refs = []
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+        const refs = find_references(doc["program"], name)
+        for r in refs {
+            all_refs.push({
+                "uri": uri,
+                "line": r["line"],
+                "col": r["col"],
+                "kind": r["kind"]
+            })
+        }
+    }
+    all_refs
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Rename (Across All Files) ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Validate a new name for renaming
+func validate_rename(new_name) {
+    if len(new_name) == 0 { return "Name cannot be empty" }
+    // Check first character is letter or underscore
+    const first = new_name[0]
+    if !((first >= "a" && first <= "z") || (first >= "A" && first <= "Z") || first == "_") {
+        return "Name must start with a letter or underscore"
+    }
+    // Check remaining characters
+    let i = 1
+    while i < len(new_name) {
+        const c = new_name[i]
+        if !is_ident_char(c) {
+            return f"Invalid character '{c}' in name"
+        }
+        i = i + 1
+    }
+    // Check not a keyword
+    if MAGI_KEYWORDS.contains(new_name) {
+        return f"'{new_name}' is a reserved keyword"
+    }
+    null
+}
+
+// Rename across all open documents
+func rename_across_files(old_name, new_name) {
+    let changes = {"__s": true}
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+        const refs = find_references(doc["program"], old_name)
+        if len(refs) > 0 {
+            let edits = []
+            for r in refs {
+                edits.push(lsp_text_edit(
+                    lsp_range(r["line"], r["col"], r["line"], r["col"] + len(old_name)),
+                    new_name
+                ))
+            }
+            changes[uri] = edits
+        }
+    }
+    changes
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Semantic Tokens with Modifiers ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Semantic token modifier flags
+const MOD_DECLARATION = 1
+const MOD_DEFINITION = 2
+const MOD_READONLY = 4
+const MOD_STATIC = 8
+const MOD_DEPRECATED = 16
+const MOD_ABSTRACT = 32
+const MOD_ASYNC = 64
+const MOD_MODIFICATION = 128
+const MOD_DOCUMENTATION = 256
+const MOD_DEFAULT_LIBRARY = 512
+
+// Classify an identifier with semantic information
+func classify_identifier(tok_text, program) {
+    // Check if it's a builtin
+    if MAGI_BUILTINS.contains(tok_text) {
+        return {"type": SEM_FUNCTION, "modifiers": MOD_DEFAULT_LIBRARY}
+    }
+
+    if program == null {
+        return {"type": SEM_VARIABLE, "modifiers": 0}
+    }
+
+    // Check if it's a function definition
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name == tok_text {
+                    return {"type": SEM_FUNCTION, "modifiers": MOD_DECLARATION}
+                }
+            },
+            StmtKind::SAsyncFuncDef(fdef) => {
+                if fdef.name == tok_text {
+                    return {"type": SEM_FUNCTION, "modifiers": MOD_DECLARATION + MOD_ASYNC}
+                }
+            },
+            StmtKind::SEnumDef(name, _, _) => {
+                if name == tok_text {
+                    return {"type": SEM_ENUM, "modifiers": MOD_DECLARATION}
+                }
+            },
+            StmtKind::SStructDef(name, _, _) => {
+                if name == tok_text {
+                    return {"type": SEM_STRUCT, "modifiers": MOD_DECLARATION}
+                }
+            },
+            StmtKind::SInterfaceDef(name, _, _) => {
+                if name == tok_text {
+                    return {"type": SEM_INTERFACE, "modifiers": MOD_DECLARATION}
+                }
+            },
+            StmtKind::SConst(name, _) => {
+                if name == tok_text {
+                    return {"type": SEM_VARIABLE, "modifiers": MOD_READONLY + MOD_DECLARATION}
+                }
+            },
+            StmtKind::SLet(name, _) => {
+                if name == tok_text {
+                    return {"type": SEM_VARIABLE, "modifiers": MOD_DECLARATION}
+                }
+            },
+            StmtKind::SLetMut(name, _) => {
+                if name == tok_text {
+                    return {"type": SEM_VARIABLE, "modifiers": MOD_DECLARATION + MOD_MODIFICATION}
+                }
+            },
+            _ => {}
+        }
+    }
+
+    {"type": SEM_VARIABLE, "modifiers": 0}
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Code Actions ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Extract function from selected range
+func make_extract_function_action(uri, range, source) {
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+    const lines = source.split("\n")
+
+    let selected_lines = []
+    let i = start_line
+    while i <= end_line && i < len(lines) {
+        selected_lines.push(lines[i])
+        i = i + 1
+    }
+    const selected_text = selected_lines.join("\n")
+
+    // Create a simple extract function refactoring
+    const func_name = "extracted_function"
+    const new_func = f"\nfunc {func_name}() {{\n{selected_text}\n}}\n"
+    const call_text = f"{func_name}()"
+
+    let edits = []
+    // Replace selection with call
+    edits.push(lsp_text_edit(range, call_text))
+    // Insert function at end of file
+    const last_line = len(lines) - 1
+    const last_char = if last_line >= 0 { len(lines[last_line]) } else { 0 }
+    edits.push(lsp_text_edit(lsp_range(last_line, last_char, last_line, last_char), new_func))
+
+    {
+        "title": "Extract function",
+        "kind": "refactor.extract",
+        "edit": {
+            "changes": {uri: edits}
+        }
+    }
+}
+
+// Extract variable from expression
+func make_extract_variable_action(uri, range, source, word) {
+    let edits = []
+    const var_name = "extracted"
+
+    // Insert const declaration before the line
+    const line = range["start"]["line"]
+    const decl = f"const {var_name} = {word}\n"
+    edits.push(lsp_text_edit(lsp_range(line, 0, line, 0), decl))
+
+    // Replace expression with variable name
+    edits.push(lsp_text_edit(range, var_name))
+
+    {
+        "title": "Extract variable",
+        "kind": "refactor.extract",
+        "edit": {
+            "changes": {uri: edits}
+        }
+    }
+}
+
+// Inline variable action
+func make_inline_variable_action(uri, program, source, var_name, line) {
+    // Find the definition and its value
+    let def_value = null
+    let def_line = -1
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        const sl = stmt.span.start_line - 1
+        match sk {
+            StmtKind::SConst(name, expr) => {
+                if name == var_name {
+                    def_value = get_expr_source_text(source, expr)
+                    def_line = sl
+                }
+            },
+            StmtKind::SLet(name, expr) => {
+                if name == var_name {
+                    def_value = get_expr_source_text(source, expr)
+                    def_line = sl
+                }
+            },
+            _ => {}
+        }
+    }
+
+    if def_value == null { return null }
+
+    // Find all references and replace with the value
+    const refs = find_references(program, var_name)
+    let edits = []
+    for r in refs {
+        if r["kind"] != "definition" {
+            edits.push(lsp_text_edit(
+                lsp_range(r["line"], r["col"], r["line"], r["col"] + len(var_name)),
+                def_value
+            ))
+        }
+    }
+
+    // Remove the definition line
+    const lines = source.split("\n")
+    if def_line >= 0 && def_line < len(lines) {
+        edits.push(lsp_text_edit(
+            lsp_range(def_line, 0, def_line + 1, 0),
+            ""
+        ))
+    }
+
+    {
+        "title": f"Inline variable '{var_name}'",
+        "kind": "refactor.inline",
+        "edit": {
+            "changes": {uri: edits}
+        }
+    }
+}
+
+// Get source text for an expression (approximate by span)
+func get_expr_source_text(source, expr) {
+    if expr == null { return "" }
+    const lines = source.split("\n")
+    const line = expr.span.start_line - 1
+    const col = expr.span.start_col - 1
+    if line < len(lines) {
+        // Extract from col to end of line (simple heuristic)
+        const ln = lines[line]
+        if col < len(ln) {
+            return ln.substring(col, len(ln))
+        }
+    }
+    ""
+}
+
+// Add missing import action
+func make_add_import_action(uri, module_name, source) {
+    const lines = source.split("\n")
+    // Find the last import line
+    let insert_line = 0
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.starts_with("import ") || ln.starts_with("use ") {
+            insert_line = i + 1
+        }
+        i = i + 1
+    }
+
+    let edits = [
+        lsp_text_edit(lsp_range(insert_line, 0, insert_line, 0), f"import {module_name}\n")
+    ]
+
+    {
+        "title": f"Add import '{module_name}'",
+        "kind": "quickfix",
+        "edit": {
+            "changes": {uri: edits}
+        }
+    }
+}
+
+// Remove unused import action
+func make_remove_unused_action(uri, source, line_num) {
+    let edits = [
+        lsp_text_edit(lsp_range(line_num, 0, line_num + 1, 0), "")
+    ]
+
+    {
+        "title": "Remove unused import",
+        "kind": "quickfix",
+        "edit": {
+            "changes": {uri: edits}
+        }
+    }
+}
+
+// Fix naming convention action
+func make_fix_naming_action(uri, source, old_name, new_name, line, col) {
+    let edits = [
+        lsp_text_edit(
+            lsp_range(line, col, line, col + len(old_name)),
+            new_name
+        )
+    ]
+
+    {
+        "title": f"Rename to '{new_name}' (naming convention)",
+        "kind": "quickfix",
+        "edit": {
+            "changes": {uri: edits}
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Signature Help ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Get full signature information for a function
+func get_full_signature(program, func_name) {
+    if program == null { return null }
+
+    // First check builtins
+    if BUILTIN_SIGNATURES.has(func_name) {
+        const sig = BUILTIN_SIGNATURES[func_name]
+        return {
+            "label": sig,
+            "parameters": extract_param_labels(sig),
+            "documentation": if BUILTIN_DOCS.has(func_name) { BUILTIN_DOCS[func_name] } else { "" }
+        }
+    }
+
+    // Check user-defined functions
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name == func_name {
+                    let param_strs = []
+                    let param_labels = []
+                    for p in fdef.params {
+                        let pstr = p.name
+                        if p.type_ann != "" {
+                            pstr = p.name + ": " + p.type_ann
+                        }
+                        if p.rest {
+                            pstr = "..." + p.name
+                        }
+                        param_strs.push(pstr)
+                        param_labels.push({"label": pstr})
+                    }
+                    let ret = ""
+                    if fdef.return_type != "" {
+                        ret = " -> " + fdef.return_type
+                    }
+                    const label = f"func {func_name}({param_strs.join(', ')}){ret}"
+                    return {
+                        "label": label,
+                        "parameters": param_labels,
+                        "documentation": ""
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Extract parameter labels from a function signature string
+func extract_param_labels(sig) {
+    let labels = []
+    // Find content between ( and )
+    const paren_start = sig.index_of("(")
+    const paren_end = sig.index_of(")")
+    if paren_start < 0 || paren_end < 0 { return labels }
+
+    const params_str = sig.substring(paren_start + 1, paren_end)
+    if len(params_str.trim()) == 0 { return labels }
+
+    const parts = params_str.split(",")
+    for part in parts {
+        labels.push({"label": part.trim()})
+    }
+    labels
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Document Symbols with Nested Symbols ───────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Collect symbols with children (nested symbols)
+func collect_symbols_nested(program) {
+    let symbols = []
+    if program == null { return symbols }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        const line = stmt.span.start_line - 1
+        const col = stmt.span.start_col - 1
+
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                let children = []
+                // Collect local variables inside the function
+                if fdef.body != null {
+                    for s in fdef.body.statements {
+                        const csk = s.kind
+                        const cl = s.span.start_line - 1
+                        const cc = s.span.start_col - 1
+                        match csk {
+                            StmtKind::SConst(name, _) => {
+                                children.push({
+                                    "name": name,
+                                    "kind": SK_CONSTANT,
+                                    "range": lsp_range(cl, cc, cl, cc + len(name)),
+                                    "selectionRange": lsp_range(cl, cc, cl, cc + len(name))
+                                })
+                            },
+                            StmtKind::SLet(name, _) => {
+                                children.push({
+                                    "name": name,
+                                    "kind": SK_VARIABLE,
+                                    "range": lsp_range(cl, cc, cl, cc + len(name)),
+                                    "selectionRange": lsp_range(cl, cc, cl, cc + len(name))
+                                })
+                            },
+                            StmtKind::SLetMut(name, _) => {
+                                children.push({
+                                    "name": name,
+                                    "kind": SK_VARIABLE,
+                                    "range": lsp_range(cl, cc, cl, cc + len(name)),
+                                    "selectionRange": lsp_range(cl, cc, cl, cc + len(name))
+                                })
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+
+                let param_names = []
+                for p in fdef.params { param_names.push(p.name) }
+                let sym = {
+                    "name": fdef.name,
+                    "kind": SK_FUNCTION,
+                    "range": lsp_range(line, col, line + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(fdef.name)),
+                    "detail": "func " + fdef.name + "(" + param_names.join(", ") + ")"
+                }
+                if len(children) > 0 {
+                    sym["children"] = children
+                }
+                symbols.push(sym)
+            },
+            StmtKind::SEnumDef(name, variants, _) => {
+                let children = []
+                let vi = 0
+                for v in variants {
+                    const vname = if typeof(v) == "string" { v } else { v[0] }
+                    children.push({
+                        "name": vname,
+                        "kind": SK_ENUM_MEMBER,
+                        "range": lsp_range(line + 1 + vi, col + 4, line + 1 + vi, col + 4 + len(vname)),
+                        "selectionRange": lsp_range(line + 1 + vi, col + 4, line + 1 + vi, col + 4 + len(vname))
+                    })
+                    vi = vi + 1
+                }
+                symbols.push({
+                    "name": name,
+                    "kind": SK_ENUM,
+                    "range": lsp_range(line, col, line + len(variants) + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "enum " + name,
+                    "children": children
+                })
+            },
+            StmtKind::SStructDef(name, fields, _) => {
+                let children = []
+                let fi = 0
+                for field in fields {
+                    const fname = field[0]
+                    children.push({
+                        "name": fname,
+                        "kind": SK_FIELD,
+                        "range": lsp_range(line + 1 + fi, col + 4, line + 1 + fi, col + 4 + len(fname)),
+                        "selectionRange": lsp_range(line + 1 + fi, col + 4, line + 1 + fi, col + 4 + len(fname))
+                    })
+                    fi = fi + 1
+                }
+                symbols.push({
+                    "name": name,
+                    "kind": SK_STRUCT,
+                    "range": lsp_range(line, col, line + len(fields) + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "struct " + name,
+                    "children": children
+                })
+            },
+            StmtKind::SInterfaceDef(name, methods, _) => {
+                let children = []
+                for m in methods {
+                    const mname = to_string(m)
+                    children.push({
+                        "name": mname,
+                        "kind": SK_METHOD,
+                        "range": lsp_range(line + 1, col + 4, line + 1, col + 4 + len(mname)),
+                        "selectionRange": lsp_range(line + 1, col + 4, line + 1, col + 4 + len(mname))
+                    })
+                }
+                symbols.push({
+                    "name": name,
+                    "kind": SK_INTERFACE,
+                    "range": lsp_range(line, col, line + len(methods) + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "interface " + name,
+                    "children": children
+                })
+            },
+            StmtKind::SImplBlock(type_name, methods) => {
+                let children = []
+                for m in methods {
+                    const mk = m.kind
+                    match mk {
+                        StmtKind::SFuncDef(fdef) => {
+                            children.push({
+                                "name": fdef.name,
+                                "kind": SK_METHOD,
+                                "range": lsp_range(m.span.start_line - 1, m.span.start_col - 1, m.span.start_line, 0),
+                                "selectionRange": lsp_range(m.span.start_line - 1, m.span.start_col - 1, m.span.start_line - 1, m.span.start_col - 1 + len(fdef.name))
+                            })
+                        },
+                        _ => {}
+                    }
+                }
+                symbols.push({
+                    "name": type_name,
+                    "kind": SK_CLASS,
+                    "range": lsp_range(line, col, line + len(methods) + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(type_name)),
+                    "detail": "impl " + type_name,
+                    "children": children
+                })
+            },
+            StmtKind::SModuleDef(name, body) => {
+                let children = []
+                if body != null {
+                    const inner = collect_symbols(body)
+                    for s in inner { children.push(s) }
+                }
+                symbols.push({
+                    "name": name,
+                    "kind": SK_MODULE,
+                    "range": lsp_range(line, col, line + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "module " + name,
+                    "children": children
+                })
+            },
+            StmtKind::SConst(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_CONSTANT,
+                    "range": lsp_range(line, col, line, col + len(name)),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "const " + name
+                })
+            },
+            StmtKind::SLet(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_VARIABLE,
+                    "range": lsp_range(line, col, line, col + len(name)),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "let " + name
+                })
+            },
+            StmtKind::SLetMut(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_VARIABLE,
+                    "range": lsp_range(line, col, line, col + len(name)),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "let mut " + name
+                })
+            },
+            StmtKind::STestDef(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_FUNCTION,
+                    "range": lsp_range(line, col, line + 1, 0),
+                    "selectionRange": lsp_range(line, col, line, col + len(name)),
+                    "detail": "test " + name
+                })
+            },
+            _ => {}
+        }
+    }
+    symbols
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Folding Ranges ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Enhanced folding: also fold multi-line strings, arrays, maps
+func compute_folding_ranges(source) {
+    let ranges = []
+    const lines = source.split("\n")
+
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+
+        // Multi-line comment blocks (// consecutive lines)
+        if ln.starts_with("//") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) && lines[j].trim().starts_with("//") {
+                j = j + 1
+            }
+            if j > start + 1 {
+                ranges.push({
+                    "startLine": start,
+                    "endLine": j - 1,
+                    "kind": FOLD_COMMENT
+                })
+            }
+            i = j
+            continue
+        }
+
+        // Import blocks
+        if ln.starts_with("import ") || ln.starts_with("use ") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) {
+                const next = lines[j].trim()
+                if next.starts_with("import ") || next.starts_with("use ") {
+                    j = j + 1
+                } else {
+                    break
+                }
+            }
+            if j > start + 1 {
+                ranges.push({
+                    "startLine": start,
+                    "endLine": j - 1,
+                    "kind": FOLD_IMPORTS
+                })
+            }
+            i = j
+            continue
+        }
+
+        // Brace-delimited blocks (functions, structs, enums, etc.)
+        if ln.ends_with("{") {
+            const start = i
+            let depth = 0
+            let k = 0
+            // Count opening braces in this line
+            while k < len(lines[i]) {
+                if lines[i][k] == "{" { depth = depth + 1 }
+                if lines[i][k] == "}" { depth = depth - 1 }
+                k = k + 1
+            }
+            let j = i + 1
+            while j < len(lines) && depth > 0 {
+                let k2 = 0
+                while k2 < len(lines[j]) {
+                    if lines[j][k2] == "{" { depth = depth + 1 }
+                    if lines[j][k2] == "}" { depth = depth - 1 }
+                    k2 = k2 + 1
+                }
+                if depth <= 0 {
+                    if j > start + 1 {
+                        ranges.push({
+                            "startLine": start,
+                            "endLine": j,
+                            "kind": FOLD_REGION
+                        })
+                    }
+                }
+                j = j + 1
+            }
+        }
+
+        // Multi-line array literals
+        if ln.ends_with("[") && !ln.ends_with("//") {
+            const start = i
+            let depth = 0
+            let k = 0
+            while k < len(lines[i]) {
+                if lines[i][k] == "[" { depth = depth + 1 }
+                if lines[i][k] == "]" { depth = depth - 1 }
+                k = k + 1
+            }
+            let j = i + 1
+            while j < len(lines) && depth > 0 {
+                let k2 = 0
+                while k2 < len(lines[j]) {
+                    if lines[j][k2] == "[" { depth = depth + 1 }
+                    if lines[j][k2] == "]" { depth = depth - 1 }
+                    k2 = k2 + 1
+                }
+                j = j + 1
+            }
+            if j - 1 > start + 1 {
+                ranges.push({
+                    "startLine": start,
+                    "endLine": j - 1,
+                    "kind": FOLD_REGION
+                })
+            }
+        }
+
+        i = i + 1
+    }
+
+    ranges
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Code Lens ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Count tests in a document
+func count_tests(program) {
+    let count = 0
+    if program == null { return count }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::STestDef(_, _) => { count = count + 1 },
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name.starts_with("test_") { count = count + 1 }
+            },
+            _ => {}
+        }
+    }
+    count
+}
+
+// Get test names
+func collect_test_names(program) {
+    let names = []
+    if program == null { return names }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::STestDef(name, _) => { names.push(name) },
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name.starts_with("test_") { names.push(fdef.name) }
+            },
+            _ => {}
+        }
+    }
+    names
+}
+
+// Enhanced code lens with test runner and implementation count
+func compute_code_lenses(uri, program) {
+    let lenses = []
+    if program == null { return lenses }
+
+    const symbols = collect_symbols(program)
+    const test_count = count_tests(program)
+
+    // File-level test count lens
+    if test_count > 0 {
+        lenses.push({
+            "range": lsp_range(0, 0, 0, 0),
+            "command": {
+                "title": f"{test_count} test(s) in file",
+                "command": "magi.runTests",
+                "arguments": [uri]
+            }
+        })
+    }
+
+    for sym in symbols {
+        const name = sym["name"]
+        const sl = sym["line"]
+        const sc = sym["col"]
+        const name_end = sc + len(name)
+
+        if sym["kind"] == SK_FUNCTION {
+            // Reference count
+            const refs = find_references(program, name)
+            const ref_count = len(refs) - 1
+
+            lenses.push({
+                "range": lsp_range(sl, sc, sl, name_end),
+                "command": {
+                    "title": f"{ref_count} reference(s)",
+                    "command": "magi.showReferences",
+                    "arguments": [uri, sl, sc]
+                }
+            })
+
+            // Run lens for test functions
+            if name == "main" || name.starts_with("test_") {
+                lenses.push({
+                    "range": lsp_range(sl, sc, sl, name_end),
+                    "command": {
+                        "title": if name == "main" { "Run" } else { "Run Test" },
+                        "command": if name == "main" { "magi.run" } else { "magi.runTest" },
+                        "arguments": [uri, name]
+                    }
+                })
+            }
+        }
+
+        // Struct: show implementation count
+        if sym["kind"] == SK_STRUCT {
+            let impl_count = 0
+            for s in program.statements {
+                const sk2 = s.kind
+                match sk2 {
+                    StmtKind::SImplBlock(type_name, _) => {
+                        if type_name == name { impl_count = impl_count + 1 }
+                    },
+                    _ => {}
+                }
+            }
+            if impl_count > 0 {
+                lenses.push({
+                    "range": lsp_range(sl, sc, sl, name_end),
+                    "command": {
+                        "title": f"{impl_count} implementation(s)",
+                        "command": "magi.showImplementations",
+                        "arguments": [uri, name]
+                    }
+                })
+            }
+        }
+
+        // Interface: show implementors
+        if sym["kind"] == SK_INTERFACE {
+            lenses.push({
+                "range": lsp_range(sl, sc, sl, name_end),
+                "command": {
+                    "title": "Show implementors",
+                    "command": "magi.showImplementors",
+                    "arguments": [uri, name]
+                }
+            })
+        }
+    }
+
+    lenses
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Inlay Hints ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Inlay hint kinds
+const INLAY_TYPE = 1
+const INLAY_PARAMETER = 2
+
+// Compute inlay hints for a document
+func compute_inlay_hints(program, source, range) {
+    let hints = []
+    if program == null { return hints }
+
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        if sl < start_line || sl > end_line { continue }
+
+        const sk = stmt.kind
+        match sk {
+            // Variable type hints (infer and show type after variable name)
+            StmtKind::SConst(name, expr) => {
+                let type_info = infer_simple_type(expr)
+                if type_info != "unknown" {
+                    const col = stmt.span.start_col - 1 + 6 + len(name) // after "const name"
+                    hints.push({
+                        "position": lsp_position(sl, col),
+                        "label": f": {type_info}",
+                        "kind": INLAY_TYPE,
+                        "paddingLeft": false,
+                        "paddingRight": true
+                    })
+                }
+            },
+            StmtKind::SLet(name, expr) => {
+                let type_info = infer_simple_type(expr)
+                if type_info != "unknown" {
+                    const col = stmt.span.start_col - 1 + 4 + len(name) // after "let name"
+                    hints.push({
+                        "position": lsp_position(sl, col),
+                        "label": f": {type_info}",
+                        "kind": INLAY_TYPE,
+                        "paddingLeft": false,
+                        "paddingRight": true
+                    })
+                }
+            },
+            StmtKind::SLetMut(name, expr) => {
+                let type_info = infer_simple_type(expr)
+                if type_info != "unknown" {
+                    const col = stmt.span.start_col - 1 + 4 + len(name) // after "let name"
+                    hints.push({
+                        "position": lsp_position(sl, col),
+                        "label": f": {type_info}",
+                        "kind": INLAY_TYPE,
+                        "paddingLeft": false,
+                        "paddingRight": true
+                    })
+                }
+            },
+            // Parameter name hints at call sites
+            StmtKind::SExprStmt(expr) => {
+                hints = collect_call_param_hints(hints, expr, program)
+            },
+            _ => {}
+        }
+
+        // Check return type hints for function definitions
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.return_type == "" {
+                    // Try to infer return type
+                    let inferred = infer_function_return_type(fdef)
+                    if inferred != "unknown" {
+                        let param_strs = []
+                        for p in fdef.params { param_strs.push(p.name) }
+                        const paren_end = stmt.span.start_col - 1 + 5 + len(fdef.name) + len(param_strs.join(", ")) + 2
+                        hints.push({
+                            "position": lsp_position(sl, paren_end),
+                            "label": f" -> {inferred}",
+                            "kind": INLAY_TYPE,
+                            "paddingLeft": true,
+                            "paddingRight": false
+                        })
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    hints
+}
+
+// Collect parameter name hints for function calls
+func collect_call_param_hints(hints, expr, program) {
+    if expr == null { return hints }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ECall(func_name, args, _) => {
+            // Look up function definition to get param names
+            let fdef = null
+            for stmt in program.statements {
+                const sk = stmt.kind
+                match sk {
+                    StmtKind::SFuncDef(fd) => {
+                        if fd.name == func_name { fdef = fd }
+                    },
+                    _ => {}
+                }
+            }
+
+            if fdef != null && args != null {
+                let i = 0
+                while i < len(args) && i < len(fdef.params) {
+                    const param_name = fdef.params[i].name
+                    const arg = args[i]
+                    // Only show hint if arg is not a simple variable with same name
+                    let show_hint = true
+                    const ak = arg.kind
+                    match ak {
+                        ExprKind::EVariable(vname) => {
+                            if vname == param_name { show_hint = false }
+                        },
+                        _ => {}
+                    }
+
+                    if show_hint {
+                        const al = arg.span.start_line - 1
+                        const ac = arg.span.start_col - 1
+                        hints.push({
+                            "position": lsp_position(al, ac),
+                            "label": f"{param_name}: ",
+                            "kind": INLAY_PARAMETER,
+                            "paddingLeft": false,
+                            "paddingRight": false
+                        })
+                    }
+                    i = i + 1
+                }
+            }
+
+            // Recurse into arguments
+            if args != null {
+                for arg in args {
+                    hints = collect_call_param_hints(hints, arg, program)
+                }
+            }
+        },
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            hints = collect_call_param_hints(hints, obj, program)
+            if args != null {
+                for arg in args {
+                    hints = collect_call_param_hints(hints, arg, program)
+                }
+            }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            hints = collect_call_param_hints(hints, left, program)
+            hints = collect_call_param_hints(hints, right, program)
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            hints = collect_call_param_hints(hints, operand, program)
+        },
+        _ => {}
+    }
+    hints
+}
+
+// Infer function return type from body (simple heuristic)
+func infer_function_return_type(fdef) {
+    if fdef.body == null { return "unknown" }
+    const stmts = fdef.body.statements
+    if len(stmts) == 0 { return "unknown" }
+
+    // Check last statement or explicit returns
+    let last = stmts[len(stmts) - 1]
+    const sk = last.kind
+    match sk {
+        StmtKind::SReturn(expr) => {
+            if expr != null { return infer_simple_type(expr) }
+            "void"
+        },
+        StmtKind::SExprStmt(expr) => {
+            infer_simple_type(expr)
+        },
+        _ => "unknown"
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Document Highlight ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Document highlight kinds
+const HIGHLIGHT_TEXT = 1
+const HIGHLIGHT_READ = 2
+const HIGHLIGHT_WRITE = 3
+
+// Compute highlights for all occurrences of a symbol
+func compute_highlights(program, source, name) {
+    let highlights = []
+    if program == null { return highlights }
+
+    const refs = find_references(program, name)
+    for r in refs {
+        const kind = match r["kind"] {
+            "definition" => HIGHLIGHT_WRITE,
+            "assignment" => HIGHLIGHT_WRITE,
+            _ => HIGHLIGHT_READ
+        }
+        highlights.push({
+            "range": lsp_range(r["line"], r["col"], r["line"], r["col"] + len(name)),
+            "kind": kind
+        })
+    }
+    highlights
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Document Link ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Find import links in source
+func compute_document_links(source) {
+    let links = []
+    const lines = source.split("\n")
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.starts_with("import ") {
+            const module_path = ln.substring(7, len(ln)).trim()
+            // Convert module path to a hypothetical file URI
+            const parts = module_path.split(".")
+            if len(parts) > 0 {
+                const start_col = lines[i].index_of(module_path)
+                if start_col >= 0 {
+                    links.push({
+                        "range": lsp_range(i, start_col, i, start_col + len(module_path)),
+                        "tooltip": f"Go to module {module_path}"
+                    })
+                }
+            }
+        }
+        i = i + 1
+    }
+    links
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Linked Editing Range ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Get linked editing ranges (e.g., rename all occurrences at once)
+func compute_linked_editing_ranges(program, source, name) {
+    let ranges = []
+    if program == null { return ranges }
+
+    const refs = find_references(program, name)
+    for r in refs {
+        ranges.push(lsp_range(r["line"], r["col"], r["line"], r["col"] + len(name)))
+    }
+
+    if len(ranges) == 0 { return null }
+    {"ranges": ranges}
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Document Color ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse color literals from source (e.g., "#FF0000", "rgb(255,0,0)")
+func compute_document_colors(source) {
+    let colors = []
+    const lines = source.split("\n")
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i]
+        // Find hex color literals: "#RRGGBB"
+        let j = 0
+        while j < len(ln) - 6 {
+            if ln[j] == "#" {
+                let valid = true
+                let k = 1
+                while k <= 6 && valid {
+                    const c = ln[j + k]
+                    if !((c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F")) {
+                        valid = false
+                    }
+                    k = k + 1
+                }
+                if valid && (j + 7 >= len(ln) || !is_ident_char(ln[j + 7])) {
+                    const hex = ln.substring(j + 1, j + 7)
+                    const r = hex_to_int(hex.substring(0, 2))
+                    const g = hex_to_int(hex.substring(2, 4))
+                    const b = hex_to_int(hex.substring(4, 6))
+                    colors.push({
+                        "range": lsp_range(i, j, i, j + 7),
+                        "color": {
+                            "red": r / 255.0,
+                            "green": g / 255.0,
+                            "blue": b / 255.0,
+                            "alpha": 1.0
+                        }
+                    })
+                    j = j + 7
+                    continue
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    colors
+}
+
+// Simple hex-to-int conversion
+func hex_to_int(hex_str) {
+    let result = 0
+    for c in hex_str.chars() {
+        result = result * 16
+        if c >= "0" && c <= "9" { result = result + (char_code(c) - char_code("0")) }
+        else if c >= "a" && c <= "f" { result = result + 10 + (char_code(c) - char_code("a")) }
+        else if c >= "A" && c <= "F" { result = result + 10 + (char_code(c) - char_code("A")) }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Call Hierarchy ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Prepare call hierarchy item at position
+func prepare_call_hierarchy(program, source, name, uri) {
+    if program == null { return null }
+    const def = find_definition(program, name)
+    if def == null { return null }
+    if def["kind"] != "function" { return null }
+
+    [{
+        "name": name,
+        "kind": SK_FUNCTION,
+        "uri": uri,
+        "range": lsp_range(def["line"], def["col"], def["line"] + 1, 0),
+        "selectionRange": lsp_range(def["line"], def["col"], def["line"], def["col"] + len(name))
+    }]
+}
+
+// Find all callers of a function (incoming calls)
+func find_incoming_calls(program, target_name, uri) {
+    let calls = []
+    if program == null { return calls }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                // Check if fdef's body calls target_name
+                if fdef.body != null {
+                    let found = false
+                    for s in fdef.body.statements {
+                        if stmt_calls_function(s, target_name) {
+                            found = true
+                        }
+                    }
+                    if found {
+                        const sl = stmt.span.start_line - 1
+                        const sc = stmt.span.start_col - 1
+                        calls.push({
+                            "from": {
+                                "name": fdef.name,
+                                "kind": SK_FUNCTION,
+                                "uri": uri,
+                                "range": lsp_range(sl, sc, sl + 1, 0),
+                                "selectionRange": lsp_range(sl, sc, sl, sc + len(fdef.name))
+                            },
+                            "fromRanges": [lsp_range(sl, sc, sl, sc + len(fdef.name))]
+                        })
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    calls
+}
+
+// Check if a statement calls a specific function
+func stmt_calls_function(stmt, func_name) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => expr_calls_function(expr, func_name),
+        StmtKind::SReturn(expr) => {
+            if expr != null { expr_calls_function(expr, func_name) } else { false }
+        },
+        StmtKind::SConst(_, expr) => {
+            if expr != null { expr_calls_function(expr, func_name) } else { false }
+        },
+        StmtKind::SLet(_, expr) => {
+            if expr != null { expr_calls_function(expr, func_name) } else { false }
+        },
+        StmtKind::SLetMut(_, expr) => {
+            if expr != null { expr_calls_function(expr, func_name) } else { false }
+        },
+        _ => false
+    }
+}
+
+// Check if an expression calls a specific function
+func expr_calls_function(expr, func_name) {
+    if expr == null { return false }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ECall(name, args, _) => {
+            if name == func_name { return true }
+            if args != null {
+                for arg in args {
+                    if expr_calls_function(arg, func_name) { return true }
+                }
+            }
+            false
+        },
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            if expr_calls_function(obj, func_name) { return true }
+            if args != null {
+                for arg in args {
+                    if expr_calls_function(arg, func_name) { return true }
+                }
+            }
+            false
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            expr_calls_function(left, func_name) || expr_calls_function(right, func_name)
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            expr_calls_function(operand, func_name)
+        },
+        _ => false
+    }
+}
+
+// Find all functions called by a function (outgoing calls)
+func find_outgoing_calls(program, source_name, uri) {
+    let calls = []
+    if program == null { return calls }
+
+    // Find the function definition
+    let target_body = null
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name == source_name {
+                    target_body = fdef.body
+                }
+            },
+            _ => {}
+        }
+    }
+
+    if target_body == null { return calls }
+
+    // Collect all function calls in the body
+    let called_names = {"__s": true}
+    for s in target_body.statements {
+        collect_called_functions(s, called_names)
+    }
+
+    // Create call hierarchy items for each called function
+    for name in called_names.keys() {
+        if name == "__s" { continue }
+        const def = find_definition(program, name)
+        if def != null {
+            calls.push({
+                "to": {
+                    "name": name,
+                    "kind": SK_FUNCTION,
+                    "uri": uri,
+                    "range": lsp_range(def["line"], def["col"], def["line"] + 1, 0),
+                    "selectionRange": lsp_range(def["line"], def["col"], def["line"], def["col"] + len(name))
+                },
+                "fromRanges": [lsp_range(def["line"], def["col"], def["line"], def["col"] + len(name))]
+            })
+        }
+    }
+    calls
+}
+
+// Collect all function names called in a statement
+func collect_called_functions(stmt, names) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => { collect_calls_in_expr(expr, names) },
+        StmtKind::SReturn(expr) => { if expr != null { collect_calls_in_expr(expr, names) } },
+        StmtKind::SConst(_, expr) => { if expr != null { collect_calls_in_expr(expr, names) } },
+        StmtKind::SLet(_, expr) => { if expr != null { collect_calls_in_expr(expr, names) } },
+        StmtKind::SLetMut(_, expr) => { if expr != null { collect_calls_in_expr(expr, names) } },
+        StmtKind::SAssignment(_, expr) => { if expr != null { collect_calls_in_expr(expr, names) } },
+        StmtKind::SIf(cond, then_b, else_b) => {
+            collect_calls_in_expr(cond, names)
+            if then_b != null {
+                for s in then_b.statements { collect_called_functions(s, names) }
+            }
+            if else_b != null {
+                for s in else_b.statements { collect_called_functions(s, names) }
+            }
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            collect_calls_in_expr(cond, names)
+            if body != null {
+                for s in body.statements { collect_called_functions(s, names) }
+            }
+        },
+        StmtKind::SForLoop(_, _, iter, body) => {
+            collect_calls_in_expr(iter, names)
+            if body != null {
+                for s in body.statements { collect_called_functions(s, names) }
+            }
+        },
+        _ => {}
+    }
+}
+
+// Collect function call names from expressions
+func collect_calls_in_expr(expr, names) {
+    if expr == null { return }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ECall(name, args, _) => {
+            names[name] = true
+            if args != null {
+                for arg in args { collect_calls_in_expr(arg, names) }
+            }
+        },
+        ExprKind::EMethodCall(obj, method, args, _) => {
+            collect_calls_in_expr(obj, names)
+            if args != null {
+                for arg in args { collect_calls_in_expr(arg, names) }
+            }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            collect_calls_in_expr(left, names)
+            collect_calls_in_expr(right, names)
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            collect_calls_in_expr(operand, names)
+        },
+        ExprKind::EIndex(obj, idx) => {
+            collect_calls_in_expr(obj, names)
+            collect_calls_in_expr(idx, names)
+        },
+        ExprKind::EFieldAccess(obj, _) => {
+            collect_calls_in_expr(obj, names)
+        },
+        ExprKind::EIf(cond, then_e, else_e) => {
+            collect_calls_in_expr(cond, names)
+            collect_calls_in_expr(then_e, names)
+            if else_e != null { collect_calls_in_expr(else_e, names) }
+        },
+        ExprKind::EArrayLiteral(elements) => {
+            for e in elements { collect_calls_in_expr(e, names) }
+        },
+        ExprKind::EMapLiteral(entries) => {
+            for entry in entries {
+                collect_calls_in_expr(entry[0], names)
+                collect_calls_in_expr(entry[1], names)
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Type Hierarchy ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Prepare type hierarchy item
+func prepare_type_hierarchy(program, name, uri) {
+    if program == null { return null }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        const sl = stmt.span.start_line - 1
+        const sc = stmt.span.start_col - 1
+        match sk {
+            StmtKind::SStructDef(sname, _, _) => {
+                if sname == name {
+                    return [{
+                        "name": name,
+                        "kind": SK_STRUCT,
+                        "uri": uri,
+                        "range": lsp_range(sl, sc, sl + 1, 0),
+                        "selectionRange": lsp_range(sl, sc, sl, sc + len(name))
+                    }]
+                }
+            },
+            StmtKind::SEnumDef(ename, _, _) => {
+                if ename == name {
+                    return [{
+                        "name": name,
+                        "kind": SK_ENUM,
+                        "uri": uri,
+                        "range": lsp_range(sl, sc, sl + 1, 0),
+                        "selectionRange": lsp_range(sl, sc, sl, sc + len(name))
+                    }]
+                }
+            },
+            StmtKind::SInterfaceDef(iname, _, _) => {
+                if iname == name {
+                    return [{
+                        "name": name,
+                        "kind": SK_INTERFACE,
+                        "uri": uri,
+                        "range": lsp_range(sl, sc, sl + 1, 0),
+                        "selectionRange": lsp_range(sl, sc, sl, sc + len(name))
+                    }]
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Find supertypes (interfaces that a type implements)
+func find_supertypes(program, type_name, uri) {
+    let supertypes = []
+    if program == null { return supertypes }
+
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SImplBlock(tname, _) => {
+                // In MAGI, impl blocks can specify interfaces
+                // For now, we can't distinguish which interface is being implemented
+                // without more AST information
+            },
+            _ => {}
+        }
+    }
+    supertypes
+}
+
+// Find subtypes (types that implement an interface)
+func find_subtypes(program, interface_name, uri) {
+    let subtypes = []
+    if program == null { return subtypes }
+
+    // Find all structs that have impl blocks
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SStructDef(sname, _, _) => {
+                // Check if this struct has methods that match the interface
+                let has_impl = false
+                for s2 in program.statements {
+                    const sk2 = s2.kind
+                    match sk2 {
+                        StmtKind::SImplBlock(tname, _) => {
+                            if tname == sname { has_impl = true }
+                        },
+                        _ => {}
+                    }
+                }
+                if has_impl {
+                    const sl = stmt.span.start_line - 1
+                    const sc = stmt.span.start_col - 1
+                    subtypes.push({
+                        "name": sname,
+                        "kind": SK_STRUCT,
+                        "uri": uri,
+                        "range": lsp_range(sl, sc, sl + 1, 0),
+                        "selectionRange": lsp_range(sl, sc, sl, sc + len(sname))
+                    })
+                }
+            },
+            _ => {}
+        }
+    }
+    subtypes
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Workspace Symbol Search ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Search for symbols across all open documents
+func workspace_symbol_search(query) {
+    let results = []
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+        const symbols = collect_symbols(doc["program"])
+        for sym in symbols {
+            // Fuzzy match: check if query is a substring of symbol name
+            if query == "" || sym["name"].contains(query) {
+                results.push({
+                    "name": sym["name"],
+                    "kind": sym["kind"],
+                    "location": lsp_location(uri, lsp_range(sym["line"], sym["col"], sym["end_line"], 0))
+                })
+            }
+        }
+    }
+    results
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Execute Command ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Execute a workspace command
+func execute_command(command, arguments) {
+    match command {
+        "magi.run" => {
+            if arguments != null && len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null && doc["program"] != null {
+                    // We would run the program here
+                    return {"status": "ok", "message": "Program execution requested"}
+                }
+            }
+            {"status": "error", "message": "No document to run"}
+        },
+        "magi.check" => {
+            if arguments != null && len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null {
+                    return {"status": "ok", "diagnostics": doc["diagnostics"]}
+                }
+            }
+            {"status": "error", "message": "No document to check"}
+        },
+        "magi.lint" => {
+            if arguments != null && len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null && doc["program"] != null {
+                    const warnings = lint(doc["program"])
+                    return {"status": "ok", "warnings": warnings}
+                }
+            }
+            {"status": "error", "message": "No document to lint"}
+        },
+        "magi.format" => {
+            if arguments != null && len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null && doc["program"] != null {
+                    const formatted = format_program(doc["program"])
+                    return {"status": "ok", "formatted": formatted}
+                }
+            }
+            {"status": "error", "message": "No document to format"}
+        },
+        "magi.runTest" => {
+            if arguments != null && len(arguments) > 1 {
+                const uri = arguments[0]
+                const test_name = arguments[1]
+                return {"status": "ok", "message": f"Test '{test_name}' execution requested"}
+            }
+            {"status": "error", "message": "No test specified"}
+        },
+        "magi.runTests" => {
+            if arguments != null && len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null {
+                    const test_names = collect_test_names(doc["program"])
+                    return {"status": "ok", "tests": test_names, "count": len(test_names)}
+                }
+            }
+            {"status": "error", "message": "No document"}
+        },
+        _ => {"status": "error", "message": f"Unknown command: {command}"}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Diagnostics Publishing ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Enhanced diagnostics with lint integration
+func compute_diagnostics(uri, text) {
+    let diagnostics = []
+
+    // Save parser state
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+
+    // Tokenize and parse
+    p_tokens = tokenize(text)
+    p_pos = 0
+    let program = null
+
+    if len(p_tokens) > 0 {
+        p_pos = 0
+        program = parse_program()
+    }
+
+    // Restore parser state
+    p_tokens = save_tokens
+    p_pos = save_pos
+
+    // Type check
+    if program != null {
+        const save_errors = tc_errors
+        const save_warnings = tc_warnings
+        tc_errors = []
+        tc_warnings = []
+
+        check(program)
+
+        for err in tc_errors {
+            diagnostics.push(lsp_diagnostic(
+                lsp_range(0, 0, 0, 1),
+                DIAG_ERROR,
+                err,
+                "magi-type-checker",
+                null
+            ))
+        }
+        for w in tc_warnings {
+            diagnostics.push(lsp_diagnostic(
+                lsp_range(0, 0, 0, 1),
+                DIAG_WARNING,
+                w,
+                "magi-type-checker",
+                null
+            ))
+        }
+
+        tc_errors = save_errors
+        tc_warnings = save_warnings
+    }
+
+    // Lint
+    if program != null {
+        const lint_warnings = lint(program)
+        for w in lint_warnings {
+            diagnostics.push(lsp_diagnostic(
+                lsp_range(0, 0, 0, 1),
+                DIAG_INFO,
+                w,
+                "magi-linter",
+                null
+            ))
+        }
+    }
+
+    diagnostics
+}
+
+// Publish diagnostics notification
+func make_publish_diagnostics(uri, diagnostics) {
+    jsonrpc_notification("textDocument/publishDiagnostics", {
+        "uri": uri,
+        "diagnostics": diagnostics
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Color Presentation ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Generate color presentation options
+func compute_color_presentations(color) {
+    let presentations = []
+    const r = to_int(color["red"] * 255.0)
+    const g = to_int(color["green"] * 255.0)
+    const b = to_int(color["blue"] * 255.0)
+
+    // Hex format
+    const hex = "#" + int_to_hex(r) + int_to_hex(g) + int_to_hex(b)
+    presentations.push({"label": hex})
+
+    // RGB format
+    presentations.push({"label": f"rgb({r}, {g}, {b})"})
+
+    // RGBA format
+    const a = if color.has("alpha") { color["alpha"] } else { 1.0 }
+    presentations.push({"label": f"rgba({r}, {g}, {b}, {a})"})
+
+    presentations
+}
+
+// Convert integer to 2-digit hex string
+func int_to_hex(n) {
+    const hex_chars = "0123456789abcdef"
+    const high = n / 16
+    const low = n % 16
+    "" + hex_chars[high] + hex_chars[low]
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Completion Item Resolve ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Resolve additional information for a completion item
+func resolve_completion_item(item) {
+    const label = item["label"]
+    const kind = if item.has("kind") { item["kind"] } else { CIK_TEXT }
+
+    // Add documentation for builtins
+    if kind == CIK_FUNCTION && BUILTIN_DOCS.has(label) {
+        item["documentation"] = {
+            "kind": "markdown",
+            "value": BUILTIN_DOCS[label]
+        }
+    }
+
+    // Add documentation for keywords
+    if kind == CIK_KEYWORD && KEYWORD_DOCS.has(label) {
+        item["documentation"] = {
+            "kind": "markdown",
+            "value": KEYWORD_DOCS[label]
+        }
+    }
+
+    item
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Inlay Hint Resolve ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func resolve_inlay_hint(hint) {
+    // Add tooltip with more detail
+    if hint.has("label") {
+        const label = hint["label"]
+        if label.starts_with(": ") {
+            hint["tooltip"] = {
+                "kind": "markdown",
+                "value": f"Inferred type: `{label.substring(2, len(label))}`"
+            }
+        }
+    }
+    hint
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Code Lens Resolve ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func resolve_code_lens(lens) {
+    // Code lenses are already resolved in compute_code_lenses
+    lens
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── didSave / willSave Handlers ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func handle_did_save(params) {
+    const uri = params["textDocument"]["uri"]
+    // Re-validate the document on save
+    if params.has("text") {
+        const text = params["text"]
+        const diags = lsp_cache_document(uri, text)
+        return make_publish_diagnostics(uri, diags)
+    }
+    // If no text included, use cached
+    const doc = lsp_get_document(uri)
+    if doc != null {
+        return make_publish_diagnostics(uri, doc["diagnostics"])
+    }
+    null
+}
+
+func handle_will_save(params) {
+    // Notification before save — no action needed
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Progress Support ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Send work done progress notifications
+func send_progress_begin(token, title, message) {
+    jsonrpc_notification("$/progress", {
+        "token": token,
+        "value": {
+            "kind": "begin",
+            "title": title,
+            "message": message,
+            "cancellable": false,
+            "percentage": 0
+        }
+    })
+}
+
+func send_progress_report(token, message, percentage) {
+    jsonrpc_notification("$/progress", {
+        "token": token,
+        "value": {
+            "kind": "report",
+            "message": message,
+            "percentage": percentage
+        }
+    })
+}
+
+func send_progress_end(token, message) {
+    jsonrpc_notification("$/progress", {
+        "token": token,
+        "value": {
+            "kind": "end",
+            "message": message
+        }
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Log and Show Message ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const MSG_ERROR = 1
+const MSG_WARNING = 2
+const MSG_INFO = 3
+const MSG_LOG = 4
+
+func send_log_message(msg_type, message) {
+    jsonrpc_notification("window/logMessage", {
+        "type": msg_type,
+        "message": message
+    })
+}
+
+func send_show_message(msg_type, message) {
+    jsonrpc_notification("window/showMessage", {
+        "type": msg_type,
+        "message": message
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Configuration and Workspace Support ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// LSP configuration settings
+let lsp_config = {
+    "__s": true,
+    "inlayHints.enabled": true,
+    "inlayHints.typeHints": true,
+    "inlayHints.parameterHints": true,
+    "inlayHints.returnTypeHints": true,
+    "lint.enabled": true,
+    "format.onSave": false,
+    "completion.snippets": true,
+    "completion.autoImport": true,
+    "diagnostics.enabled": true,
+    "semanticHighlighting.enabled": true
+}
+
+// Handle configuration change notification
+func handle_configuration_changed(params) {
+    if params != null && params.has("settings") {
+        const settings = params["settings"]
+        if typeof(settings) == "map" {
+            for k in settings.keys() {
+                if k != "__s" {
+                    lsp_config[k] = settings[k]
+                }
+            }
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Workspace File Operations ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Handle workspace folder changes
+func handle_workspace_folders_change(params) {
+    if params == null { return null }
+    if params.has("event") {
+        const event = params["event"]
+        if event.has("added") {
+            for folder in event["added"] {
+                // Index new workspace folder
+                send_log_message(MSG_INFO, f"Workspace folder added: {folder['uri']}")
+            }
+        }
+        if event.has("removed") {
+            for folder in event["removed"] {
+                send_log_message(MSG_INFO, f"Workspace folder removed: {folder['uri']}")
+            }
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Formatting Utilities ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Sort import statements
+func sort_imports(source) {
+    const lines = source.split("\n")
+    let import_lines = []
+    let other_lines = []
+    let in_imports = true
+
+    for ln in lines {
+        const trimmed = ln.trim()
+        if in_imports && (trimmed.starts_with("import ") || trimmed.starts_with("use ")) {
+            import_lines.push(ln)
+        } else {
+            if in_imports && len(import_lines) > 0 {
+                in_imports = false
+            }
+            other_lines.push(ln)
+        }
+    }
+
+    // Sort imports alphabetically
+    import_lines = import_lines.sort()
+
+    let result = []
+    for il in import_lines { result.push(il) }
+    if len(import_lines) > 0 && len(other_lines) > 0 {
+        result.push("") // blank line after imports
+    }
+    for ol in other_lines { result.push(ol) }
+
+    result.join("\n")
+}
+
+// Remove trailing whitespace from all lines
+func remove_trailing_whitespace(source) {
+    const lines = source.split("\n")
+    let result = []
+    for ln in lines {
+        let end = len(ln)
+        while end > 0 && (ln[end - 1] == " " || ln[end - 1] == "\t") {
+            end = end - 1
+        }
+        result.push(ln.substring(0, end))
+    }
+    result.join("\n")
+}
+
+// Ensure file ends with exactly one newline
+func ensure_final_newline(source) {
+    let trimmed = source
+    while len(trimmed) > 0 && trimmed[len(trimmed) - 1] == "\n" {
+        trimmed = trimmed.substring(0, len(trimmed) - 1)
+    }
+    trimmed + "\n"
+}
