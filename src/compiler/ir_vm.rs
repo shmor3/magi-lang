@@ -759,42 +759,36 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Run on dedicated machine: cargo test -- --ignored
     fn test_ir_vm_arithmetic() {
         let output = run_ir("output 1 + 2;").unwrap();
         assert_eq!(output, vec!["3"]);
     }
 
     #[test]
-    #[ignore]
     fn test_ir_vm_variables() {
         let output = run_ir("let x = 10; let y = 20; output x + y;").unwrap();
         assert_eq!(output, vec!["30"]);
     }
 
     #[test]
-    #[ignore]
     fn test_ir_vm_string() {
         let output = run_ir(r#"output "hello";"#).unwrap();
         assert_eq!(output, vec!["hello"]);
     }
 
     #[test]
-    #[ignore]
     fn test_ir_vm_if_else() {
         let output = run_ir("let x = 5; if x > 3 { output 1; } else { output 0; }").unwrap();
         assert_eq!(output, vec!["1"]);
     }
 
     #[test]
-    #[ignore]
     fn test_ir_vm_function() {
         let output = run_ir("fn add(a, b) { a + b } output add(3, 4);").unwrap();
         assert_eq!(output, vec!["7"]);
     }
 
     #[test]
-    #[ignore]
     fn test_ir_vm_while_loop() {
         let output = run_ir("let mut i = 0; while i < 5 { i = i + 1; } output i;").unwrap();
         assert_eq!(output, vec!["5"]);
