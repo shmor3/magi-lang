@@ -1,0 +1,367 @@
+// Tests for self/parser.magi
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/tests/test_parser.magi > /tmp/_parser_test.magi && cargo run --bin magi -- run /tmp/_parser_test.magi
+
+// ── Helpers ───────────────────────────────────────────────────────
+
+func desc_ek(e) {
+    const k = e.kind
+    k.describe()
+}
+
+func desc_sk(s) {
+    const k = s.kind
+    k.describe()
+}
+
+// ── Basic Statement Tests ─────────────────────────────────────────
+
+func test_parse_const() {
+    const prog = parse("const x = 42")
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "const x")
+    println("PASS: parse const")
+}
+
+func test_parse_let() {
+    const prog = parse("let y = 10")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse let")
+}
+
+func test_parse_const_string() {
+    const prog = parse("const name = \"hello\"")
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "const name")
+    println("PASS: parse const string")
+}
+
+func test_parse_const_bool() {
+    const prog = parse("const flag = true")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse const bool")
+}
+
+func test_parse_const_null() {
+    const prog = parse("const n = null")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse const null")
+}
+
+// ── Expression Tests ──────────────────────────────────────────────
+
+func test_parse_binary_add() {
+    const prog = parse("const r = 1 + 2")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse binary add")
+}
+
+func test_parse_binary_precedence() {
+    // 1 + 2 * 3 should parse as 1 + (2 * 3)
+    const prog = parse("const r = 1 + 2 * 3")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse binary precedence")
+}
+
+func test_parse_comparison() {
+    const prog = parse("const r = x == 42")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse comparison")
+}
+
+func test_parse_logical() {
+    const prog = parse("const r = a && b || c")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse logical")
+}
+
+func test_parse_unary_neg() {
+    const prog = parse("const r = -5")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse unary neg")
+}
+
+func test_parse_unary_not() {
+    const prog = parse("const r = !flag")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse unary not")
+}
+
+// ── Function Tests ────────────────────────────────────────────────
+
+func test_parse_function() {
+    const prog = parse("func add(a, b) { a + b }")
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "func")
+    println("PASS: parse function")
+}
+
+func test_parse_function_no_params() {
+    const prog = parse("func greet() { 42 }")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse function no params")
+}
+
+func test_parse_method() {
+    const prog = parse("func Foo.bar(self) { self.x }")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse method")
+}
+
+// ── Control Flow Tests ────────────────────────────────────────────
+
+func test_parse_if_else() {
+    const prog = parse("const x = if true { 1 } else { 2 }")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse if-else")
+}
+
+func test_parse_if_no_else() {
+    const prog = parse("if x > 0 { println(x) }")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse if no else")
+}
+
+func test_parse_while() {
+    const prog = parse("while x > 0 { x = x - 1 }")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse while")
+}
+
+func test_parse_for_loop() {
+    const prog = parse("for i in 0..10 { println(i) }")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse for loop")
+}
+
+func test_parse_return() {
+    const prog = parse("return 42")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse return")
+}
+
+func test_parse_break_continue() {
+    const prog = parse("break")
+    assert(len(prog.statements) == 1)
+    const prog2 = parse("continue")
+    assert(len(prog2.statements) == 1)
+    println("PASS: parse break/continue")
+}
+
+// ── Match Tests ───────────────────────────────────────────────────
+
+func test_parse_match() {
+    const src = "match x { 1 => \"one\", 2 => \"two\", _ => \"other\" }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse match")
+}
+
+func test_parse_match_enum() {
+    const src = "match val { Color::Red => 1, Color::Blue => 2, _ => 0 }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse match enum")
+}
+
+// ── Struct and Enum Definition Tests ──────────────────────────────
+
+func test_parse_struct() {
+    const src = "struct Point { x: int, y: int }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "struct Point")
+    println("PASS: parse struct")
+}
+
+func test_parse_enum() {
+    const src = "enum Color { Red, Green, Blue }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "enum Color")
+    println("PASS: parse enum")
+}
+
+func test_parse_enum_with_data() {
+    const src = "enum Option { Some(value), None }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse enum with data")
+}
+
+// ── Access and Call Tests ─────────────────────────────────────────
+
+func test_parse_method_call() {
+    const prog = parse("x.push(42)")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse method call")
+}
+
+func test_parse_field_access() {
+    const prog = parse("const v = point.x")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse field access")
+}
+
+func test_parse_index() {
+    const prog = parse("const v = arr[0]")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse index")
+}
+
+func test_parse_chained() {
+    const prog = parse("const v = a.b.c")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse chained field access")
+}
+
+func test_parse_function_call() {
+    const prog = parse("println(42)")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse function call")
+}
+
+// ── Lambda Tests ──────────────────────────────────────────────────
+
+func test_parse_arrow_lambda() {
+    const prog = parse("const f = x => x + 1")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse arrow lambda")
+}
+
+func test_parse_multi_param_lambda() {
+    const prog = parse("const f = (a, b) => a + b")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse multi-param lambda")
+}
+
+// ── Literal Tests ─────────────────────────────────────────────────
+
+func test_parse_array_literal() {
+    const prog = parse("const a = [1, 2, 3]")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse array literal")
+}
+
+func test_parse_empty_array() {
+    const prog = parse("const a = []")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse empty array")
+}
+
+// ── Assignment Tests ──────────────────────────────────────────────
+
+func test_parse_assignment() {
+    const prog = parse("x = 42")
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "assign x")
+    println("PASS: parse assignment")
+}
+
+func test_parse_compound_assign() {
+    const prog = parse("x += 1")
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "compound assign x")
+    println("PASS: parse compound assign")
+}
+
+func test_parse_field_assign() {
+    const prog = parse("obj.x = 5")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse field assign")
+}
+
+// ── Import Tests ──────────────────────────────────────────────────
+
+func test_parse_import() {
+    const prog = parse("import std.math")
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "import std.math")
+    println("PASS: parse import")
+}
+
+// ── Range Tests ───────────────────────────────────────────────────
+
+func test_parse_range() {
+    const prog = parse("const r = 0..10")
+    assert(len(prog.statements) == 1)
+    println("PASS: parse range")
+}
+
+// ── Multi-Statement Tests ─────────────────────────────────────────
+
+func test_parse_multi_statement() {
+    const src = "const x = 1\nconst y = 2\nconst z = x + y"
+    const prog = parse(src)
+    assert(len(prog.statements) == 3)
+    println("PASS: parse multi statement")
+}
+
+func test_parse_realistic_function() {
+    const src = "func max(a, b) { if a > b { a } else { b } }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "func")
+    println("PASS: parse realistic function")
+}
+
+func test_parse_struct_construct() {
+    const src = "const p = Point { x: 1, y: 2 }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse struct construct")
+}
+
+func test_parse_enum_construct() {
+    const src = "const v = Option::Some(42)"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse enum construct")
+}
+
+// ── Run All Tests ─────────────────────────────────────────────────
+
+test_parse_const()
+test_parse_let()
+test_parse_const_string()
+test_parse_const_bool()
+test_parse_const_null()
+test_parse_binary_add()
+test_parse_binary_precedence()
+test_parse_comparison()
+test_parse_logical()
+test_parse_unary_neg()
+test_parse_unary_not()
+test_parse_function()
+test_parse_function_no_params()
+test_parse_method()
+test_parse_if_else()
+test_parse_if_no_else()
+test_parse_while()
+test_parse_for_loop()
+test_parse_return()
+test_parse_break_continue()
+test_parse_match()
+test_parse_match_enum()
+test_parse_struct()
+test_parse_enum()
+test_parse_enum_with_data()
+test_parse_method_call()
+test_parse_field_access()
+test_parse_index()
+test_parse_chained()
+test_parse_function_call()
+test_parse_arrow_lambda()
+test_parse_multi_param_lambda()
+test_parse_array_literal()
+test_parse_empty_array()
+test_parse_assignment()
+test_parse_compound_assign()
+test_parse_field_assign()
+test_parse_import()
+test_parse_range()
+test_parse_multi_statement()
+test_parse_realistic_function()
+test_parse_struct_construct()
+test_parse_enum_construct()
+
+println("\nAll parser tests passed!")
