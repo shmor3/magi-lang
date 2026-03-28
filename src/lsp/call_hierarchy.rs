@@ -341,6 +341,7 @@ fn find_calls_in_statement(stmt: &Statement, target_name: &str, spans: &mut Vec<
         | StatementKind::Break { .. }
         | StatementKind::Continue { .. }
         | StatementKind::Import(_)
+        | StatementKind::ImportModule { .. }
         | StatementKind::Use { .. }
         | StatementKind::TypeAlias { .. }
         | StatementKind::EnumDef { .. }

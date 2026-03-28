@@ -267,6 +267,7 @@ fn fold_statement(stmt: &mut Statement) {
         }
         // These statements have no expressions to fold
         StatementKind::Import(_)
+        | StatementKind::ImportModule { .. }
         | StatementKind::Break { value: None, .. }
         | StatementKind::Continue { .. }
         | StatementKind::Return(None)

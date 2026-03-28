@@ -277,6 +277,12 @@ pub enum StatementKind {
     Increment { name: String },
     /// `name--;` — post-decrement statement (desugars to `name -= 1`)
     Decrement { name: String },
+    /// `import std.math` / `import std.{fs, json}` / `import std.math as m`
+    ImportModule {
+        path: Vec<String>,
+        alias: Option<String>,
+        multi: Vec<String>,
+    },
 }
 
 /// Pattern for for-loop iteration variable binding.

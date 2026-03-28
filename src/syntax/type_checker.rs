@@ -526,6 +526,10 @@ impl TypeChecker {
                     .or_insert((stmt.span.start_line, stmt.span.start_col));
             }
 
+            StatementKind::ImportModule { .. } => {
+                // Dotted imports are resolved at runtime.
+            }
+
             // let name = expr;  /  let name: type = expr;
             StatementKind::Let {
                 name,

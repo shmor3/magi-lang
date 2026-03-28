@@ -1213,7 +1213,8 @@ impl<'a> Interpreter<'a> {
                     StatementKind::Import(plugin_id) => {
                         self.imports.insert(plugin_id.clone());
                     }
-                    StatementKind::Use { .. }
+                    StatementKind::ImportModule { .. }
+                    | StatementKind::Use { .. }
                     | StatementKind::ConstDef { .. }
                     | StatementKind::Let { .. }
                     | StatementKind::LetMut { .. }
@@ -2175,6 +2176,46 @@ impl<'a> Interpreter<'a> {
                             suggestion,
                         });
                     }
+                }
+                Ok(DataType::Null)
+            }
+
+            StatementKind::ImportModule { path, alias, multi } => {
+                // Convert dotted import to use-style path and delegate to existing logic.
+                if !multi.is_empty() {
+                    // `import std.{fs, json}` → handle each as `use std::fs::*` etc.
+                    for module_name in multi {
+                        let mut use_path = path.clone();
+                        use_path.push(module_name.clone());
+                        let use_stmt = Statement {
+                            kind: StatementKind::Use {
+                                path: use_path,
+                                alias: None,
+                                glob: true,
+                                is_pub: false,
+                            },
+                            span: stmt.span,
+                            leading_comments: Vec::new(),
+                            trailing_comment: None,
+                        };
+                        self.exec_statement(&use_stmt)?;
+                    }
+                } else {
+                    // `import std.math` → `use std::math::*`
+                    // `import std.math as m` → `use std::math as m` (no glob)
+                    let glob = alias.is_none();
+                    let use_stmt = Statement {
+                        kind: StatementKind::Use {
+                            path: path.clone(),
+                            alias: alias.clone(),
+                            glob,
+                            is_pub: false,
+                        },
+                        span: stmt.span,
+                        leading_comments: Vec::new(),
+                        trailing_comment: None,
+                    };
+                    self.exec_statement(&use_stmt)?;
                 }
                 Ok(DataType::Null)
             }

@@ -215,6 +215,19 @@ impl<'a> Formatter<'a> {
             StatementKind::Import(path) => {
                 self.write(&format!("import \"{}\";", escape_string_contents(path)));
             }
+            StatementKind::ImportModule { path, alias, multi } => {
+                self.write("import ");
+                self.write(&path.join("."));
+                if !multi.is_empty() {
+                    self.write(".{");
+                    self.write(&multi.join(", "));
+                    self.write("}");
+                }
+                if let Some(a) = alias {
+                    self.write(&format!(" as {}", a));
+                }
+                self.write(";");
+            }
             StatementKind::Let {
                 name,
                 type_annotation,

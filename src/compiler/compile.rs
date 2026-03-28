@@ -759,6 +759,10 @@ impl Compiler {
                 // No-op in compiled mode; imports are resolved at link time.
             }
 
+            StatementKind::ImportModule { .. } => {
+                // No-op in compiled mode; imports are resolved at link time.
+            }
+
             StatementKind::Use { .. } => {
                 // No-op in compiled mode.
             }

@@ -21450,3 +21450,57 @@ fn test_enum_display_clean() {
     assert!(result.contains("Color::Red"));
     assert!(result.contains("Color::Rgb(255, 0, 0)"));
 }
+
+#[test]
+fn test_import_syntax() {
+    use magi_lang::syntax::ast::StatementKind;
+    let program = parse_v2("import std.math").unwrap();
+    assert!(!program.statements.is_empty());
+    match &program.statements[0].kind {
+        StatementKind::ImportModule { path, alias, multi } => {
+            assert_eq!(path, &vec!["std".to_string(), "math".to_string()]);
+            assert!(alias.is_none());
+            assert!(multi.is_empty());
+        }
+        other => panic!("Expected ImportModule, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_import_multi_syntax() {
+    use magi_lang::syntax::ast::StatementKind;
+    let program = parse_v2("import std.{fs, json}").unwrap();
+    assert!(!program.statements.is_empty());
+    match &program.statements[0].kind {
+        StatementKind::ImportModule { path, alias, multi } => {
+            assert_eq!(path, &vec!["std".to_string()]);
+            assert!(alias.is_none());
+            assert_eq!(multi, &vec!["fs".to_string(), "json".to_string()]);
+        }
+        other => panic!("Expected ImportModule, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_import_alias_syntax() {
+    use magi_lang::syntax::ast::StatementKind;
+    let program = parse_v2("import std.math as m").unwrap();
+    assert!(!program.statements.is_empty());
+    match &program.statements[0].kind {
+        StatementKind::ImportModule { path, alias, multi } => {
+            assert_eq!(path, &vec!["std".to_string(), "math".to_string()]);
+            assert_eq!(alias, &Some("m".to_string()));
+            assert!(multi.is_empty());
+        }
+        other => panic!("Expected ImportModule, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_import_module_run() {
+    let result = run_eval_unique(r#"
+        import std.math
+        output sqrt(4.0);
+    "#, "import_module_run");
+    assert!(result.contains("2"));
+}

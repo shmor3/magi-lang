@@ -266,7 +266,7 @@ impl BytecodeCompiler {
             StatementKind::TraitDef { .. } | StatementKind::ImplBlock { .. } |
             StatementKind::ImplTrait { .. } | StatementKind::TypeAlias { .. } |
             StatementKind::ModuleDef { .. } | StatementKind::Use { .. } |
-            StatementKind::Import(_) | StatementKind::TestDef { .. } |
+            StatementKind::Import(_) | StatementKind::ImportModule { .. } | StatementKind::TestDef { .. } |
             StatementKind::AsyncFunctionDef(_) => {
                 // Declarations don't emit bytecode
             }

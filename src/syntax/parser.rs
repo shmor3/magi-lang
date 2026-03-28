@@ -655,19 +655,79 @@ impl Parser {
 
     fn parse_import_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'import'
-        let name_tok = self.expect(&TokenKind::StringLiteral)?;
-        if name_tok.text.is_empty() {
-            return Err(SyntaxError {
-                line: name_tok.span.start_line as usize,
-                column: name_tok.span.start_col as usize,
-                message: "Import plugin ID cannot be empty".to_string(),
-                code: None,
+
+        // Legacy string-based import: `import "plugin-id"`
+        if self.at(&TokenKind::StringLiteral) {
+            let name_tok = self.expect(&TokenKind::StringLiteral)?;
+            if name_tok.text.is_empty() {
+                return Err(SyntaxError {
+                    line: name_tok.span.start_line as usize,
+                    column: name_tok.span.start_col as usize,
+                    message: "Import plugin ID cannot be empty".to_string(),
+                    code: None,
+                });
+            }
+            let end = name_tok.span;
+            self.eat(&TokenKind::Semicolon); // optional semicolon
+            return Ok(Statement {
+                kind: StatementKind::Import(name_tok.text),
+                span: start.merge(end),
+                leading_comments: Vec::new(),
+                trailing_comment: None,
             });
         }
-        let end = name_tok.span;
+
+        // Dotted module import: `import std.math`, `import std.{fs, json}`, `import std.math as m`
+        let mut path = Vec::new();
+        let mut multi = Vec::new();
+
+        // Handle relative paths: `import ./util` or `import ../lib`
+        if self.at(&TokenKind::Dot) {
+            let mut rel = String::from(".");
+            self.advance(); // consume '.'
+            if self.at(&TokenKind::Dot) {
+                rel.push('.');
+                self.advance(); // consume second '.'
+            }
+            if self.eat(&TokenKind::Slash) {
+                rel.push('/');
+            }
+            let seg = self.expect_identifier()?;
+            path.push(format!("{}{}", rel, seg.text));
+        } else {
+            let first = self.expect_identifier()?;
+            path.push(first.text);
+        }
+
+        while self.eat(&TokenKind::Dot) {
+            if self.at(&TokenKind::LBrace) {
+                // Multi-import: `import std.{fs, json}`
+                self.advance(); // consume '{'
+                while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                    let name = self.expect_identifier()?;
+                    multi.push(name.text);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace)?;
+                break;
+            }
+            let seg = self.expect_identifier()?;
+            path.push(seg.text);
+        }
+
+        let alias = if self.eat(&TokenKind::As) {
+            let alias_tok = self.expect_identifier()?;
+            Some(alias_tok.text)
+        } else {
+            None
+        };
+
+        let end = self.peek().span;
         self.eat(&TokenKind::Semicolon); // optional semicolon
         Ok(Statement {
-            kind: StatementKind::Import(name_tok.text),
+            kind: StatementKind::ImportModule { path, alias, multi },
             span: start.merge(end),
             leading_comments: Vec::new(),
             trailing_comment: None,

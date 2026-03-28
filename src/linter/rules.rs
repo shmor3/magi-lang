@@ -263,6 +263,7 @@ pub fn check_duplicate_imports(stmts: &[Statement]) -> Vec<AstDiagnostic> {
     for stmt in stmts {
         let path: Option<String> = match &stmt.kind {
             StatementKind::Import(path) => Some(path.clone()),
+            StatementKind::ImportModule { path, .. } => Some(path.join(".")),
             StatementKind::Use { path, .. } => Some(path.join("::")),
             _ => None,
         };
