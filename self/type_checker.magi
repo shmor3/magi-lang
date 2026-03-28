@@ -1073,3 +1073,854 @@ func check(program) {
     result.push(tc_warnings)
     result
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Generic Type Parameter Tracking and Validation
+// ═══════════════════════════════════════════════════════════════════
+
+// Generic type parameters in scope: name -> { "constraints": [...], "bound": type_str|null }
+let tc_type_params = {"__s": true}
+
+// Register generic type parameters for a function or struct
+func tc_register_type_params(type_params) {
+    for tp in type_params {
+        const name = if typeof(tp) == "string" { tp } else { tp[0] }
+        let constraints = []
+        if typeof(tp) == "array" && len(tp) > 1 {
+            constraints = tp.slice(1, len(tp))
+        }
+        tc_type_params[name] = {"constraints": constraints, "bound": null}
+    }
+}
+
+// Clear generic type parameters
+func tc_clear_type_params() {
+    tc_type_params = {"__s": true}
+}
+
+// Check if a name is a known type parameter
+func tc_is_type_param(name) {
+    tc_type_params.has(name) && name != "__s"
+}
+
+// Validate that a generic constraint is satisfiable
+func tc_check_generic_constraint(param_name, constraint_name, line) {
+    // Check the constraint refers to a known interface/trait
+    if !tc_structs.has(constraint_name) && !KNOWN_STDLIB_MODULES.contains(constraint_name) {
+        // It could be an interface
+        let found = false
+        for k in tc_type_params.keys() {
+            if k == constraint_name { found = true }
+        }
+        if !found {
+            tc_warn_at(line, f"generic constraint '{constraint_name}' on '{param_name}' references unknown type")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Type Inference Engine (Bidirectional)
+// ═══════════════════════════════════════════════════════════════════
+
+// Type representation: strings for simple types, maps for complex types
+// Simple: "int", "float", "string", "bool", "null", "unknown", "void"
+// Array: {"kind": "array", "element": type}
+// Map: {"kind": "map", "key": type, "value": type}
+// Function: {"kind": "function", "params": [types], "return": type}
+// Generic: {"kind": "generic", "name": string, "args": [types]}
+// Optional: {"kind": "optional", "inner": type}
+
+func tc_type_to_string(typ) {
+    if typeof(typ) == "string" { return typ }
+    if typeof(typ) != "map" { return "unknown" }
+    if !typ.has("kind") { return "unknown" }
+    match typ["kind"] {
+        "array" => f"Array<{tc_type_to_string(typ['element'])}>",
+        "map" => f"Map<{tc_type_to_string(typ['key'])}, {tc_type_to_string(typ['value'])}>",
+        "function" => {
+            let param_strs = []
+            if typ.has("params") {
+                for p in typ["params"] { param_strs.push(tc_type_to_string(p)) }
+            }
+            const ret = if typ.has("return") { tc_type_to_string(typ["return"]) } else { "void" }
+            f"({param_strs.join(', ')}) -> {ret}"
+        },
+        "generic" => {
+            let arg_strs = []
+            if typ.has("args") {
+                for a in typ["args"] { arg_strs.push(tc_type_to_string(a)) }
+            }
+            f"{typ['name']}<{arg_strs.join(', ')}>"
+        },
+        "optional" => f"{tc_type_to_string(typ['inner'])}?",
+        "tuple" => {
+            let elem_strs = []
+            if typ.has("elements") {
+                for e in typ["elements"] { elem_strs.push(tc_type_to_string(e)) }
+            }
+            f"({elem_strs.join(', ')})"
+        },
+        _ => "unknown"
+    }
+}
+
+// Check if two types are compatible
+func tc_types_compatible(expected, actual) {
+    if expected == "unknown" || actual == "unknown" { return true }
+    if expected == actual { return true }
+    // Numeric widening
+    if expected == "float" && actual == "int" { return true }
+    if expected == "float64" && actual == "int64" { return true }
+    // null is compatible with optional types
+    if actual == "null" { return true }
+    // Type parameter is always compatible
+    if tc_is_type_param(expected) || tc_is_type_param(actual) { return true }
+    // Complex type compatibility
+    if typeof(expected) == "map" && typeof(actual) == "map" {
+        if expected.has("kind") && actual.has("kind") && expected["kind"] == actual["kind"] {
+            return true // Simplified: check sub-components in full version
+        }
+    }
+    false
+}
+
+// Infer the type of an expression
+func tc_infer_expr_type_full(expr) {
+    if expr == null { return "unknown" }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EIntLiteral(_) => "int",
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(_) => "int",
+                Literal::LFloat(_) => "float",
+                Literal::LString(_) => "string",
+                Literal::LBool(_) => "bool",
+                _ => "unknown"
+            }
+        },
+        ExprKind::EFloatLiteral(_) => "float",
+        ExprKind::EStringLiteral(_) => "string",
+        ExprKind::EBoolLiteral(_) => "bool",
+        ExprKind::ENullLiteral => "null",
+        ExprKind::EVariable(name) => tc_lookup_var_type(name),
+        ExprKind::EArrayLiteral(elems) => {
+            if len(elems) > 0 {
+                const elem_type = tc_infer_expr_type_full(elems[0])
+                {"kind": "array", "element": elem_type}
+            } else {
+                {"kind": "array", "element": "unknown"}
+            }
+        },
+        ExprKind::EMapLiteral(_) => {"kind": "map", "key": "string", "value": "unknown"},
+        ExprKind::EBinaryOp(op, left, right) => tc_infer_binop_type_full(op, left, right),
+        ExprKind::EUnaryOp(op, operand) => tc_infer_unop_type(op, operand),
+        ExprKind::ECall(name, _, _) => tc_infer_call_return_type(name),
+        ExprKind::EMethodCall(obj, method, _, _) => tc_infer_method_return_type(obj, method),
+        ExprKind::ELambda(params, _body) => {
+            let param_types = []
+            for p in params { param_types.push("unknown") }
+            {"kind": "function", "params": param_types, "return": "unknown"}
+        },
+        ExprKind::EIfElse(_, then_block, _) => {
+            if then_block != null {
+                const stmts = then_block.stmts
+                if len(stmts) > 0 {
+                    const last = stmts[len(stmts) - 1]
+                    match last.kind {
+                        StmtKind::SExprStmt(e) => tc_infer_expr_type_full(e),
+                        _ => "unknown"
+                    }
+                } else if then_block.tail_expr != null {
+                    tc_infer_expr_type_full(then_block.tail_expr)
+                } else { "unknown" }
+            } else { "unknown" }
+        },
+        ExprKind::ERange(_, _, _) => {"kind": "array", "element": "int"},
+        ExprKind::EMatch(_, arms) => {
+            // Return type is the type of the first arm's body
+            if len(arms) > 0 {
+                "unknown" // Would need to check arm bodies
+            } else { "unknown" }
+        },
+        ExprKind::ENullCoalesce(left, _right) => tc_infer_expr_type_full(left),
+        ExprKind::EStringInterp(_) => "string",
+        ExprKind::ETupleLiteral(elems) => {
+            let elem_types = []
+            for e in elems { elem_types.push(tc_infer_expr_type_full(e)) }
+            {"kind": "tuple", "elements": elem_types}
+        },
+        ExprKind::EStructConstruct(name, _) => name,
+        ExprKind::EEnumConstruct(name, _, _) => name,
+        _ => "unknown"
+    }
+}
+
+func tc_infer_binop_type_full(op, left, right) {
+    const lt = tc_infer_expr_type_full(left)
+    const rt = tc_infer_expr_type_full(right)
+    match op {
+        BinOp::Add => {
+            if lt == "string" || rt == "string" { return "string" }
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            "unknown"
+        },
+        BinOp::Sub => {
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            "unknown"
+        },
+        BinOp::Mul => {
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            "unknown"
+        },
+        BinOp::Div => {
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            "unknown"
+        },
+        BinOp::Mod => { if lt == "int" && rt == "int" { "int" } else { "unknown" } },
+        BinOp::Eq => "bool",
+        BinOp::Ne => "bool",
+        BinOp::Lt => "bool",
+        BinOp::Le => "bool",
+        BinOp::Gt => "bool",
+        BinOp::Ge => "bool",
+        BinOp::And => "bool",
+        BinOp::Or => "bool",
+        _ => "unknown"
+    }
+}
+
+// Lookup variable type in scope
+func tc_lookup_var_type(name) {
+    let idx = len(tc_scopes) - 1
+    while idx >= 0 {
+        const scope = tc_scopes[idx]
+        if scope.has(name) {
+            const info = scope[name]
+            return info.typ
+        }
+        idx = idx - 1
+    }
+    "unknown"
+}
+
+// Infer return type of a function call
+func tc_infer_call_return_type(name) {
+    // Check builtin return types
+    if name == "len" { return "int" }
+    if name == "typeof" { return "string" }
+    if name == "to_string" { return "string" }
+    if name == "to_int" { return "int" }
+    if name == "to_float" { return "float" }
+    if name == "range" { return {"kind": "array", "element": "int"} }
+    if name == "keys" { return {"kind": "array", "element": "string"} }
+    if name == "values" { return {"kind": "array", "element": "unknown"} }
+    if name == "input" { return "string" }
+    if name == "abs" { return "float" }
+    if name == "floor" || name == "ceil" || name == "round" { return "int" }
+    if name == "sqrt" || name == "pow" { return "float" }
+    if name == "min" || name == "max" { return "unknown" }
+    if name == "contains" || name == "starts_with" || name == "ends_with" { return "bool" }
+    if name == "is_null" || name == "is_int" || name == "is_float" || name == "is_string" || name == "is_bool" || name == "is_array" || name == "is_map" { return "bool" }
+    if name == "split" || name == "chars" { return {"kind": "array", "element": "string"} }
+    if name == "join" || name == "trim" || name == "replace" { return "string" }
+    if name == "sort" || name == "reverse" || name == "filter" || name == "map" || name == "slice" || name == "append" { return {"kind": "array", "element": "unknown"} }
+    if name == "reduce" { return "unknown" }
+    if name == "parse_int" { return "int" }
+    if name == "parse_float" { return "float" }
+    "unknown"
+}
+
+// Infer return type of a method call
+func tc_infer_method_return_type(obj_expr, method) {
+    const obj_type = tc_infer_expr_type_full(obj_expr)
+    const obj_type_str = if typeof(obj_type) == "string" { obj_type } else {
+        if typeof(obj_type) == "map" && obj_type.has("kind") { obj_type["kind"] } else { "unknown" }
+    }
+
+    // String methods
+    if obj_type_str == "string" {
+        if method == "len" || method == "length" || method == "index_of" || method == "count" || method == "char_code" { return "int" }
+        if method == "split" || method == "lines" || method == "words" || method == "chars" { return {"kind": "array", "element": "string"} }
+        if method == "contains" || method == "starts_with" || method == "ends_with" || method == "is_empty" || method == "is_ascii" || method == "is_numeric" || method == "is_alpha" { return "bool" }
+        if method == "to_int" { return "int" }
+        if method == "to_float" { return "float" }
+        return "string"
+    }
+
+    // Array methods
+    if obj_type_str == "array" {
+        if method == "len" || method == "length" || method == "index_of" || method == "find_index" { return "int" }
+        if method == "contains" || method == "includes" || method == "every" || method == "some" || method == "is_empty" { return "bool" }
+        if method == "join" { return "string" }
+        if method == "sum" || method == "product" { return "unknown" }
+        if method == "average" { return "float" }
+        if method == "first" || method == "last" || method == "find" || method == "pop" || method == "min" || method == "max" { return "unknown" }
+        if method == "to_string" { return "string" }
+        if method == "to_map" { return {"kind": "map", "key": "string", "value": "unknown"} }
+        if method == "group_by" || method == "frequencies" { return {"kind": "map", "key": "string", "value": "unknown"} }
+        if method == "partition" { return {"kind": "tuple", "elements": [{"kind": "array", "element": "unknown"}, {"kind": "array", "element": "unknown"}]} }
+        return {"kind": "array", "element": "unknown"}
+    }
+
+    // Map methods
+    if obj_type_str == "map" {
+        if method == "len" { return "int" }
+        if method == "has" || method == "contains_key" || method == "contains_value" || method == "is_empty" || method == "every" || method == "some" { return "bool" }
+        if method == "keys" { return {"kind": "array", "element": "string"} }
+        if method == "values" || method == "entries" || method == "to_entries" || method == "to_array" { return {"kind": "array", "element": "unknown"} }
+        if method == "to_string" || method == "to_json" { return "string" }
+        return {"kind": "map", "key": "string", "value": "unknown"}
+    }
+
+    "unknown"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Interface Satisfaction Checking
+// ═══════════════════════════════════════════════════════════════════
+
+// Interface definitions: name -> { "methods": [method_sigs] }
+let tc_interfaces = {"__s": true}
+
+// Register an interface
+func tc_register_interface(name, methods) {
+    let method_sigs = []
+    for m in methods {
+        method_sigs.push({"name": to_string(m), "params": [], "return": "unknown"})
+    }
+    tc_interfaces[name] = {"methods": method_sigs}
+}
+
+// Check if a type satisfies an interface
+func tc_check_interface_satisfaction(type_name, interface_name, line) {
+    if !tc_interfaces.has(interface_name) || interface_name == "__s" { return true }
+    const iface = tc_interfaces[interface_name]
+    const required_methods = iface["methods"]
+
+    for req in required_methods {
+        const method_name = req["name"]
+        // Check if type_name has an impl with this method
+        let found = false
+        // Look through registered functions for TypeName.method
+        if tc_functions.has(f"{type_name}.{method_name}") {
+            found = true
+        }
+        if !found {
+            tc_error_at(line, f"type '{type_name}' does not satisfy interface '{interface_name}': missing method '{method_name}'")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Null Safety Analysis
+// ═══════════════════════════════════════════════════════════════════
+
+// Track which variables are known to be non-null after checks
+let tc_non_null_vars = {"__s": true}
+
+// Enter a null-checked scope (e.g., inside `if x != null`)
+func tc_enter_null_checked(var_name) {
+    tc_non_null_vars[var_name] = true
+}
+
+// Exit null-checked scope
+func tc_exit_null_checked(var_name) {
+    if tc_non_null_vars.has(var_name) {
+        tc_non_null_vars = tc_non_null_vars.delete(var_name)
+    }
+}
+
+// Check if a variable is known non-null
+func tc_is_known_non_null(var_name) {
+    tc_non_null_vars.has(var_name) && var_name != "__s"
+}
+
+// Analyze an if-condition for null checks
+func tc_analyze_null_check(cond) {
+    if cond == null { return null }
+    const ek = cond.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            match op {
+                BinOp::Ne => {
+                    // Check for: x != null
+                    match left.kind {
+                        ExprKind::EVariable(name) => {
+                            match right.kind {
+                                ExprKind::ENullLiteral => { return name },
+                                _ => {}
+                            }
+                        },
+                        _ => {}
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Pattern Type Checking
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_pattern(pattern, subject_type, line) {
+    if pattern == null { return null }
+    if typeof(pattern) == "string" {
+        // Wildcard or variable binding
+        if pattern == "_" { return null }
+        tc_define_var(pattern, false, subject_type, line)
+        return null
+    }
+    if typeof(pattern) == "map" && pattern.has("kind") {
+        const pk = pattern["kind"]
+        match pk {
+            "literal" => {
+                // Check literal pattern type matches subject
+                const lit_type = tc_infer_literal_type(pattern["value"])
+                if !tc_types_compatible(subject_type, lit_type) {
+                    tc_warn_at(line, f"pattern type '{lit_type}' may not match subject type '{subject_type}'")
+                }
+            },
+            "enum" => {
+                const enum_name = pattern["enum"]
+                const variant = pattern["variant"]
+                if tc_enums.has(enum_name) {
+                    const variants = tc_enums[enum_name]
+                    if !variants.contains(variant) {
+                        tc_error_at(line, f"enum '{enum_name}' has no variant '{variant}'")
+                    }
+                }
+                if pattern.has("bindings") {
+                    for b in pattern["bindings"] {
+                        tc_define_var(b, false, "unknown", line)
+                    }
+                }
+            },
+            "struct" => {
+                const struct_name = pattern["struct"]
+                if pattern.has("fields") {
+                    for f in pattern["fields"] {
+                        if typeof(f) == "array" && len(f) >= 2 {
+                            tc_define_var(f[1], false, "unknown", line)
+                        }
+                    }
+                }
+            },
+            "array" => {
+                if pattern.has("elements") {
+                    for elem in pattern["elements"] {
+                        tc_check_pattern(elem, "unknown", line)
+                    }
+                }
+            },
+            "rest" => {
+                if pattern.has("name") {
+                    tc_define_var(pattern["name"], false, "array", line)
+                }
+            },
+            "guard" => {
+                if pattern.has("inner") {
+                    tc_check_pattern(pattern["inner"], subject_type, line)
+                }
+                if pattern.has("guard") {
+                    tc_check_expr(pattern["guard"])
+                }
+            },
+            "or" => {
+                if pattern.has("left") {
+                    tc_check_pattern(pattern["left"], subject_type, line)
+                }
+                if pattern.has("right") {
+                    tc_check_pattern(pattern["right"], subject_type, line)
+                }
+            },
+            "range" => {
+                // Range patterns: start..end
+            },
+            _ => {}
+        }
+    }
+}
+
+func tc_infer_literal_type(val) {
+    if val == null { return "null" }
+    const t = typeof(val)
+    if t == "int64" || t == "int" { return "int" }
+    if t == "float64" || t == "float" { return "float" }
+    if t == "string" { return "string" }
+    if t == "bool" { return "bool" }
+    "unknown"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Closure Capture Type Analysis
+// ═══════════════════════════════════════════════════════════════════
+
+// Analyze which variables a closure captures
+func tc_analyze_captures(lambda_body) {
+    let captured = []
+    if lambda_body == null { return captured }
+
+    // Walk the body and find free variables
+    if typeof(lambda_body) == "map" && lambda_body.has("stmts") {
+        for s in lambda_body.stmts {
+            tc_collect_free_vars(s, captured)
+        }
+    }
+    captured
+}
+
+func tc_collect_free_vars(stmt, captured) {
+    if stmt == null { return null }
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => tc_collect_free_vars_expr(expr, captured),
+        StmtKind::SReturn(expr) => {
+            if expr != null { tc_collect_free_vars_expr(expr, captured) }
+        },
+        _ => {}
+    }
+}
+
+func tc_collect_free_vars_expr(expr, captured) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EVariable(name) => {
+            // Check if this variable is from an outer scope
+            let in_current = false
+            if len(tc_scopes) > 0 {
+                const current = tc_scopes[len(tc_scopes) - 1]
+                if current.has(name) { in_current = true }
+            }
+            if !in_current && !captured.contains(name) {
+                captured.push(name)
+            }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            tc_collect_free_vars_expr(left, captured)
+            tc_collect_free_vars_expr(right, captured)
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            tc_collect_free_vars_expr(operand, captured)
+        },
+        ExprKind::ECall(_, args, _) => {
+            if args != null {
+                for arg in args { tc_collect_free_vars_expr(arg, captured) }
+            }
+        },
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            tc_collect_free_vars_expr(obj, captured)
+            if args != null {
+                for arg in args { tc_collect_free_vars_expr(arg, captured) }
+            }
+        },
+        ExprKind::EFieldAccess(obj, _) => {
+            tc_collect_free_vars_expr(obj, captured)
+        },
+        ExprKind::EIndex(obj, idx) => {
+            tc_collect_free_vars_expr(obj, captured)
+            tc_collect_free_vars_expr(idx, captured)
+        },
+        _ => {}
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Lint Warning Rules (Integrated)
+// ═══════════════════════════════════════════════════════════════════
+
+// W100: Unused variables (already implemented via tc_pop_scope)
+
+// W101: Unused imports
+func tc_check_unused_imports(statements) {
+    let imported_names = {"__s": true}
+    let used_names = {"__s": true}
+
+    // Collect imported names
+    for stmt in statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SImportModule(path_parts, alias, _items) => {
+                const name = if alias != null && alias != "" { alias } else {
+                    if len(path_parts) > 0 { path_parts[len(path_parts) - 1] } else { "" }
+                }
+                if name != "" {
+                    imported_names[name] = stmt.span.start_line
+                }
+            },
+            _ => {}
+        }
+    }
+
+    // Collect used names (simplified: check all identifiers)
+    for stmt in statements {
+        tc_collect_used_names_stmt(stmt, used_names)
+    }
+
+    // Check for unused imports
+    for name in imported_names.keys() {
+        if name == "__s" { continue }
+        if !used_names.has(name) {
+            tc_warn_at(imported_names[name], f"unused import '{name}' (W101)")
+        }
+    }
+}
+
+func tc_collect_used_names_stmt(stmt, names) {
+    if stmt == null { return null }
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => tc_collect_used_names_expr(expr, names),
+        StmtKind::SConst(_, expr) => { if expr != null { tc_collect_used_names_expr(expr, names) } },
+        StmtKind::SLet(_, expr) => { if expr != null { tc_collect_used_names_expr(expr, names) } },
+        StmtKind::SLetMut(_, expr) => { if expr != null { tc_collect_used_names_expr(expr, names) } },
+        StmtKind::SReturn(expr) => { if expr != null { tc_collect_used_names_expr(expr, names) } },
+        _ => {}
+    }
+}
+
+func tc_collect_used_names_expr(expr, names) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EVariable(name) => { names[name] = true },
+        ExprKind::ECall(name, args, _) => {
+            names[name] = true
+            if args != null { for arg in args { tc_collect_used_names_expr(arg, names) } }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            tc_collect_used_names_expr(left, names)
+            tc_collect_used_names_expr(right, names)
+        },
+        ExprKind::EUnaryOp(_, operand) => tc_collect_used_names_expr(operand, names),
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            tc_collect_used_names_expr(obj, names)
+            if args != null { for arg in args { tc_collect_used_names_expr(arg, names) } }
+        },
+        ExprKind::EFieldAccess(obj, _) => tc_collect_used_names_expr(obj, names),
+        ExprKind::EIndex(obj, idx) => {
+            tc_collect_used_names_expr(obj, names)
+            tc_collect_used_names_expr(idx, names)
+        },
+        _ => {}
+    }
+}
+
+// W200: Naming convention checks
+func tc_check_naming_convention(name, kind, line) {
+    if len(name) == 0 { return null }
+    if starts_with(name, "_") { return null } // Skip private/unused
+
+    if kind == "function" || kind == "variable" || kind == "parameter" {
+        // Should be snake_case
+        if name != to_lower(name) && !name.contains("_") {
+            // Might be camelCase
+            let has_upper = false
+            let i = 1
+            while i < len(name) {
+                if name[i] >= "A" && name[i] <= "Z" { has_upper = true }
+                i = i + 1
+            }
+            if has_upper {
+                tc_warn_at(line, f"'{name}' should use snake_case naming (W200)")
+            }
+        }
+    }
+
+    if kind == "struct" || kind == "enum" || kind == "interface" {
+        // Should be PascalCase (start with uppercase)
+        if name[0] >= "a" && name[0] <= "z" {
+            tc_warn_at(line, f"type '{name}' should use PascalCase naming (W201)")
+        }
+    }
+
+    if kind == "constant" {
+        // Should be UPPER_SNAKE_CASE
+        let all_upper = true
+        for c in name.chars() {
+            if (c >= "a" && c <= "z") { all_upper = false }
+        }
+        // Don't warn if it's just a normal const (too noisy)
+    }
+}
+
+// W210: Unreachable code detection
+func tc_check_unreachable(statements, line) {
+    let found_terminal = false
+    for stmt in statements {
+        if found_terminal {
+            tc_warn_at(stmt.span.start_line, "unreachable code after return/break/continue (W210)")
+            return null
+        }
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SReturn(_) => { found_terminal = true },
+            StmtKind::SBreak(_, _) => { found_terminal = true },
+            StmtKind::SContinue(_) => { found_terminal = true },
+            StmtKind::SThrow(_) => { found_terminal = true },
+            _ => {}
+        }
+    }
+}
+
+// W211: Empty match arms
+func tc_check_empty_match(arms, line) {
+    if len(arms) == 0 {
+        tc_warn_at(line, "match expression has no arms (W211)")
+    }
+}
+
+// W220: Self-comparison detection
+func tc_check_self_comparison(expr, line) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            match op {
+                BinOp::Eq => {
+                    if tc_exprs_identical(left, right) {
+                        tc_warn_at(line, "comparing a value to itself always returns true (W220)")
+                    }
+                },
+                BinOp::Ne => {
+                    if tc_exprs_identical(left, right) {
+                        tc_warn_at(line, "comparing a value to itself always returns false (W220)")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// Check if two expressions are syntactically identical
+func tc_exprs_identical(a, b) {
+    if a == null || b == null { return false }
+    const ak = a.kind
+    const bk = b.kind
+    match ak {
+        ExprKind::EVariable(name_a) => {
+            match bk {
+                ExprKind::EVariable(name_b) => name_a == name_b,
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
+// W230: Deep nesting detection
+func tc_check_nesting_depth(depth, max_depth, line) {
+    if depth > max_depth {
+        tc_warn_at(line, f"nesting depth ({depth}) exceeds recommended maximum ({max_depth}) (W230)")
+    }
+}
+
+// W240: Long function detection
+func tc_check_function_length(fdef, line) {
+    if fdef.body == null { return null }
+    const body_length = len(fdef.body.stmts)
+    if body_length > 50 {
+        tc_warn_at(line, f"function '{fdef.name}' has {body_length} statements, consider splitting (W240)")
+    }
+}
+
+// W250: Magic number detection
+func tc_check_magic_numbers(expr, line) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(n) => {
+                    // Allow common values: 0, 1, 2, -1, 10, 100
+                    if n != 0 && n != 1 && n != 2 && n != -1 && n != 10 && n != 100 {
+                        tc_warn_at(line, f"magic number {n}: consider using a named constant (W250)")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// W251: TODO comment detection (would need source text access)
+func tc_check_todo_comments(source, line) {
+    if source.contains("TODO") || source.contains("FIXME") || source.contains("HACK") {
+        tc_warn_at(line, "TODO/FIXME/HACK comment found (W251)")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Recursive Type Handling
+// ═══════════════════════════════════════════════════════════════════
+
+// Track which types are currently being resolved (for cycle detection)
+let tc_resolving_types = {"__s": true}
+
+func tc_begin_resolve_type(name) {
+    if tc_resolving_types.has(name) && name != "__s" {
+        return true // Cycle detected
+    }
+    tc_resolving_types[name] = true
+    false
+}
+
+func tc_end_resolve_type(name) {
+    if tc_resolving_types.has(name) {
+        tc_resolving_types = tc_resolving_types.delete(name)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Module Type Tracking
+// ═══════════════════════════════════════════════════════════════════
+
+// Map module_name -> { "exports": { name -> type } }
+let tc_modules = {"__s": true}
+
+func tc_register_module(name, exports) {
+    tc_modules[name] = {"exports": exports}
+}
+
+func tc_lookup_module_export(module_name, export_name) {
+    if !tc_modules.has(module_name) || module_name == "__s" { return "unknown" }
+    const mod = tc_modules[module_name]
+    const exports = mod["exports"]
+    if exports.has(export_name) { return exports[export_name] }
+    "unknown"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Operator Overload Resolution
+// ═══════════════════════════════════════════════════════════════════
+
+// Map type_name -> { op_name -> { "params": [types], "return": type } }
+let tc_operator_overloads = {"__s": true}
+
+func tc_register_operator_overload(type_name, op_name, param_types, return_type) {
+    if !tc_operator_overloads.has(type_name) {
+        tc_operator_overloads[type_name] = {"__s": true}
+    }
+    let type_ops = tc_operator_overloads[type_name]
+    type_ops[op_name] = {"params": param_types, "return": return_type}
+    tc_operator_overloads[type_name] = type_ops
+}
+
+func tc_resolve_operator_overload(type_name, op_name) {
+    if !tc_operator_overloads.has(type_name) || type_name == "__s" { return null }
+    const type_ops = tc_operator_overloads[type_name]
+    if type_ops.has(op_name) { return type_ops[op_name] }
+    null
+}
