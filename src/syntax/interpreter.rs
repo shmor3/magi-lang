@@ -2183,13 +2183,13 @@ impl<'a> Interpreter<'a> {
             StatementKind::ImportModule { path, alias, multi } => {
                 // Convert dotted import to use-style path and delegate to existing logic.
                 if !multi.is_empty() {
-                    // `import std.{fs, json}` → handle each as `use std::fs::*` etc.
+                    // `import std.{fs, json}` → handle each module
                     for module_name in multi {
                         let mut use_path = path.clone();
                         use_path.push(module_name.clone());
                         let use_stmt = Statement {
                             kind: StatementKind::Use {
-                                path: use_path,
+                                path: use_path.clone(),
                                 alias: None,
                                 glob: true,
                                 is_pub: false,
@@ -2199,16 +2199,25 @@ impl<'a> Interpreter<'a> {
                             trailing_comment: None,
                         };
                         self.exec_statement(&use_stmt)?;
+                        // Create namespace variable for qualified access (math.sqrt())
+                        let ns_name = module_name.clone();
+                        let module_key = use_path.last().cloned().unwrap_or_default();
+                        let funcs = std_module_ops(&module_key);
+                        let mut ns_map = crate::util::OrderedMap::new();
+                        for func_name in &funcs {
+                            ns_map.insert(func_name.to_string(), DataType::String(func_name.to_string()));
+                        }
+                        ns_map.insert("__module".to_string(), DataType::String(module_key));
+                        let addr = self.heap.alloc(DataType::Map(ns_map));
+                        self.define(&ns_name, addr, false);
                     }
                 } else {
-                    // `import std.math` → `use std::math::*`
-                    // `import std.math as m` → `use std::math as m` (no glob)
-                    let glob = alias.is_none();
+                    // `import std.math` → glob import + namespace variable
                     let use_stmt = Statement {
                         kind: StatementKind::Use {
                             path: path.clone(),
                             alias: alias.clone(),
-                            glob,
+                            glob: alias.is_none(),
                             is_pub: false,
                         },
                         span: stmt.span,
@@ -2216,6 +2225,17 @@ impl<'a> Interpreter<'a> {
                         trailing_comment: None,
                     };
                     self.exec_statement(&use_stmt)?;
+                    // Create namespace variable for qualified access: math.sqrt()
+                    let ns_name = alias.clone().unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                    let module_key = path.last().cloned().unwrap_or_default();
+                    let funcs = std_module_ops(&module_key);
+                    let mut ns_map = crate::util::OrderedMap::new();
+                    for func_name in &funcs {
+                        ns_map.insert(func_name.to_string(), DataType::String(func_name.to_string()));
+                    }
+                    ns_map.insert("__module".to_string(), DataType::String(module_key));
+                    let addr = self.heap.alloc(DataType::Map(ns_map));
+                    self.define(&ns_name, addr, false);
                 }
                 Ok(DataType::Null)
             }
@@ -13024,6 +13044,25 @@ impl<'a> Interpreter<'a> {
                 // Try direct interpreter methods (no OperationEvaluator needed)
                 if let Some(result) = self.try_eval_direct_method(&obj, method, args, expr.span)? {
                     return Ok(result);
+                }
+
+                // Module namespace dispatch: math.sqrt(x) → sqrt(x)
+                if let DataType::Map(ref map) = obj {
+                    if map.get("__module").is_some() && map.get(method).is_some() {
+                        // This is a module namespace — dispatch as a regular function call
+                        let mut eval_args = Vec::new();
+                        for arg in args { eval_args.push(self.eval_expr(arg)?); }
+                        // Build a synthetic function call
+                        let call_expr = Expression {
+                            kind: ExpressionKind::Call {
+                                name: method.clone(),
+                                args: args.clone(),
+                                kwargs: kwargs.clone(),
+                            },
+                            span: expr.span,
+                        };
+                        return self.eval_expr(&call_expr);
+                    }
                 }
 
                 // Try impl block methods for struct values (including magic methods)
