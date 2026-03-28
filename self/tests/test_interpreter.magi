@@ -87,4 +87,140 @@ assert(eval_source("output(42)") == 42); println("PASS: output")
 
 assert(eval_source("func f(n) { let r = 1; let i = 2; while i <= n { r = r * i; i = i + 1 }; r }; f(5)") == 120); println("PASS: iterative factorial")
 
-println("All 39 interpreter tests passed!")
+// ── Structs ───────────────────────────────────────────────────────
+
+assert(eval_source("struct Point { x: int, y: int }; const p = Point { x: 3, y: 4 }; p.x + p.y") == 7); println("PASS: struct construction and field access")
+
+assert(eval_source("struct Pair { a: int, b: int }; const p = Pair { a: 10, b: 20 }; p.a") == 10); println("PASS: struct field access a")
+
+assert(eval_source("struct Pair { a: int, b: int }; const p = Pair { a: 10, b: 20 }; p.b") == 20); println("PASS: struct field access b")
+
+assert(eval_source("struct Config { name: string, value: int }; const c = Config { name: \"test\", value: 42 }; c.value") == 42); println("PASS: struct with string field")
+
+// ── Enums ─────────────────────────────────────────────────────────
+
+assert(eval_source("enum Color { Red, Green, Blue }; const c = Color::Red; match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }") == 1); println("PASS: enum construction and match")
+
+assert(eval_source("enum Shape { Circle(int), Rect(int, int) }; const s = Shape::Circle(5); match s { Shape::Circle(r) => r * 2, Shape::Rect(w, h) => w * h }") == 10); println("PASS: enum with data extraction")
+
+assert(eval_source("enum Option { Some(int), None }; const x = Option::Some(42); match x { Option::Some(v) => v, Option::None => 0 }") == 42); println("PASS: enum option-like")
+
+assert(eval_source("enum Option { Some(int), None }; const x = Option::None; match x { Option::Some(v) => v, Option::None => -1 }") == -1); println("PASS: enum none branch")
+
+// ── Closures ──────────────────────────────────────────────────────
+
+assert(eval_source("const mul = (x, y) => x * y; mul(6, 7)") == 42); println("PASS: closure basic")
+
+assert(eval_source("const x = 10; const add_x = (y) => x + y; add_x(5)") == 15); println("PASS: closure captures variable")
+
+assert(eval_source("func make_adder(n) { return (x) => n + x }; const add5 = make_adder(5); add5(3)") == 8); println("PASS: closure returned from function")
+
+assert(eval_source("const double = (x) => x * 2; [1, 2, 3].map(double)") == [2, 4, 6]); println("PASS: closure passed to map")
+
+// ── Pipe Operator ─────────────────────────────────────────────────
+
+assert(eval_source("func double(x) { x * 2 }; 5 |> double") == 10); println("PASS: pipe to function")
+
+assert(eval_source("func add1(x) { x + 1 }; func double(x) { x * 2 }; 3 |> add1 |> double") == 8); println("PASS: chained pipes")
+
+assert(eval_source("func inc(x) { x + 1 }; 0 |> inc |> inc |> inc") == 3); println("PASS: triple pipe")
+
+// ── List Comprehension ────────────────────────────────────────────
+
+assert(eval_source("[x * 2 for x in [1, 2, 3]]") == [2, 4, 6]); println("PASS: list comprehension basic")
+
+assert(eval_source("[x for x in [1, 2, 3, 4, 5] if x > 3]") == [4, 5]); println("PASS: list comprehension with filter")
+
+assert(eval_source("[x * x for x in range(5)]") == [0, 1, 4, 9, 16]); println("PASS: list comp with range")
+
+// ── Pattern Matching Advanced ─────────────────────────────────────
+
+assert(eval_source("match [1, 2, 3] { [a, b, c] => a + b + c, _ => 0 }") == 6); println("PASS: array pattern destructure")
+
+assert(eval_source("match 5 { 1 | 2 | 3 => \"low\", 4 | 5 | 6 => \"mid\", _ => \"high\" }") == "mid"); println("PASS: or-pattern match")
+
+assert(eval_source("match \"hello\" { \"world\" => 1, \"hello\" => 2, _ => 0 }") == 2); println("PASS: string match")
+
+assert(eval_source("match [10, 20, 30] { [first, ...rest] => first, _ => -1 }") == 10); println("PASS: array rest pattern")
+
+// ── Null Coalescing and Optional ──────────────────────────────────
+
+assert(eval_source("const x = 5; x ?? 10") == 5); println("PASS: null coalesce non-null")
+
+assert(eval_source("const x = null; x ?? 10") == 10); println("PASS: null coalesce null")
+
+// ── String Interpolation ──────────────────────────────────────────
+
+assert(eval_source("const name = \"world\"; f\"hello {name}\"") == "hello world"); println("PASS: string interpolation basic")
+
+assert(eval_source("const x = 3; const y = 4; f\"{x} + {y} = {x + y}\"") == "3 + 4 = 7"); println("PASS: string interp with expr")
+
+// ── Ranges ────────────────────────────────────────────────────────
+
+assert(eval_source("len(0..5)") == 5); println("PASS: range exclusive")
+
+assert(eval_source("len(0..=5)") == 6); println("PASS: range inclusive")
+
+assert(eval_source("(0..5)[2]") == 2); println("PASS: range index")
+
+// ── Array Methods ─────────────────────────────────────────────────
+
+assert(eval_source("[3, 1, 2].sort()") == [1, 2, 3]); println("PASS: array sort")
+
+assert(eval_source("[1, 2, 3].reverse()") == [3, 2, 1]); println("PASS: array reverse")
+
+assert(eval_source("[1, 2, 3].contains(2)") == true); println("PASS: array contains")
+
+assert(eval_source("[1, 2, 3, 4].slice(1, 3)") == [2, 3]); println("PASS: array slice")
+
+assert(eval_source("const fn = (acc, x) => acc + x; [1, 2, 3].reduce(fn, 0)") == 6); println("PASS: array reduce")
+
+assert(eval_source("const fn = (x) => x > 2; [1, 2, 3, 4].filter(fn)") == [3, 4]); println("PASS: array filter with closure")
+
+// ── String Methods ────────────────────────────────────────────────
+
+assert(eval_source("\"hello world\".split(\" \")") == ["hello", "world"]); println("PASS: string split")
+
+assert(eval_source("\"  hello  \".trim()") == "hello"); println("PASS: string trim")
+
+assert(eval_source("\"hello\".starts_with(\"hel\")") == true); println("PASS: string starts_with")
+
+assert(eval_source("\"hello\".ends_with(\"llo\")") == true); println("PASS: string ends_with")
+
+// ── Map Methods ───────────────────────────────────────────────────
+
+assert(eval_source("const m = {\"a\": 1, \"b\": 2}; m.has(\"a\")") == true); println("PASS: map has key")
+
+assert(eval_source("const m = {\"a\": 1, \"b\": 2}; len(m.keys())") == 2); println("PASS: map keys")
+
+// ── Struct with Impl Method ───────────────────────────────────────
+
+assert(eval_source("struct Vec2 { x: int, y: int }; func Vec2.sum(self) { self.x + self.y }; const v = Vec2 { x: 3, y: 4 }; v.sum()") == 7); println("PASS: struct impl method dispatch")
+
+// ── Nested Closures ───────────────────────────────────────────────
+
+assert(eval_source("func compose(f, g) { return (x) => f(g(x)) }; func add1(x) { x + 1 }; func double(x) { x * 2 }; const add1_then_double = compose(double, add1); add1_then_double(3)") == 8); println("PASS: nested closure composition")
+
+// ── Do-While Loop ─────────────────────────────────────────────────
+
+assert(eval_source("let x = 0; do { x = x + 1 } while x < 3; x") == 3); println("PASS: do-while loop")
+
+// ── Increment/Decrement ───────────────────────────────────────────
+
+assert(eval_source("let x = 5; x++; x") == 6); println("PASS: increment")
+assert(eval_source("let x = 5; x--; x") == 4); println("PASS: decrement")
+
+// ── In Operator ───────────────────────────────────────────────────
+
+assert(eval_source("2 in [1, 2, 3]") == true); println("PASS: in operator array")
+assert(eval_source("4 in [1, 2, 3]") == false); println("PASS: in operator array false")
+
+// ── Function Default Parameters ───────────────────────────────────
+
+assert(eval_source("func greet(name, greeting = \"Hello\") { greeting + \" \" + name }; greet(\"world\")") == "Hello world"); println("PASS: function default param")
+
+// ── Enum Method ───────────────────────────────────────────────────
+
+assert(eval_source("enum Dir { Up, Down }; func Dir.value(self) { match self { Dir::Up => 1, Dir::Down => -1 } }; const d = Dir::Up; d.value()") == 1); println("PASS: enum method dispatch")
+
+println("All 71 interpreter tests passed!")
