@@ -15,6 +15,10 @@
 | Errors | try/catch/throw/Result/?/Option | Multi-return `val, err = f()` — errors are values |
 | Methods | `impl Type { fn method(self) }` | `fn Type.method(self)` — dot receiver syntax |
 | Interfaces | `trait` + explicit `impl Trait for Type` | `interface` + implicit satisfaction |
+| Mutability | `let mut x` | `let` immutable, `var` mutable |
+| Composition | None | `>>` and `<<` function composition |
+| Partial apply | `_` only in pipes | `_` placeholder in any function call |
+| Match | Warning on non-exhaustive | Error on non-exhaustive |
 
 ## Removed Keywords
 
@@ -31,6 +35,7 @@
 
 - `import` — module imports
 - `interface` — replaces `trait`
+- `var` — mutable variable binding (replaces `let mut`)
 
 ## 1. Print as Expression
 
@@ -318,7 +323,7 @@ interface ReadWriter {
 
 ## 7. What Stays Unchanged
 
-- `let` / `let mut` for variable declarations
+- `let` for immutable bindings, `var` for mutable bindings
 - `const` for constants
 - `fn` for function definitions
 - `struct` for type definitions
@@ -338,7 +343,117 @@ interface ReadWriter {
 - Operator overloading via dunder methods
 - Generics with `<T>` syntax
 
-## 8. MAGI Identity
+## 8. Functional Features
+
+### Immutable by Default
+
+`let` is immutable. `var` is mutable. `let mut` is removed.
+
+```magi
+let x = 5          // immutable — cannot reassign
+var count = 0      // mutable — can reassign
+count = count + 1  // ok
+x = 10             // compile error
+```
+
+- `let` bindings are frozen after assignment
+- `var` signals "this will change" — clear intent
+- `const` stays for compile-time constants
+- Function parameters are immutable by default
+
+### Function Composition Operator `>>`
+
+Compose functions into pipelines:
+
+```magi
+let process = parse >> validate >> transform
+let result = process(input)
+
+// Equivalent to:
+let result = transform(validate(parse(input)))
+```
+
+- `f >> g` returns a new function that calls `f` then `g`
+- Works with any single-argument functions
+- Composes left to right (like `|>` but creates a reusable function)
+- `<<` for right-to-left composition: `transform << validate << parse`
+
+### Partial Application with `_`
+
+Use `_` as a placeholder to create partially applied functions:
+
+```magi
+let add = fn(a, b) { a + b }
+let add5 = add(5, _)       // returns fn(b) { 5 + b }
+let double = mul(2, _)     // returns fn(b) { 2 * b }
+
+println(add5(3))            // 8
+println(double(7))          // 14
+
+// Works with any function:
+let is_even = mod(_, 2) >> eq(_, 0)
+let evens = numbers |> filter(is_even)
+
+// Multiple placeholders create multi-arg functions:
+let between = fn(lo, x, hi) { x >= lo && x <= hi }
+let teen = between(13, _, 19)    // fn(x) { x >= 13 && x <= 19 }
+```
+
+- `_` in a function call creates a new function with that argument open
+- Multiple `_` create a function with multiple parameters (left to right)
+- Works with `|>` pipe naturally: `data |> map(add(1, _))`
+- Already exists in pipe expressions — now generalized to all calls
+
+### Anonymous Functions
+
+Two syntaxes — short lambdas and block functions:
+
+```magi
+// Short lambda (existing):
+let double = |x| x * 2
+
+// Block anonymous function (new):
+let process = fn(x) {
+    let cleaned = x.trim()
+    let parsed = parse_int(cleaned)
+    parsed * 2
+}
+
+// In higher-order functions:
+items |> map(|x| x * 2)
+items |> filter(fn(x) {
+    let valid = x > 0
+    let even = x % 2 == 0
+    valid && even
+})
+```
+
+### Exhaustive Match Enforcement
+
+The compiler enforces that `match` covers all enum variants:
+
+```magi
+enum Direction { North, East, South, West }
+
+let name = match dir {
+    Direction::North => "north",
+    Direction::East => "east",
+    // compile error: non-exhaustive match — missing South, West
+}
+
+// Fix with wildcard or all variants:
+let name = match dir {
+    Direction::North => "north",
+    Direction::East => "east",
+    _ => "other",              // wildcard covers remaining
+}
+```
+
+- All enum variants must be covered or a `_` wildcard must be present
+- Compiler warns on redundant match arms
+- Already partially implemented — now enforced as an error, not a warning
+
+## 9. MAGI Identity
 
 What makes MAGI distinct from any other language:
 
@@ -356,6 +471,9 @@ What makes MAGI distinct from any other language:
 | Methods | `fn Type.method(self)` | `fn (t T) method()` | `impl T { fn }` | `def method(self)` |
 | Interfaces | Implicit satisfaction | Implicit | Explicit traits | Duck typing |
 | Imports | `import std.math` | `import "path"` | `use path::*` | `import module` |
+| Composition | `>>` / `<<` | No | No | No |
+| Partial apply | `f(1, _)` | No | No | `functools.partial` |
+| Immutability | `let` immutable, `var` mutable | `var` / `:=` | `let` / `let mut` | All mutable |
 
 MAGI borrows the best ideas but combines them in its own way. The dot receiver syntax, expression-based control flow, pipe operator, and comprehensions are the signature features.
 
