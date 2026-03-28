@@ -15,7 +15,7 @@
 | Errors | try/catch/throw/Result/?/Option | Multi-return `val, err = f()` — errors are values |
 | Methods | `impl Type { fn method(self) }` | `fn Type.method(self)` — dot receiver syntax |
 | Interfaces | `trait` + explicit `impl Trait for Type` | `interface` + implicit satisfaction |
-| Mutability | `let mut x` | `let` immutable, `var` mutable |
+| Mutability | `let mut x` | `const` immutable, `let` mutable |
 | Composition | None | `>>` and `<<` function composition |
 | Partial apply | `_` only in pipes | `_` placeholder in any function call |
 | Match | Warning on non-exhaustive | Error on non-exhaustive |
@@ -30,12 +30,12 @@
 - `impl` — removed (dot receiver functions replace impl blocks)
 - `trait` — replaced by `interface`
 - `use` — replaced by `import`
+- `let mut` — `let` is now mutable by default, `const` for immutable
 
 ## Added Keywords
 
 - `import` — module imports
 - `interface` — replaces `trait`
-- `var` — mutable variable binding (replaces `let mut`)
 
 ## 1. Print as Expression
 
@@ -83,7 +83,7 @@ import std.math
 import std.fs
 import std.json
 
-let angle = math.sin(3.14)
+const angle = math.sin(3.14)
 
 let data, err = fs.read("config.json")
 if err { return err }
@@ -145,8 +145,8 @@ fn Color.__str__(self) {
 Enum construction uses `::` — unambiguous since imports use dot syntax.
 
 ```magi
-let c = Color::Red
-let c2 = Color::Rgb(255, 128, 0)
+const c = Color::Red
+const c2 = Color::Rgb(255, 128, 0)
 
 match c2 {
     Color::Rgb(r, g, b) => println(f"rgb({r}, {g}, {b})"),
@@ -206,9 +206,9 @@ let parsed, err = json.parse(text)
 Infallible functions return a single value:
 
 ```magi
-let n = math.sqrt(16.0)
-let s = text.to_upper("hello")
-let id = uuid.v4()
+const n = math.sqrt(16.0)
+const s = text.to_upper("hello")
+const id = uuid.v4()
 ```
 
 ## 5. Dot Receiver Functions (No `impl`)
@@ -246,7 +246,7 @@ fn Vec2.__add__(self, other) {
 ### Usage
 
 ```magi
-let a = Vec2 { x: 3.0, y: 4.0 }
+const a = Vec2 { x: 3.0, y: 4.0 }
 println(a.length())      // 5.0
 println(a + a)           // (6.0, 8.0)
 ```
@@ -323,8 +323,8 @@ interface ReadWriter {
 
 ## 7. What Stays Unchanged
 
-- `let` for immutable bindings, `var` for mutable bindings
-- `const` for constants
+- `const` for immutable bindings (default, encouraged)
+- `let` for mutable bindings
 - `fn` for function definitions
 - `struct` for type definitions
 - `enum` for enumerated types (with improvements above)
@@ -347,18 +347,17 @@ interface ReadWriter {
 
 ### Immutable by Default
 
-`let` is immutable. `var` is mutable. `let mut` is removed.
+`const` is immutable. `let` is mutable. Matches JavaScript/TypeScript.
 
 ```magi
-let x = 5          // immutable — cannot reassign
-var count = 0      // mutable — can reassign
+const x = 5        // immutable — cannot reassign
+let count = 0      // mutable — can reassign
 count = count + 1  // ok
 x = 10             // compile error
 ```
 
-- `let` bindings are frozen after assignment
-- `var` signals "this will change" — clear intent
-- `const` stays for compile-time constants
+- `const` bindings are frozen after assignment — use by default
+- `let` signals "this will change" — clear intent
 - Function parameters are immutable by default
 
 ### Function Composition Operator `>>`
@@ -366,11 +365,11 @@ x = 10             // compile error
 Compose functions into pipelines:
 
 ```magi
-let process = parse >> validate >> transform
-let result = process(input)
+const process = parse >> validate >> transform
+const result = process(input)
 
 // Equivalent to:
-let result = transform(validate(parse(input)))
+const result = transform(validate(parse(input)))
 ```
 
 - `f >> g` returns a new function that calls `f` then `g`
@@ -383,20 +382,20 @@ let result = transform(validate(parse(input)))
 Use `_` as a placeholder to create partially applied functions:
 
 ```magi
-let add = fn(a, b) { a + b }
-let add5 = add(5, _)       // returns fn(b) { 5 + b }
-let double = mul(2, _)     // returns fn(b) { 2 * b }
+const add = fn(a, b) { a + b }
+const add5 = add(5, _)       // returns fn(b) { 5 + b }
+const double = mul(2, _)     // returns fn(b) { 2 * b }
 
 println(add5(3))            // 8
 println(double(7))          // 14
 
 // Works with any function:
-let is_even = mod(_, 2) >> eq(_, 0)
-let evens = numbers |> filter(is_even)
+const is_even = mod(_, 2) >> eq(_, 0)
+const evens = numbers |> filter(is_even)
 
 // Multiple placeholders create multi-arg functions:
-let between = fn(lo, x, hi) { x >= lo && x <= hi }
-let teen = between(13, _, 19)    // fn(x) { x >= 13 && x <= 19 }
+const between = fn(lo, x, hi) { x >= lo && x <= hi }
+const teen = between(13, _, 19)    // fn(x) { x >= 13 && x <= 19 }
 ```
 
 - `_` in a function call creates a new function with that argument open
@@ -410,20 +409,20 @@ Two syntaxes — short lambdas and block functions:
 
 ```magi
 // Short lambda (existing):
-let double = |x| x * 2
+const double = |x| x * 2
 
 // Block anonymous function (new):
-let process = fn(x) {
-    let cleaned = x.trim()
-    let parsed = parse_int(cleaned)
+const process = fn(x) {
+    const cleaned = x.trim()
+    const parsed = parse_int(cleaned)
     parsed * 2
 }
 
 // In higher-order functions:
 items |> map(|x| x * 2)
 items |> filter(fn(x) {
-    let valid = x > 0
-    let even = x % 2 == 0
+    const valid = x > 0
+    const even = x % 2 == 0
     valid && even
 })
 ```
@@ -473,7 +472,7 @@ What makes MAGI distinct from any other language:
 | Imports | `import std.math` | `import "path"` | `use path::*` | `import module` |
 | Composition | `>>` / `<<` | No | No | No |
 | Partial apply | `f(1, _)` | No | No | `functools.partial` |
-| Immutability | `let` immutable, `var` mutable | `var` / `:=` | `let` / `let mut` | All mutable |
+| Immutability | `const` immutable, `let` mutable | `var` / `:=` | `let` / `let mut` | All mutable |
 
 MAGI borrows the best ideas but combines them in its own way. The dot receiver syntax, expression-based control flow, pipe operator, and comprehensions are the signature features.
 
@@ -508,7 +507,7 @@ fn load_json(path) {
     let data, err = json.parse(text)
     if err { return null, f"parse: {err}" }
 
-    let config = Config {
+    const config = Config {
         host: data.host ?? "localhost",
         port: data.port ?? 8080,
         debug: data.debug ?? false,
@@ -546,8 +545,8 @@ fn main() {
 
     log(LogLevel::Info, f"starting {config}")
 
-    let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    let result = numbers
+    const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    const result = numbers
         |> filter(|n| n % 2 == 0)
         |> map(|n| n * n)
         |> reduce(0, |acc, n| acc + n)
