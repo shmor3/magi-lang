@@ -1241,6 +1241,9 @@ fn collect_referenced_names(expr: &Expression, names: &mut std::collections::Has
             collect_referenced_names_block(catch_block, names);
             if let Some(fb) = finally_block { collect_referenced_names_block(fb, names); }
         }
+        ExpressionKind::TupleLiteral(exprs) => {
+            for e in exprs { collect_referenced_names(e, names); }
+        }
         _ => {}
     }
 }

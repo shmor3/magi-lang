@@ -325,6 +325,12 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
             collect_expression_folding_ranges(inner, ranges);
         }
 
+        ExpressionKind::TupleLiteral(exprs) => {
+            for e in exprs {
+                collect_expression_folding_ranges(e, ranges);
+            }
+        }
+
         // Leaf expressions: no foldable children.
         ExpressionKind::Literal(_)
         | ExpressionKind::Variable(_)

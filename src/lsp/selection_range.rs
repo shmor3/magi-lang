@@ -367,6 +367,11 @@ fn collect_expr_spans(expr: &Expression, line: u32, col: u32, spans: &mut Vec<Sp
                 collect_expr_spans(v, line, col, spans);
             }
         }
+        ExpressionKind::TupleLiteral(exprs) => {
+            for e in exprs {
+                collect_expr_spans(e, line, col, spans);
+            }
+        }
         _ => {}
     }
 }

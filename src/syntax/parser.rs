@@ -786,6 +786,34 @@ impl Parser {
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
 
+        // Bare tuple destructuring: `let a, b = expr;`
+        if self.at(&TokenKind::Comma) {
+            let mut elements = vec![DestructureElement::Name(name)];
+            while self.eat(&TokenKind::Comma) {
+                if self.at(&TokenKind::Underscore) {
+                    let tok = self.advance().clone();
+                    elements.push(DestructureElement::Name(tok.text));
+                } else {
+                    let tok = self.expect_identifier()?;
+                    elements.push(DestructureElement::Name(tok.text));
+                }
+            }
+            self.expect(&TokenKind::Eq)?;
+            let value = self.parse_expression()?;
+            let end = self.peek().span;
+            self.eat(&TokenKind::Semicolon);
+            return Ok(Statement {
+                kind: StatementKind::LetDestructure {
+                    pattern: DestructurePattern::Tuple(elements),
+                    mutable: is_mut,
+                    value,
+                },
+                span: start.merge(end),
+                leading_comments: Vec::new(),
+                trailing_comment: None,
+            });
+        }
+
         let type_annotation = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type_annotation()?)
         } else {
@@ -1300,7 +1328,22 @@ impl Parser {
         // Only parse value if next token is on the same line as `return`
         let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
         let value = if next_on_same_line && !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
-            Some(self.parse_expression()?)
+            let first = self.parse_expression()?;
+            // Multi-return: `return a, b` → TupleLiteral
+            if self.at(&TokenKind::Comma) {
+                let first_span = first.span;
+                let mut exprs = vec![first];
+                while self.eat(&TokenKind::Comma) {
+                    exprs.push(self.parse_expression()?);
+                }
+                let last_span = exprs.last().unwrap().span;
+                Some(Expression {
+                    kind: ExpressionKind::TupleLiteral(exprs),
+                    span: first_span.merge(last_span),
+                })
+            } else {
+                Some(first)
+            }
         } else {
             None
         };
@@ -1318,6 +1361,34 @@ impl Parser {
         self.advance(); // consume 'const'
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
+
+        // Bare tuple destructuring: `const a, b = expr;`
+        if self.at(&TokenKind::Comma) {
+            let mut elements = vec![DestructureElement::Name(name)];
+            while self.eat(&TokenKind::Comma) {
+                if self.at(&TokenKind::Underscore) {
+                    let tok = self.advance().clone();
+                    elements.push(DestructureElement::Name(tok.text));
+                } else {
+                    let tok = self.expect_identifier()?;
+                    elements.push(DestructureElement::Name(tok.text));
+                }
+            }
+            self.expect(&TokenKind::Eq)?;
+            let value = self.parse_expression()?;
+            let end = self.peek().span;
+            self.eat(&TokenKind::Semicolon);
+            return Ok(Statement {
+                kind: StatementKind::LetDestructure {
+                    pattern: DestructurePattern::Tuple(elements),
+                    mutable: false,
+                    value,
+                },
+                span: start.merge(end),
+                leading_comments: Vec::new(),
+                trailing_comment: None,
+            });
+        }
 
         let type_annotation = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type_annotation()?)

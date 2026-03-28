@@ -671,6 +671,11 @@ impl<'a> LintContext<'a> {
                     self.check_expression(val);
                 }
             }
+            ExpressionKind::TupleLiteral(exprs) => {
+                for e in exprs {
+                    self.check_expression(e);
+                }
+            }
             _ => {}
         }
     }

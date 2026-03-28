@@ -516,6 +516,8 @@ pub enum ExpressionKind {
     },
     /// Try-propagate: `expr?` — early return on error/null
     TryPropagate(Box<Expression>),
+    /// Tuple literal: `a, b` or `a, b, c` — comma-separated values (multi-return)
+    TupleLiteral(Vec<Expression>),
 }
 
 

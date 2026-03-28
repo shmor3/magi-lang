@@ -543,6 +543,12 @@ fn fold_expr(expr: &mut Expression) {
             return;
         }
         // Scalar literals, variables, placeholders, dyn trait -- nothing to fold inside
+        ExpressionKind::TupleLiteral(exprs) => {
+            for e in exprs.iter_mut() {
+                fold_expr(e);
+            }
+            return;
+        }
         ExpressionKind::Literal(_) | ExpressionKind::Variable(_) | ExpressionKind::Placeholder | ExpressionKind::DynTrait(_) => {
             return;
         }

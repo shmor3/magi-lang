@@ -495,6 +495,11 @@ fn find_calls_in_expr(expr: &Expression, target_name: &str, spans: &mut Vec<Span
         ExpressionKind::Ref(inner) | ExpressionKind::MoveClosure { body: inner, .. } => {
             find_calls_in_expr(inner, target_name, spans);
         }
+        ExpressionKind::TupleLiteral(exprs) => {
+            for e in exprs {
+                find_calls_in_expr(e, target_name, spans);
+            }
+        }
         ExpressionKind::Variable(_) | ExpressionKind::Placeholder | ExpressionKind::DynTrait(_) => {}
     }
 }
@@ -713,6 +718,11 @@ fn collect_calls_in_expr(expr: &Expression, call_map: &mut std::collections::Has
         }
         ExpressionKind::Ref(inner) | ExpressionKind::MoveClosure { body: inner, .. } => {
             collect_calls_in_expr(inner, call_map);
+        }
+        ExpressionKind::TupleLiteral(exprs) => {
+            for e in exprs {
+                collect_calls_in_expr(e, call_map);
+            }
         }
         ExpressionKind::Variable(_) | ExpressionKind::Placeholder | ExpressionKind::DynTrait(_) => {}
     }

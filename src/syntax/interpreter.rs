@@ -13713,6 +13713,14 @@ impl<'a> Interpreter<'a> {
                 // dyn Trait is a type-level expression; return as a string descriptor
                 Ok(DataType::String(format!("dyn {}", name)))
             }
+
+            ExpressionKind::TupleLiteral(exprs) => {
+                let mut items = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    items.push(self.eval_expr(e)?);
+                }
+                Ok(DataType::Tuple(items))
+            }
         }
     }
 

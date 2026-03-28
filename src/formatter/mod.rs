@@ -1235,6 +1235,15 @@ impl<'a> Formatter<'a> {
             ExpressionKind::DynTrait(name) => {
                 self.write(&format!("dyn {}", name));
             }
+
+            ExpressionKind::TupleLiteral(exprs) => {
+                for (i, e) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.fmt_expression(e);
+                }
+            }
         }
     }
 

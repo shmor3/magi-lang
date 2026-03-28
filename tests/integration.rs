@@ -21555,3 +21555,71 @@ fn test_dot_receiver_with_params() {
     "#, "dot_recv_params");
     assert!(result.contains("4"));
 }
+
+// ── Multi-return value tests ─────────────────────────────
+
+#[test]
+fn test_multi_return_basic() {
+    assert_eq!(run(r#"
+        func divide(a, b) {
+            if b == 0 { return 0, "division by zero" }
+            return a / b, null
+        }
+        let result, err = divide(10, 2)
+        output result
+    "#), DataType::Int64(5));
+}
+
+#[test]
+fn test_multi_return_error_path() {
+    assert_eq!(run(r#"
+        func divide(a, b) {
+            if b == 0 { return 0, "division by zero" }
+            return a / b, null
+        }
+        let result, err = divide(10, 0)
+        output err
+    "#), DataType::String("division by zero".to_string()));
+}
+
+#[test]
+fn test_multi_return_implicit_tuple() {
+    // Last expression as multi-return (implicit return of tuple)
+    assert_eq!(run(r#"
+        func swap(a, b) {
+            return b, a
+        }
+        let x, y = swap(1, 2)
+        output x
+    "#), DataType::Int64(2));
+}
+
+#[test]
+fn test_multi_return_three_values() {
+    assert_eq!(run(r#"
+        func triple() {
+            return 1, 2, 3
+        }
+        let a, b, c = triple()
+        output b
+    "#), DataType::Int64(2));
+}
+
+#[test]
+fn test_multi_assign_const() {
+    assert_eq!(run(r#"
+        func pair() { return "hello", "world" }
+        const a, b = pair()
+        output b
+    "#), DataType::String("world".to_string()));
+}
+
+#[test]
+fn test_multi_return_with_existing_tuple_destructure() {
+    // Existing (a, b) = syntax should still work
+    assert_eq!(run(r#"
+        func pair() { return 10, 20 }
+        let (a, b) = pair()
+        output a
+    "#), DataType::Int64(10));
+}

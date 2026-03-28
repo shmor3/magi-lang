@@ -3106,6 +3106,13 @@ impl TypeChecker {
             ExpressionKind::DynTrait(_) => {
                 ChannelType::Null
             }
+
+            ExpressionKind::TupleLiteral(exprs) => {
+                for e in exprs {
+                    self.infer_expr(e);
+                }
+                ChannelType::Array
+            }
         }
     }
 

@@ -1446,6 +1446,14 @@ impl Compiler {
                 // dyn Trait is a type-level construct; emit null in WASM.
                 self.emit(Instruction::PushNull);
             }
+
+            ExpressionKind::TupleLiteral(exprs) => {
+                // Compile each element, then build an array (tuples are arrays in IR)
+                for e in exprs {
+                    self.compile_expr(e)?;
+                }
+                self.emit(Instruction::ArrayNew(exprs.len() as u32));
+            }
         }
         Ok(())
     }
