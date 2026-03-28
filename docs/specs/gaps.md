@@ -1,163 +1,126 @@
 # MAGI Syntax — Open Gaps
 
-Unresolved syntax questions that must be answered before implementation.
+All unresolved syntax questions. Every one must be answered before implementation.
 
-## 1. For Loop Syntax
+## From Initial Review
 
-What forms of `for` loop exist?
+### 1. For Loop Syntax
+Keep C-style `for`? Or only `for x in iterable` + `for i in 0..10`?
 
-```magi
-// For-in (confirmed):
-for x in [1, 2, 3] { println(x) }
+### 2. Destructuring
+Does destructuring work with `const` and `let`? In function params? In for loops?
 
-// C-style — keep or remove?
-for (let i = 0; i < 10; i += 1) { println(i) }
+### 3. Map Type Syntax
+`map[string]int`, `{string: int}`, or `Map<string, int>`?
 
-// Range:
-for i in 0..10 { println(i) }
+### 4. Array Type Syntax
+`[int]`, `[]int`, or `Array<int>`?
 
-// Destructuring in for:
-for [key, value] in entries { println(f"{key}: {value}") }
-```
+### 5. Multi-Return Type Annotation
+`func f() -> (int, string)` or `func f() -> int, string`?
 
-**Decision needed:** Keep C-style for? Or only `for x in iterable`?
+### 6. Primitive Type Names
+Lowercase `int`/`float`/`string`/`bool` or capitalized?
 
-## 2. Destructuring
+### 7. Number Type Granularity
+All six (Int32/Int64/Uint32/Uint64/Float32/Float64) or just `int` + `float`?
 
-Does destructuring work with `const` and `let`?
+### 8. Match Arm vs Arrow Function Ambiguity
+`=>` used for both. Is `x => x + 1` inside a match a pattern or lambda?
 
-```magi
-const [a, b, c] = [1, 2, 3]
-let [x, ...rest] = [1, 2, 3, 4]
-const {name, age} = person
-let {host, port} = config
-```
+### 9. Comments
+`//` and `/* */` stay? Doc comments `///`?
 
-**Decision needed:** Confirm destructuring works with both `const` and `let`.
+### 10. Entry Point
+Explicit `main()` call or auto-invoke if `func main()` defined?
 
-## 3. Map Literal and Type Syntax
+### 11. Struct Update Syntax
+`Config { ...default, port: 443 }` — confirm spread in structs stays.
 
-```magi
-// Literal:
-const m = {"key": "value", "count": 42}
+### 12. Function Parameter Mutability
+Are params `const` (immutable) or `let` (mutable) by default?
 
-// Type annotation — which?
-func process(data map[string]int) { ... }
-func process(data {string: int}) { ... }
-func process(data Map<string, int>) { ... }
-```
+## Dropped Features — Keep or Confirm Removal
 
-**Decision needed:** What is the map type syntax?
+### 13. Do-While Loops
+Current: `do { } while cond`. Keep or remove?
 
-## 4. Array Type Syntax
+### 14. Labeled Break/Continue
+Current: `'outer: for x in xs { break 'outer }`. Keep or remove?
 
-```magi
-// Literal:
-const arr = [1, 2, 3]
+### 15. Static Globals
+Current: `static COUNTER: int = 0`. Keep or remove?
 
-// Type annotation — which?
-func sum(items [int]) -> int { ... }
-func sum(items []int) -> int { ... }
-func sum(items Array<int>) -> int { ... }
-```
+### 16. Sets, Tuples, Bytes
+First-class types in current MAGI. Staying?
 
-**Decision needed:** `[int]`, `[]int`, or `Array<int>`?
+### 17. Attributes/Decorators
+Current: `#[test]`, `#[deprecated]`, `#[ignore]`, `#[cfg(...)]`. Staying?
 
-## 5. Multi-Return Type Annotation
+### 18. Unsafe Blocks
+Current: `unsafe { }`. Keep or remove?
 
-```magi
-// Which syntax?
-func divide(a int, b int) -> (int, string) { ... }
-func divide(a int, b int) -> int, string { ... }
-```
+### 19. Yield/Generators
+Current: `yield value`. Keep or remove?
 
-**Decision needed:** Parens or no parens for multi-return types?
+### 20. Ref/Move/Dyn Keywords
+Current: `ref`, `move`, `dyn`. Keep or remove?
 
-## 6. Primitive Type Names
+### 21. Where Clauses
+Current: `func f<T>() where T: Display`. Keep or remove? (Overhaul only shows `<T: Interface>`)
 
-```magi
-// Lowercase (like Go):
-func add(a int, b int) -> int
-func pi() -> float
-func name() -> string
-func ok() -> bool
+### 22. Multiline and Raw Strings
+Current: `"""multiline"""` and `r"raw\n"`. Staying?
 
-// Or mixed (like current MAGI):
-func add(a Int64, b Int64) -> Int64
-func pi() -> Float64
-```
+### 23. Mod Blocks
+Current: `mod utils { }`. Removed since we have `import`?
 
-**Decision needed:** Lowercase `int`/`float`/`string`/`bool` or capitalized?
+## Edge Cases
 
-## 7. Number Type Granularity
+### 24. Pipe with Multi-Return
+`getData()` returns `(data, err)`. How does `|>` work? Only first value piped?
 
-Current MAGI has: `Int32`, `Int64`, `Uint32`, `Uint64`, `Float32`, `Float64`.
+### 25. Print Return Value
+`println(x)` returns `x`. Is it the original value or the string representation?
 
-Options:
-- **A)** Keep all six — explicit control
-- **B)** Just `int` (64-bit) and `float` (64-bit) — simple, with `int32`/`float32` available when needed
-- **C)** Just `int` and `float` — no 32-bit types
+### 26. Methods on Primitive Types
+Can you do `func int.is_even(self) { self % 2 == 0 }`?
 
-**Decision needed:** How many number types?
+### 27. Multiple Generic Bounds
+`<T: Display & Compare>` or `<T: Display, T: Compare>` or `<T: (Display, Compare)>`?
 
-## 8. Match Arm vs Arrow Function Ambiguity
+### 28. Struct Field Mutability
+`const v = Vec2{x: 3.0, y: 4.0}` — can you do `v.x = 5.0`? Binding-level or field-level?
 
-`=>` is used for both:
+### 29. Null vs Uninitialized
+`let x: int` — is x null? Zero? Compile error?
 
-```magi
-// Arrow function:
-const double = x => x * 2
+### 30. Interface Method Resolution
+If Reader and Writer both have `close()`, and ReadWriter embeds both, which `close()` is called?
 
-// Match arm:
-match color {
-    Color::Red => "red",
-    Color::Blue => "blue",
-}
-```
+### 31. Spread in Arrays
+`const arr = [...a, ...b, 3]` — spread works in array literals?
 
-Is there ambiguity? `x => x * 2` inside a match arm — is `x` a pattern or a lambda parameter?
+### 32. Interface Case Sensitivity
+`func read()` satisfies `interface { func read() }` but `func Read()` does not?
 
-**Decision needed:** Confirm no ambiguity, or change one of the syntaxes.
+### 33. Operator Precedence with `=>`
+Is `a > b => x` parsed as `(a > b) => x` or `a > (b => x)`?
 
-## 9. Comments
+### 34. Empty Return with Multi-Return
+`func f() -> (int, string) { return }` — error or defaults to `(null, null)`?
 
-```magi
-// Line comment
-/* Block comment */
-```
+### 35. Defer with Error State
+`defer` runs on function exit but can't see if an error occurred. Is this a problem?
 
-**Decision needed:** Confirm both stay. Doc comments? `///` or `/** */`?
+### 36. Async Multi-Return
+`await fetch()` where fetch returns `(data, err)` — does await unwrap the future AND give you the tuple?
 
-## 10. Entry Point
+### 37. Comprehensions with Multi-Return
+`[x for x in getData()]` where `getData()` returns `(arr, err)` — error or auto-unwrap first value?
 
-```magi
-// Current — explicit call:
-func main() { ... }
-main()
+### 38. Receiver on Interface Types
+Can you write `func Shape.display(self) { }`? Shape is an interface, not a concrete type.
 
-// Alternative — auto-main:
-func main() { ... }
-// main() called automatically if defined
-```
-
-**Decision needed:** Explicit `main()` call or auto-invoke?
-
-## 11. Struct Update Syntax
-
-```magi
-const default_config = Config { host: "localhost", port: 8080, debug: false }
-const prod = Config { ...default_config, port: 443, debug: false }
-```
-
-**Decision needed:** Confirm `...spread` in struct literals stays.
-
-## 12. Function Parameter Mutability
-
-```magi
-func process(items [int]) {
-    // Can I mutate items here?
-    items.push(42)  // allowed or error?
-}
-```
-
-**Decision needed:** Are function parameters `const` (immutable) or `let` (mutable) by default?
+### 39. Recursive Type Aliases
+`type Node = { value: int, children: [Node] }` — allowed?
