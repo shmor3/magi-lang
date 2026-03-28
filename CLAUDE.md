@@ -41,6 +41,21 @@ All documentation lives in `docs/`:
 - `docs/status.md` — Project status and metrics
 - `docs/mcp.md` — MCP server documentation
 
+## Syntax (New — v2)
+
+```magi
+import std.math                           // qualified imports
+func Vec2.length(self) { ... }           // dot receiver methods
+interface Shape { func area(self) }      // implicit interfaces
+const x = 5                              // immutable
+let count = 0                            // mutable
+const double = x => x * 2               // arrow functions
+let result, err = divide(10, 0)          // multi-return errors
+println(Color::Red)                      // clean enum display
+```
+
+Full syntax spec: `docs/specs/2026-03-28-syntax-overhaul-design.md`
+
 ## Key Design Decisions
 
 - **DataType::Map** uses OrderedMap (insertion-order preserving)
