@@ -1639,7 +1639,7 @@ fn test_division_by_zero() {
 }
 #[test]
 fn test_immutable_assignment_error() {
-    let err = run_err("let x = 5; x = 10;");
+    let err = run_err("const x = 5; x = 10;");
     match err {
         InterpError::ImmutableAssignment { .. } => {}
         _ => panic!("expected ImmutableAssignment, got: {:?}", err),
@@ -7900,7 +7900,7 @@ fn test_max_call_depth() {
 fn test_compound_assign_on_immutable() {
     // Compound assignment on immutable variable should error
     let err = run_err(r#"
-        let x = 5;
+        const x = 5;
         x += 1;
     "#);
     let msg = format!("{}", err);
@@ -14790,7 +14790,7 @@ fn test_error_code_e304_invalid_pipe_stage() {
 fn test_error_code_e404_immutable_assignment() {
     // E404: assign to immutable variable
     let err = run_err(r#"
-        let x = 1
+        const x = 1
         x = 2
     "#);
     let msg = format!("{}", err);
@@ -19797,7 +19797,7 @@ fn test_field_assignment_immutable_error() {
     // Field assignment on immutable variable should error
     let result = std::panic::catch_unwind(|| {
         run(r#"
-            let m = {"x": 1};
+            const m = {"x": 1};
             m.x = 2;
             output m;
         "#)
