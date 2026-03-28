@@ -1,0 +1,516 @@
+// MAGI Self-Hosted Compiler — AST Node Definitions
+//
+// Mirrors src/syntax/ast.rs. All AST types used by the parser
+// to represent a parsed MAGI program.
+
+// ── Binary Operators ───────────────────────────────────────────────
+
+enum BinOp {
+    Add, Sub, Mul, Div, Mod,
+    Eq, NotEq, Lt, Gt, LtEq, GtEq,
+    And, Or, In,
+    BitAnd, BitOr, BitXor, Shl, Shr, AndNot,
+}
+
+func BinOp.symbol(self) {
+    match self {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Eq => "==",
+        BinOp::NotEq => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::LtEq => "<=",
+        BinOp::GtEq => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+        BinOp::In => "in",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
+        BinOp::AndNot => "&^",
+    }
+}
+
+func BinOp.precedence(self) {
+    match self {
+        BinOp::Or => 1,
+        BinOp::And => 2,
+        BinOp::In => 3,
+        BinOp::Eq => 3, BinOp::NotEq => 3,
+        BinOp::Gt => 4, BinOp::Lt => 4, BinOp::GtEq => 4, BinOp::LtEq => 4,
+        BinOp::BitOr => 3,
+        BinOp::BitXor => 4,
+        BinOp::BitAnd => 4, BinOp::AndNot => 4,
+        BinOp::Shl => 5, BinOp::Shr => 5,
+        BinOp::Add => 5, BinOp::Sub => 5,
+        BinOp::Mul => 6, BinOp::Div => 6, BinOp::Mod => 6,
+    }
+}
+
+func BinOp.op_name(self) {
+    match self {
+        BinOp::Add => "add", BinOp::Sub => "subtract",
+        BinOp::Mul => "multiply", BinOp::Div => "divide",
+        BinOp::Mod => "modulo", BinOp::Eq => "equal",
+        BinOp::NotEq => "not_equal", BinOp::Gt => "greater",
+        BinOp::Lt => "less", BinOp::GtEq => "greater_eq",
+        BinOp::LtEq => "less_eq", BinOp::And => "and",
+        BinOp::Or => "or", BinOp::In => "contains",
+        BinOp::BitAnd => "bit_and", BinOp::BitOr => "bit_or",
+        BinOp::BitXor => "bit_xor", BinOp::Shl => "bit_shift_left",
+        BinOp::Shr => "bit_shift_right", BinOp::AndNot => "bit_and_not",
+    }
+}
+
+// ── Unary Operators ────────────────────────────────────────────────
+
+enum UnOp {
+    Not,
+    Neg,
+}
+
+func UnOp.symbol(self) {
+    match self {
+        UnOp::Not => "!",
+        UnOp::Neg => "-",
+    }
+}
+
+func UnOp.op_name(self) {
+    match self {
+        UnOp::Not => "not",
+        UnOp::Neg => "negate",
+    }
+}
+
+// ── Literal Values ─────────────────────────────────────────────────
+
+enum Literal {
+    IntLit(int),
+    FloatLit(float),
+    StringLit(string),
+    BoolLit(bool),
+    NullLit,
+    ArrayLit(array),
+    MapLit(array),
+    SetLit(array),
+}
+
+func Literal.type_name(self) {
+    match self {
+        Literal::IntLit(_) => "int",
+        Literal::FloatLit(_) => "float",
+        Literal::StringLit(_) => "string",
+        Literal::BoolLit(_) => "bool",
+        Literal::NullLit => "null",
+        Literal::ArrayLit(_) => "array",
+        Literal::MapLit(_) => "map",
+        Literal::SetLit(_) => "set",
+    }
+}
+
+// ── String Interpolation Parts ─────────────────────────────────────
+
+enum StringPart {
+    LiteralPart(string),
+    ExprPart(map),
+}
+
+// ── Patterns (for match expressions) ───────────────────────────────
+
+enum Pattern {
+    PLiteral(map),
+    PVariable(string),
+    PWildcard,
+    PArray(array),
+    PMap(array),
+    POr(array),
+    PRest(string),
+    PEnum(string, string, array),
+    PType(string, string),
+    PBinding(string, map),
+    PRange(map, map, bool),
+}
+
+func Pattern.describe(self) {
+    match self {
+        Pattern::PLiteral(_) => "literal",
+        Pattern::PVariable(name) => f"var({name})",
+        Pattern::PWildcard => "_",
+        Pattern::PArray(_) => "array",
+        Pattern::PMap(_) => "map",
+        Pattern::POr(_) => "or",
+        Pattern::PRest(name) => f"...{name}",
+        Pattern::PEnum(e, v, _) => f"{e}::{v}",
+        Pattern::PType(n, t) => f"{n}: {t}",
+        Pattern::PBinding(n, _) => f"{n} @",
+        Pattern::PRange(_, _, _) => "range",
+    }
+}
+
+// ── Match Arm ──────────────────────────────────────────────────────
+
+struct MatchArm {
+    pattern: map,
+    guard: map,
+    body: map,
+    span: map,
+}
+
+func match_arm_new(pattern, body, span) {
+    MatchArm { pattern: pattern, guard: null, body: body, span: span }
+}
+
+// ── For Pattern ────────────────────────────────────────────────────
+
+enum ForPattern {
+    Single(string),
+    ArrayDestructure(array),
+    MapDestructure(array),
+}
+
+// ── Destructure Pattern ────────────────────────────────────────────
+
+enum DestructurePattern {
+    DArray(array),
+    DMap(array),
+    DTuple(array),
+}
+
+enum DestructureElement {
+    DName(string),
+    DRest(string),
+}
+
+// ── Expression ─────────────────────────────────────────────────────
+
+struct Expr {
+    kind: map,
+    span: map,
+}
+
+func expr_new(kind, span) {
+    Expr { kind: kind, span: span }
+}
+
+enum ExprKind {
+    ELiteral(map),
+    EVariable(string),
+    EBinaryOp(map, map, map),
+    EUnaryOp(map, map),
+    ECall(string, array, array),
+    EMethodCall(map, string, array, array),
+    EPipe(map, map),
+    EIfElse(map, map, map),
+    EBlock(map),
+    EIndex(map, map),
+    EFieldAccess(map, string),
+    EPlaceholder,
+    ERange(map, map, bool),
+    EAwait(map),
+    ESpawn(map),
+    EYield(map),
+    ELambda(array, map),
+    EMatch(map, array),
+    EStringInterp(array),
+    ENullCoalesce(map, map),
+    EOptionalChain(map, string),
+    ESpread(map),
+    ELoop(map),
+    ETryCatch(map, string, map),
+    EListComp(map, map, map, map),
+    EMapComp(map, map, map, map, map),
+    EEnumConstruct(string, string, array),
+    EStructConstruct(string, array),
+    ETryPropagate(map),
+    ETupleLiteral(array),
+}
+
+func ExprKind.describe(self) {
+    match self {
+        ExprKind::ELiteral(_) => "literal",
+        ExprKind::EVariable(name) => f"var({name})",
+        ExprKind::EBinaryOp(_, _, _) => "binary_op",
+        ExprKind::EUnaryOp(_, _) => "unary_op",
+        ExprKind::ECall(name, _, _) => f"call({name})",
+        ExprKind::EMethodCall(_, m, _, _) => f"method({m})",
+        ExprKind::EPipe(_, _) => "pipe",
+        ExprKind::EIfElse(_, _, _) => "if_else",
+        ExprKind::EBlock(_) => "block",
+        ExprKind::EIndex(_, _) => "index",
+        ExprKind::EFieldAccess(_, f) => f"field({f})",
+        ExprKind::EPlaceholder => "_",
+        ExprKind::ERange(_, _, _) => "range",
+        ExprKind::EAwait(_) => "await",
+        ExprKind::ESpawn(_) => "spawn",
+        ExprKind::EYield(_) => "yield",
+        ExprKind::ELambda(_, _) => "lambda",
+        ExprKind::EMatch(_, _) => "match",
+        ExprKind::EStringInterp(_) => "string_interp",
+        ExprKind::ENullCoalesce(_, _) => "null_coalesce",
+        ExprKind::EOptionalChain(_, _) => "optional_chain",
+        ExprKind::ESpread(_) => "spread",
+        ExprKind::ELoop(_) => "loop",
+        ExprKind::ETryCatch(_, _, _) => "try_catch",
+        ExprKind::EListComp(_, _, _, _) => "list_comp",
+        ExprKind::EMapComp(_, _, _, _, _) => "map_comp",
+        ExprKind::EEnumConstruct(e, v, _) => f"enum({e}::{v})",
+        ExprKind::EStructConstruct(n, _) => f"struct({n})",
+        ExprKind::ETryPropagate(_) => "try?",
+        ExprKind::ETupleLiteral(_) => "tuple",
+    }
+}
+
+// ── Block ──────────────────────────────────────────────────────────
+
+struct Block {
+    stmts: array,
+    tail_expr: map,
+    span: map,
+}
+
+func block_new(stmts, tail_expr, span) {
+    Block { stmts: stmts, tail_expr: tail_expr, span: span }
+}
+
+func block_empty(span) {
+    Block { stmts: [], tail_expr: null, span: span }
+}
+
+// ── Function Definition ────────────────────────────────────────────
+
+struct FuncParam {
+    name: string,
+    type_ann: string,
+    default_val: map,
+    rest: bool,
+    kwargs: bool,
+    span: map,
+}
+
+func param_new(name, span) {
+    FuncParam { name: name, type_ann: "", default_val: null, rest: false, kwargs: false, span: span }
+}
+
+struct FuncDef {
+    name: string,
+    type_params: array,
+    params: array,
+    return_type: string,
+    body: map,
+    span: map,
+    is_getter: bool,
+    is_setter: bool,
+}
+
+func funcdef_new(name, params, body, span) {
+    FuncDef {
+        name: name, type_params: [], params: params,
+        return_type: "", body: body, span: span,
+        is_getter: false, is_setter: false,
+    }
+}
+
+// ── Struct and Enum Definitions ────────────────────────────────────
+
+struct StructFieldDef {
+    name: string,
+    type_ann: string,
+    default_val: map,
+    span: map,
+}
+
+struct EnumVariantDef {
+    name: string,
+    fields: array,
+    span: map,
+}
+
+// ── Statement ──────────────────────────────────────────────────────
+
+struct Stmt {
+    kind: map,
+    span: map,
+}
+
+func stmt_new(kind, span) {
+    Stmt { kind: kind, span: span }
+}
+
+enum StmtKind {
+    SLet(string, map),
+    SLetMut(string, map),
+    SLetDestructure(map, bool, map),
+    SConst(string, map),
+    SAssignment(string, map),
+    SCompoundAssign(string, map, map),
+    SFieldAssign(map, string, map),
+    SIndexAssign(map, map, map),
+    SFuncDef(map),
+    SAsyncFuncDef(map),
+    SReturn(map),
+    SBreak(string, map),
+    SContinue(string),
+    SIf(map, map, map),
+    SForLoop(string, map, map, map),
+    SWhileLoop(string, map, map),
+    SDoWhile(string, map, map),
+    SMatch(map, array),
+    SOutput(map),
+    SExprStmt(map),
+    SStructDef(string, array, array),
+    SEnumDef(string, array, array),
+    SInterfaceDef(string, array, array),
+    SImplBlock(string, array),
+    SImplTrait(string, string, array),
+    SImport(string),
+    SImportModule(array, string, array),
+    STypeAlias(string, string),
+    SDefer(map),
+    SSpawn(map),
+    SThrow(map),
+    STryCatch(map, string, map, map),
+    STestDef(string, map),
+    SModuleDef(string, map),
+    STupleAssign(array, map),
+    SIncrement(string),
+    SDecrement(string),
+}
+
+func StmtKind.describe(self) {
+    match self {
+        StmtKind::SLet(name, _) => f"let {name}",
+        StmtKind::SLetMut(name, _) => f"let mut {name}",
+        StmtKind::SLetDestructure(_, _, _) => "let destructure",
+        StmtKind::SConst(name, _) => f"const {name}",
+        StmtKind::SAssignment(name, _) => f"assign {name}",
+        StmtKind::SCompoundAssign(name, _, _) => f"compound assign {name}",
+        StmtKind::SFieldAssign(_, f, _) => f"field assign .{f}",
+        StmtKind::SIndexAssign(_, _, _) => "index assign",
+        StmtKind::SFuncDef(_) => "func",
+        StmtKind::SAsyncFuncDef(_) => "async func",
+        StmtKind::SReturn(_) => "return",
+        StmtKind::SBreak(_, _) => "break",
+        StmtKind::SContinue(_) => "continue",
+        StmtKind::SIf(_, _, _) => "if",
+        StmtKind::SForLoop(_, _, _, _) => "for",
+        StmtKind::SWhileLoop(_, _, _) => "while",
+        StmtKind::SDoWhile(_, _, _) => "do-while",
+        StmtKind::SMatch(_, _) => "match",
+        StmtKind::SOutput(_) => "output",
+        StmtKind::SExprStmt(_) => "expr",
+        StmtKind::SStructDef(name, _, _) => f"struct {name}",
+        StmtKind::SEnumDef(name, _, _) => f"enum {name}",
+        StmtKind::SInterfaceDef(name, _, _) => f"interface {name}",
+        StmtKind::SImplBlock(name, _) => f"impl {name}",
+        StmtKind::SImplTrait(tr, ty, _) => f"impl {tr} for {ty}",
+        StmtKind::SImport(path) => f"import {path}",
+        StmtKind::SImportModule(_, _, _) => "import module",
+        StmtKind::STypeAlias(name, _) => f"type {name}",
+        StmtKind::SDefer(_) => "defer",
+        StmtKind::SSpawn(_) => "spawn",
+        StmtKind::SThrow(_) => "throw",
+        StmtKind::STryCatch(_, _, _, _) => "try-catch",
+        StmtKind::STestDef(name, _) => f"test {name}",
+        StmtKind::SModuleDef(name, _) => f"mod {name}",
+        StmtKind::STupleAssign(_, _) => "tuple assign",
+        StmtKind::SIncrement(name) => f"{name}++",
+        StmtKind::SDecrement(name) => f"{name}--",
+    }
+}
+
+// ── Program ────────────────────────────────────────────────────────
+
+struct Program {
+    statements: array,
+    span: map,
+}
+
+func program_new(statements, span) {
+    Program { statements: statements, span: span }
+}
+
+// ── AST Builder Helpers ────────────────────────────────────────────
+// Convenience functions for constructing AST nodes.
+
+func make_int_lit(value, span) {
+    expr_new(ExprKind::ELiteral(Literal::IntLit(value)), span)
+}
+
+func make_float_lit(value, span) {
+    expr_new(ExprKind::ELiteral(Literal::FloatLit(value)), span)
+}
+
+func make_str_lit(value, span) {
+    expr_new(ExprKind::ELiteral(Literal::StringLit(value)), span)
+}
+
+func make_bool_lit(value, span) {
+    expr_new(ExprKind::ELiteral(Literal::BoolLit(value)), span)
+}
+
+func make_null_lit(span) {
+    expr_new(ExprKind::ELiteral(Literal::NullLit), span)
+}
+
+func make_var(name, span) {
+    expr_new(ExprKind::EVariable(name), span)
+}
+
+func make_binop(op, left, right, span) {
+    expr_new(ExprKind::EBinaryOp(op, left, right), span)
+}
+
+func make_unaryop(op, operand, span) {
+    expr_new(ExprKind::EUnaryOp(op, operand), span)
+}
+
+func make_call(name, args, span) {
+    expr_new(ExprKind::ECall(name, args, []), span)
+}
+
+func make_method_call(object, method, args, span) {
+    expr_new(ExprKind::EMethodCall(object, method, args, []), span)
+}
+
+func make_field_access(object, field, span) {
+    expr_new(ExprKind::EFieldAccess(object, field), span)
+}
+
+func make_index(object, index, span) {
+    expr_new(ExprKind::EIndex(object, index), span)
+}
+
+func make_if(cond, then_block, else_block, span) {
+    expr_new(ExprKind::EIfElse(cond, then_block, else_block), span)
+}
+
+func make_lambda(params, body, span) {
+    expr_new(ExprKind::ELambda(params, body), span)
+}
+
+func make_let(name, value, span) {
+    stmt_new(StmtKind::SLet(name, value), span)
+}
+
+func make_const(name, value, span) {
+    stmt_new(StmtKind::SConst(name, value), span)
+}
+
+func make_return(value, span) {
+    stmt_new(StmtKind::SReturn(value), span)
+}
+
+func make_output(value, span) {
+    stmt_new(StmtKind::SOutput(value), span)
+}
+
+func make_expr_stmt(expr, span) {
+    stmt_new(StmtKind::SExprStmt(expr), span)
+}

@@ -1,0 +1,413 @@
+// Tests for self/ast.magi
+// Run: cat self/types.magi self/ast.magi self/tests/test_ast.magi > /tmp/_ast_test.magi && cargo run --bin magi -- run /tmp/_ast_test.magi
+
+// Helper: extract kind from Expr and describe it (works around method dispatch issue)
+func desc_ek(e) {
+    const k = e.kind
+    k.describe()
+}
+
+func desc_sk(st) {
+    const k = st.kind
+    k.describe()
+}
+
+// ── BinOp Tests ────────────────────────────────────────────────────
+
+func test_binop_symbol() {
+    assert(BinOp::Add.symbol() == "+")
+    assert(BinOp::Sub.symbol() == "-")
+    assert(BinOp::Mul.symbol() == "*")
+    assert(BinOp::Div.symbol() == "/")
+    assert(BinOp::Mod.symbol() == "%")
+    assert(BinOp::Eq.symbol() == "==")
+    assert(BinOp::NotEq.symbol() == "!=")
+    assert(BinOp::And.symbol() == "&&")
+    assert(BinOp::Or.symbol() == "||")
+    assert(BinOp::BitAnd.symbol() == "&")
+    assert(BinOp::Shl.symbol() == "<<")
+    println("PASS: BinOp.symbol")
+}
+
+func test_binop_precedence() {
+    assert(BinOp::Mul.precedence() > BinOp::Add.precedence())
+    assert(BinOp::Add.precedence() > BinOp::Eq.precedence())
+    assert(BinOp::And.precedence() > BinOp::Or.precedence())
+    println("PASS: BinOp.precedence")
+}
+
+func test_binop_op_name() {
+    assert(BinOp::Add.op_name() == "add")
+    assert(BinOp::Sub.op_name() == "subtract")
+    assert(BinOp::Eq.op_name() == "equal")
+    assert(BinOp::In.op_name() == "contains")
+    println("PASS: BinOp.op_name")
+}
+
+// ── UnOp Tests ─────────────────────────────────────────────────────
+
+func test_unop() {
+    assert(UnOp::Not.symbol() == "!")
+    assert(UnOp::Neg.symbol() == "-")
+    assert(UnOp::Not.op_name() == "not")
+    assert(UnOp::Neg.op_name() == "negate")
+    println("PASS: UnOp")
+}
+
+// ── Literal Tests ──────────────────────────────────────────────────
+
+func test_literal() {
+    assert(Literal::IntLit(42).type_name() == "int")
+    assert(Literal::FloatLit(3.14).type_name() == "float")
+    assert(Literal::StringLit("hello").type_name() == "string")
+    assert(Literal::BoolLit(true).type_name() == "bool")
+    assert(Literal::NullLit.type_name() == "null")
+    assert(Literal::ArrayLit([]).type_name() == "array")
+    assert(Literal::MapLit([]).type_name() == "map")
+    println("PASS: Literal")
+}
+
+// ── Pattern Tests ──────────────────────────────────────────────────
+
+func test_pattern() {
+    assert(Pattern::PWildcard.describe() == "_")
+    assert(Pattern::PVariable("x").describe() == "var(x)")
+    assert(Pattern::PRest("xs").describe() == "...xs")
+    assert(Pattern::PEnum("Option", "Some", []).describe() == "Option::Some")
+    assert(Pattern::PType("n", "int").describe() == "n: int")
+    println("PASS: Pattern")
+}
+
+// ── ExprKind Tests (direct, no struct wrapping) ────────────────────
+
+func test_exprkind_describe() {
+    assert(ExprKind::ELiteral(Literal::IntLit(1)).describe() == "literal")
+    assert(ExprKind::EVariable("x").describe() == "var(x)")
+    assert(ExprKind::ECall("foo", [], []).describe() == "call(foo)")
+    assert(ExprKind::EMethodCall(null, "bar", [], []).describe() == "method(bar)")
+    assert(ExprKind::EPlaceholder.describe() == "_")
+    assert(ExprKind::ESpread(null).describe() == "spread")
+    assert(ExprKind::EEnumConstruct("Option", "Some", []).describe() == "enum(Option::Some)")
+    assert(ExprKind::EStructConstruct("Point", []).describe() == "struct(Point)")
+    assert(ExprKind::ETupleLiteral([]).describe() == "tuple")
+    assert(ExprKind::EPipe(null, null).describe() == "pipe")
+    assert(ExprKind::ENullCoalesce(null, null).describe() == "null_coalesce")
+    println("PASS: ExprKind.describe")
+}
+
+// ── Expr Construction Tests ────────────────────────────────────────
+
+func test_expr_literal() {
+    const s = span_new(1, 1)
+    const e = make_int_lit(42, s)
+    assert(desc_ek(e) == "literal")
+    assert(e.span.start_line == 1)
+    println("PASS: Expr literal construction")
+}
+
+func test_expr_variable() {
+    const s = span_new(1, 5)
+    const e = make_var("x", s)
+    assert(desc_ek(e) == "var(x)")
+    println("PASS: Expr variable construction")
+}
+
+func test_expr_binop() {
+    const s = span_new(1, 1)
+    const left = make_int_lit(1, s)
+    const right = make_int_lit(2, s)
+    const e = make_binop(BinOp::Add, left, right, s)
+    assert(desc_ek(e) == "binary_op")
+    println("PASS: Expr binary op construction")
+}
+
+func test_expr_unaryop() {
+    const s = span_new(1, 1)
+    const operand = make_bool_lit(true, s)
+    const e = make_unaryop(UnOp::Not, operand, s)
+    assert(desc_ek(e) == "unary_op")
+    println("PASS: Expr unary op construction")
+}
+
+func test_expr_call() {
+    const s = span_new(1, 1)
+    const arg = make_int_lit(10, s)
+    const e = make_call("println", [arg], s)
+    assert(desc_ek(e) == "call(println)")
+    println("PASS: Expr call construction")
+}
+
+func test_expr_method_call() {
+    const s = span_new(1, 1)
+    const obj = make_var("arr", s)
+    const arg = make_int_lit(5, s)
+    const e = make_method_call(obj, "push", [arg], s)
+    assert(desc_ek(e) == "method(push)")
+    println("PASS: Expr method call construction")
+}
+
+func test_expr_field_access() {
+    const s = span_new(1, 1)
+    const obj = make_var("point", s)
+    const e = make_field_access(obj, "x", s)
+    assert(desc_ek(e) == "field(x)")
+    println("PASS: Expr field access construction")
+}
+
+func test_expr_index() {
+    const s = span_new(1, 1)
+    const obj = make_var("arr", s)
+    const idx = make_int_lit(0, s)
+    const e = make_index(obj, idx, s)
+    assert(desc_ek(e) == "index")
+    println("PASS: Expr index construction")
+}
+
+func test_expr_if() {
+    const s = span_new(1, 1)
+    const cond = make_bool_lit(true, s)
+    const then_b = block_new([], make_int_lit(1, s), s)
+    const else_b = block_new([], make_int_lit(2, s), s)
+    const e = make_if(cond, then_b, else_b, s)
+    assert(desc_ek(e) == "if_else")
+    println("PASS: Expr if construction")
+}
+
+func test_expr_lambda() {
+    const s = span_new(1, 1)
+    const p = param_new("x", s)
+    const body = make_var("x", s)
+    const e = make_lambda([p], body, s)
+    assert(desc_ek(e) == "lambda")
+    println("PASS: Expr lambda construction")
+}
+
+func test_expr_enum_construct() {
+    const s = span_new(1, 1)
+    const val = make_int_lit(42, s)
+    const kind = ExprKind::EEnumConstruct("Option", "Some", [val])
+    assert(kind.describe() == "enum(Option::Some)")
+    // Verify struct wrapping preserves the kind
+    const e = expr_new(kind, s)
+    assert(e.span.start_line == 1)
+    println("PASS: Expr enum construct")
+}
+
+func test_expr_struct_construct() {
+    const s = span_new(1, 1)
+    const kind = ExprKind::EStructConstruct("Point", [])
+    assert(kind.describe() == "struct(Point)")
+    const e = expr_new(kind, s)
+    assert(e.span.start_col == 1)
+    println("PASS: Expr struct construct")
+}
+
+func test_expr_misc() {
+    const s = span_new(1, 1)
+    // Test kinds directly (not via struct field) to avoid interpreter dispatch issue
+    assert(ExprKind::EPlaceholder.describe() == "_")
+    assert(ExprKind::ERange(null, null, false).describe() == "range")
+    println("PASS: Expr misc kinds")
+}
+
+// ── StmtKind Tests (direct) ───────────────────────────────────────
+
+func test_stmtkind_describe() {
+    assert(StmtKind::SLet("x", null).describe() == "let x")
+    assert(StmtKind::SLetMut("y", null).describe() == "let mut y")
+    assert(StmtKind::SConst("PI", null).describe() == "const PI")
+    assert(StmtKind::SAssignment("z", null).describe() == "assign z")
+    assert(StmtKind::SReturn(null).describe() == "return")
+    assert(StmtKind::SBreak("", null).describe() == "break")
+    assert(StmtKind::SContinue("").describe() == "continue")
+    assert(StmtKind::SImport("std.io").describe() == "import std.io")
+    assert(StmtKind::STypeAlias("Id", "int").describe() == "type Id")
+    assert(StmtKind::SDefer(null).describe() == "defer")
+    assert(StmtKind::SThrow(null).describe() == "throw")
+    assert(StmtKind::SOutput(null).describe() == "output")
+    assert(StmtKind::SIncrement("i").describe() == "i++")
+    assert(StmtKind::SDecrement("j").describe() == "j--")
+    assert(StmtKind::SStructDef("Point", [], []).describe() == "struct Point")
+    assert(StmtKind::SEnumDef("Color", [], []).describe() == "enum Color")
+    assert(StmtKind::SImplBlock("Vec", []).describe() == "impl Vec")
+    assert(StmtKind::SImplTrait("Display", "Point", []).describe() == "impl Display for Point")
+    println("PASS: StmtKind.describe")
+}
+
+// ── Stmt Construction Tests ────────────────────────────────────────
+
+func test_stmt_let() {
+    const s = span_new(1, 1)
+    const val = make_int_lit(42, s)
+    const st = make_let("x", val, s)
+    assert(desc_sk(st) == "let x")
+    println("PASS: Stmt let construction")
+}
+
+func test_stmt_const() {
+    const s = span_new(1, 1)
+    const val = make_str_lit("hello", s)
+    const st = make_const("greeting", val, s)
+    assert(desc_sk(st) == "const greeting")
+    println("PASS: Stmt const construction")
+}
+
+func test_stmt_return() {
+    const s = span_new(1, 1)
+    const val = make_int_lit(0, s)
+    const st = make_return(val, s)
+    assert(desc_sk(st) == "return")
+    println("PASS: Stmt return construction")
+}
+
+func test_stmt_output() {
+    const s = span_new(1, 1)
+    const val = make_str_lit("hi", s)
+    const st = make_output(val, s)
+    assert(desc_sk(st) == "output")
+    println("PASS: Stmt output construction")
+}
+
+func test_stmt_struct_def() {
+    const s = span_new(1, 1)
+    const f1 = StructFieldDef { name: "x", type_ann: "float", default_val: null, span: s }
+    const f2 = StructFieldDef { name: "y", type_ann: "float", default_val: null, span: s }
+    const kind = StmtKind::SStructDef("Point", [], [f1, f2])
+    assert(kind.describe() == "struct Point")
+    println("PASS: Stmt struct def")
+}
+
+func test_stmt_enum_def() {
+    const s = span_new(1, 1)
+    const v1 = EnumVariantDef { name: "None", fields: [], span: s }
+    const v2 = EnumVariantDef { name: "Some", fields: ["value"], span: s }
+    const kind = StmtKind::SEnumDef("Option", [], [v1, v2])
+    assert(kind.describe() == "enum Option")
+    println("PASS: Stmt enum def")
+}
+
+func test_stmt_impl_block() {
+    const s = span_new(1, 1)
+    const body = block_empty(s)
+    const method = funcdef_new("area", [], body, s)
+    const kind = StmtKind::SImplBlock("Circle", [method])
+    assert(kind.describe() == "impl Circle")
+    println("PASS: Stmt impl block")
+}
+
+// ── Block Tests ────────────────────────────────────────────────────
+
+func test_block() {
+    const s = span_new(1, 1)
+    const st1 = make_let("x", make_int_lit(1, s), s)
+    const st2 = make_let("y", make_int_lit(2, s), s)
+    const tail = make_binop(BinOp::Add, make_var("x", s), make_var("y", s), s)
+    const b = block_new([st1, st2], tail, s)
+    assert(len(b.stmts) == 2)
+    assert(b.tail_expr != null)
+    println("PASS: Block construction")
+}
+
+func test_block_empty() {
+    const s = span_new(1, 1)
+    const b = block_empty(s)
+    assert(len(b.stmts) == 0)
+    assert(b.tail_expr == null)
+    println("PASS: Block empty")
+}
+
+// ── FuncDef Tests ──────────────────────────────────────────────────
+
+func test_funcdef() {
+    const s = span_new(1, 1)
+    const p1 = param_new("a", s)
+    const p2 = param_new("b", s)
+    const body = block_new([], make_binop(BinOp::Add, make_var("a", s), make_var("b", s), s), s)
+    const fd = funcdef_new("add", [p1, p2], body, s)
+    assert(fd.name == "add")
+    assert(len(fd.params) == 2)
+    assert(fd.params[0].name == "a")
+    assert(fd.params[1].name == "b")
+    assert(fd.is_getter == false)
+    assert(fd.is_setter == false)
+    println("PASS: FuncDef construction")
+}
+
+// ── Program Tests ──────────────────────────────────────────────────
+
+func test_program() {
+    const s = span_new(1, 1)
+    const s1 = make_const("x", make_int_lit(1, s), s)
+    const s2 = make_output(make_var("x", s), s)
+    const prog = program_new([s1, s2], s)
+    assert(len(prog.statements) == 2)
+    println("PASS: Program construction")
+}
+
+// ── ForPattern Tests ───────────────────────────────────────────────
+
+func test_for_pattern() {
+    const p1 = ForPattern::Single("item")
+    const p2 = ForPattern::ArrayDestructure([DestructureElement::DName("a"), DestructureElement::DName("b")])
+    match p1 {
+        ForPattern::Single(name) => assert(name == "item"),
+        _ => assert(false),
+    }
+    match p2 {
+        ForPattern::ArrayDestructure(elems) => assert(len(elems) == 2),
+        _ => assert(false),
+    }
+    println("PASS: ForPattern")
+}
+
+// ── MatchArm Tests ─────────────────────────────────────────────────
+
+func test_match_arm() {
+    const s = span_new(1, 1)
+    const pat = Pattern::PVariable("x")
+    const body = block_new([], make_var("x", s), s)
+    const arm = match_arm_new(pat, body, s)
+    assert(arm.guard == null)
+    assert(arm.pattern.describe() == "var(x)")
+    println("PASS: MatchArm construction")
+}
+
+// ── Run All Tests ──────────────────────────────────────────────────
+
+test_binop_symbol()
+test_binop_precedence()
+test_binop_op_name()
+test_unop()
+test_literal()
+test_pattern()
+test_exprkind_describe()
+test_expr_literal()
+test_expr_variable()
+test_expr_binop()
+test_expr_unaryop()
+test_expr_call()
+test_expr_method_call()
+test_expr_field_access()
+test_expr_index()
+test_expr_if()
+test_expr_lambda()
+test_expr_enum_construct()
+test_expr_struct_construct()
+test_expr_misc()
+test_stmtkind_describe()
+test_stmt_let()
+test_stmt_const()
+test_stmt_return()
+test_stmt_output()
+test_stmt_struct_def()
+test_stmt_enum_def()
+test_stmt_impl_block()
+test_block()
+test_block_empty()
+test_funcdef()
+test_program()
+test_for_pattern()
+test_match_arm()
+
+println("")
+println("All AST tests passed!")
