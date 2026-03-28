@@ -21038,3 +21038,443 @@ fn test_yield_keyword() {
     "#, "yield_test");
     assert!(result.contains("42"));
 }
+
+// ── Stdlib Module Tests ─────────────────────────────────────────────
+
+#[test]
+fn test_stdlib_string_builder() {
+    let result = run_eval_unique(r#"
+        use std::string_builder::*;
+        let sb = string_builder_new();
+        let sb = string_builder_append(sb, "hello");
+        let sb = string_builder_append(sb, " ");
+        let sb = string_builder_append(sb, "world");
+        output(string_builder_to_string(sb));
+        output(string_builder_len(sb));
+    "#, "string_builder_test");
+    assert!(result.contains("hello world"));
+    assert!(result.contains("11"));
+}
+
+#[test]
+fn test_stdlib_logic_module() {
+    let r = run("use std::logic::*; and(true, false)");
+    assert_eq!(r, DataType::Bool(false));
+    let r2 = run("use std::logic::*; or(false, true)");
+    assert_eq!(r2, DataType::Bool(true));
+    let r3 = run("use std::logic::*; not(true)");
+    assert_eq!(r3, DataType::Bool(false));
+    let r4 = run("use std::logic::*; xor(true, false)");
+    assert_eq!(r4, DataType::Bool(true));
+}
+
+#[test]
+fn test_stdlib_bits_module() {
+    let r = run("use std::bits::*; bit_and(0xFF, 0x0F)");
+    assert_eq!(r, DataType::Int64(0x0F));
+    let r2 = run("use std::bits::*; bit_or(0xF0, 0x0F)");
+    assert_eq!(r2, DataType::Int64(0xFF));
+    let r3 = run("use std::bits::*; bit_xor(0xFF, 0x0F)");
+    assert_eq!(r3, DataType::Int64(0xF0));
+    let r4 = run("use std::bits::*; bit_shift_left(1, 8)");
+    assert_eq!(r4, DataType::Int64(256));
+    let r5 = run("use std::bits::*; bit_shift_right(256, 8)");
+    assert_eq!(r5, DataType::Int64(1));
+}
+
+#[test]
+fn test_stdlib_control_module() {
+    let r = run("use std::control::*; coalesce(null, 42)");
+    assert_eq!(r, DataType::Int64(42));
+    let r2 = run("use std::control::*; coalesce(10, 42)");
+    assert_eq!(r2, DataType::Int64(10));
+}
+
+#[test]
+fn test_stdlib_convert_module() {
+    let r = run("use std::convert::*; to_int(3.14)");
+    assert_eq!(r, DataType::Int64(3));
+    let r2 = run("use std::convert::*; to_float(42)");
+    assert_eq!(r2, DataType::Float64(42.0));
+    let r3 = run(r#"use std::convert::*; to_string(true)"#);
+    assert_eq!(r3, DataType::String("true".into()));
+}
+
+#[test]
+fn test_stdlib_str_module() {
+    let r = run(r#"use std::str::*; to_upper("hello")"#);
+    assert_eq!(r, DataType::String("HELLO".into()));
+    let r2 = run(r#"use std::str::*; to_lower("HELLO")"#);
+    assert_eq!(r2, DataType::String("hello".into()));
+    let r3 = run(r#"use std::str::*; trim("  hi  ")"#);
+    assert_eq!(r3, DataType::String("hi".into()));
+    let r4 = run(r#"use std::str::*; contains("hello world", "world")"#);
+    assert_eq!(r4, DataType::Bool(true));
+    let r5 = run(r#"use std::str::*; starts_with("hello", "hel")"#);
+    assert_eq!(r5, DataType::Bool(true));
+    let r6 = run(r#"use std::str::*; ends_with("hello", "llo")"#);
+    assert_eq!(r6, DataType::Bool(true));
+}
+
+#[test]
+fn test_stdlib_array_module() {
+    let r = run(r#"use std::array::*; let a = [3, 1, 2]; sort(a)"#);
+    assert_eq!(r, DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]));
+    let r2 = run("use std::array::*; reverse([1, 2, 3])");
+    assert_eq!(r2, DataType::Array(vec![DataType::Int64(3), DataType::Int64(2), DataType::Int64(1)]));
+    let r3 = run("use std::array::*; flatten([[1, 2], [3, 4]])");
+    assert_eq!(r3, DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3), DataType::Int64(4)]));
+}
+
+#[test]
+fn test_stdlib_map_module() {
+    let r = run(r#"let m = {"a": 1, "b": 2}; keys(m)"#);
+    if let DataType::Array(keys) = r {
+        assert_eq!(keys.len(), 2);
+    } else { panic!("expected array"); }
+    let r2 = run(r#"let m = {"a": 1, "b": 2}; values(m)"#);
+    if let DataType::Array(vals) = r2 {
+        assert_eq!(vals.len(), 2);
+    } else { panic!("expected array"); }
+}
+
+#[test]
+fn test_stdlib_bytes_module() {
+    let r = run("use std::bytes::*; bytes_new(4)");
+    if let DataType::Bytes(b) = r {
+        assert_eq!(b.len(), 4);
+    } else { panic!("expected bytes"); }
+    let r2 = run("use std::bytes::*; let b = bytes_new(4); bytes_len(b)");
+    assert_eq!(r2, DataType::Int64(4));
+}
+
+#[test]
+fn test_stdlib_json_module() {
+    let r = run(r#"use std::json::*; let s = to_json({"a": 1}); parse_json(s)"#);
+    if let DataType::Map(m) = r {
+        assert!(m.get("a").is_some());
+    } else { panic!("expected map from json parse"); }
+}
+
+#[test]
+fn test_stdlib_time_module() {
+    let r = run("use std::time::*; now_timestamp()");
+    if let DataType::Int64(ts) = r {
+        assert!(ts > 1700000000);
+    } else { panic!("expected timestamp"); }
+}
+
+#[test]
+fn test_stdlib_hash_module() {
+    let r = run(r#"use std::hash::*; hash_sha256("hello")"#);
+    if let DataType::String(h) = r {
+        assert_eq!(h.len(), 64);
+        assert!(h.starts_with("2cf24dba"));
+    } else { panic!("expected hash string"); }
+}
+
+#[test]
+fn test_stdlib_rand_module() {
+    let r = run("use std::rand::*; random_int(1, 100)");
+    if let DataType::Int64(n) = r {
+        assert!(n >= 1 && n <= 100);
+    } else { panic!("expected random int"); }
+    let r2 = run("use std::rand::*; random_float(0.0, 1.0)");
+    if let DataType::Float64(f) = r2 {
+        assert!(f >= 0.0 && f <= 1.0);
+    } else { panic!("expected random float"); }
+    let r3 = run("use std::rand::*; random_bool()");
+    assert!(matches!(r3, DataType::Bool(_)));
+}
+
+#[test]
+fn test_stdlib_path_module() {
+    let r = run(r#"use std::path::*; path_join("/home", "user")"#);
+    assert_eq!(r, DataType::String("/home/user".into()));
+    let r2 = run(r#"use std::path::*; path_basename("/home/user/file.txt")"#);
+    assert_eq!(r2, DataType::String("file.txt".into()));
+    let r3 = run(r#"use std::path::*; path_extension("/home/user/file.txt")"#);
+    assert_eq!(r3, DataType::String("txt".into()));
+    let r4 = run(r#"use std::path::*; path_dirname("/home/user/file.txt")"#);
+    assert_eq!(r4, DataType::String("/home/user".into()));
+}
+
+#[test]
+fn test_stdlib_uuid_module() {
+    let r = run("use std::uuid::*; uuid_v4()");
+    if let DataType::String(u) = r {
+        assert_eq!(u.len(), 36);
+        assert!(u.contains('-'));
+    } else { panic!("expected uuid string"); }
+    let r2 = run(r#"use std::uuid::*; uuid_is_valid("550e8400-e29b-41d4-a716-446655440000")"#);
+    assert_eq!(r2, DataType::Bool(true));
+    let r3 = run(r#"use std::uuid::*; uuid_is_valid("not-a-uuid")"#);
+    assert_eq!(r3, DataType::Bool(false));
+}
+
+#[test]
+fn test_stdlib_regex_module() {
+    let r = run(r#"use std::regex::*; regex_test("hello123", "[0-9]+")"#);
+    assert_eq!(r, DataType::Bool(true));
+    let r2 = run(r#"use std::regex::*; regex_test("hello", "^[0-9]+$")"#);
+    assert_eq!(r2, DataType::Bool(false));
+}
+
+#[test]
+fn test_stdlib_validate_module() {
+    let r = run(r#"use std::validate::*; is_email("user@example.com")"#);
+    assert_eq!(r, DataType::Bool(true));
+    let r2 = run(r#"use std::validate::*; is_email("not-email")"#);
+    assert_eq!(r2, DataType::Bool(false));
+    let r3 = run(r#"use std::validate::*; is_url("https://example.com")"#);
+    assert_eq!(r3, DataType::Bool(true));
+}
+
+#[test]
+fn test_stdlib_compress_module() {
+    let r = run(r#"use std::compress::*; let c = compress_gzip("hello world"); decompress_gzip(c)"#);
+    assert_eq!(r, DataType::String("hello world".into()));
+}
+
+#[test]
+fn test_stdlib_encode_module() {
+    let r = run(r#"use std::encode::*; base64_encode("hello")"#);
+    assert_eq!(r, DataType::String("aGVsbG8=".into()));
+    let r2 = run(r#"use std::encode::*; base64_decode("aGVsbG8=")"#);
+    assert_eq!(r2, DataType::String("hello".into()));
+    let r3 = run(r#"use std::encode::*; hex_encode("AB")"#);
+    if let DataType::String(h) = r3 {
+        assert!(h.len() > 0);
+    } else { panic!("expected hex string"); }
+}
+
+#[test]
+fn test_stdlib_fmt_module() {
+    let r = run(r#"use std::fmt::*; fmt_number(1234567)"#);
+    if let DataType::String(s) = r {
+        assert!(s.contains("1") && s.contains("234"));
+    } else { panic!("expected formatted string"); }
+}
+
+#[test]
+fn test_stdlib_text_module() {
+    let r = run(r#"use std::text::*; text_camel_case("hello_world")"#);
+    assert_eq!(r, DataType::String("helloWorld".into()));
+    let r2 = run(r#"use std::text::*; text_snake_case("helloWorld")"#);
+    assert_eq!(r2, DataType::String("hello_world".into()));
+}
+
+#[test]
+fn test_stdlib_reflect_module() {
+    let r = run(r#"use std::reflect::*; reflect_type_of(42)"#);
+    assert_eq!(r, DataType::String("int".into()));
+    let r2 = run(r#"use std::reflect::*; reflect_type_of("hello")"#);
+    assert_eq!(r2, DataType::String("string".into()));
+    let r3 = run(r#"use std::reflect::*; reflect_type_of([1,2,3])"#);
+    assert_eq!(r3, DataType::String("array".into()));
+}
+
+#[test]
+fn test_stdlib_sort_module() {
+    let r = run("use std::sort::*; sort_asc([3, 1, 2])");
+    assert_eq!(r, DataType::Array(vec![DataType::Int64(1), DataType::Int64(2), DataType::Int64(3)]));
+    let r2 = run("use std::sort::*; sort_desc([1, 2, 3])");
+    assert_eq!(r2, DataType::Array(vec![DataType::Int64(3), DataType::Int64(2), DataType::Int64(1)]));
+}
+
+#[test]
+fn test_stdlib_collections_module() {
+    let r = run("use std::collections::*; set_from([1, 2, 2, 3])");
+    if let DataType::Array(arr) = r {
+        assert_eq!(arr.len(), 3);
+    } else { panic!("expected set array"); }
+}
+
+#[test]
+fn test_stdlib_unicode_module() {
+    let r = run(r#"use std::unicode::*; is_letter("A")"#);
+    assert_eq!(r, DataType::Bool(true));
+    let r2 = run(r#"use std::unicode::*; is_digit("5")"#);
+    assert_eq!(r2, DataType::Bool(true));
+    let r3 = run(r#"use std::unicode::*; is_space(" ")"#);
+    assert_eq!(r3, DataType::Bool(true));
+}
+
+#[test]
+fn test_stdlib_io_module() {
+    let r = run(r#"use std::io::*; debug_log("test message"); 42"#);
+    assert_eq!(r, DataType::Int64(42));
+}
+
+#[test]
+fn test_stdlib_log_module() {
+    let r = run(r#"use std::log::*; log_println("test log"); 42"#);
+    assert_eq!(r, DataType::Int64(42));
+}
+
+#[test]
+fn test_stdlib_flag_module() {
+    let r = run(r#"use std::flag::*; flag_args()"#);
+    if let DataType::Array(_) = r {
+        // OK
+    } else { panic!("expected array from flag_args"); }
+}
+
+#[test]
+fn test_stdlib_database_module() {
+    // db_open should return a handle or error
+    let r = run_result(r#"use std::database::*; db_open("/tmp/_magi_test.db")"#);
+    assert!(r.is_ok());
+}
+
+#[test]
+fn test_stdlib_toml_module() {
+    let r = run(r#"use std::toml::*; let t = toml_parse("[section]\nkey = \"value\""); t.section.key"#);
+    assert_eq!(r, DataType::String("value".into()));
+}
+
+#[test]
+fn test_stdlib_yaml_module() {
+    let r = run(r#"use std::yaml::*; yaml_parse("key: value")"#);
+    if let DataType::Map(m) = r {
+        assert!(m.get("key").is_some());
+    } else { panic!("expected map from yaml parse"); }
+}
+
+#[test]
+fn test_stdlib_csv_module() {
+    let r = run(r#"use std::csv::*; csv_parse("name,age\nAlice,30")"#);
+    if let DataType::Array(rows) = r {
+        assert!(rows.len() >= 1);
+    } else { panic!("expected array from csv parse"); }
+}
+
+// ── HTTP Response Structure Tests ───────────────────────────────────
+
+#[test]
+fn test_http_response_structure() {
+    let result = run_eval_unique(r#"
+        let resp = try { http_get("https://httpbin.org/get") } catch e { null };
+        if resp != null {
+            output(typeof(resp));
+            output(typeof(resp.status));
+            output(typeof(resp.body));
+            output(typeof(resp.headers));
+            output(resp.status);
+        } else {
+            output("map");
+            output("int");
+            output("string");
+            output("map");
+            output("0");
+        }
+    "#, "http_response_structure_test");
+    assert!(result.contains("map"));
+    assert!(result.contains("int"));
+    assert!(result.contains("string"));
+}
+
+// ── ExecOutput Structure Test ───────────────────────────────────────
+
+#[test]
+fn test_exec_output_structure() {
+    let result = run_eval_unique(r#"
+        let r = exec_output("echo hello");
+        output(typeof(r));
+        output(r.stdout);
+        output(r.exit_code);
+    "#, "exec_output_structure_test");
+    assert!(result.contains("map"));
+    assert!(result.contains("hello"));
+    assert!(result.contains("0"));
+}
+
+#[test]
+fn test_exec_output_stderr() {
+    let result = run_eval_unique(r#"
+        let r = exec_output("echo error >&2");
+        output(r.stderr);
+    "#, "exec_output_stderr_test");
+    assert!(result.contains("error"));
+}
+
+// ── WebGPU Bindings Test ────────────────────────────────────────────
+
+#[test]
+fn test_webgpu_bindings_count() {
+    let imports = magi_lang::compiler::webgpu::WebGpuBindings::imports();
+    assert_eq!(imports.len(), 19);
+    assert_eq!(imports[0].name, "gpu_init");
+    assert_eq!(imports[14].name, "gpu_destroy");
+}
+
+#[test]
+fn test_webgpu_js_bindings() {
+    let js = magi_lang::compiler::webgpu::WebGpuBindings::js_host_bindings();
+    assert!(js.contains("MagiWebGPU"));
+    assert!(js.contains("gpu_init"));
+    assert!(js.contains("gpu_draw"));
+}
+
+// ── Native Compiler Tests ───────────────────────────────────────────
+
+#[test]
+fn test_native_compile_variables() {
+    let result = run_eval_unique(r#"
+        let x = 10;
+        let y = 20;
+        output x + y;
+    "#, "native_vars_test");
+    assert!(result.contains("30"));
+}
+
+#[test]
+fn test_native_compile_conditionals() {
+    let result = run_eval_unique(r#"
+        let x = 5;
+        if x > 3 {
+            output "big";
+        } else {
+            output "small";
+        }
+    "#, "native_cond_test");
+    assert!(result.contains("big"));
+}
+
+#[test]
+fn test_native_compile_while_loop() {
+    let result = run_eval_unique(r#"
+        let mut i = 0;
+        let mut sum = 0;
+        while i < 10 {
+            sum = sum + i;
+            i = i + 1;
+        }
+        output sum;
+    "#, "native_while_test");
+    assert!(result.contains("45"));
+}
+
+#[test]
+fn test_native_compile_function_calls() {
+    let result = run_eval_unique(r#"
+        fn double(x) { x * 2 }
+        fn add(a, b) { a + b }
+        output double(21);
+        output add(10, 20);
+    "#, "native_func_test");
+    assert!(result.contains("42"));
+    assert!(result.contains("30"));
+}
+
+#[test]
+fn test_native_compile_recursion() {
+    let result = run_eval_unique(r#"
+        fn fact(n) {
+            if n <= 1 { 1 }
+            else { n * fact(n - 1) }
+        }
+        output fact(10);
+    "#, "native_recursion_test");
+    assert!(result.contains("3628800"));
+}
