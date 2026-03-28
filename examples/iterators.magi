@@ -1,101 +1,48 @@
-// Iterators — map, filter, reduce chains and collection processing
+// Iterators — map, filter, reduce with arrow functions
 //
 // Run with: magi run examples/iterators.magi
 
-output "=== Core: map, filter, reduce ===";
+println("=== Core: map, filter, reduce ===")
 
-let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
-let doubled = data.map(|x| x * 2);
-output f"map *2:     {doubled}";
+const doubled = numbers.map(x => x * 2)
+println(f"doubled: {doubled}")
 
-let evens = data.filter(|x| x % 2 == 0);
-output f"filter even: {evens}";
+const evens = numbers.filter(x => x % 2 == 0)
+println(f"evens: {evens}")
 
-let sum = data.reduce(0, |acc, x| acc + x);
-output f"reduce sum: {sum}";
+const sum = numbers.reduce(0, (acc, x) => acc + x)
+println(f"sum: {sum}")
 
-output "";
-output "=== Chained Transformations ===";
+println("")
+println("=== Chaining with Pipe ===")
 
-// Square even numbers, then sum them
-let result = data
-    .filter(|x| x % 2 == 0)
-    .map(|x| x * x)
-    .reduce(0, |acc, x| acc + x);
-output f"Sum of squares of evens: {result}";
+const result = numbers
+    |> filter(x => x % 2 == 0)
+    |> map(x => x * x)
+    |> reduce(0, (acc, x) => acc + x)
 
-output "";
-output "=== Search: find, any, all ===";
+println(f"sum of even squares: {result}")
 
-output f"find >7:  {data.find(|x| x > 7)}";
-output f"any <0:   {data.any(|x| x < 0)}";
-output f"all >0:   {data.all(|x| x > 0)}";
+println("")
+println("=== Comprehensions ===")
 
-output "";
-output "=== Transform: sort, reverse, unique, flat_map ===";
+const squares = [x * x for x in 1..=5]
+println(f"squares: {squares}")
 
-let unsorted = [5, 1, 3, 2, 4];
-output f"sort:      {unsorted.sort()}";
-output f"reverse:   {[1, 2, 3].reverse()}";
-output f"unique:    {[1, 1, 2, 2, 3, 3].unique()}";
-output f"flat_map:  {[[1, 2], [3, 4]].flat_map(|x| x)}";
+const even_squares = [x * x for x in 1..=10 if x % 2 == 0]
+println(f"even squares: {even_squares}")
 
-output "";
-output "=== Grouping: group_by, partition, chunk ===";
+println("")
+println("=== Higher-Order Functions ===")
 
-let grouped = data.group_by(|x| if x % 2 == 0 { "even" } else { "odd" });
-output f"group_by:   {grouped}";
+func apply_twice(f, x) { f(f(x)) }
+const increment = x => x + 1
+println(f"apply_twice(increment, 5) = {apply_twice(increment, 5)}")
 
-let parts = data.partition(|x| x <= 5);
-output f"partition:  {parts}";
+const double = x => x * 2
+println(f"apply_twice(double, 3) = {apply_twice(double, 3)}")
 
-let chunks = data.chunk(4);
-output f"chunk(4):   {chunks}";
-
-output "";
-output "=== Indexing: enumerate, zip ===";
-
-let letters = ["a", "b", "c"];
-output f"enumerate:  {letters.enumerate()}";
-output f"zip:        {[1, 2, 3].zip(["x", "y", "z"])}";
-
-output "";
-output "=== Windowing: take_while, skip_while, scan ===";
-
-output f"take <4:    {data.take_while(|x| x < 4)}";
-output f"skip <4:    {data.skip_while(|x| x < 4)}";
-output f"scan sum:   {[1, 2, 3, 4].scan(0, |acc, x| acc + x)}";
-
-output "";
-output "=== Sorting: sort_by, min_by, max_by ===";
-
-let words = ["cherry", "fig", "apple", "date", "banana"];
-let by_len = words.sort_by(|a, b| len(a) - len(b));
-output f"sort_by len: {by_len}";
-output f"min_by len:  {words.min_by(|a, b| len(a) - len(b))}";
-output f"max_by len:  {words.max_by(|a, b| len(a) - len(b))}";
-
-output "";
-output "=== Comprehensions ===";
-
-let squares = [n * n for n in 1..=10];
-output f"Squares 1..10: {squares}";
-
-let even_squares = [n * n for n in 1..=10 if n % 2 == 0];
-output f"Even squares:  {even_squares}";
-
-output "";
-output "=== Pipe Operator ===";
-
-fn double(x) { x * 2 }
-fn add_one(x) { x + 1 }
-
-let piped = 5 |> double(_) |> add_one(_);
-output f"5 |> double |> add_one = {piped}";
-
-let pipe_len = [1, 2, 3, 4, 5] |> len(_);
-output f"Piped length: {pipe_len}";
-
-output "";
-output "Iterators demo complete.";
+println("")
+println("Iterators demo complete.")

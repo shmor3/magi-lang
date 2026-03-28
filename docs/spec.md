@@ -1,6 +1,6 @@
 # MAGI Language Specification
 
-Version: 0.9.0
+Version: 1.0.0
 
 ---
 
@@ -8,23 +8,22 @@ Version: 0.9.0
 
 ### Keywords
 ```
-let mut const fn return if else for while loop match break continue
-struct enum impl trait use mod pub async await spawn yield
-try catch finally throw defer output type static unsafe asm
-ref move dyn where super
+const let func struct enum interface type import
+if else for in while match select
+break continue return defer spawn await async
+true false null
 ```
 
 ### Literals
 - **Integers**: `42`, `0xFF`, `0o77`, `0b1010`, `1_000_000`
 - **Floats**: `3.14`, `1.0e10`, `2.5E-3`
-- **Strings**: `"hello"`, `f"name is {name}"` (string interpolation), `"""multiline"""`, `r"raw\n"`
+- **Strings**: `"hello"`, `f"name is {name}"`, `"""multiline"""`, `r"raw\n"`
 - **Booleans**: `true`, `false`
 - **Null**: `null`
 - **Characters**: `'a'`, `'\n'`
 - **Arrays**: `[1, 2, 3]`
 - **Maps**: `{"key": "value"}`
-- **Sets**: `Set(1, 2, 3)`
-- **Tuples**: `Tuple(1, "hello", true)`
+- **Tuples**: `(1, "hello", true)`
 
 ### Operators
 ```
@@ -34,172 +33,280 @@ ref move dyn where super
 & | ^ << >> &^              Bitwise
 += -= *= /= %= &= |= ^=   Compound assignment
 |>                          Pipe
+=>                          Arrow function
 .. ..=                      Range
 ?.                          Optional chain
 ??                          Null coalesce
-?                           Try propagate
 ...                         Spread
 in                          Membership
 ```
+
+### Comments
+```magi
+// line comment
+/* block comment */
+/// doc comment
+```
+
+### Semicolons
+Optional. Newlines end statements. Semicolons allowed for multiple statements on one line.
 
 ---
 
 ## 2. Types
 
 ### Primitive Types
-`int64`, `float64`, `int32`, `uint32`, `uint64`, `float32`, `bool`, `string`, `null`
+```
+int       // 64-bit signed integer (default)
+float     // 64-bit floating point (default)
+string    // UTF-8 string
+bool      // true or false
+byte      // unsigned 8-bit
+any       // any type (dynamic)
+int32     // 32-bit signed
+uint32    // 32-bit unsigned
+uint64    // 64-bit unsigned
+float32   // 32-bit float
+```
 
 ### Composite Types
-- **Array**: ordered collection
-- **Map**: insertion-order preserving key-value pairs
-- **Set**: unordered unique values
-- **Tuple**: fixed-size heterogeneous collection
-- **Bytes**: raw binary data
-- **Optional**: `Some(value)` / `None`
-- **Result**: `Ok(value)` / `Err(msg)`
+```
+[]int                    // array of int
+map[string]int           // map with string keys, int values
+(int, string)            // tuple
+set[int]                 // set
+[]byte                   // byte array
+```
 
 ### User-Defined Types
 ```magi
-struct Point { x: float64, y: float64 }
-enum Shape { Circle(float64), Rect(float64, float64) }
-type UserId = int64  // type alias
+struct Point { x: float, y: float }
+enum Shape { Circle(float), Rect(float, float) }
+type UserId = int
 ```
 
 ### Generics
 ```magi
-fn<T, U: Display>(x: T) -> U { ... }
-struct Box<T> { value: T }
-enum Option<T> { Some(T), None }
+func max<T: Compare>(a T, b T) -> T { if a.compare(b) > 0 { a } else { b } }
+struct Stack<T> { items: []T }
 ```
 
 ---
 
-## 3. Expressions
+## 3. Bindings
 
-### Control Flow (expression-based)
 ```magi
-let x = if cond { a } else { b };
-let y = match val { 1 => "one", _ => "other" };
-let z = loop { if done { break result; } };
+const x = 42          // immutable (default, encouraged)
+let count = 0         // mutable
+count = count + 1     // ok
 ```
 
-### Closures
+All variables must be initialized. Destructuring works with both:
 ```magi
-let add = |a, b| a + b;
-let transform = |x| { let y = x * 2; y + 1 };
-```
-
-### Pipe Operator
-```magi
-data |> filter(|x| x > 0) |> map(|x| x * 2) |> sum()
-```
-
-### Destructuring
-```magi
-let [a, b, ...rest] = [1, 2, 3, 4, 5];
-let {name, age} = {"name": "Alice", "age": 30};
-for [key, value] in map.entries() { ... }
+const [a, b, c] = [1, 2, 3]
+let [head, ...rest] = [1, 2, 3, 4]
+const {name, age} = person
+let result, err = divide(10, 3)
 ```
 
 ---
 
-## 4. Statements
+## 4. Functions
 
-### Variable Binding
 ```magi
-let x = 42;
-let mut counter = 0;
-const MAX = 100;
-static GLOBAL: int64 = 0;
+func add(a int, b int) -> int { a + b }
+func greet(name string) -> string { f"Hello, {name}!" }
+func double(x) { x * 2 }    // type annotations optional
 ```
 
-### Functions
+### Arrow Functions
 ```magi
-fn greet(name: string) -> string { f"Hello, {name}!" }
-async fn fetch(url: string) { await http_get(url) }
-fn<T>(items: [T], pred: fn(T) -> bool) -> [T] { items.filter(pred) }
+const double = x => x * 2
+const add = (a, b) => a + b
+numbers |> filter(x => x > 0) |> map(x => x * x)
 ```
 
-### Control Flow
+### Dot Receiver Methods
 ```magi
-for item in collection { ... }
-for (let mut i = 0; i < n; i += 1) { ... }
-'outer: for x in xs { break 'outer; }
+struct Vec2 { x: float, y: float }
+
+func Vec2.length(self) -> float {
+    math.sqrt(self.x * self.x + self.y * self.y)
+}
+
+func Vec2.add(self, other Vec2) -> Vec2 {
+    Vec2 { x: self.x + other.x, y: self.y + other.y }
+}
+```
+
+### Multi-Return
+```magi
+func divide(a int, b int) -> (int, string) {
+    if b == 0 { return 0, "division by zero" }
+    return a / b, null
+}
+
+let result, err = divide(10, 3)
+if err { return null, err }
+```
+
+---
+
+## 5. Interfaces
+
+Implicit satisfaction — no `implements` declaration needed.
+
+```magi
+interface Shape {
+    func area(self) -> float
+    func perimeter(self) -> float
+}
+
+struct Circle { radius: float }
+func Circle.area(self) -> float { 3.14159 * self.radius * self.radius }
+func Circle.perimeter(self) -> float { 2.0 * 3.14159 * self.radius }
+// Circle satisfies Shape automatically
+```
+
+### Operator Interfaces
+```
++       Add.add(self, other)
+-       Subtract.subtract(self, other)
+*       Multiply.multiply(self, other)
+/       Divide.divide(self, other)
+==      Equal.equal(self, other)
+<><=>=  Compare.compare(self, other) -> int
+[]      Index.index(self, key)
+for..in Iterable.iterate(self)
+print   Display.display(self) -> string
+len()   Length.length(self) -> int
+in      Contains.contains(self, key) -> bool
+```
+
+---
+
+## 6. Enums
+
+```magi
+enum Color { Red, Green, Blue, Rgb(int, int, int) }
+enum Direction { North = 0, East, South, West }
+
+println(Color::Red)              // Color::Red
+println(Color::Rgb(255, 0, 0))   // Color::Rgb(255, 0, 0)
+
+func Color.display(self) -> string {
+    match self {
+        Color::Red => "red",
+        Color::Rgb(r, g, b) => f"#{r:02x}{g:02x}{b:02x}",
+        _ => "color",
+    }
+}
+```
+
+---
+
+## 7. Control Flow
+
+```magi
+// If/else (expression)
+const max = if a > b { a } else { b }
+
+// For loop (ranges and iterables only — no C-style)
+for i in 0..10 { println(i) }
+for item in collection { println(item) }
+'outer: for row in matrix { for cell in row { if cell == 0 { break 'outer } } }
+
+// While
 while condition { ... }
-do { ... } while condition;
-loop { break; }
-defer cleanup();
-try { risky() } catch err { handle(err) } finally { cleanup() }
-```
 
-### Pattern Matching
-```magi
-match value {
-    0 => "zero",
-    1..=9 => "digit",
-    n if n < 0 => "negative",
-    Some(x) => f"got {x}",
-    [first, .., last] => f"{first}..{last}",
+// Match (exhaustive — all variants must be covered)
+match direction {
+    Direction::North => "north",
+    Direction::East => "east",
     _ => "other",
 }
-```
 
-### Structs, Enums, Traits
-```magi
-struct Point { x: float64, y: float64 }
-impl Point { fn distance(self, other: Point) -> float64 { ... } }
-trait HasArea { fn area(self) -> float64; }
-impl HasArea for Point { fn area(self) -> float64 { 0.0 } }
-enum Color { Red, Green, Blue, Custom(int64, int64, int64) }
-```
-
-### Modules
-```magi
-mod utils { pub fn square(x) { x * x } }
-use utils::*;
-use std::math::*;
-```
-
-### Operator Overloading
-```magi
-impl Point {
-    fn __add__(self, other) { Point { x: self.x + other.x, y: self.y + other.y } }
-    fn __eq__(self, other) { self.x == other.x && self.y == other.y }
-    fn __str__(self) { f"({self.x}, {self.y})" }
-    fn __index__(self, i) { if i == 0 { self.x } else { self.y } }
-    fn __iter__(self) { [self.x, self.y] }
+// Match guards
+match n {
+    _ if n % 15 == 0 => "FizzBuzz",
+    _ if n % 3 == 0 => "Fizz",
+    _ => to_string(n),
 }
 ```
 
 ---
 
-## 5. Concurrency
+## 8. Error Handling
+
+Errors are values. No exceptions.
 
 ```magi
-spawn { expensive_computation() };
-let (tx, rx) = channel();
-chan_send(tx, value);
-let msg = chan_recv(rx);
-select { msg from rx1 => handle(msg), msg from rx2 => handle(msg) }
+func read_config(path string) -> (Config, string) {
+    let text, err = fs.read(path)
+    if err { return null, f"read: {err}" }
+
+    let data, err = json.parse(text)
+    if err { return null, f"parse: {err}" }
+
+    data, null
+}
+
+let config, err = read_config("app.json")
+if err { println(f"error: {err}"); return }
 ```
 
 ---
 
-## 6. Error Handling
+## 9. Imports
 
 ```magi
-try { fs_read("file.txt") } catch err { output err; }
-fn divide(a, b) { if b == 0 { Err("zero") } else { Ok(a / b) } }
-let value = risky()?;
+import std.math              // math.sqrt(), math.sin()
+import std.{fs, json, net}   // multi-import
+import std.math as m         // alias: m.sqrt()
+import canvas                // package
+import ./util                // relative
 ```
 
 ---
 
-## 7. Attributes
+## 10. Concurrency
 
 ```magi
-#[test] fn test_add() { assert_eq(1 + 1, 2); }
-#[deprecated] fn old() { ... }
-#[ignore] fn skip() { ... }
-#[cfg(target_os = "linux")] fn linux_only() { ... }
+const task = spawn fetch_data(url)
+const result = await task
+
+select {
+    msg from inbox => println(msg),
+    tick from timer => update(),
+    _ => println("timeout"),
+}
+
+defer fs.close(file)    // runs on function exit
+```
+
+---
+
+## 11. Built-in Functions
+
+```
+println(value)    // print with newline, returns value
+print(value)      // print without newline, returns value
+len(collection)   // length
+to_string(value)  // convert to string
+parse_int(s)      // string to int (null on failure)
+parse_float(s)    // string to float (null on failure)
+typeof(value)     // type name as string
+assert(condition) // panic if false
+```
+
+---
+
+## 12. Attributes
+
+```magi
+#[test]
+func test_add() { assert(1 + 1 == 2) }
+
+#[deprecated("use new_func instead")]
+func old_func() { ... }
 ```

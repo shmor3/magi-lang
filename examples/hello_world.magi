@@ -1,7 +1,7 @@
 // hello_world.magi — minimal MAGI hello world
 // Run with: magi run examples/hello_world.magi
 
-output "Hello, world!";
+println("Hello, world!")
 
-let name = "MAGI";
-output f"Welcome to {name}!";
+const name = "MAGI"
+println(f"Welcome to {name}!")

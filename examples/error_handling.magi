@@ -1,130 +1,57 @@
-// Error Handling — try/catch, throw, Result/Optional patterns
+// Error Handling — errors are values, multi-return
 //
 // Run with: magi run examples/error_handling.magi
 
-output "=== Try/Catch Basics ===";
+println("=== Multi-Return Errors ===")
 
-fn parse_positive(s) {
-    let n = to_int64(s);
-    if n == null {
-        throw f"'{s}' is not a valid number";
-    }
-    if n <= 0 {
-        throw f"{n} is not positive";
-    }
-    n
+func divide(a, b) {
+    if b == 0 { return 0, "division by zero" }
+    return a / b, null
 }
 
-let r1 = try {
-    parse_positive("42")
-} catch err {
-    f"Error: {err}"
-};
-output f"parse '42':   {r1}";
+let result, err = divide(10, 2)
+println(f"10 / 2 = {result} (err: {err})")
 
-let r2 = try {
-    parse_positive("abc")
-} catch err {
-    f"Error: {err}"
-};
-output f"parse 'abc':  {r2}";
+let result2, err2 = divide(10, 0)
+println(f"10 / 0 = {result2} (err: {err2})")
 
-let r3 = try {
-    parse_positive("-5")
-} catch err {
-    f"Error: {err}"
-};
-output f"parse '-5':   {r3}";
+println("")
+println("=== Error Propagation ===")
 
-output "";
-output "=== Try/Catch/Finally ===";
-
-let result = try {
-    let val = 100 / 2;
-    val
-} catch err {
-    output f"Caught: {err}";
-    0
-} finally {
-    output "  (cleanup ran in finally block)";
-};
-output f"Result: {result}";
-
-output "";
-output "=== Optional Pattern (Some/None) ===";
-
-fn find_user(id) {
-    match id {
-        1 => Some({"name": "Alice", "role": "admin"}),
-        2 => Some({"name": "Bob", "role": "user"}),
-        _ => None,
-    }
+func read_number(input) {
+    const n = parse_int(input)
+    if n == null { return 0, f"not a number: {input}" }
+    return n, null
 }
 
-let user1 = find_user(1);
-let user3 = find_user(3);
-
-output f"User 1 found: {is_some(user1)}";
-output f"User 3 found: {is_some(user3)}";
-output f"User 1 data:  {unwrap(user1)}";
-output f"User 3 fallback: {unwrap_or(user3, {"name": "Guest", "role": "none"})}";
-
-output "";
-output "=== Result Pattern (Ok/Err) ===";
-
-fn safe_divide(a, b) {
-    if b == 0 {
-        Err("division by zero")
-    } else {
-        Ok(a / b)
-    }
+func double_input(input) {
+    let n, err = read_number(input)
+    if err { return 0, err }
+    return n * 2, null
 }
 
-let d1 = safe_divide(10, 2);
-let d2 = safe_divide(10, 0);
+let val, err = double_input("21")
+println(f"double('21') = {val}")
 
-output f"10 / 2: is_ok={is_ok(d1)}, value={unwrap(d1)}";
-output f"10 / 0: is_err={is_err(d2)}";
+let val2, err2 = double_input("abc")
+println(f"double('abc') error: {err2}")
 
-output "";
-output "=== Try-Propagate Operator (?) ===";
+println("")
+println("=== Null Coalescing ===")
 
-fn get_user_name(id) {
-    let user = find_user(id)?;
-    let data = unwrap(user);
-    data.name
-}
+const name = null ?? "default"
+println(f"null ?? 'default' = {name}")
 
-output f"User 1 name: {get_user_name(1)}";
+const config = {"host": "localhost"}
+const port = config.port ?? 8080
+println(f"port = {port}")
 
-let user99 = try {
-    get_user_name(99)
-} catch _e {
-    "not found"
-};
-output f"User 99 name: {user99}";
+println("")
+println("=== Optional Chaining ===")
 
-output "";
-output "=== Chained Error Handling ===";
+const user = {"profile": {"name": "Alice"}}
+println(f"name = {user?.profile?.name}")
+println(f"missing = {user?.settings?.theme ?? 'dark'}")
 
-fn process_input(input) {
-    try {
-        let n = parse_positive(input);
-        let result = safe_divide(100, n);
-        if is_ok(result) {
-            f"Success: 100 / {n} = {unwrap(result)}"
-        } else {
-            f"Division error: {unwrap(result)}"
-        }
-    } catch err {
-        f"Parse error: {err}"
-    }
-}
-
-let inputs = ["10", "0", "-3", "abc", "25"];
-for input in inputs {
-    output f"  process('{input}'): {process_input(input)}";
-}
-
-output "";
-output "Error handling demo complete.";
+println("")
+println("Error handling demo complete.")

@@ -1,46 +1,35 @@
-// Fibonacci — recursive vs iterative implementations
+// Fibonacci — recursive vs iterative
 //
 // Run with: magi run examples/fibonacci.magi
 
-// Recursive fibonacci (simple but exponential)
-fn fib_recursive(n) {
+func fib_recursive(n) {
     if n <= 1 { n } else { fib_recursive(n - 1) + fib_recursive(n - 2) }
 }
 
-// Iterative fibonacci (O(n) time, O(1) space)
-fn fib_iterative(n) {
-    if n <= 1 { return n; }
-    let mut a = 0;
-    let mut b = 1;
-    for (let mut i = 2; i <= n; i += 1) {
-        let temp = a + b;
-        a = b;
-        b = temp;
+func fib_iterative(n) {
+    if n <= 1 { return n }
+    let a = 0
+    let b = 1
+    for i in 2..=n {
+        const temp = a + b
+        a = b
+        b = temp
     }
     b
 }
 
-// Generate first N fibonacci numbers using the iterative version
-fn fib_sequence(count) {
-    [fib_iterative(i) for i in 0..count]
-}
+println("--- Recursive Fibonacci (first 15) ---")
+const recursive_results = [fib_recursive(i) for i in 0..15]
+println(f"  {recursive_results}")
 
-output "--- Recursive Fibonacci (first 15) ---";
-let recursive_results = [fib_recursive(i) for i in 0..15];
-output f"  {recursive_results}";
+println("")
+println("--- Iterative Fibonacci (first 30) ---")
+const fibs = [fib_iterative(i) for i in 0..30]
+println(f"  {fibs}")
 
-output "";
-output "--- Iterative Fibonacci (first 30) ---";
-let fibs = fib_sequence(30);
-output f"  {fibs}";
-
-output "";
-output "--- Fibonacci Properties ---";
-let sum = fibs.reduce(0, |acc, x| acc + x);
-output f"  Sum of first 30: {sum}";
-output f"  fib(20) = {fib_iterative(20)}";
-output f"  fib(29) = {fib_iterative(29)}";
-
-// Golden ratio approximation: fib(n)/fib(n-1) approaches phi
-let ratio = fib_iterative(29) / fib_iterative(28);
-output f"  fib(29)/fib(28) = {ratio} (golden ratio ~ 1.618)";
+println("")
+println("--- Fibonacci Properties ---")
+const sum = fibs.reduce(0, (acc, x) => acc + x)
+println(f"  Sum of first 30: {sum}")
+println(f"  fib(20) = {fib_iterative(20)}")
+println(f"  fib(29) = {fib_iterative(29)}")

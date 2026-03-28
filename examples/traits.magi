@@ -1,139 +1,64 @@
-// Traits — trait definition, impl blocks, and operator overloading
+// Interfaces and Operator Overloading
 //
 // Run with: magi run examples/traits.magi
 
-output "=== Structs with Impl Blocks ===";
+import std.math
 
-struct Vec2 {
-    x: float64,
-    y: float64
+struct Vec2 { x: float, y: float }
+
+func Vec2.magnitude(self) {
+    math.sqrt(self.x * self.x + self.y * self.y)
 }
 
-impl Vec2 {
-    fn magnitude(self) {
-        (self.x * self.x + self.y * self.y).sqrt()
-    }
-
-    fn dot(self, other) {
-        self.x * other.x + self.y * other.y
-    }
-
-    fn scale(self, factor) {
-        Vec2 { x: self.x * factor, y: self.y * factor }
-    }
-
-    fn to_string(self) {
-        f"({self.x}, {self.y})"
-    }
+func Vec2.add(self, other) {
+    Vec2 { x: self.x + other.x, y: self.y + other.y }
 }
 
-let a = Vec2 { x: 3.0, y: 4.0 };
-let b = Vec2 { x: 1.0, y: 2.0 };
-
-output f"a = {a.to_string()}";
-output f"b = {b.to_string()}";
-output f"|a| = {a.magnitude()}";
-output f"a . b = {a.dot(b)}";
-output f"a * 2 = {a.scale(2.0).to_string()}";
-
-output "";
-output "=== Operator Overloading ===";
-
-impl Vec2 {
-    fn __add__(self, other) {
-        Vec2 { x: self.x + other.x, y: self.y + other.y }
-    }
-
-    fn __sub__(self, other) {
-        Vec2 { x: self.x - other.x, y: self.y - other.y }
-    }
-
-    fn __eq__(self, other) {
-        self.x == other.x && self.y == other.y
-    }
+func Vec2.subtract(self, other) {
+    Vec2 { x: self.x - other.x, y: self.y - other.y }
 }
 
-let c = a + b;
-let d = a - b;
-output f"a + b = {c.to_string()}";
-output f"a - b = {d.to_string()}";
-output f"a == a: {a == a}";
-output f"a == b: {a == b}";
-
-output "";
-output "=== Trait Definition and Implementation ===";
-
-trait HasArea {
-    fn area(self);
+func Vec2.equal(self, other) {
+    self.x == other.x && self.y == other.y
 }
 
-trait Describable {
-    fn describe(self);
+func Vec2.display(self) {
+    f"Vec2({self.x}, {self.y})"
 }
 
-struct Circle {
-    radius: float64
+println("--- Vec2 Operations ---")
+const a = Vec2 { x: 3.0, y: 4.0 }
+const b = Vec2 { x: 1.0, y: 2.0 }
+
+println(f"a = {a}")
+println(f"b = {b}")
+println(f"a + b = {a + b}")
+println(f"a - b = {a - b}")
+println(f"a == b: {a == b}")
+println(f"|a| = {a.magnitude()}")
+
+println("")
+println("--- Interface Satisfaction ---")
+
+interface HasArea {
+    func area(self) -> float
 }
 
-struct Rectangle {
-    width: float64,
-    height: float64
+struct Circle { radius: float }
+struct Square { side: float }
+
+func Circle.area(self) { math.pi * self.radius * self.radius }
+func Circle.display(self) { f"Circle(r={self.radius})" }
+
+func Square.area(self) { self.side * self.side }
+func Square.display(self) { f"Square(s={self.side})" }
+
+func print_area(shape HasArea) {
+    println(f"  area = {shape.area()}")
 }
 
-impl HasArea for Circle {
-    fn area(self) {
-        3.14159265 * self.radius * self.radius
-    }
-}
-
-impl HasArea for Rectangle {
-    fn area(self) {
-        self.width * self.height
-    }
-}
-
-impl Describable for Circle {
-    fn describe(self) {
-        f"Circle with radius {self.radius}"
-    }
-}
-
-impl Describable for Rectangle {
-    fn describe(self) {
-        f"Rectangle {self.width}x{self.height}"
-    }
-}
-
-let shapes = [
-    Circle { radius: 5.0 },
-    Rectangle { width: 4.0, height: 6.0 },
-    Circle { radius: 3.0 },
-    Rectangle { width: 10.0, height: 2.0 },
-];
-
-output "Shape areas:";
+const shapes = [Circle { radius: 5.0 }, Square { side: 3.0 }]
 for shape in shapes {
-    output f"  {shape.describe()}: area = {shape.area()}";
+    println(shape)
+    print_area(shape)
 }
-
-output "";
-output "=== Struct Defaults and Update Syntax ===";
-
-struct Config {
-    timeout: int64 = 30,
-    retries: int64 = 3,
-    verbose: bool = false
-}
-
-let default_config = Config {};
-output f"Default config: timeout={default_config.timeout}, retries={default_config.retries}, verbose={default_config.verbose}";
-
-let custom = Config { timeout: 60, verbose: true };
-output f"Custom config: timeout={custom.timeout}, retries={custom.retries}, verbose={custom.verbose}";
-
-// Struct update syntax: copy fields from another struct
-let updated = Config { ...default_config, timeout: 90 };
-output f"Updated config: timeout={updated.timeout}, retries={updated.retries}";
-
-output "";
-output "Traits demo complete.";

@@ -1,129 +1,28 @@
-// Concurrency — multiple spawns with channels for parallel work
+// Concurrency — spawn tasks and await results
 //
 // Run with: magi run examples/concurrency.magi
 
-output "=== Parallel Computation ===";
+println("=== Spawn and Await ===")
 
-// Spawn multiple workers that compute independently
-fn compute_square(n) { n * n }
-fn compute_cube(n) { n * n * n }
-fn compute_factorial(n) {
-    if n <= 1 { 1 } else { n * compute_factorial(n - 1) }
-}
-
-let n = 10;
-let t1 = spawn compute_square(n);
-let t2 = spawn compute_cube(n);
-let t3 = spawn compute_factorial(n);
-
-let sq = await t1;
-let cu = await t2;
-let fa = await t3;
-
-output f"square({n})    = {sq}";
-output f"cube({n})      = {cu}";
-output f"factorial({n}) = {fa}";
-
-output "";
-output "=== Fan-Out / Fan-In Pattern ===";
-
-// Multiple workers send results through a shared channel
-let ch = channel();
-let tx = ch[0];
-let rx = ch[1];
-
-fn worker(id, sender, value) {
-    let result = value * value + id;
-    chan_send(sender, result);
-}
-
-// Spawn 5 workers
-let mut workers = [];
-let mut i = 0;
-while i < 5 {
-    let t = spawn worker(i, tx, i * 3);
-    workers = array_push(workers, t);
-    i = i + 1;
-}
-
-// Collect all results
-let mut results = [];
-let mut j = 0;
-while j < 5 {
-    let val = chan_recv(rx);
-    results = array_push(results, val);
-    j = j + 1;
-}
-
-// Wait for all workers to finish
-for w in workers {
-    await w;
-}
-
-output f"Worker results: {results.sort()}";
-
-output "";
-output "=== Pipeline Pattern ===";
-
-// Stage 1: generate numbers
-// Stage 2: double them
-// Stage 3: filter even results
-let stage1_ch = channel();
-let stage2_ch = channel();
-
-fn stage1_producer(tx, count) {
-    let mut k = 1;
-    while k <= count {
-        chan_send(tx, k);
-        k = k + 1;
+func compute(n) {
+    let result = 0
+    for i in 0..n {
+        result = result + i
     }
+    result
 }
 
-fn stage2_doubler(rx, tx, count) {
-    let mut k = 0;
-    while k < count {
-        let val = chan_recv(rx);
-        chan_send(tx, val * 2);
-        k = k + 1;
-    }
-}
+const t1 = spawn compute(1000)
+const t2 = spawn compute(2000)
+const t3 = spawn compute(3000)
 
-let count = 8;
-let p1 = spawn stage1_producer(stage1_ch[0], count);
-let p2 = spawn stage2_doubler(stage1_ch[1], stage2_ch[0], count);
+const r1 = await t1
+const r2 = await t2
+const r3 = await t3
 
-let mut pipeline_results = [];
-let mut m = 0;
-while m < count {
-    let val = chan_recv(stage2_ch[1]);
-    pipeline_results = array_push(pipeline_results, val);
-    m = m + 1;
-}
+println(f"sum(0..1000) = {r1}")
+println(f"sum(0..2000) = {r2}")
+println(f"sum(0..3000) = {r3}")
 
-await p1;
-await p2;
-
-output f"Pipeline (1..{count} doubled): {pipeline_results}";
-
-output "";
-output "=== Spawn with Captured Variables ===";
-
-let base = 1000;
-let offsets = [1, 2, 3, 4, 5];
-
-let mut handles = [];
-for offset in offsets {
-    let t = spawn { base + offset };
-    handles = array_push(handles, t);
-}
-
-let mut captured_results = [];
-for h in handles {
-    let r = await h;
-    captured_results = array_push(captured_results, r);
-}
-
-output f"Captured variable results: {captured_results}";
-
-output "";
-output "Concurrency demo complete.";
+println("")
+println("Concurrency demo complete.")
