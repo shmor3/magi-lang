@@ -13098,7 +13098,7 @@ impl<'a> Interpreter<'a> {
                             self.heap.push_scope();
                             if let Some(p) = impl_method.params.first() {
                                 let addr = self.heap.alloc(obj.clone());
-                                self.define(&p.name, addr, false);
+                                self.define(&p.name, addr, true); // self is mutable
                             }
                             let mut eval_args = Vec::new();
                             for arg in args { eval_args.push(self.eval_expr(arg)?); }
@@ -13136,7 +13136,7 @@ impl<'a> Interpreter<'a> {
                             self.heap.push_scope();
                             if let Some(p) = impl_method.params.first() {
                                 let addr = self.heap.alloc(obj.clone());
-                                self.define(&p.name, addr, false);
+                                self.define(&p.name, addr, true); // self is mutable
                             }
                             let mut eval_args = Vec::new();
                             for arg in args { eval_args.push(self.eval_expr(arg)?); }

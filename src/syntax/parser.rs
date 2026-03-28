@@ -2052,6 +2052,66 @@ impl Parser {
             // Try parsing as expression
             let expr = self.parse_expression()?;
 
+            // Check for field/index assignment: expr.field = value or expr[idx] = value
+            if self.at(&TokenKind::Eq) && matches!(expr.kind, ExpressionKind::FieldAccess { .. } | ExpressionKind::Index { .. }) {
+                self.advance(); // consume '='
+                let value = self.parse_expression()?;
+                let end = value.span;
+                self.eat(&TokenKind::Semicolon);
+                let kind = match expr.kind {
+                    ExpressionKind::FieldAccess { object, field } => {
+                        StatementKind::FieldAssignment { object: *object, field, value }
+                    }
+                    ExpressionKind::Index { object, index } => {
+                        StatementKind::IndexAssignment { object: *object, index: *index, value }
+                    }
+                    _ => unreachable!(),
+                };
+                let trailing = self.take_trailing_comment(end.end_line);
+                statements.push(Statement {
+                    span: expr.span.merge(end),
+                    kind,
+                    leading_comments: leading,
+                    trailing_comment: trailing,
+                });
+                continue;
+            }
+
+            // Check for compound assignment on fields: expr.field += value
+            if matches!(self.peek_kind(), TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq | TokenKind::PercentEq) {
+                if let ExpressionKind::FieldAccess { ref object, ref field } = expr.kind {
+                    let op_tok = self.advance().clone();
+                    let op = match op_tok.kind {
+                        TokenKind::PlusEq => crate::syntax::ast::BinOp::Add,
+                        TokenKind::MinusEq => crate::syntax::ast::BinOp::Sub,
+                        TokenKind::StarEq => crate::syntax::ast::BinOp::Mul,
+                        TokenKind::SlashEq => crate::syntax::ast::BinOp::Div,
+                        TokenKind::PercentEq => crate::syntax::ast::BinOp::Mod,
+                        _ => crate::syntax::ast::BinOp::Add,
+                    };
+                    let rhs = self.parse_expression()?;
+                    let end = rhs.span;
+                    self.eat(&TokenKind::Semicolon);
+                    // Desugar: obj.field += val → obj.field = obj.field + val
+                    let current = Expression {
+                        kind: ExpressionKind::FieldAccess { object: object.clone(), field: field.clone() },
+                        span: expr.span,
+                    };
+                    let sum = Expression {
+                        kind: ExpressionKind::BinaryOp { op, left: Box::new(current), right: Box::new(rhs) },
+                        span: expr.span.merge(end),
+                    };
+                    let trailing = self.take_trailing_comment(end.end_line);
+                    statements.push(Statement {
+                        span: expr.span.merge(end),
+                        kind: StatementKind::FieldAssignment { object: *object.clone(), field: field.clone(), value: sum },
+                        leading_comments: leading,
+                        trailing_comment: trailing,
+                    });
+                    continue;
+                }
+            }
+
             if self.eat(&TokenKind::Semicolon) {
                 // It's an expression statement
                 let end_line = self.tokens[self.pos.saturating_sub(1)].span.end_line;

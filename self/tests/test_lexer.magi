@@ -1,0 +1,90 @@
+// Tests for self/lexer.magi
+
+func test_tokenize_number() {
+    const tokens = tokenize("42")
+    assert(len(tokens) == 2) // IntLit + Eof
+    assert(tokens[0].text == "42")
+    println("PASS: tokenize number")
+}
+
+func test_tokenize_string() {
+    const tokens = tokenize("\"hello\"")
+    assert(tokens[0].text == "hello")
+    println("PASS: tokenize string")
+}
+
+func test_tokenize_keywords() {
+    const tokens = tokenize("func if else for while return")
+    assert(len(tokens) == 7) // 6 keywords + Eof
+    println("PASS: tokenize keywords")
+}
+
+func test_tokenize_operators() {
+    const tokens = tokenize("+ - * / == != <= >= && || |> =>")
+    assert(len(tokens) > 10)
+    println("PASS: tokenize operators")
+}
+
+func test_tokenize_simple_program() {
+    const source = "func add(a, b) { a + b }"
+    const tokens = tokenize(source)
+    // func add ( a , b ) { a + b } Eof
+    assert(len(tokens) >= 10)
+    println("PASS: tokenize simple program")
+}
+
+func test_tokenize_line_tracking() {
+    const tokens = tokenize("const x = 5\nconst y = 10")
+    // Find the 'y' token — should be on line 2
+    for tok in tokens {
+        if tok.text == "y" {
+            assert(tok.line == 2)
+        }
+    }
+    println("PASS: line tracking")
+}
+
+func test_tokenize_comments() {
+    const tokens = tokenize("// comment\n42")
+    assert(tokens[0].text == "42") // comment skipped
+    println("PASS: skip comments")
+}
+
+func test_tokenize_dotdot_range() {
+    const tokens = tokenize("0..10")
+    // 0, .., 10, Eof
+    assert(len(tokens) == 4)
+    println("PASS: range operator")
+}
+
+func test_tokenize_arrow() {
+    const tokens = tokenize("x => x * 2")
+    let found_arrow = false
+    for tok in tokens {
+        if tok.text == "=>" { found_arrow = true }
+    }
+    assert(found_arrow)
+    println("PASS: arrow operator")
+}
+
+func test_tokenize_label() {
+    const tokens = tokenize("'outer")
+    assert(tokens[0].text == "outer")
+    println("PASS: label")
+}
+
+// ── Run All ─────────────────────────────────────────────────────────
+
+test_tokenize_number()
+test_tokenize_string()
+test_tokenize_keywords()
+test_tokenize_operators()
+test_tokenize_simple_program()
+test_tokenize_line_tracking()
+test_tokenize_comments()
+test_tokenize_dotdot_range()
+test_tokenize_arrow()
+test_tokenize_label()
+
+println("")
+println("All Phase 2 lexer tests passed!")

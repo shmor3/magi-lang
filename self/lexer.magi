@@ -1,0 +1,246 @@
+// MAGI Self-Hosted Compiler — Lexer
+//
+// Tokenizes MAGI source code into a token stream.
+// Uses functional style — each function returns new state.
+
+// ── Token Types ─────────────────────────────────────────────────────
+
+enum TokenKind {
+    Const, Let, Func, Struct, Enum, Interface, Type, Import,
+    If, Else, For, In, While, Match, Select,
+    Break, Continue, Return, Defer, Spawn, Await, Async,
+    True, False, Null,
+    IntLit, FloatLit, StringLit, FStringStart, Ident,
+    Plus, Minus, Star, Slash, Percent, StarStar,
+    EqEq, NotEq, Lt, Gt, LtEq, GtEq,
+    AndAnd, PipePipe, Bang,
+    Amp, Caret, Shl, Shr,
+    Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
+    Pipe, Arrow, FatArrow,
+    QuestionQuestion, QuestionDot,
+    DotDot, DotDotEq, DotDotDot,
+    LParen, RParen, LBracket, RBracket, LBrace, RBrace,
+    Colon, ColonColon, Semicolon, Comma, Dot, Hash,
+    Underscore, At, Label, Bar,
+    Eof,
+}
+
+struct Token {
+    kind: TokenKind,
+    text: string,
+    line: int,
+    col: int,
+}
+
+// ── Keyword Lookup ──────────────────────────────────────────────────
+
+func keyword_lookup(word) {
+    match word {
+        "const" => TokenKind::Const, "let" => TokenKind::Let,
+        "func" => TokenKind::Func, "fn" => TokenKind::Func,
+        "struct" => TokenKind::Struct, "enum" => TokenKind::Enum,
+        "interface" => TokenKind::Interface, "trait" => TokenKind::Interface,
+        "type" => TokenKind::Type, "import" => TokenKind::Import,
+        "if" => TokenKind::If, "else" => TokenKind::Else,
+        "for" => TokenKind::For, "in" => TokenKind::In,
+        "while" => TokenKind::While, "match" => TokenKind::Match,
+        "select" => TokenKind::Select,
+        "break" => TokenKind::Break, "continue" => TokenKind::Continue,
+        "return" => TokenKind::Return, "defer" => TokenKind::Defer,
+        "spawn" => TokenKind::Spawn, "await" => TokenKind::Await,
+        "async" => TokenKind::Async,
+        "true" => TokenKind::True, "false" => TokenKind::False,
+        "null" => TokenKind::Null,
+        _ => null,
+    }
+}
+
+// ── Tokenizer ───────────────────────────────────────────────────────
+// Implemented as pure functions operating on source string + position.
+
+func tokenize(source) {
+    let pos = 0
+    let line = 1
+    let col = 1
+    let tokens = []
+
+    while pos < len(source) {
+        // Skip whitespace and comments
+        while pos < len(source) {
+            const ch = source[pos]
+            if ch == " " || ch == "\t" || ch == "\r" {
+                pos = pos + 1
+                col = col + 1
+            } else if ch == "\n" {
+                pos = pos + 1
+                line = line + 1
+                col = 1
+            } else if ch == "/" && pos + 1 < len(source) && source[pos + 1] == "/" {
+                while pos < len(source) && source[pos] != "\n" { pos = pos + 1 }
+            } else if ch == "/" && pos + 1 < len(source) && source[pos + 1] == "*" {
+                pos = pos + 2; col = col + 2
+                while pos < len(source) {
+                    if source[pos] == "*" && pos + 1 < len(source) && source[pos + 1] == "/" {
+                        pos = pos + 2; col = col + 2; break
+                    }
+                    if source[pos] == "\n" { line = line + 1; col = 1 } else { col = col + 1 }
+                    pos = pos + 1
+                }
+            } else { break }
+        }
+
+        if pos >= len(source) { break }
+
+        const start_line = line
+        const start_col = col
+        const ch = source[pos]
+
+        // Numbers
+        if ch >= "0" && ch <= "9" {
+            let num = ""
+            let is_float = false
+            while pos < len(source) && ((source[pos] >= "0" && source[pos] <= "9") || source[pos] == "." || source[pos] == "_") {
+                if source[pos] == "." {
+                    if is_float { break }
+                    if pos + 1 < len(source) && source[pos + 1] == "." { break }
+                    is_float = true
+                }
+                if source[pos] != "_" { num = num + source[pos] }
+                pos = pos + 1; col = col + 1
+            }
+            const kind = if is_float { TokenKind::FloatLit } else { TokenKind::IntLit }
+            tokens.push(Token { kind: kind, text: num, line: start_line, col: start_col })
+            continue
+        }
+
+        // Identifiers and keywords
+        if (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" {
+            let word = ""
+            while pos < len(source) && ((source[pos] >= "a" && source[pos] <= "z") || (source[pos] >= "A" && source[pos] <= "Z") || (source[pos] >= "0" && source[pos] <= "9") || source[pos] == "_") {
+                word = word + source[pos]
+                pos = pos + 1; col = col + 1
+            }
+            // Check for f-string
+            if word == "f" && pos < len(source) && source[pos] == "\"" {
+                pos = pos + 1; col = col + 1
+                let s = ""
+                while pos < len(source) && source[pos] != "\"" {
+                    if source[pos] == "\\" && pos + 1 < len(source) {
+                        pos = pos + 1; col = col + 1
+                        s = s + source[pos]
+                    } else {
+                        s = s + source[pos]
+                    }
+                    pos = pos + 1; col = col + 1
+                }
+                if pos < len(source) { pos = pos + 1; col = col + 1 }
+                tokens.push(Token { kind: TokenKind::FStringStart, text: s, line: start_line, col: start_col })
+                continue
+            }
+            const kw = keyword_lookup(word)
+            const kind = if kw != null { kw } else { TokenKind::Ident }
+            tokens.push(Token { kind: kind, text: word, line: start_line, col: start_col })
+            continue
+        }
+
+        // Strings
+        if ch == "\"" {
+            pos = pos + 1; col = col + 1
+            let s = ""
+            while pos < len(source) && source[pos] != "\"" {
+                if source[pos] == "\\" && pos + 1 < len(source) {
+                    pos = pos + 1; col = col + 1
+                    const esc = source[pos]
+                    match esc {
+                        "n" => { s = s + "\n" },
+                        "t" => { s = s + "\t" },
+                        "\\" => { s = s + "\\" },
+                        "\"" => { s = s + "\"" },
+                        _ => { s = s + esc },
+                    }
+                } else {
+                    s = s + source[pos]
+                }
+                pos = pos + 1; col = col + 1
+            }
+            if pos < len(source) { pos = pos + 1; col = col + 1 }
+            tokens.push(Token { kind: TokenKind::StringLit, text: s, line: start_line, col: start_col })
+            continue
+        }
+
+        // Labels ('outer)
+        if ch == "'" {
+            pos = pos + 1; col = col + 1
+            let label = ""
+            while pos < len(source) && ((source[pos] >= "a" && source[pos] <= "z") || source[pos] == "_") {
+                label = label + source[pos]
+                pos = pos + 1; col = col + 1
+            }
+            tokens.push(Token { kind: TokenKind::Label, text: label, line: start_line, col: start_col })
+            continue
+        }
+
+        // Operators and delimiters
+        pos = pos + 1; col = col + 1
+        const next = if pos < len(source) { source[pos] } else { null }
+
+        const tok = match ch {
+            "=" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::EqEq, text: "==", line: start_line, col: start_col } }
+                   else if next == ">" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::FatArrow, text: "=>", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Eq, text: "=", line: start_line, col: start_col } },
+            "!" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::NotEq, text: "!=", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Bang, text: "!", line: start_line, col: start_col } },
+            "<" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::LtEq, text: "<=", line: start_line, col: start_col } }
+                   else if next == "<" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::Shl, text: "<<", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Lt, text: "<", line: start_line, col: start_col } },
+            ">" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::GtEq, text: ">=", line: start_line, col: start_col } }
+                   else if next == ">" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::Shr, text: ">>", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Gt, text: ">", line: start_line, col: start_col } },
+            "&" => if next == "&" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::AndAnd, text: "&&", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Amp, text: "&", line: start_line, col: start_col } },
+            "|" => if next == "|" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::PipePipe, text: "||", line: start_line, col: start_col } }
+                   else if next == ">" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::Pipe, text: "|>", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Bar, text: "|", line: start_line, col: start_col } },
+            "+" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::PlusEq, text: "+=", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Plus, text: "+", line: start_line, col: start_col } },
+            "-" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::MinusEq, text: "-=", line: start_line, col: start_col } }
+                   else if next == ">" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::Arrow, text: "->", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Minus, text: "-", line: start_line, col: start_col } },
+            "*" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::StarEq, text: "*=", line: start_line, col: start_col } }
+                   else if next == "*" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::StarStar, text: "**", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Star, text: "*", line: start_line, col: start_col } },
+            "/" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::SlashEq, text: "/=", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Slash, text: "/", line: start_line, col: start_col } },
+            "%" => if next == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::PercentEq, text: "%=", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Percent, text: "%", line: start_line, col: start_col } },
+            "?" => if next == "?" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::QuestionQuestion, text: "??", line: start_line, col: start_col } }
+                   else if next == "." { pos = pos + 1; col = col + 1; Token { kind: TokenKind::QuestionDot, text: "?.", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Ident, text: "?", line: start_line, col: start_col } },
+            "." => if next == "." {
+                pos = pos + 1; col = col + 1
+                const next2 = if pos < len(source) { source[pos] } else { null }
+                if next2 == "=" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::DotDotEq, text: "..=", line: start_line, col: start_col } }
+                else if next2 == "." { pos = pos + 1; col = col + 1; Token { kind: TokenKind::DotDotDot, text: "...", line: start_line, col: start_col } }
+                else { Token { kind: TokenKind::DotDot, text: "..", line: start_line, col: start_col } }
+            } else { Token { kind: TokenKind::Dot, text: ".", line: start_line, col: start_col } },
+            ":" => if next == ":" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::ColonColon, text: "::", line: start_line, col: start_col } }
+                   else { Token { kind: TokenKind::Colon, text: ":", line: start_line, col: start_col } },
+            "(" => Token { kind: TokenKind::LParen, text: "(", line: start_line, col: start_col },
+            ")" => Token { kind: TokenKind::RParen, text: ")", line: start_line, col: start_col },
+            "[" => Token { kind: TokenKind::LBracket, text: "[", line: start_line, col: start_col },
+            "]" => Token { kind: TokenKind::RBracket, text: "]", line: start_line, col: start_col },
+            "{" => Token { kind: TokenKind::LBrace, text: "{", line: start_line, col: start_col },
+            "}" => Token { kind: TokenKind::RBrace, text: "}", line: start_line, col: start_col },
+            ";" => Token { kind: TokenKind::Semicolon, text: ";", line: start_line, col: start_col },
+            "," => Token { kind: TokenKind::Comma, text: ",", line: start_line, col: start_col },
+            "#" => Token { kind: TokenKind::Hash, text: "#", line: start_line, col: start_col },
+            "@" => Token { kind: TokenKind::At, text: "@", line: start_line, col: start_col },
+            "^" => Token { kind: TokenKind::Caret, text: "^", line: start_line, col: start_col },
+            _ => Token { kind: TokenKind::Ident, text: ch, line: start_line, col: start_col },
+        }
+        tokens.push(tok)
+    }
+
+    tokens.push(Token { kind: TokenKind::Eof, text: "", line: line, col: col })
+    tokens
+}
