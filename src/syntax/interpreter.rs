@@ -1319,7 +1319,7 @@ impl<'a> Interpreter<'a> {
                 }
                 let val = self.eval_expr(value)?;
                 let addr = self.heap.alloc(val.clone());
-                self.define(name, addr, false);
+                self.define(name, addr, true); // let is mutable in new syntax
                 Ok(val)
             }
 
@@ -13034,6 +13034,40 @@ impl<'a> Interpreter<'a> {
                     && Self::has_optional_chain(&object.kind)
                 {
                     return Ok(DataType::Null);
+                }
+
+                // In-place mutating methods on arrays (push, pop, sort, reverse)
+                if matches!(method.as_str(), "push" | "pop" | "shift" | "unshift" | "sort" | "reverse") {
+                    if let ExpressionKind::Variable(ref var_name) = object.kind {
+                        let lookup_result = self.lookup(var_name).map(|e| (e.addr, e.mutable));
+                        if let Some((addr, true)) = lookup_result {
+                            // Eval args first (before borrowing heap mutably)
+                            let push_val = if method == "push" {
+                                args.first().map(|a| self.eval_expr(a)).transpose()?
+                            } else { None };
+                            if let Some(DataType::Array(ref mut arr)) = self.heap.values.get_mut(&addr) {
+                                match method.as_str() {
+                                    "push" => {
+                                        if let Some(val) = push_val { arr.push(val); }
+                                        return Ok(self.heap.read(addr).cloned().unwrap_or(DataType::Null));
+                                    }
+                                    "pop" => {
+                                        let popped = arr.pop().unwrap_or(DataType::Null);
+                                        return Ok(popped);
+                                    }
+                                    "sort" => {
+                                        arr.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+                                        return Ok(self.heap.read(addr).cloned().unwrap_or(DataType::Null));
+                                    }
+                                    "reverse" => {
+                                        arr.reverse();
+                                        return Ok(self.heap.read(addr).cloned().unwrap_or(DataType::Null));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Try HOF methods first (they need interpreter for lambda calls)
