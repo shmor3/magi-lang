@@ -406,5 +406,436 @@ func format_program(program) {
     for s in program.statements {
         parts.push(fmt_stmt(s, 0))
     }
-    parts.join(FMT_NL) + FMT_NL
+    let result = parts.join(FMT_NL) + FMT_NL
+
+    // Post-processing: sort imports, ensure final newline
+    result = fmt_sort_imports(result)
+    result = fmt_ensure_final_newline(result)
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Expression Formatting ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_expr_full(expr, depth) {
+    if expr == null { return "null" }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => fmt_literal(lit),
+        ExprKind::EIntLiteral(n) => to_string(n),
+        ExprKind::EFloatLiteral(f) => to_string(f),
+        ExprKind::EStringLiteral(s) => "\"" + fmt_escape_string(s) + "\"",
+        ExprKind::EBoolLiteral(b) => if b { "true" } else { "false" },
+        ExprKind::ENullLiteral => "null",
+        ExprKind::EVariable(name) => name,
+        ExprKind::EBinaryOp(op, left, right) => {
+            const ls = fmt_expr_full(left, depth)
+            const rs = fmt_expr_full(right, depth)
+            const ops = fmt_binop(op)
+            f"{ls} {ops} {rs}"
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const os = fmt_expr_full(operand, depth)
+            const ops = fmt_unop(op)
+            f"{ops}{os}"
+        },
+        ExprKind::ECall(name, args, type_args) => {
+            let arg_strs = []
+            if args != null {
+                for a in args { arg_strs.push(fmt_expr_full(a, depth)) }
+            }
+            let ta_str = ""
+            if type_args != null && len(type_args) > 0 {
+                ta_str = "<" + type_args.join(", ") + ">"
+            }
+            f"{name}{ta_str}({arg_strs.join(', ')})"
+        },
+        ExprKind::EMethodCall(obj, method, args, _) => {
+            const os = fmt_expr_full(obj, depth)
+            let arg_strs = []
+            if args != null {
+                for a in args { arg_strs.push(fmt_expr_full(a, depth)) }
+            }
+            f"{os}.{method}({arg_strs.join(', ')})"
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            const os = fmt_expr_full(obj, depth)
+            f"{os}.{field}"
+        },
+        ExprKind::EIndex(obj, idx) => {
+            const os = fmt_expr_full(obj, depth)
+            const is = fmt_expr_full(idx, depth)
+            f"{os}[{is}]"
+        },
+        ExprKind::EArrayLiteral(elems) => {
+            if elems == null || len(elems) == 0 { return "[]" }
+            let elem_strs = []
+            for e in elems { elem_strs.push(fmt_expr_full(e, depth)) }
+            const inline = "[" + elem_strs.join(", ") + "]"
+            // Multi-line if too long
+            if len(inline) > 80 {
+                const indent = fmt_indent(depth + 1)
+                const close_indent = fmt_indent(depth)
+                let lines = []
+                for es in elem_strs { lines.push(indent + es + ",") }
+                return "[\n" + lines.join("\n") + "\n" + close_indent + "]"
+            }
+            inline
+        },
+        ExprKind::EMapLiteral(entries) => {
+            if entries == null || len(entries) == 0 { return "{}" }
+            let entry_strs = []
+            for entry in entries {
+                const ks = fmt_expr_full(entry[0], depth)
+                const vs = fmt_expr_full(entry[1], depth)
+                entry_strs.push(f"{ks}: {vs}")
+            }
+            const inline = "{" + entry_strs.join(", ") + "}"
+            if len(inline) > 80 {
+                const indent = fmt_indent(depth + 1)
+                const close_indent = fmt_indent(depth)
+                let lines = []
+                for es in entry_strs { lines.push(indent + es + ",") }
+                return "{\n" + lines.join("\n") + "\n" + close_indent + "}"
+            }
+            inline
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            const cs = fmt_expr_full(cond, depth)
+            const ts = fmt_block_inline(then_b, depth)
+            if else_b != null {
+                const es = fmt_block_inline(else_b, depth)
+                f"if {cs} {ts} else {es}"
+            } else {
+                f"if {cs} {ts}"
+            }
+        },
+        ExprKind::ELambda(params, body) => {
+            let pstrs = []
+            for p in params {
+                if p.rest { pstrs.push("..." + p.name) }
+                else { pstrs.push(p.name) }
+            }
+            if len(pstrs) == 1 && !params[0].rest {
+                const bs = fmt_expr_full(body, depth)
+                f"{pstrs[0]} => {bs}"
+            } else {
+                const bs = fmt_block_inline(body, depth)
+                f"({pstrs.join(', ')}) => {bs}"
+            }
+        },
+        ExprKind::EMatch(subject, arms) => {
+            const ss = fmt_expr_full(subject, depth)
+            let arm_strs = []
+            for arm in arms {
+                const indent = fmt_indent(depth + 1)
+                arm_strs.push(indent + fmt_match_arm(arm, depth + 1))
+            }
+            const close_indent = fmt_indent(depth)
+            f"match {ss} {{\n{arm_strs.join(',\n')}\n{close_indent}}}"
+        },
+        ExprKind::ERange(start, end_expr, inclusive) => {
+            const ss = fmt_expr_full(start, depth)
+            const es = fmt_expr_full(end_expr, depth)
+            if inclusive { f"{ss}..={es}" } else { f"{ss}..{es}" }
+        },
+        ExprKind::EStringInterp(parts) => {
+            let result = "f\""
+            for part in parts {
+                match part {
+                    StringPart::LiteralPart(s) => { result = result + fmt_escape_string(s) },
+                    StringPart::ExprPart(expr) => {
+                        result = result + "{" + fmt_expr_full(expr, depth) + "}"
+                    },
+                }
+            }
+            result + "\""
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            const ls = fmt_expr_full(left, depth)
+            const rs = fmt_expr_full(right, depth)
+            f"{ls} ?? {rs}"
+        },
+        ExprKind::EOptionalChain(obj, field) => {
+            const os = fmt_expr_full(obj, depth)
+            f"{os}?.{field}"
+        },
+        ExprKind::EPipe(left, right) => {
+            const ls = fmt_expr_full(left, depth)
+            const rs = fmt_expr_full(right, depth)
+            f"{ls} |> {rs}"
+        },
+        ExprKind::ESpread(inner) => {
+            "..." + fmt_expr_full(inner, depth)
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            let elem_strs = []
+            for e in elems { elem_strs.push(fmt_expr_full(e, depth)) }
+            "(" + elem_strs.join(", ") + ")"
+        },
+        ExprKind::EEnumConstruct(enum_name, variant, args) => {
+            if args == null || len(args) == 0 {
+                f"{enum_name}::{variant}"
+            } else {
+                let arg_strs = []
+                for a in args { arg_strs.push(fmt_expr_full(a, depth)) }
+                f"{enum_name}::{variant}({arg_strs.join(', ')})"
+            }
+        },
+        ExprKind::EStructConstruct(name, field_pairs) => {
+            let field_strs = []
+            for pair in field_pairs {
+                const fname = pair[0]
+                const fval = fmt_expr_full(pair[1], depth)
+                if fname == "__spread" {
+                    field_strs.push("..." + fval)
+                } else {
+                    field_strs.push(f"{fname}: {fval}")
+                }
+            }
+            const inline = name + " { " + field_strs.join(", ") + " }"
+            if len(inline) > 80 {
+                const indent = fmt_indent(depth + 1)
+                const close_indent = fmt_indent(depth)
+                let lines = []
+                for fs in field_strs { lines.push(indent + fs + ",") }
+                return name + " {\n" + lines.join("\n") + "\n" + close_indent + "}"
+            }
+            inline
+        },
+        ExprKind::EBlock(block) => fmt_block_inline(block, depth),
+        ExprKind::ELoop(body) => "loop " + fmt_block_inline(body, depth),
+        ExprKind::EListComp(elem, var_e, iter, cond) => {
+            const es = fmt_expr_full(elem, depth)
+            const vs = fmt_expr_full(var_e, depth)
+            const is = fmt_expr_full(iter, depth)
+            if cond != null {
+                const cs = fmt_expr_full(cond, depth)
+                f"[{es} for {vs} in {is} if {cs}]"
+            } else {
+                f"[{es} for {vs} in {is}]"
+            }
+        },
+        _ => "/* expr */"
+    }
+}
+
+func fmt_match_arm(arm, depth) {
+    // Simplified: arm is [pattern, body]
+    if typeof(arm) == "array" && len(arm) >= 2 {
+        const ps = to_string(arm[0])
+        const bs = fmt_expr_full(arm[1], depth)
+        f"{ps} => {bs}"
+    } else {
+        "_ => /* arm */"
+    }
+}
+
+func fmt_literal(lit) {
+    match lit {
+        Literal::LInt(n) => to_string(n),
+        Literal::LFloat(f) => to_string(f),
+        Literal::LString(s) => "\"" + fmt_escape_string(s) + "\"",
+        Literal::LBool(b) => if b { "true" } else { "false" },
+        _ => "null"
+    }
+}
+
+func fmt_binop(op) {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+        _ => "?"
+    }
+}
+
+func fmt_unop(op) {
+    match op {
+        UnOp::Not => "!",
+        UnOp::Neg => "-",
+        _ => "~"
+    }
+}
+
+func fmt_escape_string(s) {
+    let result = ""
+    for c in s.chars() {
+        if c == "\"" { result = result + "\\\"" }
+        else if c == "\\" { result = result + "\\\\" }
+        else if c == "\n" { result = result + "\\n" }
+        else if c == "\r" { result = result + "\\r" }
+        else if c == "\t" { result = result + "\\t" }
+        else { result = result + c }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Comment Preservation ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Extract comments from source (to be re-inserted after formatting)
+func fmt_extract_comments(source) {
+    let comments = []
+    const lines = source.split("\n")
+    let i = 0
+    for ln in lines {
+        const trimmed = ln.trim()
+        if trimmed.starts_with("//") {
+            comments.push({"line": i, "text": trimmed})
+        }
+        i = i + 1
+    }
+    comments
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Import Grouping and Sorting ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_sort_imports(source) {
+    const lines = source.split("\n")
+    let import_lines = []
+    let other_lines = []
+    let in_imports = true
+
+    let i = 0
+    while i < len(lines) {
+        const trimmed = lines[i].trim()
+        if in_imports && (trimmed.starts_with("import ") || trimmed.starts_with("use ")) {
+            import_lines.push(lines[i])
+        } else {
+            if in_imports && len(import_lines) > 0 { in_imports = false }
+            other_lines.push(lines[i])
+        }
+        i = i + 1
+    }
+
+    if len(import_lines) == 0 { return source }
+
+    // Sort imports alphabetically
+    import_lines = import_lines.sort()
+
+    // Group: std imports first, then others
+    let std_imports = []
+    let user_imports = []
+    for il in import_lines {
+        if il.trim().starts_with("import std.") {
+            std_imports.push(il)
+        } else {
+            user_imports.push(il)
+        }
+    }
+
+    let result = []
+    for il in std_imports { result.push(il) }
+    if len(std_imports) > 0 && len(user_imports) > 0 {
+        result.push("") // blank line between groups
+    }
+    for il in user_imports { result.push(il) }
+    if len(import_lines) > 0 { result.push("") } // blank after imports
+    for ol in other_lines { result.push(ol) }
+
+    result.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Trailing Comma Handling ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Add trailing commas to multi-line constructs
+func fmt_add_trailing_commas(source) {
+    const lines = source.split("\n")
+    let result = []
+    let i = 0
+    while i < len(lines) {
+        let ln = lines[i]
+        const trimmed = ln.trim()
+        // If this line ends with a value and next line starts with ] or } or ),
+        // ensure trailing comma
+        if i + 1 < len(lines) {
+            const next_trimmed = lines[i + 1].trim()
+            if (next_trimmed == "]" || next_trimmed == "}" || next_trimmed == ")") {
+                if len(trimmed) > 0 && !trimmed.ends_with(",") && !trimmed.ends_with("{") && !trimmed.ends_with("[") && !trimmed.starts_with("//") {
+                    ln = ln + ","
+                }
+            }
+        }
+        result.push(ln)
+        i = i + 1
+    }
+    result.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Multi-line Expression Formatting ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Break a long function call across multiple lines
+func fmt_break_call(name, args, depth) {
+    const indent = fmt_indent(depth + 1)
+    const close_indent = fmt_indent(depth)
+    let arg_strs = []
+    for a in args { arg_strs.push(indent + fmt_expr_full(a, depth + 1) + ",") }
+    name + "(\n" + arg_strs.join("\n") + "\n" + close_indent + ")"
+}
+
+// Break a long binary chain across multiple lines
+func fmt_break_chain(parts, op_str, depth) {
+    const indent = fmt_indent(depth + 1)
+    let result = parts[0]
+    let i = 1
+    while i < len(parts) {
+        result = result + "\n" + indent + op_str + " " + parts[i]
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Doc Comment Formatting ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Format doc comments (/// style)
+func fmt_doc_comment(lines, depth) {
+    let result = []
+    const indent = fmt_indent(depth)
+    for ln in lines {
+        const trimmed = ln.trim()
+        if trimmed.starts_with("///") {
+            result.push(indent + trimmed)
+        } else if trimmed.starts_with("//") {
+            result.push(indent + trimmed)
+        }
+    }
+    result.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Utility ─────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_ensure_final_newline(source) {
+    if len(source) == 0 { return "\n" }
+    // Remove extra trailing newlines
+    let trimmed = source
+    while len(trimmed) > 1 && trimmed[len(trimmed) - 1] == "\n" && trimmed[len(trimmed) - 2] == "\n" {
+        trimmed = trimmed.substring(0, len(trimmed) - 1)
+    }
+    if trimmed[len(trimmed) - 1] != "\n" {
+        trimmed = trimmed + "\n"
+    }
+    trimmed
 }

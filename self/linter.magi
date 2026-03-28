@@ -302,6 +302,8 @@ func lint(program) {
     // Reset state
     lint_warnings = []
     lint_scopes = [lint_new_scope()]
+    lint_loop_depth = 0
+    lint_func_depth = 0
 
     for s in program.statements {
         lint_stmt(s)
@@ -310,5 +312,355 @@ func lint(program) {
     // Pop global scope
     lint_pop_scope()
 
+    // Run additional lint passes
+    lint_check_unused_imports(program.statements)
+    lint_check_naming_conventions(program.statements)
+    lint_check_unreachable_code(program.statements)
+    lint_check_function_complexity(program.statements)
+
     lint_warnings
+}
+
+// ── Additional State ─────────────────────────────────────────────────
+
+let lint_loop_depth = 0
+let lint_func_depth = 0
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W100-W114: Variable/Import/Function Warnings ────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// W100: Unused variables (implemented via scope pop above)
+
+// W101: Unused imports
+func lint_check_unused_imports(statements) {
+    let imported_names = {"__s": true}
+    let used_names = {"__s": true}
+
+    for stmt in statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SImportModule(path_parts, alias, _) => {
+                const name = if alias != null && alias != "" { alias } else {
+                    if len(path_parts) > 0 { path_parts[len(path_parts) - 1] } else { "" }
+                }
+                if name != "" {
+                    imported_names[name] = stmt.span.start_line
+                }
+            },
+            _ => lint_collect_used_names(stmt, used_names)
+        }
+    }
+
+    for name in imported_names.keys() {
+        if name == "__s" { continue }
+        if !used_names.has(name) {
+            lint_warnings.push(f"W101: unused import '{name}' at line {imported_names[name]}")
+        }
+    }
+}
+
+func lint_collect_used_names(stmt, names) {
+    if stmt == null { return null }
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => lint_collect_expr_names(expr, names),
+        StmtKind::SConst(_, expr) => { if expr != null { lint_collect_expr_names(expr, names) } },
+        StmtKind::SLet(_, expr) => { if expr != null { lint_collect_expr_names(expr, names) } },
+        StmtKind::SLetMut(_, expr) => { if expr != null { lint_collect_expr_names(expr, names) } },
+        StmtKind::SReturn(expr) => { if expr != null { lint_collect_expr_names(expr, names) } },
+        StmtKind::SFuncDef(fdef) => {
+            if fdef.body != null {
+                for s in fdef.body.stmts { lint_collect_used_names(s, names) }
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_collect_expr_names(expr, names) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EVariable(name) => { names[name] = true },
+        ExprKind::ECall(name, args, _) => {
+            names[name] = true
+            if args != null { for a in args { lint_collect_expr_names(a, names) } }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            lint_collect_expr_names(left, names)
+            lint_collect_expr_names(right, names)
+        },
+        ExprKind::EUnaryOp(_, operand) => lint_collect_expr_names(operand, names),
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            lint_collect_expr_names(obj, names)
+            if args != null { for a in args { lint_collect_expr_names(a, names) } }
+        },
+        ExprKind::EFieldAccess(obj, _) => lint_collect_expr_names(obj, names),
+        ExprKind::EIndex(obj, idx) => {
+            lint_collect_expr_names(obj, names)
+            lint_collect_expr_names(idx, names)
+        },
+        _ => {}
+    }
+}
+
+// W102: Redundant operations (e.g., x = x, if true, etc.)
+func lint_check_redundant(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            // x + 0, x * 1, x - 0
+            match op {
+                BinOp::Add => {
+                    match right.kind {
+                        ExprKind::ELiteral(lit) => {
+                            match lit {
+                                Literal::LInt(0) => {
+                                    lint_warnings.push(f"W102: adding zero has no effect at line {expr.span.start_line}")
+                                },
+                                _ => {}
+                            }
+                        },
+                        _ => {}
+                    }
+                },
+                BinOp::Mul => {
+                    match right.kind {
+                        ExprKind::ELiteral(lit) => {
+                            match lit {
+                                Literal::LInt(1) => {
+                                    lint_warnings.push(f"W102: multiplying by one has no effect at line {expr.span.start_line}")
+                                },
+                                _ => {}
+                            }
+                        },
+                        _ => {}
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// W103: Reserved keyword used as name
+func lint_check_reserved_keyword(name, line) {
+    const reserved = ["class", "extends", "super", "new", "this", "private", "protected", "public", "abstract", "final", "native", "volatile", "transient"]
+    if reserved.contains(name) {
+        lint_warnings.push(f"W103: '{name}' is a reserved keyword at line {line}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W200-W252: Style and Complexity Warnings ────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// W200: Naming conventions
+func lint_check_naming_conventions(statements) {
+    for stmt in statements {
+        const line = stmt.span.start_line
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                const name = fdef.name
+                // Functions should be snake_case
+                if name != to_lower(name) && !name.contains("_") && !name.contains(".") {
+                    let has_upper = false
+                    let i = 1
+                    while i < len(name) {
+                        if name[i] >= "A" && name[i] <= "Z" { has_upper = true }
+                        i = i + 1
+                    }
+                    if has_upper {
+                        lint_warnings.push(f"W200: function '{name}' should use snake_case at line {line}")
+                    }
+                }
+
+                // Check param naming
+                for p in fdef.params {
+                    lint_check_reserved_keyword(p.name, line)
+                }
+
+                // W240: Long functions
+                if fdef.body != null && len(fdef.body.stmts) > 50 {
+                    lint_warnings.push(f"W240: function '{name}' has {len(fdef.body.stmts)} statements (>50), consider splitting at line {line}")
+                }
+            },
+            StmtKind::SStructDef(name, _, _) => {
+                if len(name) > 0 && name[0] >= "a" && name[0] <= "z" {
+                    lint_warnings.push(f"W201: struct '{name}' should use PascalCase at line {line}")
+                }
+            },
+            StmtKind::SEnumDef(name, _, _) => {
+                if len(name) > 0 && name[0] >= "a" && name[0] <= "z" {
+                    lint_warnings.push(f"W201: enum '{name}' should use PascalCase at line {line}")
+                }
+            },
+            StmtKind::SInterfaceDef(name, _, _) => {
+                if len(name) > 0 && name[0] >= "a" && name[0] <= "z" {
+                    lint_warnings.push(f"W201: interface '{name}' should use PascalCase at line {line}")
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+// W210: Unreachable code
+func lint_check_unreachable_code(statements) {
+    let found_terminal = false
+    for stmt in statements {
+        if found_terminal {
+            lint_warnings.push(f"W210: unreachable code at line {stmt.span.start_line}")
+            return null
+        }
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SReturn(_) => { found_terminal = true },
+            StmtKind::SBreak(_, _) => { found_terminal = true },
+            StmtKind::SContinue(_) => { found_terminal = true },
+            StmtKind::SThrow(_) => { found_terminal = true },
+            _ => {}
+        }
+    }
+}
+
+// W211: Non-exhaustive match (checked in type_checker, but lint version for warnings)
+
+// W220: Self-comparison
+func lint_check_self_comparison(expr, line) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            match op {
+                BinOp::Eq => {
+                    if lint_exprs_same(left, right) {
+                        lint_warnings.push(f"W220: comparing value to itself at line {line}")
+                    }
+                },
+                BinOp::Ne => {
+                    if lint_exprs_same(left, right) {
+                        lint_warnings.push(f"W220: comparing value to itself at line {line}")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_exprs_same(a, b) {
+    if a == null || b == null { return false }
+    match a.kind {
+        ExprKind::EVariable(na) => {
+            match b.kind {
+                ExprKind::EVariable(nb) => na == nb,
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
+// W221: Empty blocks
+func lint_check_empty_block(block, label, line) {
+    if block != null && len(block.stmts) == 0 && block.tail_expr == null {
+        lint_warnings.push(f"W221: empty {label} block at line {line}")
+    }
+}
+
+// W222: Variable shadowing
+func lint_check_shadow(name, line) {
+    // Check if name exists in any outer scope
+    let i = len(lint_scopes) - 2 // skip current scope
+    while i >= 0 {
+        const scope = lint_scopes[i]
+        if scope.has(name) && name != "__s" {
+            lint_warnings.push(f"W222: '{name}' shadows outer variable at line {line}")
+            return null
+        }
+        i = i - 1
+    }
+}
+
+// W230: Deep nesting
+func lint_check_nesting(depth, line) {
+    if depth > 5 {
+        lint_warnings.push(f"W230: nesting depth ({depth}) exceeds 5 at line {line}")
+    }
+}
+
+// W241: Cognitive complexity
+func lint_check_function_complexity(statements) {
+    for stmt in statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.body != null {
+                    const complexity = lint_compute_complexity(fdef.body.stmts, 0)
+                    if complexity > 15 {
+                        lint_warnings.push(f"W241: function '{fdef.name}' has cognitive complexity {complexity} (>15) at line {stmt.span.start_line}")
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+func lint_compute_complexity(statements, depth) {
+    let score = 0
+    for stmt in statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SIf(_, then_b, else_b) => {
+                score = score + 1 + depth
+                if then_b != null { score = score + lint_compute_complexity(then_b.stmts, depth + 1) }
+                if else_b != null { score = score + 1 + lint_compute_complexity(else_b.stmts, depth + 1) }
+            },
+            StmtKind::SWhileLoop(_, _, body) => {
+                score = score + 1 + depth
+                if body != null { score = score + lint_compute_complexity(body.stmts, depth + 1) }
+            },
+            StmtKind::SForLoop(_, _, _, body) => {
+                score = score + 1 + depth
+                if body != null { score = score + lint_compute_complexity(body.stmts, depth + 1) }
+            },
+            StmtKind::SMatch(_, arms) => {
+                score = score + 1 + depth
+                for arm in arms { score = score + 1 }
+            },
+            StmtKind::STryCatch(_, _, _, _) => {
+                score = score + 1 + depth
+            },
+            StmtKind::SBreak(_, _) => { score = score + 1 },
+            StmtKind::SContinue(_) => { score = score + 1 },
+            _ => {}
+        }
+    }
+    score
+}
+
+// W250: Magic numbers
+func lint_check_magic_number(expr, line) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(n) => {
+                    if n != 0 && n != 1 && n != 2 && n != -1 && n != 10 && n != 100 {
+                        lint_warnings.push(f"W250: magic number {n} at line {line}")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
 }
