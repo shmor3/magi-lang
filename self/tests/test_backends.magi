@@ -1,0 +1,171 @@
+// Tests for self/compiler/wasm.magi, native.magi, webgpu.magi
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/compiler/ir.magi self/compiler/compile.magi self/compiler/wasm.magi self/compiler/native.magi self/compiler/webgpu.magi self/tests/test_backends.magi > /tmp/_backends_test.magi && cargo run --bin magi -- run /tmp/_backends_test.magi
+
+func test_wasm_header() {
+    const ir = compile_to_ir(parse("output 42"))
+    const wasm = compile_to_wasm(ir)
+    // WASM magic: \0asm
+    assert(wasm[0] == 0)
+    assert(wasm[1] == 97)  // 'a'
+    assert(wasm[2] == 115) // 's'
+    assert(wasm[3] == 109) // 'm'
+    println("PASS: wasm header")
+}
+
+func test_wasm_version() {
+    const ir = compile_to_ir(parse("output 1"))
+    const wasm = compile_to_wasm(ir)
+    // WASM version: 1 (little-endian)
+    assert(wasm[4] == 1)
+    assert(wasm[5] == 0)
+    assert(wasm[6] == 0)
+    assert(wasm[7] == 0)
+    println("PASS: wasm version")
+}
+
+func test_wasm_has_sections() {
+    const ir = compile_to_ir(parse("output 42"))
+    const wasm = compile_to_wasm(ir)
+    // Binary must be longer than just the 8-byte header
+    assert(len(wasm) > 8)
+    println("PASS: wasm has sections")
+}
+
+func test_wasm_type_section() {
+    const ir = compile_to_ir(parse("output 1"))
+    const wasm = compile_to_wasm(ir)
+    // Type section has id=1 and appears right after the 8-byte header
+    assert(wasm[8] == 1)
+    println("PASS: wasm type section present")
+}
+
+func test_native_elf_header() {
+    const ir = compile_to_ir(parse("output 42"))
+    const elf = compile_to_native(ir)
+    assert(elf[0] == 127)  // 0x7f
+    assert(elf[1] == 69)   // 'E'
+    assert(elf[2] == 76)   // 'L'
+    assert(elf[3] == 70)   // 'F'
+    println("PASS: elf header")
+}
+
+func test_native_elf_class() {
+    const ir = compile_to_ir(parse("output 42"))
+    const elf = compile_to_native(ir)
+    assert(elf[4] == 2)  // EI_CLASS: ELFCLASS64
+    assert(elf[5] == 1)  // EI_DATA: little-endian
+    assert(elf[6] == 1)  // EI_VERSION: current
+    println("PASS: elf class/data/version")
+}
+
+func test_native_elf_machine() {
+    const ir = compile_to_ir(parse("output 10"))
+    const elf = compile_to_native(ir)
+    // e_machine at offset 18: EM_X86_64 = 0x3E
+    assert(elf[18] == 0x3E)
+    assert(elf[19] == 0)
+    println("PASS: elf machine x86_64")
+}
+
+func test_native_elf_size() {
+    const ir = compile_to_ir(parse("output 5"))
+    const elf = compile_to_native(ir)
+    // ELF header (64) + program header (56) + code > 120 bytes
+    assert(len(elf) > 120)
+    println("PASS: elf size > 120 bytes")
+}
+
+func test_native_elf_type() {
+    const ir = compile_to_ir(parse("output 1"))
+    const elf = compile_to_native(ir)
+    // e_type at offset 16: ET_EXEC = 2
+    assert(elf[16] == 2)
+    assert(elf[17] == 0)
+    println("PASS: elf type ET_EXEC")
+}
+
+func test_webgpu_imports() {
+    const imports = webgpu_imports()
+    assert(len(imports) == 19)
+    println("PASS: webgpu imports")
+}
+
+func test_webgpu_import_fields() {
+    const imports = webgpu_imports()
+    const first = imports[0]
+    assert(first["module"] == "webgpu")
+    assert(first["name"] == "request_adapter")
+    assert(first["kind"] == "func")
+    println("PASS: webgpu import fields")
+}
+
+func test_webgpu_memory_import() {
+    const imports = webgpu_imports()
+    const last = imports[18]
+    assert(last["module"] == "webgpu")
+    assert(last["name"] == "memory")
+    assert(last["kind"] == "memory")
+    println("PASS: webgpu memory import")
+}
+
+func test_webgpu_js_bridge() {
+    const bridge = webgpu_js_bridge()
+    assert(len(bridge) > 100)
+    println("PASS: webgpu js bridge")
+}
+
+func test_webgpu_bridge_contains_gpu() {
+    const bridge = webgpu_js_bridge()
+    assert(bridge.contains("navigator.gpu"))
+    println("PASS: webgpu bridge references navigator.gpu")
+}
+
+func test_wasm_leb_u32_small() {
+    // wasm_leb_u32 writes to global wasm_out
+    wasm_out = []
+    wasm_leb_u32(0)
+    assert(len(wasm_out) == 1)
+    assert(wasm_out[0] == 0)
+    wasm_out = []
+    println("PASS: leb u32 zero")
+}
+
+func test_wasm_leb_u32_127() {
+    wasm_out = []
+    wasm_leb_u32(127)
+    assert(len(wasm_out) == 1)
+    assert(wasm_out[0] == 127)
+    wasm_out = []
+    println("PASS: leb u32 127 single byte")
+}
+
+func test_wasm_leb_u32_128() {
+    wasm_out = []
+    wasm_leb_u32(128)
+    assert(len(wasm_out) == 2)
+    assert(wasm_out[0] == 128)
+    assert(wasm_out[1] == 1)
+    wasm_out = []
+    println("PASS: leb u32 128 two bytes")
+}
+
+// ── Run All Tests ─────────────────────────────────────────────────
+
+test_wasm_header()
+test_wasm_version()
+test_wasm_has_sections()
+test_wasm_type_section()
+test_native_elf_header()
+test_native_elf_class()
+test_native_elf_machine()
+test_native_elf_size()
+test_native_elf_type()
+test_webgpu_imports()
+test_webgpu_import_fields()
+test_webgpu_memory_import()
+test_webgpu_js_bridge()
+test_webgpu_bridge_contains_gpu()
+test_wasm_leb_u32_small()
+test_wasm_leb_u32_127()
+test_wasm_leb_u32_128()
+println("All backend tests passed!")

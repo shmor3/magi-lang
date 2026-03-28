@@ -1,0 +1,521 @@
+// MAGI Self-Hosted Compiler — WASM Binary Encoder
+//
+// Takes an IR module snapshot and produces a WASM binary (as []int).
+// Implements the WebAssembly binary format (WASM 1.0).
+//
+// Entry point: compile_to_wasm(module) -> []int
+//
+// NOTE: MAGI arrays are value-typed (copied on pass). All mutable output
+// buffers are module-level globals, appended to by helper functions.
+
+// ── Module-level output buffer ────────────────────────────────────
+
+let wasm_out = []
+
+func wasm_push(b) {
+    wasm_out.push(b)
+}
+
+// ── LEB128 Helpers ────────────────────────────────────────────────
+
+func wasm_leb_u32(val) {
+    let v = val
+    while true {
+        const byte = v & 127
+        v = v >> 7
+        if v == 0 {
+            wasm_push(byte)
+            return null
+        }
+        wasm_push(byte + 128)
+    }
+}
+
+func wasm_leb_i64(val) {
+    let v = val
+    let more = true
+    while more {
+        const byte = v & 127
+        v = v >> 7
+        if (v == 0 && (byte & 64) == 0) || (v == -1 && (byte & 64) != 0) {
+            more = false
+            wasm_push(byte)
+        } else {
+            wasm_push(byte + 128)
+        }
+    }
+}
+
+// ── LEB128 helpers that write into a separate scratch buffer ──────
+// Returns the encoded bytes as []int for section size computation.
+
+let wasm_scratch = []
+
+func wscratch_reset() {
+    wasm_scratch = []
+}
+
+func wscratch_leb_u32(val) {
+    let v = val
+    while true {
+        const byte = v & 127
+        v = v >> 7
+        if v == 0 {
+            wasm_scratch.push(byte)
+            return null
+        }
+        wasm_scratch.push(byte + 128)
+    }
+}
+
+// Encode name bytes into wasm_scratch
+func wscratch_name(name) {
+    const bytes = wasm_str_bytes(name)
+    wscratch_leb_u32(len(bytes))
+    let i = 0
+    while i < len(bytes) {
+        wasm_scratch.push(bytes[i])
+        i = i + 1
+    }
+}
+
+// Convert string to ASCII byte array (basic chars only)
+func wasm_str_bytes(s) {
+    const result = []
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        // Use char code via a lookup
+        result.push(wasm_char_code(c))
+        i = i + 1
+    }
+    result
+}
+
+func wasm_char_code(c) {
+    if c == " "  { return 32 }
+    if c == "!"  { return 33 }
+    if c == "\"" { return 34 }
+    if c == "#"  { return 35 }
+    if c == "$"  { return 36 }
+    if c == "%"  { return 37 }
+    if c == "&"  { return 38 }
+    if c == "'"  { return 39 }
+    if c == "("  { return 40 }
+    if c == ")"  { return 41 }
+    if c == "*"  { return 42 }
+    if c == "+"  { return 43 }
+    if c == ","  { return 44 }
+    if c == "-"  { return 45 }
+    if c == "."  { return 46 }
+    if c == "/"  { return 47 }
+    if c == "0"  { return 48 }
+    if c == "1"  { return 49 }
+    if c == "2"  { return 50 }
+    if c == "3"  { return 51 }
+    if c == "4"  { return 52 }
+    if c == "5"  { return 53 }
+    if c == "6"  { return 54 }
+    if c == "7"  { return 55 }
+    if c == "8"  { return 56 }
+    if c == "9"  { return 57 }
+    if c == ":"  { return 58 }
+    if c == ";"  { return 59 }
+    if c == "<"  { return 60 }
+    if c == "="  { return 61 }
+    if c == ">"  { return 62 }
+    if c == "?"  { return 63 }
+    if c == "@"  { return 64 }
+    if c == "A"  { return 65 }
+    if c == "B"  { return 66 }
+    if c == "C"  { return 67 }
+    if c == "D"  { return 68 }
+    if c == "E"  { return 69 }
+    if c == "F"  { return 70 }
+    if c == "G"  { return 71 }
+    if c == "H"  { return 72 }
+    if c == "I"  { return 73 }
+    if c == "J"  { return 74 }
+    if c == "K"  { return 75 }
+    if c == "L"  { return 76 }
+    if c == "M"  { return 77 }
+    if c == "N"  { return 78 }
+    if c == "O"  { return 79 }
+    if c == "P"  { return 80 }
+    if c == "Q"  { return 81 }
+    if c == "R"  { return 82 }
+    if c == "S"  { return 83 }
+    if c == "T"  { return 84 }
+    if c == "U"  { return 85 }
+    if c == "V"  { return 86 }
+    if c == "W"  { return 87 }
+    if c == "X"  { return 88 }
+    if c == "Y"  { return 89 }
+    if c == "Z"  { return 90 }
+    if c == "["  { return 91 }
+    if c == "\\" { return 92 }
+    if c == "]"  { return 93 }
+    if c == "^"  { return 94 }
+    if c == "_"  { return 95 }
+    if c == "`"  { return 96 }
+    if c == "a"  { return 97 }
+    if c == "b"  { return 98 }
+    if c == "c"  { return 99 }
+    if c == "d"  { return 100 }
+    if c == "e"  { return 101 }
+    if c == "f"  { return 102 }
+    if c == "g"  { return 103 }
+    if c == "h"  { return 104 }
+    if c == "i"  { return 105 }
+    if c == "j"  { return 106 }
+    if c == "k"  { return 107 }
+    if c == "l"  { return 108 }
+    if c == "m"  { return 109 }
+    if c == "n"  { return 110 }
+    if c == "o"  { return 111 }
+    if c == "p"  { return 112 }
+    if c == "q"  { return 113 }
+    if c == "r"  { return 114 }
+    if c == "s"  { return 115 }
+    if c == "t"  { return 116 }
+    if c == "u"  { return 117 }
+    if c == "v"  { return 118 }
+    if c == "w"  { return 119 }
+    if c == "x"  { return 120 }
+    if c == "y"  { return 121 }
+    if c == "z"  { return 122 }
+    if c == "{"  { return 123 }
+    if c == "|"  { return 124 }
+    if c == "}"  { return 125 }
+    if c == "~"  { return 126 }
+    63  // '?' for unknown
+}
+
+// ── Section emission (writes directly to wasm_out) ────────────────
+// Strategy: build section payload into a snapshot, compute size, emit to wasm_out.
+
+// Marker: record start position in wasm_out, then later patch size
+// We use a two-pass approach: collect payload in wasm_scratch, then emit to wasm_out.
+
+func wasm_emit_section_from_scratch(section_id, count) {
+    // wasm_scratch contains the raw payload data (without count prefix)
+    // Emit: [section_id] [leb(count + payload_size)] [leb(count)] [payload]
+    const payload = wasm_scratch  // snapshot (value copy)
+    wscratch_reset()
+
+    // Build content = leb(count) ++ payload
+    const content = []
+    // encode count into content
+    let cv = count
+    while true {
+        const byte = cv & 127
+        cv = cv >> 7
+        if cv == 0 {
+            content.push(byte)
+            break
+        }
+        content.push(byte + 128)
+    }
+    let pi = 0
+    while pi < len(payload) {
+        content.push(payload[pi])
+        pi = pi + 1
+    }
+
+    // Emit to wasm_out: section_id, leb(len(content)), content
+    wasm_push(section_id)
+    let sv = len(content)
+    while true {
+        const byte = sv & 127
+        sv = sv >> 7
+        if sv == 0 {
+            wasm_push(byte)
+            break
+        }
+        wasm_push(byte + 128)
+    }
+    let ci = 0
+    while ci < len(content) {
+        wasm_push(content[ci])
+        ci = ci + 1
+    }
+}
+
+// ── IR → WASM Instruction Translation ────────────────────────────
+// Translates one IR instruction into WASM opcodes written to wasm_out.
+
+func wasm_translate_instr(instr) {
+    const d = instr.dump()
+
+    if d == "i64.add"    { wasm_push(0x7C); return null }
+    if d == "i64.sub"    { wasm_push(0x7D); return null }
+    if d == "i64.mul"    { wasm_push(0x7E); return null }
+    if d == "i64.div"    { wasm_push(0x7F); return null }
+    if d == "i64.rem"    { wasm_push(0x81); return null }
+    if d == "i64.eq"     { wasm_push(0x51); return null }
+    if d == "i64.ne"     { wasm_push(0x52); return null }
+    if d == "i64.lt"     { wasm_push(0x53); return null }
+    if d == "i64.gt"     { wasm_push(0x55); return null }
+    if d == "i64.le"     { wasm_push(0x57); return null }
+    if d == "i64.ge"     { wasm_push(0x59); return null }
+    if d == "bool.not"   { wasm_push(0x50); return null }  // i64.eqz
+    if d == "drop"       { wasm_push(0x1A); return null }
+    if d == "return"     { wasm_push(0x0F); return null }
+    if d == "else"       { wasm_push(0x05); return null }
+    if d == "end"        { wasm_push(0x0B); return null }
+    if d == "block"      { wasm_push(0x02); wasm_push(0x40); return null }
+    if d == "loop"       { wasm_push(0x03); wasm_push(0x40); return null }
+    if d == "if"         { wasm_push(0x04); wasm_push(0x7E); return null }
+    if d == "if_void"    { wasm_push(0x04); wasm_push(0x40); return null }
+    if d == "push_null"  { wasm_push(0x42); wasm_push(0x00); return null }
+    if d == "i64.neg"    { wasm_push(0x42); wasm_push(0x00); wasm_push(0x1B); return null }
+    if d == "string_concat" { wasm_push(0x01); return null }  // nop placeholder
+    if d == "array_get"     { wasm_push(0x01); return null }
+    if d == "print"      {
+        // call import 0 (env.print)
+        wasm_push(0x10); wasm_leb_u32(0)
+        return null
+    }
+
+    if d.starts_with("push_i64(") {
+        const n_str = d.slice(9, len(d) - 1)
+        const n = parse_int(n_str)
+        wasm_push(0x42)
+        wasm_leb_i64(n)
+        return null
+    }
+    if d.starts_with("push_bool(") {
+        const b_str = d.slice(10, len(d) - 1)
+        wasm_push(0x42)
+        if b_str == "true" { wasm_push(0x01) } else { wasm_push(0x00) }
+        return null
+    }
+    if d.starts_with("push_string(") {
+        const idx_str = d.slice(12, len(d) - 1)
+        const idx = parse_int(idx_str)
+        wasm_push(0x42)
+        wasm_leb_i64(idx)
+        return null
+    }
+    if d.starts_with("local_get(") {
+        const idx_str = d.slice(10, len(d) - 1)
+        const idx = parse_int(idx_str)
+        wasm_push(0x20)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("local_set(") {
+        const idx_str = d.slice(10, len(d) - 1)
+        const idx = parse_int(idx_str)
+        wasm_push(0x21)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("global_get(") {
+        const idx_str = d.slice(11, len(d) - 1)
+        const idx = parse_int(idx_str)
+        wasm_push(0x23)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("global_set(") {
+        const idx_str = d.slice(11, len(d) - 1)
+        const idx = parse_int(idx_str)
+        wasm_push(0x24)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("br(") {
+        const depth_str = d.slice(3, len(d) - 1)
+        const depth = parse_int(depth_str)
+        wasm_push(0x0C)
+        wasm_leb_u32(depth)
+        return null
+    }
+    if d.starts_with("br_if(") {
+        const depth_str = d.slice(6, len(d) - 1)
+        const depth = parse_int(depth_str)
+        wasm_push(0x0D)
+        wasm_leb_u32(depth)
+        return null
+    }
+    if d.starts_with("call(") {
+        // Stub: call func index 1
+        wasm_push(0x10); wasm_push(0x01)
+        return null
+    }
+    // fallback: nop
+    wasm_push(0x01)
+}
+
+// ── Build one WASM function body into wasm_scratch ────────────────
+
+func wasm_encode_func_to_scratch(ir_func) {
+    const instrs    = ir_func["instructions"]
+    const lc        = ir_func["local_count"]
+    const n         = ir_func["instruction_count"]
+
+    // Build function body into a temporary buffer via wasm_out snapshot trick:
+    // We save current wasm_out, emit body there, extract, restore.
+    const saved_out = wasm_out
+    wasm_out = []
+
+    // Locals descriptor
+    if lc > 0 {
+        wasm_leb_u32(1)        // 1 local group
+        wasm_leb_u32(lc)       // count
+        wasm_push(0x7E)        // i64
+    } else {
+        wasm_push(0x00)        // 0 local groups
+    }
+
+    // Instructions
+    let i = 0
+    while i < n {
+        wasm_translate_instr(instrs[i])
+        i = i + 1
+    }
+    wasm_push(0x0B)  // end
+
+    // The body is now in wasm_out
+    const body = wasm_out
+    wasm_out = saved_out
+
+    // Write size-prefixed body into wasm_scratch
+    let sv = len(body)
+    while true {
+        const byte = sv & 127
+        sv = sv >> 7
+        if sv == 0 {
+            wasm_scratch.push(byte)
+            break
+        }
+        wasm_scratch.push(byte + 128)
+    }
+    let bi = 0
+    while bi < len(body) {
+        wasm_scratch.push(body[bi])
+        bi = bi + 1
+    }
+}
+
+// ── compile_to_wasm ────────────────────────────────────────────────
+
+func compile_to_wasm(module) {
+    const functions = module["functions"]
+    const strings   = module["strings"]
+    const nfuncs    = len(functions)
+
+    // Reset output buffer
+    wasm_out = []
+
+    // ── 1. WASM magic + version ────────────────────────────────────
+    wasm_push(0); wasm_push(97); wasm_push(115); wasm_push(109)  // \0asm
+    wasm_push(1); wasm_push(0);  wasm_push(0);   wasm_push(0)    // version 1
+
+    // ── 2. Type section ──────────────────────────────────────────
+    // 3 types: print (i64)->(), main ()->(), binary (i64,i64)->i64
+    wscratch_reset()
+    // type 0: (i64) -> ()
+    wasm_scratch.push(0x60); wasm_scratch.push(0x01); wasm_scratch.push(0x7E); wasm_scratch.push(0x00)
+    // type 1: () -> ()
+    wasm_scratch.push(0x60); wasm_scratch.push(0x00); wasm_scratch.push(0x00)
+    // type 2: (i64, i64) -> i64
+    wasm_scratch.push(0x60); wasm_scratch.push(0x02); wasm_scratch.push(0x7E); wasm_scratch.push(0x7E)
+    wasm_scratch.push(0x01); wasm_scratch.push(0x7E)
+    wasm_emit_section_from_scratch(1, 3)
+
+    // ── 3. Import section ────────────────────────────────────────
+    // import "env"."print" : type 0
+    wscratch_reset()
+    // module name "env" (3 bytes)
+    wasm_scratch.push(3); wasm_scratch.push(101); wasm_scratch.push(110); wasm_scratch.push(118)
+    // field name "print" (5 bytes)
+    wasm_scratch.push(5)
+    wasm_scratch.push(112); wasm_scratch.push(114); wasm_scratch.push(105)
+    wasm_scratch.push(110); wasm_scratch.push(116)
+    wasm_scratch.push(0x00)  // func import
+    wasm_scratch.push(0x00)  // type index 0
+    wasm_emit_section_from_scratch(2, 1)
+
+    // ── 4. Function section ──────────────────────────────────────
+    wscratch_reset()
+    let fi = 0
+    while fi < nfuncs {
+        wasm_scratch.push(0x01)  // type index 1 (void func)
+        fi = fi + 1
+    }
+    wasm_emit_section_from_scratch(3, nfuncs)
+
+    // ── 5. Memory section ────────────────────────────────────────
+    wscratch_reset()
+    wasm_scratch.push(0x00)  // no max
+    wasm_scratch.push(0x01)  // min = 1 page
+    wasm_emit_section_from_scratch(5, 1)
+
+    // ── 6. Export section ────────────────────────────────────────
+    wscratch_reset()
+    // "memory" memory export
+    wasm_scratch.push(6)
+    wasm_scratch.push(109); wasm_scratch.push(101); wasm_scratch.push(109)
+    wasm_scratch.push(111); wasm_scratch.push(114); wasm_scratch.push(121)
+    wasm_scratch.push(0x02)  // memory
+    wasm_scratch.push(0x00)  // index 0
+    // "main" func export (func index 1 = after 1 import)
+    wasm_scratch.push(4)
+    wasm_scratch.push(109); wasm_scratch.push(97); wasm_scratch.push(105); wasm_scratch.push(110)
+    wasm_scratch.push(0x00)  // func
+    wasm_scratch.push(0x01)  // index 1
+    wasm_emit_section_from_scratch(7, 2)
+
+    // ── 7. Code section ──────────────────────────────────────────
+    wscratch_reset()
+    let ci = 0
+    while ci < nfuncs {
+        wasm_encode_func_to_scratch(functions[ci])
+        ci = ci + 1
+    }
+    wasm_emit_section_from_scratch(10, nfuncs)
+
+    // ── 8. Data section (string pool) ────────────────────────────
+    if len(strings) > 0 {
+        wscratch_reset()
+        wasm_scratch.push(0x00)   // active, memory 0
+        wasm_scratch.push(0x41)   // i32.const
+        wasm_scratch.push(0x00)   // offset 0
+        wasm_scratch.push(0x0B)   // end
+
+        // Collect all string bytes
+        const str_bytes = []
+        let si = 0
+        while si < len(strings) {
+            const sb = wasm_str_bytes(strings[si])
+            let sbi = 0
+            while sbi < len(sb) {
+                str_bytes.push(sb[sbi])
+                sbi = sbi + 1
+            }
+            str_bytes.push(0)  // null terminator
+            si = si + 1
+        }
+        // leb(len(str_bytes)) + str_bytes
+        let slv = len(str_bytes)
+        while true {
+            const byte = slv & 127
+            slv = slv >> 7
+            if slv == 0 { wasm_scratch.push(byte); break }
+            wasm_scratch.push(byte + 128)
+        }
+        let sdi = 0
+        while sdi < len(str_bytes) {
+            wasm_scratch.push(str_bytes[sdi])
+            sdi = sdi + 1
+        }
+        wasm_emit_section_from_scratch(11, 1)
+    }
+
+    // Return snapshot of wasm_out
+    const result = wasm_out
+    wasm_out = []
+    result
+}
