@@ -7401,7 +7401,7 @@ fn main() {
     // recursion in the interpreter (debug builds use far more stack per frame).
     let builder = std::thread::Builder::new()
         .name("magi-main".to_string())
-        .stack_size(32 * 1024 * 1024); // 32 MB
+        .stack_size(64 * 1024 * 1024); // 64 MB (increased for self-hosted parser tests)
     let handler = builder
         .spawn(main_inner)
         .expect("failed to spawn main thread");

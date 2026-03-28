@@ -1,0 +1,498 @@
+// MAGI Self-Hosted Compiler — Step-Through Debugger
+//
+// Provides interactive debugging of MAGI programs:
+//   - Set/remove breakpoints by line number
+//   - Step, next, continue commands
+//   - Variable inspection at current scope
+//   - Stack trace display
+//   - Expression evaluation in debug context
+//
+// Uses the self-hosted interpreter's scope stack for variable inspection.
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Helpers ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func pad_left(s, width) {
+    let result = s
+    while len(result) < width {
+        result = " " + result
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Debugger State ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_breakpoints = {"__s": true}  // line_number -> true
+let dbg_step_mode = true
+let dbg_running = true
+let dbg_source_lines = []
+let dbg_current_line = 0
+let dbg_call_stack = []  // stack of {"name": fn_name, "line": line}
+let dbg_watch_exprs = []  // list of expression strings to evaluate each step
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Breakpoint Management ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_set_breakpoint(line) {
+    dbg_breakpoints[to_string(line)] = true
+    println(f"Breakpoint set at line {line}")
+}
+
+func dbg_remove_breakpoint(line) {
+    const key = to_string(line)
+    if dbg_breakpoints.has(key) {
+        dbg_breakpoints[key] = false
+        println(f"Breakpoint removed at line {line}")
+    } else {
+        println(f"No breakpoint at line {line}")
+    }
+}
+
+func dbg_has_breakpoint(line) {
+    const key = to_string(line)
+    dbg_breakpoints.has(key) && dbg_breakpoints[key] == true
+}
+
+func dbg_list_breakpoints() {
+    let bps = []
+    for key in keys(dbg_breakpoints) {
+        if key == "__s" { continue }
+        if dbg_breakpoints[key] == true {
+            bps.push(to_int(key))
+        }
+    }
+    if len(bps) == 0 {
+        println("No breakpoints set.")
+    } else {
+        bps = sort(bps)
+        println("Breakpoints: " + bps.join(", "))
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Source Display ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_show_context(line, context_lines) {
+    const total = len(dbg_source_lines)
+    const start = max(0, line - context_lines)
+    const end_line = min(total, line + context_lines + 1)
+
+    let i = start
+    while i < end_line {
+        const marker = if i + 1 == line { ">>>" } else { "   " }
+        const bp_marker = if dbg_has_breakpoint(i + 1) { "*" } else { " " }
+        const line_text = if i < total { dbg_source_lines[i] } else { "" }
+        const line_num = to_string(i + 1)
+        const padded = pad_left(line_num, 4)
+        println(marker + bp_marker + padded + " | " + line_text)
+        i = i + 1
+    }
+}
+
+func dbg_show_current() {
+    dbg_show_context(dbg_current_line, 2)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Variable Inspection ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_show_locals() {
+    // Read from the interpreter's scope stack
+    if len(i_scopes) == 0 {
+        println("No active scope.")
+        return
+    }
+    const current_scope = i_scopes[len(i_scopes) - 1]
+    let count = 0
+    for name in keys(current_scope) {
+        if name == "__s" { continue }
+        const val = current_scope[name]
+        println(f"  {name} = {val}")
+        count = count + 1
+    }
+    if count == 0 {
+        println("  (no local variables)")
+    }
+}
+
+func dbg_show_all_vars() {
+    // Show variables from all scopes (innermost first)
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        const scope = i_scopes[scope_idx]
+        const label = if scope_idx == 0 { "global" } else { f"scope {scope_idx}" }
+        println(f"[{label}]")
+        for name in keys(scope) {
+            if name == "__s" { continue }
+            const val = scope[name]
+            println(f"  {name} = {val}")
+        }
+        scope_idx = scope_idx - 1
+    }
+}
+
+func dbg_inspect_var(name) {
+    // Search scopes from innermost to outermost
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        const scope = i_scopes[scope_idx]
+        if scope.has(name) {
+            const val = scope[name]
+            const t = typeof(val)
+            println(f"  {name}: {t} = {val}")
+            return
+        }
+        scope_idx = scope_idx - 1
+    }
+    println("  Variable " + name + " not found in any scope.")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Stack Trace ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_push_frame(name, line) {
+    dbg_call_stack.push({"name": name, "line": line})
+}
+
+func dbg_pop_frame() {
+    if len(dbg_call_stack) > 0 {
+        dbg_call_stack = dbg_call_stack[0..len(dbg_call_stack) - 1]
+    }
+}
+
+func dbg_show_stack_trace() {
+    if len(dbg_call_stack) == 0 {
+        println("  <top-level>")
+        return
+    }
+    println("Stack trace (most recent first):")
+    let i = len(dbg_call_stack) - 1
+    while i >= 0 {
+        const frame = dbg_call_stack[i]
+        println("  #" + to_string(len(dbg_call_stack) - i) + " " + frame["name"] + " at line " + to_string(frame["line"]))
+        i = i - 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Watch Expressions ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_add_watch(expr) {
+    dbg_watch_exprs.push(expr)
+    println(f"Watch added: {expr}")
+}
+
+func dbg_remove_watch(index) {
+    if index >= 0 && index < len(dbg_watch_exprs) {
+        const removed = dbg_watch_exprs[index]
+        let new_watches = []
+        let i = 0
+        while i < len(dbg_watch_exprs) {
+            if i != index {
+                new_watches.push(dbg_watch_exprs[i])
+            }
+            i = i + 1
+        }
+        dbg_watch_exprs = new_watches
+        println(f"Watch removed: {removed}")
+    } else {
+        println(f"Invalid watch index: {index}")
+    }
+}
+
+func dbg_show_watches() {
+    if len(dbg_watch_exprs) == 0 {
+        return
+    }
+    println("Watches:")
+    let i = 0
+    for expr in dbg_watch_exprs {
+        // Try to look up simple variable names
+        let val = "<cannot evaluate>"
+        let scope_idx = len(i_scopes) - 1
+        while scope_idx >= 0 {
+            if i_scopes[scope_idx].has(expr) {
+                val = to_string(i_scopes[scope_idx][expr])
+                break
+            }
+            scope_idx = scope_idx - 1
+        }
+        println(f"  [{i}] {expr} = {val}")
+        i = i + 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Debug Command Processing ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_process_command(cmd) {
+    const trimmed = cmd.trim()
+    if trimmed == "" || trimmed == "s" || trimmed == "step" || trimmed == "n" || trimmed == "next" {
+        dbg_step_mode = true
+        return "step"
+    }
+    if trimmed == "c" || trimmed == "continue" {
+        dbg_step_mode = false
+        return "continue"
+    }
+    if trimmed == "q" || trimmed == "quit" {
+        dbg_running = false
+        return "quit"
+    }
+    if trimmed == "h" || trimmed == "help" {
+        dbg_print_help()
+        return "help"
+    }
+    if trimmed == "w" || trimmed == "where" {
+        dbg_show_current()
+        return "where"
+    }
+    if trimmed == "l" || trimmed == "locals" {
+        dbg_show_locals()
+        return "locals"
+    }
+    if trimmed == "a" || trimmed == "all" {
+        dbg_show_all_vars()
+        return "all"
+    }
+    if trimmed == "bt" || trimmed == "backtrace" {
+        dbg_show_stack_trace()
+        return "backtrace"
+    }
+    if trimmed == "bl" || trimmed == "breakpoints" {
+        dbg_list_breakpoints()
+        return "breakpoints"
+    }
+    if trimmed == "watches" {
+        dbg_show_watches()
+        return "watches"
+    }
+    // b <N> — set breakpoint
+    if trimmed.starts_with("b ") {
+        const num_str = trimmed[2..len(trimmed)].trim()
+        const line_num = to_int(num_str)
+        if line_num > 0 {
+            dbg_set_breakpoint(line_num)
+        } else {
+            println(f"Invalid line number: {num_str}")
+        }
+        return "breakpoint"
+    }
+    // d <N> — delete breakpoint
+    if trimmed.starts_with("d ") {
+        const num_str = trimmed[2..len(trimmed)].trim()
+        const line_num = to_int(num_str)
+        if line_num > 0 {
+            dbg_remove_breakpoint(line_num)
+        }
+        return "delete"
+    }
+    // p <name> — print variable
+    if trimmed.starts_with("p ") {
+        const var_name = trimmed[2..len(trimmed)].trim()
+        dbg_inspect_var(var_name)
+        return "print"
+    }
+    // watch <expr> — add watch expression
+    if trimmed.starts_with("watch ") {
+        const expr = trimmed[6..len(trimmed)].trim()
+        dbg_add_watch(expr)
+        return "watch"
+    }
+    // unwatch <N> — remove watch by index
+    if trimmed.starts_with("unwatch ") {
+        const idx_str = trimmed[8..len(trimmed)].trim()
+        dbg_remove_watch(to_int(idx_str))
+        return "unwatch"
+    }
+    // ctx <N> — show context with N lines
+    if trimmed.starts_with("ctx ") {
+        const n_str = trimmed[4..len(trimmed)].trim()
+        const n = to_int(n_str)
+        if n > 0 {
+            dbg_show_context(dbg_current_line, n)
+        }
+        return "ctx"
+    }
+
+    println("Unknown command: " + trimmed + ". Type h for help.")
+    "unknown"
+}
+
+func dbg_print_help() {
+    println("MAGI Debugger Commands:")
+    println("  s/step/n/next     Step one statement")
+    println("  c/continue        Continue to next breakpoint")
+    println("  q/quit            Quit debugger")
+    println("  w/where           Show current location")
+    println("  l/locals          Show local variables")
+    println("  a/all             Show all variables (all scopes)")
+    println("  bt/backtrace      Show stack trace")
+    println("  b <N>             Set breakpoint at line N")
+    println("  d <N>             Delete breakpoint at line N")
+    println("  bl/breakpoints    List all breakpoints")
+    println("  p <name>          Print variable value")
+    println("  watch <expr>      Add watch expression")
+    println("  unwatch <N>       Remove watch by index")
+    println("  watches           Show all watch expressions")
+    println("  ctx <N>           Show N lines of context")
+    println("  h/help            Show this help")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Debug Prompt Loop ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_prompt() {
+    dbg_show_current()
+    dbg_show_watches()
+
+    while true {
+        print("(dbg) ")
+        const line = input()
+        if line == null {
+            dbg_running = false
+            return "quit"
+        }
+        const action = dbg_process_command(line)
+        if action == "step" || action == "continue" || action == "quit" {
+            return action
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Statement Classification ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_is_definition(stmt) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SFuncDef(_) => true,
+        StmtKind::SAsyncFuncDef(_) => true,
+        StmtKind::SEnumDef(_, _, _) => true,
+        StmtKind::SStructDef(_, _, _) => true,
+        StmtKind::SInterfaceDef(_, _, _) => true,
+        StmtKind::SImplBlock(_, _) => true,
+        StmtKind::SImplTrait(_, _, _) => true,
+        StmtKind::SModuleDef(_, _) => true,
+        _ => false
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Main Debug Entry Point ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func debug_run(source) {
+    // Reset state
+    dbg_breakpoints = {"__s": true}
+    dbg_step_mode = true
+    dbg_running = true
+    dbg_call_stack = []
+    dbg_watch_exprs = []
+
+    // Parse source
+    const program = parse(source)
+    if program == null {
+        println("Parse error — cannot debug.")
+        return null
+    }
+
+    dbg_source_lines = source.split("\n")
+
+    println("MAGI Debugger")
+    println("Type 'h' for help. Stepping through program.")
+    println("")
+
+    // Reset interpreter state
+    i_scopes = [i_new_scope()]
+
+    // Pass 1: register definitions
+    for stmt in program.statements {
+        if dbg_is_definition(stmt) {
+            eval_stmt(stmt)
+        }
+    }
+
+    // Pass 2: execute with debug control
+    for stmt in program.statements {
+        if !dbg_running { break }
+
+        // Skip definitions (already registered)
+        if dbg_is_definition(stmt) { continue }
+
+        const line = stmt.span.start_line
+        dbg_current_line = line
+
+        // Check if we should break here
+        if dbg_step_mode || dbg_has_breakpoint(line) {
+            const action = dbg_prompt()
+            if action == "quit" { break }
+        }
+
+        // Execute the statement
+        const result = eval_stmt(stmt)
+
+        // Check for signals
+        if is_signal(result) {
+            if is_return(result) {
+                println(f"Return value: {signal_value(result)}")
+            }
+        }
+    }
+
+    println("Program finished.")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Debug a Source File ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func debug_source(source) {
+    debug_run(source)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Conditional Breakpoints (future extension) ──────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_conditional_breakpoints = {"__s": true}  // line -> condition_expr_string
+
+func dbg_set_conditional_breakpoint(line, condition) {
+    dbg_breakpoints[to_string(line)] = true
+    dbg_conditional_breakpoints[to_string(line)] = condition
+    println(f"Conditional breakpoint at line {line}: {condition}")
+}
+
+func dbg_should_break(line) {
+    if !dbg_has_breakpoint(line) { return false }
+    const key = to_string(line)
+    if dbg_conditional_breakpoints.has(key) {
+        const condition = dbg_conditional_breakpoints[key]
+        // Try to evaluate the condition as a variable name
+        let scope_idx = len(i_scopes) - 1
+        while scope_idx >= 0 {
+            if i_scopes[scope_idx].has(condition) {
+                const val = i_scopes[scope_idx][condition]
+                // Truthy check
+                if val == false || val == null || val == 0 {
+                    return false
+                }
+                return true
+            }
+            scope_idx = scope_idx - 1
+        }
+        return true  // condition not evaluable, break anyway
+    }
+    true
+}

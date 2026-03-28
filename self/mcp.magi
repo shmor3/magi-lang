@@ -1,0 +1,290 @@
+// MAGI Self-Hosted Compiler — MCP Server (Model Context Protocol)
+//
+// Exposes 7 MAGI tools over JSON-RPC 2.0 stdio transport:
+//   magi_run, magi_check, magi_format, magi_lint,
+//   magi_parse, magi_stdlib, magi_version
+//
+// Each tool calls the corresponding pipeline function from cli.magi.
+// Protocol: MCP 2024-11-05 (same as src/mcp.rs)
+
+// ══════════════════════════════════════════════════════════════════════
+// ── MCP Protocol Constants ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const MCP_PROTOCOL_VERSION = "2024-11-05"
+const MCP_SERVER_NAME = "magi-mcp-self"
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Tool Definitions ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func mcp_tool_def(name, description, params) {
+    const schema = {"type": "object"}
+    if len(params) > 0 {
+        let props = {"__s": true}
+        for p in params {
+            props[p["name"]] = {
+                "type": p["type"],
+                "description": p["description"]
+            }
+        }
+        schema["properties"] = props
+    }
+    {
+        "name": name,
+        "description": description,
+        "inputSchema": schema
+    }
+}
+
+func mcp_param(name, typ, description) {
+    {"name": name, "type": typ, "description": description}
+}
+
+func mcp_tool_definitions() {
+    [
+        mcp_tool_def("magi_run", "Execute MAGI source code and return output", [
+            mcp_param("code", "string", "MAGI source code")
+        ]),
+        mcp_tool_def("magi_check", "Type-check MAGI source and return diagnostics", [
+            mcp_param("code", "string", "MAGI source code")
+        ]),
+        mcp_tool_def("magi_format", "Format MAGI source code", [
+            mcp_param("code", "string", "MAGI source code")
+        ]),
+        mcp_tool_def("magi_lint", "Lint MAGI source and return warnings", [
+            mcp_param("code", "string", "MAGI source code")
+        ]),
+        mcp_tool_def("magi_parse", "Parse MAGI source and return AST summary", [
+            mcp_param("code", "string", "MAGI source code")
+        ]),
+        mcp_tool_def("magi_stdlib", "List stdlib modules and functions", [
+            mcp_param("module", "string", "Module name (optional)")
+        ]),
+        mcp_tool_def("magi_version", "Return MAGI version info", [])
+    ]
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Tool Result Helpers ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func mcp_text_result(text) {
+    {
+        "content": [{
+            "type": "text",
+            "text": text
+        }]
+    }
+}
+
+func mcp_error_result(message) {
+    {
+        "content": [{
+            "type": "text",
+            "text": message
+        }],
+        "isError": true
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Tool Implementations ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func mcp_tool_run(arguments) {
+    const code = if arguments.has("code") { arguments["code"] } else { "" }
+    if code == "" { return mcp_error_result("Missing 'code' argument") }
+
+    // Parse and run
+    const program = parse(code)
+    if program == null { return mcp_error_result("Parse error") }
+
+    const check_result = check(program)
+    const errors = check_result[0]
+    if len(errors) > 0 {
+        return mcp_error_result("Type errors:\n" + errors.join("\n"))
+    }
+
+    // Interpret
+    const optimized = optimize(program)
+    const result = eval_program(optimized)
+    mcp_text_result(to_string(result))
+}
+
+func mcp_tool_check(arguments) {
+    const code = if arguments.has("code") { arguments["code"] } else { "" }
+    if code == "" { return mcp_error_result("Missing 'code' argument") }
+
+    const program = parse(code)
+    if program == null { return mcp_error_result("Parse error") }
+
+    const check_result = check(program)
+    const errors = check_result[0]
+    const warnings = check_result[1]
+
+    if len(errors) == 0 && len(warnings) == 0 {
+        return mcp_text_result("No issues found.")
+    }
+
+    let out_text = ""
+    for err in errors {
+        out_text = out_text + f"error: {err}\n"
+    }
+    for w in warnings {
+        out_text = out_text + f"warning: {w}\n"
+    }
+    mcp_text_result(out_text)
+}
+
+func mcp_tool_format(arguments) {
+    const code = if arguments.has("code") { arguments["code"] } else { "" }
+    if code == "" { return mcp_error_result("Missing 'code' argument") }
+
+    const program = parse(code)
+    if program == null { return mcp_error_result("Parse error") }
+
+    const formatted = format_program(program)
+    mcp_text_result(formatted)
+}
+
+func mcp_tool_lint(arguments) {
+    const code = if arguments.has("code") { arguments["code"] } else { "" }
+    if code == "" { return mcp_error_result("Missing 'code' argument") }
+
+    const program = parse(code)
+    if program == null { return mcp_error_result("Parse error") }
+
+    const warnings = lint(program)
+    if len(warnings) == 0 {
+        return mcp_text_result("No warnings.")
+    }
+    mcp_text_result(warnings.join("\n"))
+}
+
+func mcp_tool_parse(arguments) {
+    const code = if arguments.has("code") { arguments["code"] } else { "" }
+    if code == "" { return mcp_error_result("Missing 'code' argument") }
+
+    const program = parse(code)
+    if program == null { return mcp_error_result("Parse error") }
+
+    let summary = f"{len(program.statements)} statements\n"
+    for stmt in program.statements {
+        const sl = stmt.span.start_line
+        const sk = stmt.kind
+        let kind_str = "stmt"
+        match sk {
+            StmtKind::SFuncDef(fdef) => { kind_str = "fn " + fdef.name },
+            StmtKind::SStructDef(sname, _, _) => { kind_str = "struct " + sname },
+            StmtKind::SEnumDef(ename, _, _) => { kind_str = "enum " + ename },
+            StmtKind::SInterfaceDef(tname, _, _) => { kind_str = "trait " + tname },
+            StmtKind::SImplBlock(iname, _) => { kind_str = "impl " + iname },
+            StmtKind::SLet(lname, _) => { kind_str = "let " + lname },
+            StmtKind::SConst(cname, _) => { kind_str = "const " + cname },
+            StmtKind::SImport(path) => { kind_str = "import " + path },
+            _ => {}
+        }
+        summary = summary + f"  line {sl}: {kind_str}\n"
+    }
+    mcp_text_result(summary)
+}
+
+func mcp_tool_stdlib(arguments) {
+    const module = if arguments.has("module") { arguments["module"] } else { "" }
+    if module == "" {
+        return mcp_text_result(to_string(len(KNOWN_STDLIB_MODULES)) + " modules: " + KNOWN_STDLIB_MODULES.join(", "))
+    }
+    if KNOWN_STDLIB_MODULES.contains(module) {
+        mcp_text_result("Module " + module + " is available in the MAGI standard library.")
+    } else {
+        mcp_text_result("Module " + module + " not found.")
+    }
+}
+
+func mcp_tool_version() {
+    mcp_text_result(f"MAGI v{VERSION} (self-hosted)")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── MCP Request Handlers ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func mcp_handle_initialize(id) {
+    jsonrpc_result(id, {
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "capabilities": {
+            "tools": {"__s": true}
+        },
+        "serverInfo": {
+            "name": MCP_SERVER_NAME,
+            "version": VERSION
+        }
+    })
+}
+
+func mcp_handle_tools_list(id) {
+    jsonrpc_result(id, {
+        "tools": mcp_tool_definitions()
+    })
+}
+
+func mcp_handle_tools_call(id, params) {
+    const tool_name = if params.has("name") { params["name"] } else { "" }
+    const arguments = if params.has("arguments") { params["arguments"] } else { {"__s": true} }
+
+    const result = match tool_name {
+        "magi_run" => mcp_tool_run(arguments),
+        "magi_check" => mcp_tool_check(arguments),
+        "magi_format" => mcp_tool_format(arguments),
+        "magi_lint" => mcp_tool_lint(arguments),
+        "magi_parse" => mcp_tool_parse(arguments),
+        "magi_stdlib" => mcp_tool_stdlib(arguments),
+        "magi_version" => mcp_tool_version(),
+        _ => mcp_error_result(f"Unknown tool: {tool_name}")
+    }
+
+    jsonrpc_result(id, result)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── MCP Server Loop ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func run_mcp_server() {
+    let running = true
+    while running {
+        const request = read_message()
+        if request == null { break }
+
+        const method = if request.has("method") { request["method"] } else { null }
+        const id = if request.has("id") { request["id"] } else { null }
+        const params = if request.has("params") { request["params"] } else { null }
+
+        if method == null { continue }
+
+        const response = match method {
+            "initialize" => mcp_handle_initialize(id),
+            "initialized" => { continue },
+            "tools/list" => mcp_handle_tools_list(id),
+            "tools/call" => mcp_handle_tools_call(id, params),
+            "shutdown" => {
+                running = false
+                jsonrpc_result(id, null)
+            },
+            _ => jsonrpc_error(id, -32601, f"Method not found: {method}")
+        }
+
+        write_message(response)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── MCP Tool Count ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const MCP_TOOL_COUNT = 7
+const MCP_TOOLS = [
+    "magi_run", "magi_check", "magi_format", "magi_lint",
+    "magi_parse", "magi_stdlib", "magi_version"
+]

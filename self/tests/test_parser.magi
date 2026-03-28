@@ -318,8 +318,242 @@ func test_parse_enum_construct() {
     println("PASS: parse enum construct")
 }
 
+// ── New Construct Tests ──────────────────────────────────────────
+
+func test_parse_list_comprehension() {
+    const src = "[x * 2 for x in arr]"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse list comprehension")
+}
+
+func test_parse_list_comp_with_filter() {
+    const src = "[x for x in arr if x > 0]"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse list comp with filter")
+}
+
+func test_parse_spread_array() {
+    const src = "const a = [...arr, 4, 5]"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse spread in array")
+}
+
+func test_parse_spread_struct() {
+    const src = "const c = Config { ...default_val, port: 443 }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse spread in struct")
+}
+
+func test_parse_optional_chaining() {
+    const src = "const v = obj?.field"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse optional chaining")
+}
+
+func test_parse_null_coalesce() {
+    const src = "const v = x ?? 42"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse null coalesce")
+}
+
+func test_parse_fstring() {
+    const src = "const s = f\"hello {name}\""
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse f-string")
+}
+
+func test_parse_async_func() {
+    const src = "async func fetch_data() { await get_url() }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "async func")
+    println("PASS: parse async func")
+}
+
+func test_parse_spawn_expr() {
+    const src = "const t = spawn compute()"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse spawn expr")
+}
+
+func test_parse_await_expr() {
+    const src = "const r = await task"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse await expr")
+}
+
+func test_parse_tuple_literal() {
+    const src = "const t = (1, 2, 3)"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse tuple literal")
+}
+
+func test_parse_try_propagate() {
+    const src = "const v = result?"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse try propagate")
+}
+
+func test_parse_pipe() {
+    const src = "const r = data |> sort"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse pipe")
+}
+
+func test_parse_type_annotation_params() {
+    const src = "func add(a: int, b: int) -> int { a + b }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse type annotation params")
+}
+
+func test_parse_generics() {
+    const src = "func max_val<T>(a: T, b: T) -> T { if a > b { a } else { b } }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse generics")
+}
+
+func test_parse_defer() {
+    const src = "defer close(file)"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "defer")
+    println("PASS: parse defer")
+}
+
+func test_parse_import_multi() {
+    const src = "import std.{fs, json}"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "import module")
+    println("PASS: parse import multi")
+}
+
+func test_parse_import_alias() {
+    const src = "import std.math as m"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "import module")
+    println("PASS: parse import alias")
+}
+
+func test_parse_type_alias() {
+    const src = "type ID = int"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "type ID")
+    println("PASS: parse type alias")
+}
+
+func test_parse_destructure_array() {
+    const src = "const [a, b] = pair"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "let destructure")
+    println("PASS: parse destructure array")
+}
+
+func test_parse_destructure_map() {
+    const src = "const {name, age} = obj"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "let destructure")
+    println("PASS: parse destructure map")
+}
+
+func test_parse_tuple_destructure() {
+    const src = "let x, y = get_point()"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "let destructure")
+    println("PASS: parse tuple destructure")
+}
+
+func test_parse_multi_return() {
+    const src = "return a, b"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse multi return")
+}
+
+func test_parse_enum_iota() {
+    const src = "enum Dir { N = 0, E, S, W }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "enum Dir")
+    println("PASS: parse enum iota")
+}
+
+func test_parse_interface() {
+    const src = "interface Shape { func area(self) -> float }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "interface Shape")
+    println("PASS: parse interface")
+}
+
+func test_parse_impl_block() {
+    const src = "impl Point { func new(x: int) { Point { x: x } } }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "impl Point")
+    println("PASS: parse impl block")
+}
+
+func test_parse_throw() {
+    const src = "throw Error { msg: \"fail\" }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "throw")
+    println("PASS: parse throw")
+}
+
+func test_parse_try_catch() {
+    const src = "try { risky() } catch e { handle(e) }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "try-catch")
+    println("PASS: parse try-catch")
+}
+
+func test_parse_attribute() {
+    const src = "#[deprecated] func old_api() { 42 }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse attribute")
+}
+
+func test_parse_for_destructure() {
+    const src = "for [k, v] in entries { println(k) }"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    println("PASS: parse for destructure")
+}
+
+func test_parse_do_while() {
+    const src = "do { x = x + 1 } while x < 10"
+    const prog = parse(src)
+    assert(len(prog.statements) == 1)
+    assert(desc_sk(prog.statements[0]) == "do-while")
+    println("PASS: parse do-while")
+}
+
 // ── Run All Tests ─────────────────────────────────────────────────
 
+// Original tests
 test_parse_const()
 test_parse_let()
 test_parse_const_string()
@@ -363,5 +597,38 @@ test_parse_multi_statement()
 test_parse_realistic_function()
 test_parse_struct_construct()
 test_parse_enum_construct()
+
+// New construct tests (31 tests)
+test_parse_list_comprehension()
+test_parse_list_comp_with_filter()
+test_parse_spread_array()
+test_parse_spread_struct()
+test_parse_optional_chaining()
+test_parse_null_coalesce()
+test_parse_fstring()
+test_parse_async_func()
+test_parse_spawn_expr()
+test_parse_await_expr()
+test_parse_tuple_literal()
+test_parse_try_propagate()
+test_parse_pipe()
+test_parse_type_annotation_params()
+test_parse_generics()
+test_parse_defer()
+test_parse_import_multi()
+test_parse_import_alias()
+test_parse_type_alias()
+test_parse_destructure_array()
+test_parse_destructure_map()
+test_parse_tuple_destructure()
+test_parse_multi_return()
+test_parse_enum_iota()
+test_parse_interface()
+test_parse_impl_block()
+test_parse_throw()
+test_parse_try_catch()
+test_parse_attribute()
+test_parse_for_destructure()
+test_parse_do_while()
 
 println("\nAll parser tests passed!")

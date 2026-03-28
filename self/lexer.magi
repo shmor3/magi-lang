@@ -9,6 +9,7 @@ enum TokenKind {
     Const, Let, Func, Struct, Enum, Interface, Type, Import,
     If, Else, For, In, While, Match, Select,
     Break, Continue, Return, Defer, Spawn, Await, Async,
+    Do, Throw, Try, Test, Impl, Loop, Yield, As,
     True, False, Null,
     IntLit, FloatLit, StringLit, FStringStart, Ident,
     Plus, Minus, Star, Slash, Percent, StarStar,
@@ -17,7 +18,7 @@ enum TokenKind {
     Amp, Caret, Shl, Shr,
     Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
     Pipe, Arrow, FatArrow,
-    QuestionQuestion, QuestionDot,
+    QuestionQuestion, QuestionDot, Question,
     DotDot, DotDotEq, DotDotDot,
     LParen, RParen, LBracket, RBracket, LBrace, RBrace,
     Colon, ColonColon, Semicolon, Comma, Dot, Hash,
@@ -49,6 +50,10 @@ func keyword_lookup(word) {
         "return" => TokenKind::Return, "defer" => TokenKind::Defer,
         "spawn" => TokenKind::Spawn, "await" => TokenKind::Await,
         "async" => TokenKind::Async,
+        "do" => TokenKind::Do, "throw" => TokenKind::Throw,
+        "try" => TokenKind::Try, "test" => TokenKind::Test,
+        "impl" => TokenKind::Impl, "loop" => TokenKind::Loop,
+        "yield" => TokenKind::Yield, "as" => TokenKind::As,
         "true" => TokenKind::True, "false" => TokenKind::False,
         "null" => TokenKind::Null,
         _ => null,
@@ -215,7 +220,7 @@ func tokenize(source) {
                    else { Token { kind: TokenKind::Percent, text: "%", line: start_line, col: start_col } },
             "?" => if next == "?" { pos = pos + 1; col = col + 1; Token { kind: TokenKind::QuestionQuestion, text: "??", line: start_line, col: start_col } }
                    else if next == "." { pos = pos + 1; col = col + 1; Token { kind: TokenKind::QuestionDot, text: "?.", line: start_line, col: start_col } }
-                   else { Token { kind: TokenKind::Ident, text: "?", line: start_line, col: start_col } },
+                   else { Token { kind: TokenKind::Question, text: "?", line: start_line, col: start_col } },
             "." => if next == "." {
                 pos = pos + 1; col = col + 1
                 const next2 = if pos < len(source) { source[pos] } else { null }

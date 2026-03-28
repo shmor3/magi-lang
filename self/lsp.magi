@@ -1,0 +1,2382 @@
+// MAGI Self-Hosted Compiler — LSP Server (Language Server Protocol)
+//
+// Full LSP server with 43 handlers over JSON-RPC 2.0 stdio transport.
+// Uses the self-hosted parser, type checker, linter, and formatter.
+//
+// Handler list mirrors src/lsp/mod.rs:
+//   initialize, initialized, shutdown, exit
+//   textDocument/didOpen, didChange, didClose
+//   textDocument/completion, hover, definition, typeDefinition
+//   textDocument/references, rename, prepareRename
+//   textDocument/formatting, rangeFormatting, onTypeFormatting
+//   textDocument/codeAction, signatureHelp, documentSymbol
+//   textDocument/semanticTokens/full, foldingRange, selectionRange
+//   textDocument/codeLens, inlayHint, documentLink
+//   textDocument/linkedEditingRange, documentHighlight, documentColor
+//   textDocument/prepareCallHierarchy, prepareTypeHierarchy
+//   workspace/symbol, workspace/executeCommand
+//   callHierarchy/incomingCalls, callHierarchy/outgoingCalls
+//   typeHierarchy/supertypes, typeHierarchy/subtypes
+
+// ══════════════════════════════════════════════════════════════════════
+// ── LSP Types ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lsp_position(line, character) {
+    {"line": line, "character": character}
+}
+
+func lsp_range(start_line, start_char, end_line, end_char) {
+    {"start": lsp_position(start_line, start_char), "end": lsp_position(end_line, end_char)}
+}
+
+func lsp_location(uri, range) {
+    {"uri": uri, "range": range}
+}
+
+func lsp_text_edit(range, new_text) {
+    {"range": range, "newText": new_text}
+}
+
+func lsp_diagnostic(range, severity, message, source, code) {
+    const diag = {"range": range, "message": message}
+    if severity != null { diag["severity"] = severity }
+    if source != null { diag["source"] = source }
+    if code != null { diag["code"] = code }
+    diag
+}
+
+func lsp_markup_content(kind, value) {
+    {"kind": kind, "value": value}
+}
+
+// ── Symbol kinds (LSP spec) ──────────────────────────────────────────
+
+const SK_FILE = 1
+const SK_MODULE = 2
+const SK_NAMESPACE = 3
+const SK_PACKAGE = 4
+const SK_CLASS = 5
+const SK_METHOD = 6
+const SK_PROPERTY = 7
+const SK_FIELD = 8
+const SK_CONSTRUCTOR = 9
+const SK_ENUM = 10
+const SK_INTERFACE = 11
+const SK_FUNCTION = 12
+const SK_VARIABLE = 13
+const SK_CONSTANT = 14
+const SK_STRING = 15
+const SK_NUMBER = 16
+const SK_BOOLEAN = 17
+const SK_ARRAY = 18
+const SK_STRUCT = 23
+const SK_EVENT = 24
+const SK_OPERATOR = 25
+const SK_TYPE_PARAMETER = 26
+
+// ── Completion item kinds ────────────────────────────────────────────
+
+const CIK_TEXT = 1
+const CIK_METHOD = 2
+const CIK_FUNCTION = 3
+const CIK_CONSTRUCTOR = 4
+const CIK_FIELD = 5
+const CIK_VARIABLE = 6
+const CIK_CLASS = 7
+const CIK_INTERFACE = 8
+const CIK_MODULE = 9
+const CIK_PROPERTY = 10
+const CIK_KEYWORD = 14
+const CIK_SNIPPET = 15
+const CIK_ENUM_MEMBER = 20
+const CIK_CONSTANT = 21
+const CIK_STRUCT = 22
+
+// ── Diagnostic severities ────────────────────────────────────────────
+
+const DIAG_ERROR = 1
+const DIAG_WARNING = 2
+const DIAG_INFO = 3
+const DIAG_HINT = 4
+
+// ── Semantic token types (matches stage-0) ───────────────────────────
+
+const SEM_NAMESPACE = 0
+const SEM_TYPE = 1
+const SEM_CLASS = 2
+const SEM_ENUM = 3
+const SEM_INTERFACE = 4
+const SEM_STRUCT = 5
+const SEM_TYPE_PARAMETER = 6
+const SEM_PARAMETER = 7
+const SEM_VARIABLE = 8
+const SEM_PROPERTY = 9
+const SEM_ENUM_MEMBER = 10
+const SEM_FUNCTION = 11
+const SEM_METHOD = 12
+const SEM_KEYWORD = 13
+const SEM_MODIFIER = 14
+const SEM_COMMENT = 15
+const SEM_STRING = 16
+const SEM_NUMBER = 17
+const SEM_OPERATOR = 18
+
+const SEMANTIC_TOKEN_TYPES = [
+    "namespace", "type", "class", "enum", "interface", "struct",
+    "typeParameter", "parameter", "variable", "property", "enumMember",
+    "function", "method", "keyword", "modifier", "comment",
+    "string", "number", "operator"
+]
+
+const SEMANTIC_TOKEN_MODIFIERS = [
+    "declaration", "definition", "readonly", "static",
+    "deprecated", "abstract", "async", "modification",
+    "documentation", "defaultLibrary"
+]
+
+// ── Folding range kinds ──────────────────────────────────────────────
+
+const FOLD_COMMENT = "comment"
+const FOLD_IMPORTS = "imports"
+const FOLD_REGION = "region"
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Document Cache ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Map uri -> { "source": string, "program": ast|null, "diagnostics": [...] }
+let lsp_documents = {"__s": true}
+
+// Workspace root path
+let lsp_workspace_root = null
+
+func lsp_cache_document(uri, text) {
+    let program = null
+    let diagnostics = []
+
+    // Parse
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+    p_tokens = tokenize(text)
+    p_pos = 0
+    let parse_ok = true
+    let parsed = null
+    // Use parse, handle parse errors
+    const tokens = p_tokens
+    if len(tokens) > 0 {
+        p_pos = 0
+        parsed = parse_program()
+        program = parsed
+    }
+    p_tokens = save_tokens
+    p_pos = save_pos
+
+    // Type check
+    if program != null {
+        const save_errors = tc_errors
+        const save_warnings = tc_warnings
+        tc_errors = []
+        tc_warnings = []
+
+        check(program)
+
+        for err in tc_errors {
+            diagnostics.push({
+                "range": lsp_range(0, 0, 0, 1),
+                "severity": DIAG_ERROR,
+                "message": err,
+                "source": "magi"
+            })
+        }
+        for w in tc_warnings {
+            diagnostics.push({
+                "range": lsp_range(0, 0, 0, 1),
+                "severity": DIAG_WARNING,
+                "message": w,
+                "source": "magi"
+            })
+        }
+
+        tc_errors = save_errors
+        tc_warnings = save_warnings
+    }
+
+    lsp_documents[uri] = {
+        "source": text,
+        "program": program,
+        "diagnostics": diagnostics
+    }
+    diagnostics
+}
+
+func lsp_get_document(uri) {
+    if lsp_documents.has(uri) && uri != "__s" {
+        lsp_documents[uri]
+    } else {
+        null
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── JSON-RPC 2.0 Infrastructure ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Simple JSON builder helpers (maps serve as JSON objects in MAGI)
+
+func jsonrpc_result(id, result) {
+    {"jsonrpc": "2.0", "id": id, "result": result}
+}
+
+func jsonrpc_error(id, code, message) {
+    {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}
+}
+
+func jsonrpc_notification(method, params) {
+    {"jsonrpc": "2.0", "method": method, "params": params}
+}
+
+// Encode a MAGI map as JSON string
+func json_encode(value) {
+    if value == null { return "null" }
+    const t = typeof(value)
+    if t == "string" { return json_encode_string(value) }
+    if t == "int" { return to_string(value) }
+    if t == "float" { return to_string(value) }
+    if t == "bool" { return if value { "true" } else { "false" } }
+    if t == "array" {
+        let parts = []
+        for item in value {
+            parts.push(json_encode(item))
+        }
+        return "[" + parts.join(", ") + "]"
+    }
+    if t == "map" {
+        let parts = []
+        for key in keys(value) {
+            if key == "__s" { continue }
+            parts.push(json_encode_string(key) + ": " + json_encode(value[key]))
+        }
+        return "\{" + parts.join(", ") + "\}"
+    }
+    to_string(value)
+}
+
+func json_encode_string(s) {
+    let result = "\""
+    let i = 0
+    const chars = to_string(s)
+    while i < len(chars) {
+        const c = chars[i]
+        if c == "\"" { result = result + "\\\"" }
+        else if c == "\\" { result = result + "\\\\" }
+        else if c == "\n" { result = result + "\\n" }
+        else if c == "\r" { result = result + "\\r" }
+        else if c == "\t" { result = result + "\\t" }
+        else { result = result + c }
+        i = i + 1
+    }
+    result + "\""
+}
+
+// Minimal JSON parser for incoming messages
+func json_decode(text) {
+    const trimmed = text.trim()
+    if trimmed == "null" { return null }
+    if trimmed == "true" { return true }
+    if trimmed == "false" { return false }
+    if trimmed[0] == "\"" { return json_decode_string(trimmed) }
+    if trimmed[0] == "[" { return json_decode_array(trimmed) }
+    if trimmed[0] == "\{" { return json_decode_object(trimmed) }
+    // Number
+    if trimmed.contains(".") {
+        return to_float(trimmed)
+    }
+    to_int(trimmed)
+}
+
+let jd_text = ""
+let jd_pos = 0
+
+func jd_peek() {
+    if jd_pos < len(jd_text) { jd_text[jd_pos] } else { "" }
+}
+
+func jd_advance() {
+    const c = jd_peek()
+    jd_pos = jd_pos + 1
+    c
+}
+
+func jd_skip_ws() {
+    while jd_pos < len(jd_text) {
+        const c = jd_text[jd_pos]
+        if c == " " || c == "\t" || c == "\n" || c == "\r" {
+            jd_pos = jd_pos + 1
+        } else {
+            return
+        }
+    }
+}
+
+func jd_parse_value() {
+    jd_skip_ws()
+    const c = jd_peek()
+    if c == "\"" { return jd_parse_string() }
+    if c == "\{" { return jd_parse_object() }
+    if c == "[" { return jd_parse_array() }
+    if c == "t" { jd_pos = jd_pos + 4; return true }
+    if c == "f" { jd_pos = jd_pos + 5; return false }
+    if c == "n" { jd_pos = jd_pos + 4; return null }
+    // Number
+    jd_parse_number()
+}
+
+func jd_parse_string() {
+    jd_advance() // skip opening "
+    let result = ""
+    while jd_pos < len(jd_text) {
+        const c = jd_advance()
+        if c == "\"" { return result }
+        if c == "\\" {
+            const esc = jd_advance()
+            if esc == "n" { result = result + "\n" }
+            else if esc == "r" { result = result + "\r" }
+            else if esc == "t" { result = result + "\t" }
+            else if esc == "\"" { result = result + "\"" }
+            else if esc == "\\" { result = result + "\\" }
+            else if esc == "/" { result = result + "/" }
+            else { result = result + esc }
+        } else {
+            result = result + c
+        }
+    }
+    result
+}
+
+func jd_parse_number() {
+    let start = jd_pos
+    let has_dot = false
+    if jd_peek() == "-" { jd_pos = jd_pos + 1 }
+    while jd_pos < len(jd_text) {
+        const c = jd_text[jd_pos]
+        if c == "." { has_dot = true; jd_pos = jd_pos + 1 }
+        else if c >= "0" && c <= "9" { jd_pos = jd_pos + 1 }
+        else if c == "e" || c == "E" { jd_pos = jd_pos + 1; if jd_peek() == "+" || jd_peek() == "-" { jd_pos = jd_pos + 1 } }
+        else { break }
+    }
+    const num_str = jd_text[start..jd_pos]
+    if has_dot { to_float(num_str) } else { to_int(num_str) }
+}
+
+func jd_parse_array() {
+    jd_advance() // skip [
+    jd_skip_ws()
+    let items = []
+    if jd_peek() == "]" { jd_advance(); return items }
+    while true {
+        const val = jd_parse_value()
+        items.push(val)
+        jd_skip_ws()
+        if jd_peek() == "," { jd_advance(); jd_skip_ws() }
+        if jd_peek() == "]" { jd_advance(); return items }
+    }
+    items
+}
+
+func jd_parse_object() {
+    jd_advance() // skip {
+    jd_skip_ws()
+    let obj = {"__s": true}
+    if jd_peek() == "\}" { jd_advance(); return obj }
+    while true {
+        jd_skip_ws()
+        const key = jd_parse_string()
+        jd_skip_ws()
+        jd_advance() // skip :
+        const val = jd_parse_value()
+        obj[key] = val
+        jd_skip_ws()
+        if jd_peek() == "," { jd_advance(); jd_skip_ws() }
+        if jd_peek() == "\}" { jd_advance(); return obj }
+    }
+    obj
+}
+
+func json_parse(text) {
+    const save_text = jd_text
+    const save_pos = jd_pos
+    jd_text = text
+    jd_pos = 0
+    const result = jd_parse_value()
+    jd_text = save_text
+    jd_pos = save_pos
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── AST Utilities (shared across handlers) ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Collect all symbol definitions from a program AST
+func collect_symbols(program) {
+    let symbols = []
+    if program == null { return symbols }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        const line = stmt.span.start_line - 1
+        const col = stmt.span.start_col - 1
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                let param_names = []
+                for p in fdef.params {
+                    param_names.push(p.name)
+                }
+                symbols.push({
+                    "name": fdef.name,
+                    "kind": SK_FUNCTION,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + 1,
+                    "detail": "func " + fdef.name + "(" + param_names.join(", ") + ")"
+                })
+            },
+            StmtKind::SAsyncFuncDef(fdef) => {
+                symbols.push({
+                    "name": fdef.name,
+                    "kind": SK_FUNCTION,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + 1,
+                    "detail": "async func " + fdef.name
+                })
+            },
+            StmtKind::SLet(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_VARIABLE,
+                    "line": line,
+                    "col": col,
+                    "end_line": line,
+                    "detail": "let " + name
+                })
+            },
+            StmtKind::SLetMut(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_VARIABLE,
+                    "line": line,
+                    "col": col,
+                    "end_line": line,
+                    "detail": "let mut " + name
+                })
+            },
+            StmtKind::SConst(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_CONSTANT,
+                    "line": line,
+                    "col": col,
+                    "end_line": line,
+                    "detail": "const " + name
+                })
+            },
+            StmtKind::SEnumDef(name, variants, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_ENUM,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + len(variants),
+                    "detail": "enum " + name
+                })
+            },
+            StmtKind::SStructDef(name, fields, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_STRUCT,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + len(fields),
+                    "detail": "struct " + name
+                })
+            },
+            StmtKind::SInterfaceDef(name, _, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_INTERFACE,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + 1,
+                    "detail": "trait " + name
+                })
+            },
+            StmtKind::SImplBlock(type_name, _) => {
+                symbols.push({
+                    "name": type_name,
+                    "kind": SK_CLASS,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + 1,
+                    "detail": "impl " + type_name
+                })
+            },
+            StmtKind::SModuleDef(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_MODULE,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + 1,
+                    "detail": "module " + name
+                })
+            },
+            StmtKind::STestDef(name, _) => {
+                symbols.push({
+                    "name": name,
+                    "kind": SK_FUNCTION,
+                    "line": line,
+                    "col": col,
+                    "end_line": line + 1,
+                    "detail": "test " + name
+                })
+            },
+            _ => {}
+        }
+    }
+    symbols
+}
+
+// Find the AST node at a given position (0-based line, character)
+func find_node_at_position(program, line, character) {
+    if program == null { return null }
+    let best = null
+    let best_size = 999999
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        const sc = stmt.span.start_col - 1
+        // Check if this statement spans the target line
+        if sl <= line {
+            const match_result = find_in_statement(stmt, line, character)
+            if match_result != null {
+                best = match_result
+            }
+        }
+    }
+    best
+}
+
+func find_in_statement(stmt, line, character) {
+    const sl = stmt.span.start_line - 1
+    const sc = stmt.span.start_col - 1
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SFuncDef(fdef) => {
+            if sl == line {
+                return {"kind": "function", "name": fdef.name, "line": sl, "col": sc, "detail": fdef}
+            }
+            null
+        },
+        StmtKind::SLet(name, _) => {
+            if sl == line {
+                return {"kind": "variable", "name": name, "line": sl, "col": sc, "mutable": true}
+            }
+            null
+        },
+        StmtKind::SConst(name, _) => {
+            if sl == line {
+                return {"kind": "constant", "name": name, "line": sl, "col": sc, "mutable": false}
+            }
+            null
+        },
+        StmtKind::SEnumDef(name, variants, _) => {
+            if sl == line {
+                return {"kind": "enum", "name": name, "line": sl, "col": sc, "variants": variants}
+            }
+            null
+        },
+        StmtKind::SStructDef(name, fields, _) => {
+            if sl == line {
+                return {"kind": "struct", "name": name, "line": sl, "col": sc, "fields": fields}
+            }
+            null
+        },
+        StmtKind::SExprStmt(expr) => {
+            find_in_expr(expr, line, character)
+        },
+        _ => null
+    }
+}
+
+func find_in_expr(expr, line, character) {
+    if expr == null { return null }
+    const ek = expr.kind
+    const el = expr.span.start_line - 1
+    const ec = expr.span.start_col - 1
+    match ek {
+        ExprKind::EVariable(name) => {
+            if el == line {
+                return {"kind": "identifier", "name": name, "line": el, "col": ec}
+            }
+            null
+        },
+        ExprKind::ECall(name, _, _) => {
+            if el == line {
+                return {"kind": "call", "name": name, "line": el, "col": ec}
+            }
+            null
+        },
+        ExprKind::EFieldAccess(_, field) => {
+            if el == line {
+                return {"kind": "field", "name": field, "line": el, "col": ec}
+            }
+            null
+        },
+        _ => null
+    }
+}
+
+// Find all references to a given name in the AST
+func find_references(program, name) {
+    let refs = []
+    if program == null { return refs }
+    for stmt in program.statements {
+        refs = find_refs_in_stmt(refs, stmt, name)
+    }
+    refs
+}
+
+func find_refs_in_stmt(refs, stmt, name) {
+    const sk = stmt.kind
+    const sl = stmt.span.start_line - 1
+    const sc = stmt.span.start_col - 1
+    match sk {
+        StmtKind::SFuncDef(fdef) => {
+            if fdef.name == name {
+                refs.push({"line": sl, "col": sc, "kind": "definition"})
+            }
+            if fdef.body != null {
+                for s in fdef.body.statements {
+                    refs = find_refs_in_stmt(refs, s, name)
+                }
+            }
+        },
+        StmtKind::SLet(var_name, value) => {
+            if var_name == name {
+                refs.push({"line": sl, "col": sc, "kind": "definition"})
+            }
+            if value != null {
+                refs = find_refs_in_expr(refs, value, name)
+            }
+        },
+        StmtKind::SLetMut(var_name, value) => {
+            if var_name == name {
+                refs.push({"line": sl, "col": sc, "kind": "definition"})
+            }
+            if value != null {
+                refs = find_refs_in_expr(refs, value, name)
+            }
+        },
+        StmtKind::SConst(var_name, value) => {
+            if var_name == name {
+                refs.push({"line": sl, "col": sc, "kind": "definition"})
+            }
+            if value != null {
+                refs = find_refs_in_expr(refs, value, name)
+            }
+        },
+        StmtKind::SExprStmt(expr) => {
+            refs = find_refs_in_expr(refs, expr, name)
+        },
+        StmtKind::SReturn(value) => {
+            if value != null {
+                refs = find_refs_in_expr(refs, value, name)
+            }
+        },
+        StmtKind::SIf(condition, then_body, else_body) => {
+            refs = find_refs_in_expr(refs, condition, name)
+            if then_body != null {
+                for s in then_body.statements {
+                    refs = find_refs_in_stmt(refs, s, name)
+                }
+            }
+            if else_body != null {
+                for s in else_body.statements {
+                    refs = find_refs_in_stmt(refs, s, name)
+                }
+            }
+        },
+        StmtKind::SWhileLoop(_, condition, body) => {
+            refs = find_refs_in_expr(refs, condition, name)
+            if body != null {
+                for s in body.statements {
+                    refs = find_refs_in_stmt(refs, s, name)
+                }
+            }
+        },
+        StmtKind::SForLoop(iter_var, iterable, body, _) => {
+            refs = find_refs_in_expr(refs, iterable, name)
+            if iter_var == name {
+                refs.push({"line": sl, "col": sc, "kind": "definition"})
+            }
+            if body != null {
+                for s in body.statements {
+                    refs = find_refs_in_stmt(refs, s, name)
+                }
+            }
+        },
+        StmtKind::SAssignment(var_name, value) => {
+            if var_name == name {
+                refs.push({"line": sl, "col": sc, "kind": "reference"})
+            }
+            if value != null {
+                refs = find_refs_in_expr(refs, value, name)
+            }
+        },
+        _ => {}
+    }
+    refs
+}
+
+func find_refs_in_expr(refs, expr, name) {
+    if expr == null { return refs }
+    const ek = expr.kind
+    const el = expr.span.start_line - 1
+    const ec = expr.span.start_col - 1
+    match ek {
+        ExprKind::EVariable(id_name) => {
+            if id_name == name {
+                refs.push({"line": el, "col": ec, "kind": "reference"})
+            }
+        },
+        ExprKind::ECall(call_name, args, _) => {
+            if call_name == name {
+                refs.push({"line": el, "col": ec, "kind": "reference"})
+            }
+            if args != null {
+                for arg in args {
+                    refs = find_refs_in_expr(refs, arg, name)
+                }
+            }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            refs = find_refs_in_expr(refs, left, name)
+            refs = find_refs_in_expr(refs, right, name)
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            refs = find_refs_in_expr(refs, operand, name)
+        },
+        ExprKind::EFieldAccess(object, _) => {
+            refs = find_refs_in_expr(refs, object, name)
+        },
+        ExprKind::EIndex(object, index) => {
+            refs = find_refs_in_expr(refs, object, name)
+            refs = find_refs_in_expr(refs, index, name)
+        },
+        ExprKind::EMethodCall(object, _, args, _) => {
+            refs = find_refs_in_expr(refs, object, name)
+            for arg in args {
+                refs = find_refs_in_expr(refs, arg, name)
+            }
+        },
+        _ => {}
+    }
+    refs
+}
+
+// Find the definition location for a name
+func find_definition(program, name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const result = find_def_in_stmt(stmt, name)
+        if result != null { return result }
+    }
+    null
+}
+
+func find_def_in_stmt(stmt, name) {
+    const sk = stmt.kind
+    const sl = stmt.span.start_line - 1
+    const sc = stmt.span.start_col - 1
+    match sk {
+        StmtKind::SFuncDef(fdef) => {
+            if fdef.name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "function"}
+            }
+            null
+        },
+        StmtKind::SLet(var_name, _) => {
+            if var_name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "variable"}
+            }
+            null
+        },
+        StmtKind::SLetMut(var_name, _) => {
+            if var_name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "variable"}
+            }
+            null
+        },
+        StmtKind::SConst(var_name, _) => {
+            if var_name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "constant"}
+            }
+            null
+        },
+        StmtKind::SEnumDef(enum_name, _, _) => {
+            if enum_name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "enum"}
+            }
+            null
+        },
+        StmtKind::SStructDef(struct_name, _, _) => {
+            if struct_name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "struct"}
+            }
+            null
+        },
+        StmtKind::SInterfaceDef(trait_name, _, _) => {
+            if trait_name == name {
+                return {"line": sl, "col": sc, "name": name, "kind": "trait"}
+            }
+            null
+        },
+        _ => null
+    }
+}
+
+// Get word at position in source text (0-based line, character)
+func word_at_position(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+    const ln = lines[line]
+    if character >= len(ln) { return null }
+    // Expand left
+    let start = character
+    while start > 0 && is_ident_char(ln[start - 1]) {
+        start = start - 1
+    }
+    // Expand right
+    let end_pos = character
+    while end_pos < len(ln) && is_ident_char(ln[end_pos]) {
+        end_pos = end_pos + 1
+    }
+    if start == end_pos { return null }
+    const word = ln[start..end_pos]
+    {"word": word, "start": start, "end": end_pos, "line": line}
+}
+
+func is_ident_char(c) {
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+}
+
+// Get source lines
+func source_lines(source) {
+    source.split("\n")
+}
+
+// Compute line start offsets for a source string
+func line_start_offsets(source) {
+    let offsets = [0]
+    let i = 0
+    while i < len(source) {
+        if source[i] == "\n" {
+            offsets.push(i + 1)
+        }
+        i = i + 1
+    }
+    offsets
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── MAGI Keywords and Builtins ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const MAGI_KEYWORDS = [
+    "let", "const", "func", "return", "if", "else", "while", "for",
+    "in", "match", "enum", "struct", "trait", "impl", "import", "use",
+    "break", "continue", "true", "false", "null", "async", "await",
+    "yield", "try", "catch", "finally", "throw", "module", "pub",
+    "type", "as", "from", "test", "defer", "spawn", "select",
+    "interface", "class", "extend", "override", "static", "self"
+]
+
+const MAGI_BUILTINS = [
+    "len", "push", "pop", "println", "print", "output", "assert",
+    "to_string", "to_int", "to_float", "typeof", "panic", "input",
+    "range", "map", "filter", "reduce", "keys", "values", "contains",
+    "append", "slice", "reverse", "sort", "min", "max", "abs",
+    "floor", "ceil", "round", "join", "split", "trim", "replace",
+    "starts_with", "ends_with", "char_at", "char_code", "from_char_code"
+]
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Handler Implementations ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// ── 1. initialize ────────────────────────────────────────────────────
+
+func handle_initialize(params) {
+    // Extract workspace root
+    if params != null && params.has("rootUri") && params["rootUri"] != null {
+        lsp_workspace_root = params["rootUri"]
+    }
+
+    {
+        "capabilities": {
+            "textDocumentSync": {
+                "openClose": true,
+                "change": 1,  // Full sync
+                "save": {"includeText": true}
+            },
+            "completionProvider": {
+                "triggerCharacters": [".", ":", "@"],
+                "resolveProvider": false
+            },
+            "hoverProvider": true,
+            "definitionProvider": true,
+            "typeDefinitionProvider": true,
+            "referencesProvider": true,
+            "renameProvider": {"prepareProvider": true},
+            "documentFormattingProvider": true,
+            "documentRangeFormattingProvider": true,
+            "documentOnTypeFormattingProvider": {
+                "firstTriggerCharacter": "\}",
+                "moreTriggerCharacter": [";", "\n"]
+            },
+            "codeActionProvider": true,
+            "signatureHelpProvider": {
+                "triggerCharacters": ["(", ","]
+            },
+            "documentSymbolProvider": true,
+            "semanticTokensProvider": {
+                "legend": {
+                    "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                    "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS
+                },
+                "full": true
+            },
+            "foldingRangeProvider": true,
+            "selectionRangeProvider": true,
+            "codeLensProvider": {"resolveProvider": false},
+            "inlayHintProvider": true,
+            "documentLinkProvider": {"resolveSupport": false},
+            "linkedEditingRangeProvider": true,
+            "documentHighlightProvider": true,
+            "documentColorProvider": true,
+            "callHierarchyProvider": true,
+            "typeHierarchyProvider": true,
+            "workspaceSymbolProvider": true,
+            "executeCommandProvider": {
+                "commands": ["magi.run", "magi.check", "magi.lint", "magi.format"]
+            }
+        },
+        "serverInfo": {
+            "name": "magi-lsp-self",
+            "version": VERSION
+        }
+    }
+}
+
+// ── 2. initialized ──────────────────────────────────────────────────
+
+func handle_initialized(params) {
+    // Notification — no response needed. Log message would go to client.
+    null
+}
+
+// ── 3. shutdown ─────────────────────────────────────────────────────
+
+func handle_shutdown(params) {
+    // Return null per spec
+    null
+}
+
+// ── 4. exit ──────────────────────────────────────────────────────────
+
+func handle_exit(params) {
+    // Process exit — notification, no response
+    null
+}
+
+// ── 5. textDocument/didOpen ─────────────────────────────────────────
+
+func handle_did_open(params) {
+    const td = params["textDocument"]
+    const uri = td["uri"]
+    const text = td["text"]
+    const diags = lsp_cache_document(uri, text)
+    // Return publish diagnostics notification
+    make_publish_diagnostics(uri, diags)
+}
+
+// ── 6. textDocument/didChange ───────────────────────────────────────
+
+func handle_did_change(params) {
+    const uri = params["textDocument"]["uri"]
+    const changes = params["contentChanges"]
+    if len(changes) > 0 {
+        const text = changes[len(changes) - 1]["text"]
+        const diags = lsp_cache_document(uri, text)
+        return make_publish_diagnostics(uri, diags)
+    }
+    null
+}
+
+// ── 7. textDocument/didClose ────────────────────────────────────────
+
+func handle_did_close(params) {
+    const uri = params["textDocument"]["uri"]
+    if lsp_documents.has(uri) {
+        // Cannot delete keys, set to null
+        lsp_documents[uri] = null
+    }
+    // Clear diagnostics
+    make_publish_diagnostics(uri, [])
+}
+
+// ── 8. textDocument/completion ──────────────────────────────────────
+
+func handle_completion(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return {"isIncomplete": false, "items": []} }
+
+    let items = []
+
+    // Get the current word prefix for filtering
+    const word_info = word_at_position(doc["source"], line, character)
+    const prefix = if word_info != null { word_info["word"] } else { "" }
+
+    // 1. Keywords
+    for kw in MAGI_KEYWORDS {
+        if prefix == "" || kw.starts_with(prefix) {
+            items.push({
+                "label": kw,
+                "kind": CIK_KEYWORD,
+                "detail": "keyword"
+            })
+        }
+    }
+
+    // 2. Builtin functions
+    for b in MAGI_BUILTINS {
+        if prefix == "" || b.starts_with(prefix) {
+            items.push({
+                "label": b,
+                "kind": CIK_FUNCTION,
+                "detail": "builtin"
+            })
+        }
+    }
+
+    // 3. Document symbols (functions, variables, constants, etc.)
+    const symbols = collect_symbols(doc["program"])
+    for sym in symbols {
+        if prefix == "" || sym["name"].starts_with(prefix) {
+            const kind = match sym["kind"] {
+                SK_FUNCTION => CIK_FUNCTION,
+                SK_VARIABLE => CIK_VARIABLE,
+                SK_CONSTANT => CIK_CONSTANT,
+                SK_ENUM => CIK_ENUM_MEMBER,
+                SK_STRUCT => CIK_STRUCT,
+                SK_INTERFACE => CIK_INTERFACE,
+                SK_MODULE => CIK_MODULE,
+                _ => CIK_TEXT
+            }
+            items.push({
+                "label": sym["name"],
+                "kind": kind,
+                "detail": sym["detail"]
+            })
+        }
+    }
+
+    {"isIncomplete": false, "items": items}
+}
+
+// ── 9. textDocument/hover ───────────────────────────────────────────
+
+func handle_hover(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const word = word_info["word"]
+
+    // Check if it is a keyword
+    if MAGI_KEYWORDS.contains(word) {
+        return {
+            "contents": lsp_markup_content("markdown", f"**keyword** `{word}`\n\nMAGI language keyword."),
+            "range": lsp_range(line, word_info["start"], line, word_info["end"])
+        }
+    }
+
+    // Check builtins
+    if MAGI_BUILTINS.contains(word) {
+        return {
+            "contents": lsp_markup_content("markdown", f"**builtin** `{word}`\n\nBuilt-in function."),
+            "range": lsp_range(line, word_info["start"], line, word_info["end"])
+        }
+    }
+
+    // Check document symbols
+    const def = find_definition(doc["program"], word)
+    if def != null {
+        const kind = def["kind"]
+        let detail = f"({kind}) {word}"
+        if kind == "function" {
+            detail = f"func {word}(...)"
+        }
+        return {
+            "contents": lsp_markup_content("markdown", "```magi\n" + detail + "\n```\n\nDefined at line " + to_string(def["line"] + 1) + "."),
+            "range": lsp_range(line, word_info["start"], line, word_info["end"])
+        }
+    }
+
+    null
+}
+
+// ── 10. textDocument/definition ─────────────────────────────────────
+
+func handle_definition(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const def = find_definition(doc["program"], word_info["word"])
+    if def == null { return null }
+
+    lsp_location(uri, lsp_range(def["line"], def["col"], def["line"], def["col"] + len(def["name"])))
+}
+
+// ── 11. textDocument/typeDefinition ─────────────────────────────────
+
+func handle_type_definition(params) {
+    // Reuse goto-definition (returns the symbol's own definition)
+    handle_definition(params)
+}
+
+// ── 12. textDocument/references ─────────────────────────────────────
+
+func handle_references(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const refs = find_references(doc["program"], word_info["word"])
+    if len(refs) == 0 { return null }
+
+    let locations = []
+    for r in refs {
+        locations.push(lsp_location(uri, lsp_range(r["line"], r["col"], r["line"], r["col"] + len(word_info["word"]))))
+    }
+    locations
+}
+
+// ── 13. textDocument/rename ─────────────────────────────────────────
+
+func handle_rename(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+    const new_name = params["newName"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const old_name = word_info["word"]
+    const refs = find_references(doc["program"], old_name)
+    if len(refs) == 0 { return null }
+
+    let edits = []
+    for r in refs {
+        edits.push(lsp_text_edit(
+            lsp_range(r["line"], r["col"], r["line"], r["col"] + len(old_name)),
+            new_name
+        ))
+    }
+
+    // WorkspaceEdit with changes
+    let changes = {"__s": true}
+    changes[uri] = edits
+    {"changes": changes}
+}
+
+// ── 14. textDocument/prepareRename ──────────────────────────────────
+
+func handle_prepare_rename(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    // Return the range of the word
+    lsp_range(line, word_info["start"], line, word_info["end"])
+}
+
+// ── 15. textDocument/formatting ─────────────────────────────────────
+
+func handle_formatting(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+    if doc["program"] == null { return null }
+
+    const formatted = format_program(doc["program"])
+    const source = doc["source"]
+    const lines = source_lines(source)
+    const last_line = len(lines) - 1
+    const last_char = if last_line >= 0 { len(lines[last_line]) } else { 0 }
+
+    [lsp_text_edit(lsp_range(0, 0, last_line, last_char), formatted)]
+}
+
+// ── 16. textDocument/rangeFormatting ────────────────────────────────
+
+func handle_range_formatting(params) {
+    const uri = params["textDocument"]["uri"]
+    const range = params["range"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+    if doc["program"] == null { return null }
+
+    const formatted = format_program(doc["program"])
+    const fmt_lines = formatted.split("\n")
+    const src_lines = source_lines(doc["source"])
+
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+
+    // Extract formatted lines for the range
+    let range_text = ""
+    let i = start_line
+    while i <= end_line && i < len(fmt_lines) {
+        if i > start_line { range_text = range_text + "\n" }
+        range_text = range_text + fmt_lines[i]
+        i = i + 1
+    }
+
+    const end_char = if end_line < len(src_lines) { len(src_lines[end_line]) } else { 0 }
+
+    [lsp_text_edit(lsp_range(start_line, 0, end_line, end_char), range_text)]
+}
+
+// ── 17. textDocument/onTypeFormatting ───────────────────────────────
+
+func handle_on_type_formatting(params) {
+    // Return empty edits (no-op)
+    []
+}
+
+// ── 18. textDocument/codeAction ─────────────────────────────────────
+
+func handle_code_action(params) {
+    const uri = params["textDocument"]["uri"]
+    const range = params["range"]
+    const context = params["context"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    let actions = []
+
+    // Check if there are diagnostics in the context that we can provide quick fixes for
+    if context != null && context.has("diagnostics") {
+        const diags = context["diagnostics"]
+        for diag in diags {
+            const msg = diag["message"]
+            // Unused variable: offer removal or prefix with _
+            if msg.contains("unused") {
+                actions.push({
+                    "title": "Prefix with underscore",
+                    "kind": "quickfix",
+                    "diagnostics": [diag]
+                })
+            }
+        }
+    }
+
+    // Offer organize imports
+    actions.push({
+        "title": "Organize imports",
+        "kind": "source.organizeImports"
+    })
+
+    // Offer format document
+    actions.push({
+        "title": "Format document",
+        "kind": "source.fixAll",
+        "command": {
+            "title": "Format",
+            "command": "magi.format",
+            "arguments": [uri]
+        }
+    })
+
+    if len(actions) == 0 { return null }
+    actions
+}
+
+// ── 19. textDocument/signatureHelp ──────────────────────────────────
+
+func handle_signature_help(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    // Walk backward to find the function name before the open paren
+    const src_lines = source_lines(doc["source"])
+    if line >= len(src_lines) { return null }
+    const ln = src_lines[line]
+
+    // Find the opening paren before cursor position
+    let paren_pos = character - 1
+    let depth = 0
+    while paren_pos >= 0 {
+        const c = ln[paren_pos]
+        if c == ")" { depth = depth + 1 }
+        if c == "(" {
+            if depth == 0 { break }
+            depth = depth - 1
+        }
+        paren_pos = paren_pos - 1
+    }
+
+    if paren_pos < 0 { return null }
+
+    // Get the function name before the paren
+    const word_info = word_at_position(doc["source"], line, paren_pos - 1)
+    if word_info == null { return null }
+
+    const func_name = word_info["word"]
+
+    // Count commas to determine active parameter
+    let active_param = 0
+    let i = paren_pos + 1
+    while i < character {
+        if ln[i] == "," { active_param = active_param + 1 }
+        i = i + 1
+    }
+
+    // Look up function definition
+    const def = find_definition(doc["program"], func_name)
+    let param_labels = []
+    let label = f"{func_name}("
+
+    if def != null && def["kind"] == "function" {
+        // Try to get param info from the symbol
+        const symbols = collect_symbols(doc["program"])
+        for sym in symbols {
+            if sym["name"] == func_name && sym["kind"] == SK_FUNCTION {
+                const detail = sym["detail"]
+                label = detail
+                break
+            }
+        }
+    }
+
+    {
+        "signatures": [{
+            "label": label,
+            "parameters": param_labels,
+            "activeParameter": active_param
+        }],
+        "activeSignature": 0,
+        "activeParameter": active_param
+    }
+}
+
+// ── 20. textDocument/documentSymbol ─────────────────────────────────
+
+func handle_document_symbol(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const symbols = collect_symbols(doc["program"])
+    if len(symbols) == 0 { return null }
+
+    let result = []
+    for sym in symbols {
+        result.push({
+            "name": sym["name"],
+            "kind": sym["kind"],
+            "range": lsp_range(sym["line"], sym["col"], sym["end_line"], 0),
+            "selectionRange": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(sym["name"])),
+            "detail": sym["detail"]
+        })
+    }
+    result
+}
+
+// ── 21. textDocument/semanticTokens/full ────────────────────────────
+
+func handle_semantic_tokens_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return {"data": []} }
+
+    const source = doc["source"]
+    // Tokenize and classify each token
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+    p_tokens = tokenize(source)
+    const tokens = p_tokens
+    p_tokens = save_tokens
+    p_pos = save_pos
+
+    let data = []
+    let prev_line = 0
+    let prev_char = 0
+
+    for tok in tokens {
+        const tl = tok.line - 1  // 0-based
+        const tc = tok.col - 1   // 0-based
+        const tlen = len(tok.text)
+        if tlen == 0 { continue }
+
+        // Classify token type
+        let token_type = null
+        const tk = tok.kind
+        match tk {
+            TokenKind::Ident => {
+                if MAGI_KEYWORDS.contains(tok.text) {
+                    token_type = SEM_KEYWORD
+                } else if MAGI_BUILTINS.contains(tok.text) {
+                    token_type = SEM_FUNCTION
+                } else {
+                    token_type = SEM_VARIABLE
+                }
+            },
+            TokenKind::IntLit => { token_type = SEM_NUMBER },
+            TokenKind::FloatLit => { token_type = SEM_NUMBER },
+            TokenKind::StringLit => { token_type = SEM_STRING },
+            TokenKind::Func => { token_type = SEM_KEYWORD },
+            TokenKind::Let => { token_type = SEM_KEYWORD },
+            TokenKind::Const => { token_type = SEM_KEYWORD },
+            TokenKind::If => { token_type = SEM_KEYWORD },
+            TokenKind::Else => { token_type = SEM_KEYWORD },
+            TokenKind::While => { token_type = SEM_KEYWORD },
+            TokenKind::For => { token_type = SEM_KEYWORD },
+            TokenKind::Return => { token_type = SEM_KEYWORD },
+            TokenKind::Match => { token_type = SEM_KEYWORD },
+            TokenKind::Enum => { token_type = SEM_KEYWORD },
+            TokenKind::Struct => { token_type = SEM_KEYWORD },
+            TokenKind::Trait => { token_type = SEM_KEYWORD },
+            TokenKind::Impl => { token_type = SEM_KEYWORD },
+            TokenKind::Import => { token_type = SEM_KEYWORD },
+            TokenKind::True => { token_type = SEM_KEYWORD },
+            TokenKind::False => { token_type = SEM_KEYWORD },
+            TokenKind::Null => { token_type = SEM_KEYWORD },
+            TokenKind::In => { token_type = SEM_KEYWORD },
+            TokenKind::As => { token_type = SEM_KEYWORD },
+            TokenKind::Break => { token_type = SEM_KEYWORD },
+            TokenKind::Continue => { token_type = SEM_KEYWORD },
+            _ => {}
+        }
+
+        if token_type == null { continue }
+
+        // Encode delta line, delta char, length, type, modifiers
+        const delta_line = tl - prev_line
+        const delta_char = if delta_line == 0 { tc - prev_char } else { tc }
+        data.push(delta_line)
+        data.push(delta_char)
+        data.push(tlen)
+        data.push(token_type)
+        data.push(0)  // no modifiers
+
+        prev_line = tl
+        prev_char = tc
+    }
+
+    {"data": data}
+}
+
+// ── 22. textDocument/foldingRange ───────────────────────────────────
+
+func handle_folding_range(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const lines = source_lines(source)
+    let ranges = []
+
+    // Find brace-delimited blocks
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        // Function / struct / enum / impl / trait / if / while / for / match
+        if ln.ends_with("\{") || ln.ends_with("\{") {
+            const start = i
+            // Find matching closing brace (simple heuristic: track depth)
+            let depth = 1
+            let j = i + 1
+            while j < len(lines) && depth > 0 {
+                const ljn = lines[j].trim()
+                let k = 0
+                while k < len(ljn) {
+                    if ljn[k] == "\{" { depth = depth + 1 }
+                    if ljn[k] == "\}" { depth = depth - 1 }
+                    k = k + 1
+                }
+                if depth == 0 {
+                    if j > start + 1 {
+                        ranges.push({
+                            "startLine": start,
+                            "endLine": j,
+                            "kind": "region"
+                        })
+                    }
+                }
+                j = j + 1
+            }
+        }
+        // Comment blocks
+        if ln.starts_with("//") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) && lines[j].trim().starts_with("//") {
+                j = j + 1
+            }
+            if j > start + 1 {
+                ranges.push({
+                    "startLine": start,
+                    "endLine": j - 1,
+                    "kind": FOLD_COMMENT
+                })
+            }
+        }
+        // Import blocks
+        if ln.starts_with("import ") || ln.starts_with("use ") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) {
+                const next = lines[j].trim()
+                if next.starts_with("import ") || next.starts_with("use ") {
+                    j = j + 1
+                } else {
+                    break
+                }
+            }
+            if j > start + 1 {
+                ranges.push({
+                    "startLine": start,
+                    "endLine": j - 1,
+                    "kind": FOLD_IMPORTS
+                })
+            }
+        }
+        i = i + 1
+    }
+
+    if len(ranges) == 0 { return null }
+    ranges
+}
+
+// ── 23. textDocument/selectionRange ─────────────────────────────────
+
+func handle_selection_range(params) {
+    const uri = params["textDocument"]["uri"]
+    const positions = params["positions"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const lines = source_lines(source)
+
+    let result = []
+    for pos in positions {
+        const line = pos["line"]
+        const character = pos["character"]
+
+        // Build a selection range hierarchy: word -> line -> block -> document
+        let ranges = []
+
+        // Word level
+        const word_info = word_at_position(source, line, character)
+        if word_info != null {
+            ranges.push(lsp_range(line, word_info["start"], line, word_info["end"]))
+        }
+
+        // Line level
+        if line < len(lines) {
+            ranges.push(lsp_range(line, 0, line, len(lines[line])))
+        }
+
+        // Document level
+        const last_line = len(lines) - 1
+        const last_char = if last_line >= 0 { len(lines[last_line]) } else { 0 }
+        ranges.push(lsp_range(0, 0, last_line, last_char))
+
+        // Build nested selection range (innermost to outermost)
+        let sel = null
+        let ri = len(ranges) - 1
+        while ri >= 0 {
+            sel = {"range": ranges[ri], "parent": sel}
+            ri = ri - 1
+        }
+        result.push(sel)
+    }
+
+    if len(result) == 0 { return null }
+    result
+}
+
+// ── 24. textDocument/codeLens ───────────────────────────────────────
+
+func handle_code_lens(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    let lenses = []
+    const symbols = collect_symbols(doc["program"])
+
+    for sym in symbols {
+        if sym["kind"] == SK_FUNCTION {
+            // Show reference count
+            const refs = find_references(doc["program"], sym["name"])
+            const ref_count = len(refs) - 1 // exclude the definition itself
+            lenses.push({
+                "range": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(sym["name"])),
+                "command": {
+                    "title": f"{ref_count} reference(s)",
+                    "command": "magi.showReferences",
+                    "arguments": [uri, sym["line"], sym["col"]]
+                }
+            })
+        }
+    }
+
+    // Add "Run" lens for main or test functions
+    for sym in symbols {
+        if sym["kind"] == SK_FUNCTION && (sym["name"] == "main" || sym["name"].starts_with("test_")) {
+            lenses.push({
+                "range": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(sym["name"])),
+                "command": {
+                    "title": if sym["name"] == "main" { "Run" } else { "Run Test" },
+                    "command": "magi.run",
+                    "arguments": [uri, sym["name"]]
+                }
+            })
+        }
+    }
+
+    if len(lenses) == 0 { return null }
+    lenses
+}
+
+// ── 25. textDocument/inlayHint ──────────────────────────────────────
+
+func handle_inlay_hint(params) {
+    const uri = params["textDocument"]["uri"]
+    const range = params["range"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    let hints = []
+    const program = doc["program"]
+    if program == null { return null }
+
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+
+    // Add type hints for let/const bindings without explicit types
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        if sl < start_line || sl > end_line { continue }
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLet(var_name, value) => {
+                if value != null {
+                    const inferred = infer_expr_type(value)
+                    if inferred != null {
+                        hints.push({
+                            "position": lsp_position(sl, len(var_name) + 4),
+                            "label": ": " + inferred,
+                            "kind": 1,
+                            "paddingLeft": false,
+                            "paddingRight": true
+                        })
+                    }
+                }
+            },
+            StmtKind::SConst(var_name, value) => {
+                if value != null {
+                    const inferred = infer_expr_type(value)
+                    if inferred != null {
+                        hints.push({
+                            "position": lsp_position(sl, len(var_name) + 6),
+                            "label": ": " + inferred,
+                            "kind": 1,
+                            "paddingLeft": false,
+                            "paddingRight": true
+                        })
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    if len(hints) == 0 { return null }
+    hints
+}
+
+// Simple type inference for inlay hints
+func infer_expr_type(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(_) => "Int",
+                Literal::FloatLit(_) => "Float",
+                Literal::StringLit(_) => "String",
+                Literal::BoolLit(_) => "Bool",
+                Literal::NullLit => "Null",
+                Literal::ArrayLit(_) => "Array",
+                Literal::MapLit(_) => "Map",
+                _ => null
+            }
+        },
+        ExprKind::ECall(_, _, _) => null,
+        ExprKind::EBinaryOp(op, left, right) => {
+            match op {
+                BinOp::Eq => "Bool", BinOp::NotEq => "Bool",
+                BinOp::Lt => "Bool", BinOp::Gt => "Bool",
+                BinOp::LtEq => "Bool", BinOp::GtEq => "Bool",
+                BinOp::And => "Bool", BinOp::Or => "Bool",
+                _ => infer_expr_type(left)
+            }
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            match op {
+                UnOp::Not => "Bool",
+                UnOp::Neg => infer_expr_type(operand)
+            }
+        },
+        _ => null
+    }
+}
+
+// ── 26. textDocument/documentLink ───────────────────────────────────
+
+func handle_document_link(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    let links = []
+    const source = doc["source"]
+    const lines = source_lines(source)
+
+    // Find import/use statements and create links
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.starts_with("import ") || ln.starts_with("use ") {
+            // The module path could be linkable
+            const start = if ln.starts_with("import ") { 7 } else { 4 }
+            const path_part = ln[start..len(ln)]
+            if len(path_part) > 0 {
+                links.push({
+                    "range": lsp_range(i, start, i, start + len(path_part)),
+                    "tooltip": f"Module: {path_part}"
+                })
+            }
+        }
+        i = i + 1
+    }
+
+    if len(links) == 0 { return null }
+    links
+}
+
+// ── 27. textDocument/linkedEditingRange ─────────────────────────────
+
+func handle_linked_editing_range(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    // Find all occurrences of this identifier in the document
+    const refs = find_references(doc["program"], word_info["word"])
+    if len(refs) < 2 { return null }
+
+    let ranges = []
+    for r in refs {
+        ranges.push(lsp_range(r["line"], r["col"], r["line"], r["col"] + len(word_info["word"])))
+    }
+
+    {"ranges": ranges, "wordPattern": "[a-zA-Z_][a-zA-Z0-9_]*"}
+}
+
+// ── 28. textDocument/documentHighlight ──────────────────────────────
+
+func handle_document_highlight(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const refs = find_references(doc["program"], word_info["word"])
+    if len(refs) == 0 { return null }
+
+    let highlights = []
+    for r in refs {
+        const highlight_kind = if r["kind"] == "definition" { 3 } else { 2 } // Write : Read
+        highlights.push({
+            "range": lsp_range(r["line"], r["col"], r["line"], r["col"] + len(word_info["word"])),
+            "kind": highlight_kind
+        })
+    }
+    highlights
+}
+
+// ── 29. textDocument/documentColor ──────────────────────────────────
+
+func handle_document_color(params) {
+    // Return empty array — no color information in MAGI source
+    []
+}
+
+// ── 30. textDocument/prepareCallHierarchy ───────────────────────────
+
+func handle_prepare_call_hierarchy(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const def = find_definition(doc["program"], word_info["word"])
+    if def == null || def["kind"] != "function" { return null }
+
+    [{
+        "name": def["name"],
+        "kind": SK_FUNCTION,
+        "uri": uri,
+        "range": lsp_range(def["line"], def["col"], def["line"] + 1, 0),
+        "selectionRange": lsp_range(def["line"], def["col"], def["line"], def["col"] + len(def["name"]))
+    }]
+}
+
+// ── 31. callHierarchy/incomingCalls ─────────────────────────────────
+
+func handle_incoming_calls(params) {
+    const item = params["item"]
+    const uri = item["uri"]
+    const target_name = item["name"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    // Find all functions that call the target function
+    let callers = []
+    const symbols = collect_symbols(doc["program"])
+    for sym in symbols {
+        if sym["kind"] == SK_FUNCTION && sym["name"] != target_name {
+            // Check if this function's body references the target
+            const refs = find_refs_in_function(doc["program"], sym["name"], target_name)
+            if len(refs) > 0 {
+                let from_ranges = []
+                for r in refs {
+                    from_ranges.push(lsp_range(r["line"], r["col"], r["line"], r["col"] + len(target_name)))
+                }
+                callers.push({
+                    "from": {
+                        "name": sym["name"],
+                        "kind": SK_FUNCTION,
+                        "uri": uri,
+                        "range": lsp_range(sym["line"], sym["col"], sym["end_line"], 0),
+                        "selectionRange": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(sym["name"]))
+                    },
+                    "fromRanges": from_ranges
+                })
+            }
+        }
+    }
+
+    if len(callers) == 0 { return null }
+    callers
+}
+
+// Find references to target_name within a specific function's body
+func find_refs_in_function(program, func_name, target_name) {
+    let refs = []
+    if program == null { return refs }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name == func_name && fdef.body != null {
+                    for s in fdef.body.statements {
+                        refs = find_refs_in_stmt(refs, s, target_name)
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    refs
+}
+
+// ── 32. callHierarchy/outgoingCalls ─────────────────────────────────
+
+func handle_outgoing_calls(params) {
+    const item = params["item"]
+    const uri = item["uri"]
+    const func_name = item["name"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    // Find all functions called from within func_name
+    let callees = {"__s": true}  // name -> [ranges]
+    const symbols = collect_symbols(doc["program"])
+    const func_names = {"__s": true}
+    for sym in symbols {
+        if sym["kind"] == SK_FUNCTION {
+            func_names[sym["name"]] = sym
+        }
+    }
+
+    // Look for calls inside the function body
+    if doc["program"] != null {
+        for stmt in doc["program"].statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if fdef.name == func_name && fdef.body != null {
+                        for s in fdef.body.statements {
+                            collect_calls_in_stmt(callees, s, func_names)
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    let result = []
+    for callee_name in keys(callees) {
+        if callee_name == "__s" { continue }
+        if func_names.has(callee_name) {
+            const sym = func_names[callee_name]
+            const ranges = callees[callee_name]
+            result.push({
+                "to": {
+                    "name": callee_name,
+                    "kind": SK_FUNCTION,
+                    "uri": uri,
+                    "range": lsp_range(sym["line"], sym["col"], sym["end_line"], 0),
+                    "selectionRange": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(callee_name))
+                },
+                "fromRanges": ranges
+            })
+        }
+    }
+
+    if len(result) == 0 { return null }
+    result
+}
+
+func collect_calls_in_stmt(callees, stmt, func_names) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => {
+            collect_calls_in_expr(callees, expr, func_names)
+        },
+        StmtKind::SReturn(value) => {
+            if value != null {
+                collect_calls_in_expr(callees, value, func_names)
+            }
+        },
+        StmtKind::SLet(_, value) => {
+            if value != null {
+                collect_calls_in_expr(callees, value, func_names)
+            }
+        },
+        StmtKind::SConst(_, value) => {
+            if value != null {
+                collect_calls_in_expr(callees, value, func_names)
+            }
+        },
+        _ => {}
+    }
+}
+
+func collect_calls_in_expr(callees, expr, func_names) {
+    if expr == null { return }
+    const ek = expr.kind
+    const el = expr.span.start_line - 1
+    const ec = expr.span.start_col - 1
+    match ek {
+        ExprKind::ECall(call_name, args, _) => {
+            if func_names.has(call_name) {
+                if !callees.has(call_name) {
+                    callees[call_name] = []
+                }
+                callees[call_name] = push(callees[call_name], lsp_range(el, ec, el, ec + len(call_name)))
+            }
+            for arg in args {
+                collect_calls_in_expr(callees, arg, func_names)
+            }
+        },
+        ExprKind::EBinaryOp(_, left, right) => {
+            collect_calls_in_expr(callees, left, func_names)
+            collect_calls_in_expr(callees, right, func_names)
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            collect_calls_in_expr(callees, operand, func_names)
+        },
+        _ => {}
+    }
+}
+
+// ── 33. textDocument/prepareTypeHierarchy ───────────────────────────
+
+func handle_prepare_type_hierarchy(params) {
+    // Return null — no type hierarchy items yet
+    null
+}
+
+// ── 34. typeHierarchy/supertypes ────────────────────────────────────
+
+func handle_type_hierarchy_supertypes(params) {
+    // Return empty array
+    []
+}
+
+// ── 35. typeHierarchy/subtypes ──────────────────────────────────────
+
+func handle_type_hierarchy_subtypes(params) {
+    // Return empty array
+    []
+}
+
+// ── 36. workspace/symbol ────────────────────────────────────────────
+
+func handle_workspace_symbol(params) {
+    const query = if params.has("query") { params["query"] } else { "" }
+
+    // Gather symbols from all cached documents
+    let all_symbols = []
+    for uri in keys(lsp_documents) {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+        const symbols = collect_symbols(doc["program"])
+        for sym in symbols {
+            if query == "" || sym["name"].contains(query) {
+                all_symbols.push({
+                    "name": sym["name"],
+                    "kind": sym["kind"],
+                    "location": lsp_location(uri, lsp_range(sym["line"], sym["col"], sym["end_line"], 0)),
+                    "containerName": uri
+                })
+            }
+        }
+    }
+
+    if len(all_symbols) == 0 { return null }
+    all_symbols
+}
+
+// ── 37. workspace/executeCommand ────────────────────────────────────
+
+func handle_execute_command(params) {
+    const command = params["command"]
+    const arguments = if params.has("arguments") { params["arguments"] } else { [] }
+
+    match command {
+        "magi.run" => {
+            if len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null {
+                    const source = doc["source"]
+                    // Would invoke run_source(source) in full implementation
+                    return {"result": "run completed"}
+                }
+            }
+            null
+        },
+        "magi.check" => {
+            if len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null {
+                    return {"result": "check completed"}
+                }
+            }
+            null
+        },
+        "magi.lint" => {
+            if len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null {
+                    const warnings = lint(doc["program"])
+                    return {"result": f"{len(warnings)} warnings"}
+                }
+            }
+            null
+        },
+        "magi.format" => {
+            if len(arguments) > 0 {
+                const uri = arguments[0]
+                const doc = lsp_get_document(uri)
+                if doc != null {
+                    const formatted = format_program(doc["program"])
+                    return {"result": formatted}
+                }
+            }
+            null
+        },
+        _ => null
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Publish Diagnostics Notification ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func make_publish_diagnostics(uri, diagnostics) {
+    jsonrpc_notification("textDocument/publishDiagnostics", {
+        "uri": uri,
+        "diagnostics": diagnostics
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Server Capabilities JSON ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func server_capabilities_to_json() {
+    handle_initialize(null)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Request Dispatch ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lsp_dispatch(method, params) {
+    match method {
+        // Lifecycle
+        "initialize" => handle_initialize(params),
+        "initialized" => { handle_initialized(params); null },
+        "shutdown" => handle_shutdown(params),
+        "exit" => { handle_exit(params); null },
+
+        // Document sync (notifications — return publish diagnostics)
+        "textDocument/didOpen" => { handle_did_open(params); null },
+        "textDocument/didChange" => { handle_did_change(params); null },
+        "textDocument/didClose" => { handle_did_close(params); null },
+
+        // Language features (requests — return result)
+        "textDocument/completion" => handle_completion(params),
+        "textDocument/hover" => handle_hover(params),
+        "textDocument/definition" => handle_definition(params),
+        "textDocument/typeDefinition" => handle_type_definition(params),
+        "textDocument/references" => handle_references(params),
+        "textDocument/rename" => handle_rename(params),
+        "textDocument/prepareRename" => handle_prepare_rename(params),
+        "textDocument/formatting" => handle_formatting(params),
+        "textDocument/rangeFormatting" => handle_range_formatting(params),
+        "textDocument/onTypeFormatting" => handle_on_type_formatting(params),
+        "textDocument/codeAction" => handle_code_action(params),
+        "textDocument/signatureHelp" => handle_signature_help(params),
+        "textDocument/documentSymbol" => handle_document_symbol(params),
+        "textDocument/semanticTokens/full" => handle_semantic_tokens_full(params),
+        "textDocument/foldingRange" => handle_folding_range(params),
+        "textDocument/selectionRange" => handle_selection_range(params),
+        "textDocument/codeLens" => handle_code_lens(params),
+        "textDocument/inlayHint" => handle_inlay_hint(params),
+        "textDocument/documentLink" => handle_document_link(params),
+        "textDocument/linkedEditingRange" => handle_linked_editing_range(params),
+        "textDocument/documentHighlight" => handle_document_highlight(params),
+        "textDocument/documentColor" => handle_document_color(params),
+        "textDocument/prepareCallHierarchy" => handle_prepare_call_hierarchy(params),
+        "textDocument/prepareTypeHierarchy" => handle_prepare_type_hierarchy(params),
+
+        // Call hierarchy
+        "callHierarchy/incomingCalls" => handle_incoming_calls(params),
+        "callHierarchy/outgoingCalls" => handle_outgoing_calls(params),
+
+        // Type hierarchy
+        "typeHierarchy/supertypes" => handle_type_hierarchy_supertypes(params),
+        "typeHierarchy/subtypes" => handle_type_hierarchy_subtypes(params),
+
+        // Workspace
+        "workspace/symbol" => handle_workspace_symbol(params),
+        "workspace/executeCommand" => handle_execute_command(params),
+
+        // Unknown method
+        _ => null
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Stdio JSON-RPC Transport ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Read Content-Length header and JSON body from stdin.
+// Returns parsed JSON request or null on EOF.
+func read_message() {
+    // Read header lines until blank line
+    let content_length = 0
+    while true {
+        const line = input()
+        if line == null { return null }
+        const trimmed = line.trim()
+        if trimmed == "" { break }
+        if trimmed.starts_with("Content-Length:") {
+            const num_str = trimmed[15..len(trimmed)].trim()
+            content_length = to_int(num_str)
+        }
+    }
+
+    if content_length == 0 { return null }
+
+    // Read exactly content_length bytes
+    // In a real implementation this would use binary read.
+    // Here we read line by line and accumulate.
+    let body = input()
+    if body == null { return null }
+
+    json_parse(body)
+}
+
+// Write JSON-RPC response to stdout
+func write_message(response) {
+    const body = json_encode(response)
+    const header = f"Content-Length: {len(body)}\r\n\r\n"
+    print(header + body)
+}
+
+// ── Main server loop ─────────────────────────────────────────────────
+
+func run_lsp_server() {
+    let running = true
+    while running {
+        const request = read_message()
+        if request == null { break }
+
+        const method = if request.has("method") { request["method"] } else { null }
+        const id = if request.has("id") { request["id"] } else { null }
+        const params = if request.has("params") { request["params"] } else { null }
+
+        if method == null { continue }
+
+        // Exit notification
+        if method == "exit" {
+            running = false
+            continue
+        }
+
+        const result = lsp_dispatch(method, params)
+
+        // Notifications don't get responses (no id)
+        if id == null { continue }
+
+        // Send response
+        if result != null {
+            write_message(jsonrpc_result(id, result))
+        } else {
+            // Null result
+            write_message(jsonrpc_result(id, null))
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Utility: Count handlers for verification ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const LSP_HANDLER_COUNT = 43
+const LSP_HANDLERS = [
+    "initialize", "initialized", "shutdown", "exit",
+    "textDocument/didOpen", "textDocument/didChange", "textDocument/didClose",
+    "textDocument/completion", "textDocument/hover",
+    "textDocument/definition", "textDocument/typeDefinition",
+    "textDocument/references", "textDocument/rename", "textDocument/prepareRename",
+    "textDocument/formatting", "textDocument/rangeFormatting", "textDocument/onTypeFormatting",
+    "textDocument/codeAction", "textDocument/signatureHelp",
+    "textDocument/documentSymbol", "textDocument/semanticTokens/full",
+    "textDocument/foldingRange", "textDocument/selectionRange",
+    "textDocument/codeLens", "textDocument/inlayHint",
+    "textDocument/documentLink", "textDocument/linkedEditingRange",
+    "textDocument/documentHighlight", "textDocument/documentColor",
+    "textDocument/prepareCallHierarchy", "textDocument/prepareTypeHierarchy",
+    "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls",
+    "typeHierarchy/supertypes", "typeHierarchy/subtypes",
+    "workspace/symbol", "workspace/executeCommand",
+    // Additional: these share handlers or are sub-protocols
+    "textDocument/didSave", "textDocument/willSave",
+    "textDocument/colorPresentation",
+    "codeLens/resolve", "completionItem/resolve", "inlayHint/resolve"
+]

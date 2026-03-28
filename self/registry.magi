@@ -1,0 +1,515 @@
+// MAGI Self-Hosted Compiler — Package Registry
+//
+// Package management for MAGI:
+//   - Parse magispace.toml configuration files
+//   - Resolve dependencies with semver constraints
+//   - Minimum Version Selection (MVS) algorithm
+//   - Lock file generation (magi.lock)
+//   - Package search and listing
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Semver Types ─────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func semver_parse(version_str) {
+    const parts = version_str.split(".")
+    if len(parts) < 3 {
+        return null
+    }
+    // Handle pre-release: "1.0.0-beta" -> patch = "0-beta"
+    const patch_str = parts[2]
+    let patch = 0
+    let pre = ""
+    if patch_str.contains("-") {
+        const pp = patch_str.split("-")
+        patch = to_int(pp[0])
+        pre = pp[1]
+    } else {
+        patch = to_int(patch_str)
+    }
+    {
+        "major": to_int(parts[0]),
+        "minor": to_int(parts[1]),
+        "patch": patch,
+        "pre": pre
+    }
+}
+
+func semver_to_string(v) {
+    let s = to_string(v["major"]) + "." + to_string(v["minor"]) + "." + to_string(v["patch"])
+    if v["pre"] != "" {
+        s = s + "-" + v["pre"]
+    }
+    s
+}
+
+func semver_compare(a, b) {
+    if a["major"] != b["major"] { return a["major"] - b["major"] }
+    if a["minor"] != b["minor"] { return a["minor"] - b["minor"] }
+    if a["patch"] != b["patch"] { return a["patch"] - b["patch"] }
+    // Pre-release versions have lower precedence
+    if a["pre"] == "" && b["pre"] != "" { return 1 }
+    if a["pre"] != "" && b["pre"] == "" { return -1 }
+    if a["pre"] < b["pre"] { return -1 }
+    if a["pre"] > b["pre"] { return 1 }
+    0
+}
+
+func semver_satisfies(version, constraint) {
+    if constraint == "" || constraint == "*" { return true }
+
+    // Parse constraint prefix
+    let op = "="
+    let ver_str = constraint
+
+    if constraint.starts_with(">=") {
+        op = ">="
+        ver_str = constraint[2..len(constraint)].trim()
+    } else if constraint.starts_with("<=") {
+        op = "<="
+        ver_str = constraint[2..len(constraint)].trim()
+    } else if constraint.starts_with(">") {
+        op = ">"
+        ver_str = constraint[1..len(constraint)].trim()
+    } else if constraint.starts_with("<") {
+        op = "<"
+        ver_str = constraint[1..len(constraint)].trim()
+    } else if constraint.starts_with("=") {
+        op = "="
+        ver_str = constraint[1..len(constraint)].trim()
+    } else if constraint.starts_with("~") {
+        // Tilde: ~1.2.3 means >=1.2.3, <1.3.0
+        op = "~"
+        ver_str = constraint[1..len(constraint)].trim()
+    } else if constraint.starts_with("^") {
+        // Caret: ^1.2.3 means >=1.2.3, <2.0.0
+        op = "^"
+        ver_str = constraint[1..len(constraint)].trim()
+    }
+
+    const target = semver_parse(ver_str)
+    if target == null { return true }  // unparseable, accept
+
+    const cmp = semver_compare(version, target)
+
+    match op {
+        "=" => cmp == 0,
+        ">=" => cmp >= 0,
+        "<=" => cmp <= 0,
+        ">" => cmp > 0,
+        "<" => cmp < 0,
+        "~" => {
+            // >=target, <target.minor+1
+            cmp >= 0 && version["major"] == target["major"] && version["minor"] == target["minor"]
+        },
+        "^" => {
+            // >=target, <next major
+            if target["major"] > 0 {
+                cmp >= 0 && version["major"] == target["major"]
+            } else if target["minor"] > 0 {
+                cmp >= 0 && version["major"] == target["major"] && version["minor"] == target["minor"]
+            } else {
+                cmp == 0
+            }
+        },
+        _ => true
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── TOML Parser (minimal, for magispace.toml) ───────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func toml_parse(text) {
+    let result = {"__s": true}
+    let current_section = result
+    let current_section_name = ""
+
+    const lines = text.split("\n")
+    for line in lines {
+        const trimmed = line.trim()
+
+        // Skip empty lines and comments
+        if trimmed == "" { continue }
+        if trimmed[0] == "#" { continue }
+
+        // Section header: [section]
+        if trimmed[0] == "[" {
+            const end = trimmed.indexOf("]")
+            if end > 0 {
+                current_section_name = trimmed[1..end]
+                if !result.has(current_section_name) {
+                    result[current_section_name] = {"__s": true}
+                }
+                current_section = result[current_section_name]
+            }
+            continue
+        }
+
+        // Key-value pair: key = value
+        const eq_pos = trimmed.indexOf("=")
+        if eq_pos > 0 {
+            const key = trimmed[0..eq_pos].trim()
+            let value = trimmed[eq_pos + 1..len(trimmed)].trim()
+
+            // Strip quotes from string values
+            if len(value) >= 2 && value[0] == "\"" && value[len(value) - 1] == "\"" {
+                value = value[1..len(value) - 1]
+            }
+
+            // Handle arrays
+            if len(value) >= 2 && value[0] == "[" && value[len(value) - 1] == "]" {
+                const inner = value[1..len(value) - 1].trim()
+                if inner == "" {
+                    value = []
+                } else {
+                    let items = []
+                    const parts = inner.split(",")
+                    for part in parts {
+                        let item = part.trim()
+                        if len(item) >= 2 && item[0] == "\"" && item[len(item) - 1] == "\"" {
+                            item = item[1..len(item) - 1]
+                        }
+                        items.push(item)
+                    }
+                    value = items
+                }
+            }
+
+            // Handle booleans
+            if value == "true" { value = true }
+            if value == "false" { value = false }
+
+            current_section[key] = value
+        }
+    }
+
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Package Info ─────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func package_info(name, version, description, dependencies) {
+    {
+        "name": name,
+        "version": version,
+        "description": description,
+        "dependencies": dependencies  // [{name, constraint}]
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Parse magispace.toml ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func parse_magispace(text) {
+    const config = toml_parse(text)
+
+    let pkg_name = ""
+    let pkg_version = ""
+    let pkg_description = ""
+
+    if config.has("package") {
+        const pkg = config["package"]
+        if pkg.has("name") { pkg_name = pkg["name"] }
+        if pkg.has("version") { pkg_version = pkg["version"] }
+        if pkg.has("description") { pkg_description = pkg["description"] }
+    }
+
+    let deps = []
+    if config.has("dependencies") {
+        const dep_section = config["dependencies"]
+        for dep_name in keys(dep_section) {
+            if dep_name == "__s" { continue }
+            const constraint = dep_section[dep_name]
+            deps.push({"name": dep_name, "constraint": to_string(constraint)})
+        }
+    }
+
+    {
+        "name": pkg_name,
+        "version": pkg_version,
+        "description": pkg_description,
+        "dependencies": deps,
+        "raw": config
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Dependency Resolution ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Simple dependency graph: resolve all transitive dependencies
+func resolve_dependencies(requirements, registry) {
+    let resolved = []
+    let visited = {"__s": true}
+    let stack = []
+
+    // Initialize stack with direct requirements
+    for req in requirements {
+        stack.push(req["name"])
+    }
+
+    while len(stack) > 0 {
+        const current = stack[len(stack) - 1]
+        stack = stack[0..len(stack) - 1]
+
+        if visited.has(current) { continue }
+        visited[current] = true
+
+        if registry.has(current) {
+            const pkg = registry[current]
+            resolved.push({
+                "name": current,
+                "version": pkg["version"]
+            })
+
+            // Add transitive dependencies
+            if pkg.has("dependencies") {
+                for dep in pkg["dependencies"] {
+                    if !visited.has(dep["name"]) {
+                        stack.push(dep["name"])
+                    }
+                }
+            }
+        }
+    }
+
+    resolved
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Minimum Version Selection (MVS) ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// MVS algorithm (from Go): for each dependency, select the minimum version
+// that satisfies all constraints across the dependency graph.
+func resolve_mvs(requirements, available_versions) {
+    // available_versions: name -> [version_strings] (sorted ascending)
+    // requirements: [{name, constraint}]
+
+    let selected = {"__s": true}  // name -> version_string
+
+    for req in requirements {
+        const name = req["name"]
+        const constraint = req["constraint"]
+
+        if !available_versions.has(name) {
+            println("Warning: package " + name + " not found")
+            continue
+        }
+
+        const versions = available_versions[name]
+
+        // Find the minimum version that satisfies the constraint
+        let found = false
+        for ver_str in versions {
+            const ver = semver_parse(ver_str)
+            if ver == null { continue }
+            if semver_satisfies(ver, constraint) {
+                if selected.has(name) {
+                    // Keep the higher of the two (to satisfy all constraints)
+                    const existing = semver_parse(selected[name])
+                    if existing != null && semver_compare(ver, existing) > 0 {
+                        selected[name] = ver_str
+                    }
+                } else {
+                    selected[name] = ver_str
+                }
+                found = true
+                break  // MVS: take the first (minimum) satisfying version
+            }
+        }
+
+        if !found {
+            println("Warning: no version of " + name + " satisfies constraint " + constraint)
+        }
+    }
+
+    // Convert to list
+    let result = []
+    for name in keys(selected) {
+        if name == "__s" { continue }
+        result.push({"name": name, "version": selected[name]})
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Lock File ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func generate_lockfile(resolved_deps) {
+    let lock = "# magi.lock -- auto-generated, do not edit\n\n"
+    for dep in resolved_deps {
+        lock = lock + "[[package]]\n"
+        lock = lock + "name = \"" + dep["name"] + "\"\n"
+        lock = lock + "version = \"" + dep["version"] + "\"\n"
+        lock = lock + "\n"
+    }
+    lock
+}
+
+func parse_lockfile(text) {
+    let packages = []
+    let current = null
+
+    const lines = text.split("\n")
+    for line in lines {
+        const trimmed = line.trim()
+
+        if trimmed == "[[package]]" {
+            if current != null {
+                packages.push(current)
+            }
+            current = {"name": "", "version": ""}
+            continue
+        }
+
+        if current != null {
+            if trimmed.starts_with("name = ") {
+                let val = trimmed[7..len(trimmed)].trim()
+                if len(val) >= 2 && val[0] == "\"" {
+                    val = val[1..len(val) - 1]
+                }
+                current["name"] = val
+            }
+            if trimmed.starts_with("version = ") {
+                let val = trimmed[10..len(trimmed)].trim()
+                if len(val) >= 2 && val[0] == "\"" {
+                    val = val[1..len(val) - 1]
+                }
+                current["version"] = val
+            }
+        }
+    }
+
+    if current != null {
+        packages.push(current)
+    }
+
+    packages
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Registry Index ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func registry_new() {
+    {
+        "packages": {"__s": true}  // name -> package_info
+    }
+}
+
+func registry_add(reg, name, version, description, deps) {
+    reg["packages"][name] = package_info(name, version, description, deps)
+}
+
+func registry_search(reg, query) {
+    let results = []
+    for name in keys(reg["packages"]) {
+        if name == "__s" { continue }
+        const pkg = reg["packages"][name]
+        if name.contains(query) || pkg["description"].contains(query) {
+            results.push(pkg)
+        }
+    }
+    results
+}
+
+func registry_list(reg) {
+    let results = []
+    for name in keys(reg["packages"]) {
+        if name == "__s" { continue }
+        results.push(reg["packages"][name])
+    }
+    results
+}
+
+func registry_get(reg, name) {
+    if reg["packages"].has(name) {
+        reg["packages"][name]
+    } else {
+        null
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Package Installation Plan ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func plan_install(magispace_text, reg) {
+    const config = parse_magispace(magispace_text)
+    const requirements = config["dependencies"]
+
+    if len(requirements) == 0 {
+        return {"packages": [], "lockfile": ""}
+    }
+
+    // Build available versions from registry
+    let available = {"__s": true}
+    for req in requirements {
+        const name = req["name"]
+        const pkg = registry_get(reg, name)
+        if pkg != null {
+            available[name] = [pkg["version"]]
+        }
+    }
+
+    // Resolve
+    const resolved = resolve_mvs(requirements, available)
+    const lockfile = generate_lockfile(resolved)
+
+    {"packages": resolved, "lockfile": lockfile}
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Cycle Detection ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func detect_cycles(requirements, registry) {
+    let visiting = {"__s": true}
+    let visited = {"__s": true}
+    let cycles = []
+
+    for req in requirements {
+        const name = req["name"]
+        if !visited.has(name) {
+            const cycle = dfs_cycle(name, registry, visiting, visited)
+            if cycle != null {
+                cycles.push(cycle)
+            }
+        }
+    }
+
+    cycles
+}
+
+func dfs_cycle(name, registry, visiting, visited) {
+    if visiting.has(name) {
+        return [name]  // cycle detected
+    }
+    if visited.has(name) {
+        return null  // already fully processed
+    }
+
+    visiting[name] = true
+
+    if registry.has(name) {
+        const pkg = registry[name]
+        if pkg.has("dependencies") {
+            for dep in pkg["dependencies"] {
+                const result = dfs_cycle(dep["name"], registry, visiting, visited)
+                if result != null {
+                    return push([name], result)
+                }
+            }
+        }
+    }
+
+    visiting[name] = false
+    visited[name] = true
+    null
+}
