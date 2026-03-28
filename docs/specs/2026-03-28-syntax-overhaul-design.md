@@ -28,7 +28,7 @@ Every syntax choice must pass this test: can a developer coming from any mainstr
 
 - `output` — replaced by `print()` / `println()`
 - `throw` — replaced by `return null, "error"`
-- `try` / `catch` / `finally` — no exception handling
+- `try` / `catch` / `finally` — no exceptions
 - `impl` — dot receiver functions
 - `trait` — replaced by `interface`
 - `use` — replaced by `import`
@@ -36,6 +36,11 @@ Every syntax choice must pass this test: can a developer coming from any mainstr
 - `fn` — replaced by `func`
 - `__dunder__` methods — replaced by named interfaces
 - `>>` / `<<` composition — `|>` pipe is sufficient
+- `|x| expr` lambdas — replaced by `x => expr` arrow functions
+- `_` partial application — arrow functions cover it
+- `loop` — use `while true`
+- `Result` / `Ok` / `Err` — multi-return errors
+- `Some` / `None` / `?` — use null + `??`
 
 ## Added
 
@@ -326,13 +331,138 @@ x = 10             // compile error
 
 Matches JavaScript: `const` is frozen, `let` is mutable.
 
-## 10. What Stays Unchanged
+## 10. Concurrency
+
+```magi
+// spawn launches a concurrent task
+const task = spawn fetch_data(url)
+const result = await task
+
+// select waits on multiple channels
+select {
+    msg from inbox => println(msg),
+    tick from timer => update(),
+    _ => println("timeout"),
+}
+```
+
+- `spawn expr` — launches concurrent task, returns a future
+- `await expr` — waits for future to resolve, multi-return stays intact
+- `select` — waits on multiple channels, first ready wins
+- `defer expr` — runs when function exits (cleanup without try/finally)
+
+```magi
+async func fetch(url) {
+    let resp, err = net.get(url)
+    if err { return null, err }
+    resp.body, null
+}
+
+// await unwraps the future, multi-return comes through
+let body, err = await fetch("https://api.example.com")
+if err { return null, err }
+```
+
+```magi
+func process_file(path) {
+    let file, err = fs.open(path)
+    if err { return null, err }
+    defer fs.close(file)
+
+    let data, err = fs.read_all(file)
+    if err { return null, err }
+    data, null
+}
+```
+
+## 11. Lambdas — Arrow Functions
+
+```magi
+// Single expression:
+const double = x => x * 2
+const add = (a, b) => a + b
+
+// Multi-line block:
+const process = (x) => {
+    const cleaned = x.trim()
+    parse_int(cleaned) * 2
+}
+
+// In higher-order functions:
+numbers |> filter(x => x % 2 == 0) |> map(x => x * x)
+```
+
+- `x => expr` — single argument, no parens needed
+- `(a, b) => expr` — multiple arguments
+- `(x) => { block }` — multi-line
+- Replaces `|x| expr` pipe-style lambdas
+
+## 12. Generics
+
+```magi
+func max<T: Compare>(a T, b T) -> T {
+    if a.compare(b) > 0 { a } else { b }
+}
+
+struct Stack<T> {
+    items: [T],
+}
+
+func Stack<T>.push(self, item T) {
+    self.items.push(item)
+}
+
+func Stack<T>.pop(self) -> T {
+    self.items.pop()
+}
+```
+
+- `<T>` for type parameters
+- `T: Interface` for bounds
+- Works on functions, structs, and receiver methods
+
+## 13. Type Aliases
+
+```magi
+type ID = int
+type Handler = func(Request) -> Response
+type StringMap = map[string]string
+```
+
+## 14. Visibility
+
+Everything is public. Modules are the privacy boundary.
+
+- No `pub`/`private`/`export` keywords
+- If a module exports it, it's available
+- Convention: prefix internal helpers with `_` (not enforced)
+
+```magi
+func parse(input) { ... }         // public API
+func _tokenize(input) { ... }     // internal — convention, not enforced
+```
+
+## 15. Semicolons
+
+Optional. Newlines end statements. Semicolons allowed for multiple statements on one line.
+
+```magi
+// Normal — no semicolons:
+const x = 5
+const y = 10
+println(x + y)
+
+// One-liner — semicolons allowed:
+const a = 1; const b = 2; println(a + b)
+```
+
+## 16. What Stays Unchanged
 
 - `const` / `let` for bindings
 - `struct` for types
 - `enum` for enumerated types
 - `if` / `else` as expressions
-- `for` / `while` / `loop`
+- `for` / `while` (no `loop` — use `while true`)
 - `match` with pattern matching (exhaustive enforcement)
 - `break` / `continue` / `return`
 - `f"..."` string interpolation
@@ -340,14 +470,29 @@ Matches JavaScript: `const` is frozen, `let` is mutable.
 - `[x for x in arr if cond]` comprehensions
 - `..` and `..=` range operators
 - `??` null coalesce and `?.` optional chain
-- `async` / `await` / `spawn` / `select`
-- `defer`
 - `...` spread operator
 - Generics with `<T>` syntax
-- Lambdas `|x| x * 2`
-- `_` partial application in function calls
+- `type` aliases
 
-## 11. Full Example
+## 17. Removed (Complete List)
+
+- `output` — replaced by `print()` / `println()`
+- `throw` — replaced by `return null, "error"`
+- `try` / `catch` / `finally` — no exceptions
+- `impl` — dot receiver functions
+- `trait` — replaced by `interface`
+- `use` — replaced by `import`
+- `let mut` — `let` is now mutable, `const` is immutable
+- `fn` — replaced by `func`
+- `__dunder__` methods — replaced by named interfaces
+- `>>` / `<<` composition — `|>` pipe is sufficient
+- `|x| expr` lambdas — replaced by `x => expr` arrow functions
+- `_` partial application — arrow functions cover it
+- `loop` — use `while true`
+- `Result` / `Ok` / `Err` — multi-return errors
+- `Some` / `None` / `?` — use null + `??`
+
+## 18. Full Example
 
 ```magi
 import std.{math, fs, json}
@@ -413,9 +558,9 @@ func main() {
 
     const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     const result = numbers
-        |> filter(|n| n % 2 == 0)
-        |> map(|n| n * n)
-        |> reduce(0, |acc, n| acc + n)
+        |> filter(n => n % 2 == 0)
+        |> map(n => n * n)
+        |> reduce(0, (acc, n) => acc + n)
 
     println(f"sum of even squares: {result}")
 }
@@ -425,10 +570,10 @@ main()
 
 ## 12. Implementation Order
 
-1. **Lexer** — Add `import`, `interface`, `func` tokens. Remove `output`, `throw`, `try`, `catch`, `finally`, `impl`, `trait`, `use`, `fn` tokens.
-2. **Parser** — Parse `import std.path`, `func` keyword, dot receivers, `interface`, multiple return values.
-3. **AST** — New nodes for imports, dot receivers, interfaces. Remove try/catch/throw/impl/trait.
-4. **Interpreter** — `print()`/`println()` builtins. Multi-return. Module namespacing. Dot receiver dispatch. Implicit interface satisfaction. Named operator interfaces. Clean enum display. Remove exception machinery.
-5. **Type checker** — Interface satisfaction. Receiver validation. Multi-return types. Exhaustive match enforcement.
-6. **Tests** — Update all tests to new syntax. Add new tests.
-7. **Docs** — Update spec.md, stdlib.md, examples.
+1. **Lexer** — Add `import`, `interface`, `func`, `=>` tokens. Remove `output`, `throw`, `try`, `catch`, `finally`, `impl`, `trait`, `use`, `fn`, `loop` tokens. Make semicolons optional.
+2. **Parser** — Parse `import std.path`, `func` keyword, dot receivers `func Type.method(self)`, `interface` declarations, arrow functions `x => expr`, multiple return values, `type` aliases. Remove `|x|` lambda syntax, `loop`, try/catch/throw/impl/trait.
+3. **AST** — New nodes for imports, dot receivers, interfaces, arrow functions. Remove try/catch/throw/impl/trait/loop nodes.
+4. **Interpreter** — `print()`/`println()` as expression builtins. Multi-return values. Module namespacing from imports. Dot receiver dispatch. Implicit interface satisfaction. Named operator interfaces (`Add`, `Display`, `Equal`, etc.). Clean enum display. Remove exception machinery.
+5. **Type checker** — Interface satisfaction. Receiver validation. Multi-return types. Exhaustive match enforcement (error, not warning). Generics with interface bounds.
+6. **Tests** — Update all 3,263 tests to new syntax. Add tests for new features.
+7. **Docs** — Update spec.md, stdlib.md, examples, CLAUDE.md.
