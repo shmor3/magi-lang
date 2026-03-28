@@ -1,0 +1,107 @@
+// MAGI Self-Hosted Compiler — Core Types
+
+// ── DataType ────────────────────────────────────────────────────────
+// Represents all MAGI values at runtime.
+// Uses simple variant data — no complex type annotations in enums.
+
+enum DataType {
+    Null,
+    Bool(bool),
+    Int(int),
+    Float(float),
+    Str(string),
+    Array(array),
+    Map(map),
+    Tuple(array),
+}
+
+func DataType.type_name(self) {
+    match self {
+        DataType::Null => "null",
+        DataType::Bool(_) => "bool",
+        DataType::Int(_) => "int",
+        DataType::Float(_) => "float",
+        DataType::Str(_) => "string",
+        DataType::Array(_) => "array",
+        DataType::Map(_) => "map",
+        DataType::Tuple(_) => "tuple",
+    }
+}
+
+func DataType.is_truthy(self) {
+    match self {
+        DataType::Null => false,
+        DataType::Bool(b) => b,
+        DataType::Int(n) => n != 0,
+        DataType::Float(f) => f != 0.0,
+        DataType::Str(s) => len(s) > 0,
+        DataType::Array(a) => len(a) > 0,
+        _ => true,
+    }
+}
+
+func DataType.display(self) {
+    match self {
+        DataType::Null => "null",
+        DataType::Bool(b) => to_string(b),
+        DataType::Int(n) => to_string(n),
+        DataType::Float(f) => to_string(f),
+        DataType::Str(s) => s,
+        DataType::Array(a) => {
+            const sep = ", "
+            const parts = a.map(x => {
+                match x {
+                    DataType::Int(n) => to_string(n),
+                    DataType::Str(s) => s,
+                    _ => "<val>",
+                }
+            })
+            const joined = parts.join(sep)
+            f"[{joined}]"
+        },
+        _ => "<value>",
+    }
+}
+
+// ── Span ────────────────────────────────────────────────────────────
+
+struct Span {
+    start_line: int,
+    start_col: int,
+    end_line: int,
+    end_col: int,
+    start_byte: int,
+    end_byte: int,
+}
+
+func span_new(line, col) {
+    Span { start_line: line, start_col: col, end_line: line, end_col: col, start_byte: 0, end_byte: 0 }
+}
+
+func Span.merge(self, other) {
+    const sl = if self.start_line < other.start_line { self.start_line } else { other.start_line }
+    const sc = if self.start_line < other.start_line { self.start_col }
+               else if self.start_line == other.start_line && self.start_col < other.start_col { self.start_col }
+               else { other.start_col }
+    const el = if self.end_line > other.end_line { self.end_line } else { other.end_line }
+    const ec = if self.end_line > other.end_line { self.end_col }
+               else if self.end_line == other.end_line && self.end_col > other.end_col { self.end_col }
+               else { other.end_col }
+    Span { start_line: sl, start_col: sc, end_line: el, end_col: ec, start_byte: 0, end_byte: 0 }
+}
+
+// ── Error Types ─────────────────────────────────────────────────────
+
+enum CompileError {
+    Error(int, int, string),
+    Unsupported(string),
+    Internal(string),
+}
+
+func CompileError.display(self) {
+    match self {
+        CompileError::Error(line, col, msg) => f"error at {line}:{col}: {msg}",
+        CompileError::Unsupported(msg) => f"unsupported: {msg}",
+        CompileError::Internal(msg) => f"internal error: {msg}",
+    }
+}

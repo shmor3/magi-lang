@@ -1,0 +1,102 @@
+// Tests for self/types.magi
+// Run: cat self/types.magi self/tests/test_types.magi | magi run -
+
+// ── DataType Tests ──────────────────────────────────────────────────
+
+func test_datatype_null() {
+    const v = DataType::Null
+    assert(v.type_name() == "null")
+    assert(v.is_truthy() == false)
+    assert(v.display() == "null")
+    println("PASS: DataType::Null")
+}
+
+func test_datatype_bool() {
+    assert(DataType::Bool(true).is_truthy() == true)
+    assert(DataType::Bool(false).is_truthy() == false)
+    assert(DataType::Bool(true).type_name() == "bool")
+    println("PASS: DataType::Bool")
+}
+
+func test_datatype_int() {
+    const v = DataType::Int(42)
+    assert(v.type_name() == "int")
+    assert(v.is_truthy() == true)
+    assert(v.display() == "42")
+    assert(DataType::Int(0).is_truthy() == false)
+    println("PASS: DataType::Int")
+}
+
+func test_datatype_float() {
+    const v = DataType::Float(3.14)
+    assert(v.type_name() == "float")
+    assert(v.is_truthy() == true)
+    println("PASS: DataType::Float")
+}
+
+func test_datatype_string() {
+    const v = DataType::Str("hello")
+    assert(v.type_name() == "string")
+    assert(v.display() == "hello")
+    assert(DataType::Str("").is_truthy() == false)
+    println("PASS: DataType::Str")
+}
+
+func test_datatype_array() {
+    const v = DataType::Array([DataType::Int(1), DataType::Int(2)])
+    assert(v.type_name() == "array")
+    assert(v.is_truthy() == true)
+    println("PASS: DataType::Array")
+}
+
+// ── Span Tests ──────────────────────────────────────────────────────
+
+func test_span_new() {
+    const s = span_new(1, 5)
+    assert(s.start_line == 1)
+    assert(s.start_col == 5)
+    println("PASS: Span.new")
+}
+
+func test_span_merge() {
+    const a = Span { start_line: 1, start_col: 1, end_line: 1, end_col: 5, start_byte: 0, end_byte: 4 }
+    const b = Span { start_line: 2, start_col: 3, end_line: 2, end_col: 10, start_byte: 20, end_byte: 27 }
+    const m = a.merge(b)
+    assert(m.start_line == 1)
+    assert(m.start_col == 1)
+    assert(m.end_line == 2)
+    assert(m.end_col == 10)
+    println("PASS: Span.merge")
+}
+
+// ── CompileError Tests ──────────────────────────────────────────────
+
+func test_compile_error() {
+    const err = CompileError::Error(5, 10, "unexpected token")
+    const msg = err.display()
+    assert(msg.contains("5:10"))
+    assert(msg.contains("unexpected token"))
+    println("PASS: CompileError")
+}
+
+func test_compile_error_unsupported() {
+    const err = CompileError::Unsupported("feature X")
+    assert(err.display().contains("unsupported"))
+    println("PASS: CompileError::Unsupported")
+}
+
+// ── Run All ─────────────────────────────────────────────────────────
+
+test_datatype_null()
+test_datatype_bool()
+test_datatype_int()
+test_datatype_float()
+test_datatype_string()
+test_datatype_array()
+test_span_new()
+test_span_merge()
+test_compile_error()
+test_compile_error_unsupported()
+
+println("")
+println("All Phase 1 type tests passed!")

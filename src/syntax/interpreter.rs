@@ -13122,6 +13122,44 @@ impl<'a> Interpreter<'a> {
                     }
                 }
 
+                // Try impl block methods for enum values
+                if let DataType::Map(ref map) = obj {
+                    if let Some(DataType::String(enum_name)) = map.get("__enum") {
+                        let resolved = self.impl_methods.get(enum_name).and_then(|m| m.get(method.as_str()).cloned());
+                        if let Some(impl_method) = resolved {
+                            self.call_depth += 1;
+                            if self.call_depth > MAX_CALL_DEPTH {
+                                self.call_depth -= 1;
+                                return Err(InterpError::ResourceLimit { limit: format!("{} calls", MAX_CALL_DEPTH), actual: format!("{} calls", self.call_depth + 1), context: format!("{}.{}", enum_name, method), span: expr.span });
+                            }
+                            self.symbols.push(HashMap::new());
+                            self.heap.push_scope();
+                            if let Some(p) = impl_method.params.first() {
+                                let addr = self.heap.alloc(obj.clone());
+                                self.define(&p.name, addr, false);
+                            }
+                            let mut eval_args = Vec::new();
+                            for arg in args { eval_args.push(self.eval_expr(arg)?); }
+                            for (i, param) in impl_method.params.iter().skip(1).enumerate() {
+                                let val = if i < eval_args.len() { eval_args[i].clone() }
+                                    else if let Some(default) = &param.default { self.eval_expr(default)? }
+                                    else { DataType::Null };
+                                let addr = self.heap.alloc(val);
+                                self.define(&param.name, addr, false);
+                            }
+                            let result = self.exec_block(&impl_method.body);
+                            self.heap.pop_scope();
+                            self.symbols.pop();
+                            self.call_depth -= 1;
+                            return match result {
+                                Ok(v) => Ok(v),
+                                Err(InterpError::ReturnSignal(value)) => Ok(value),
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
+                }
+
                 let op_type =
                     resolve_method(&obj, method).ok_or_else(|| {
                         let available = available_methods_for_type(&obj);
