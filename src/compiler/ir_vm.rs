@@ -168,7 +168,7 @@ impl IrVm {
     fn execute_instructions(&mut self, module: &IrModule, instructions: &[Instruction], _fn_idx: usize) -> Result<Val, String> {
         let mut ip = 0;
         let mut step_count: u64 = 0;
-        const MAX_STEPS: u64 = 100_000_000;
+        const MAX_STEPS: u64 = 1_000_000_000;
         while ip < instructions.len() {
             step_count += 1;
             if step_count > MAX_STEPS {
