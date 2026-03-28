@@ -21,7 +21,7 @@ Every syntax choice must pass this test: can a developer coming from any mainstr
 | Methods | `impl Type { fn method(self) }` | `func Type.method(self)` — dot receiver |
 | Interfaces | `trait` + explicit `impl Trait for Type` | `interface` + implicit satisfaction |
 | Mutability | `let mut x` | `const` immutable, `let` mutable |
-| Operator overload | `__add__`, `__str__` dunders | Named interfaces: `Add`, `Stringer` |
+| Operator overload | `__add__`, `__str__` dunders | Named interfaces: `Add`, `Display`, `Equal` |
 | Composition | None | Removed — `\|>` pipe is sufficient |
 
 ## Removed
@@ -119,23 +119,27 @@ println(a.scale(2.0))    // Vec2 { x: 6.0, y: 8.0 }
 
 ## 5. Operator Overloading via Interfaces
 
-Instead of magic `__dunder__` methods, operators are defined by implementing named interfaces.
+Operators are defined by implementing named interfaces. Every name is a complete English word.
 
 ```magi
 interface Add {
     func add(self, other) -> self
 }
 
-interface Stringer {
-    func string(self) -> string
+interface Display {
+    func display(self) -> string
 }
 
 interface Equal {
     func equal(self, other) -> bool
 }
 
+interface Compare {
+    func compare(self, other) -> int
+}
+
 interface Iterable {
-    func iter(self) -> Iterator
+    func iterate(self) -> Iterator
 }
 
 interface Callable {
@@ -144,6 +148,14 @@ interface Callable {
 
 interface Index {
     func index(self, key) -> any
+}
+
+interface Length {
+    func length(self) -> int
+}
+
+interface Contains {
+    func contains(self, key) -> bool
 }
 ```
 
@@ -154,7 +166,7 @@ func Vec2.add(self, other) {
     Vec2 { x: self.x + other.x, y: self.y + other.y }
 }
 
-func Vec2.string(self) {
+func Vec2.display(self) {
     f"({self.x}, {self.y})"
 }
 
@@ -170,24 +182,28 @@ const a = Vec2 { x: 1.0, y: 2.0 }
 const b = Vec2 { x: 3.0, y: 4.0 }
 println(a + b)       // calls a.add(b) → (4.0, 6.0)
 println(a == b)      // calls a.equal(b) → false
-println(a)           // calls a.string() → (1.0, 2.0)
+println(a)           // calls a.display() → (1.0, 2.0)
 ```
 
-Operator → interface mapping:
+Operator → interface mapping (all plain English, no abbreviations):
 
 | Operator | Interface | Method |
 |----------|-----------|--------|
 | `+` | `Add` | `add(self, other)` |
-| `-` | `Sub` | `sub(self, other)` |
-| `*` | `Mul` | `mul(self, other)` |
-| `/` | `Div` | `div(self, other)` |
-| `%` | `Mod` | `mod(self, other)` |
+| `-` | `Subtract` | `subtract(self, other)` |
+| `*` | `Multiply` | `multiply(self, other)` |
+| `/` | `Divide` | `divide(self, other)` |
+| `%` | `Modulo` | `modulo(self, other)` |
 | `==` | `Equal` | `equal(self, other)` |
-| `<` | `Compare` | `compare(self, other) -> int` |
+| `<` `>` `<=` `>=` | `Compare` | `compare(self, other) -> int` |
+| `-x` (unary) | `Negate` | `negate(self)` |
 | `[]` | `Index` | `index(self, key)` |
-| `for..in` | `Iterable` | `iter(self)` |
-| `println()` | `Stringer` | `string(self)` |
+| `[]=` | `SetIndex` | `set_index(self, key, value)` |
+| `for..in` | `Iterable` | `iterate(self)` |
+| `println()` | `Display` | `display(self)` |
 | `()` | `Callable` | `call(self, args)` |
+| `len()` | `Length` | `length(self)` |
+| `in` | `Contains` | `contains(self, key)` |
 
 ## 6. Interfaces (Implicit Satisfaction)
 
@@ -259,7 +275,7 @@ enum Direction {
 ### Methods on Enums
 
 ```magi
-func Color.string(self) {
+func Color.display(self) {
     match self {
         Color::Red => "red",
         Color::Green => "green",
@@ -346,7 +362,7 @@ func Config.address(self) {
     f"{self.host}:{self.port}"
 }
 
-func Config.string(self) {
+func Config.display(self) {
     f"Config({self.address()})"
 }
 
@@ -372,7 +388,7 @@ enum LogLevel {
     Error,
 }
 
-func LogLevel.string(self) {
+func LogLevel.display(self) {
     match self {
         LogLevel::Debug => "DEBUG",
         LogLevel::Info => "INFO",
