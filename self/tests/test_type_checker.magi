@@ -1,0 +1,289 @@
+// Tests for self/type_checker.magi
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/type_checker.magi self/tests/test_type_checker.magi > /tmp/_tc_test.magi && RUST_MIN_STACK=33554432 cargo run --bin magi --release -- run /tmp/_tc_test.magi
+
+// ── Helpers ───────────────────────────────────────────────────────
+
+func tc_parse_and_check(source) {
+    const prog = parse(source)
+    check(prog)
+}
+
+func has_error_containing(errors, needle) {
+    for e in errors {
+        if e.contains(needle) { return true }
+    }
+    false
+}
+
+// ── Undefined Variable ──────────────────────────────────────────
+
+func test_undefined_variable() {
+    const result = tc_parse_and_check("println(x)")
+    const errors = result[0]
+    const warnings = result[1]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "undefined"))
+    println("PASS: undefined variable detected")
+}
+
+// ── Immutable Assignment ────────────────────────────────────────
+
+func test_immutable_assignment() {
+    const result = tc_parse_and_check("const x = 5; x = 10")
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "immutable"))
+    println("PASS: immutable assignment detected")
+}
+
+// ── Mutable Assignment OK ───────────────────────────────────────
+
+func test_mutable_assignment_ok() {
+    const result = tc_parse_and_check("let x = 5; x = 10; println(x)")
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: mutable assignment allowed")
+}
+
+// ── Unused Variable Warning ─────────────────────────────────────
+
+func test_unused_variable() {
+    const result = tc_parse_and_check("const x = 5")
+    const warnings = result[1]
+    assert(len(warnings) > 0)
+    assert(has_error_containing(warnings, "unused"))
+    println("PASS: unused variable warning")
+}
+
+// ── Underscore Prefix Suppresses Unused Warning ─────────────────
+
+func test_underscore_no_warning() {
+    const result = tc_parse_and_check("const _x = 5")
+    const warnings = result[1]
+    // _x should not trigger unused warning
+    const has_unused = has_error_containing(warnings, "unused variable '_x'")
+    assert(!has_unused)
+    println("PASS: underscore prefix suppresses unused warning")
+}
+
+// ── Valid Program ───────────────────────────────────────────────
+
+func test_valid_program() {
+    const result = tc_parse_and_check("const x = 5; println(x)")
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: valid program has no errors")
+}
+
+// ── Function Arity Check ────────────────────────────────────────
+
+func test_function_arity() {
+    const src = "func add(a, b) { a + b }; add(1)"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "expects at least 2"))
+    println("PASS: function arity mismatch detected")
+}
+
+// ── Function Arity OK ───────────────────────────────────────────
+
+func test_function_arity_ok() {
+    const src = "func add(a, b) { a + b }; add(1, 2)"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    // Should have no arity errors (may have unused warning for add result)
+    const has_arity_error = has_error_containing(errors, "expects")
+    assert(!has_arity_error)
+    println("PASS: function arity correct")
+}
+
+// ── Undefined Function ──────────────────────────────────────────
+
+func test_undefined_function() {
+    const result = tc_parse_and_check("foo(1, 2)")
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "undefined function"))
+    println("PASS: undefined function detected")
+}
+
+// ── Builtin Functions OK ────────────────────────────────────────
+
+func test_builtin_functions() {
+    const result = tc_parse_and_check("const x = len([1, 2, 3]); println(x)")
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: builtin functions accepted")
+}
+
+// ── Break Outside Loop ──────────────────────────────────────────
+
+func test_break_outside_loop() {
+    const result = tc_parse_and_check("break")
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "break"))
+    assert(has_error_containing(errors, "outside"))
+    println("PASS: break outside loop detected")
+}
+
+// ── Continue Outside Loop ───────────────────────────────────────
+
+func test_continue_outside_loop() {
+    const result = tc_parse_and_check("continue")
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "continue"))
+    assert(has_error_containing(errors, "outside"))
+    println("PASS: continue outside loop detected")
+}
+
+// ── Return Outside Function ─────────────────────────────────────
+
+func test_return_outside_function() {
+    const result = tc_parse_and_check("return 5")
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "return"))
+    assert(has_error_containing(errors, "outside"))
+    println("PASS: return outside function detected")
+}
+
+// ── Non-exhaustive Match (Enum) ─────────────────────────────────
+
+func test_non_exhaustive_match() {
+    const src = "enum Color { Red, Green, Blue }; match Color::Red { Color::Red => 1 }"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "non-exhaustive"))
+    println("PASS: non-exhaustive match detected")
+}
+
+// ── Exhaustive Match with Wildcard ──────────────────────────────
+
+func test_exhaustive_match_wildcard() {
+    const src = "enum Color { Red, Green, Blue }; match Color::Red { Color::Red => 1, _ => 0 }"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    const has_exhaustive_error = has_error_containing(errors, "non-exhaustive")
+    assert(!has_exhaustive_error)
+    println("PASS: exhaustive match with wildcard accepted")
+}
+
+// ── Exhaustive Match All Variants ───────────────────────────────
+
+func test_exhaustive_match_all_variants() {
+    const src = "enum Color { Red, Green, Blue }; match Color::Red { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    const has_exhaustive_error = has_error_containing(errors, "non-exhaustive")
+    assert(!has_exhaustive_error)
+    println("PASS: exhaustive match with all variants accepted")
+}
+
+// ── Empty Match Warning ─────────────────────────────────────────
+
+func test_empty_match_warning() {
+    const src = "const x = 5; match x {}"
+    const result = tc_parse_and_check(src)
+    const warnings = result[1]
+    assert(has_error_containing(warnings, "empty match"))
+    println("PASS: empty match warning")
+}
+
+// ── Type Inference: Literals ────────────────────────────────────
+
+func test_type_inference_literals() {
+    const prog = parse("const a = 42; const b = 3.14; const c = \"hello\"; const d = true")
+    check(prog)
+    // After checking, we verify the inferred types through the expression inferrer
+    const int_expr = prog.statements[0].kind
+    match int_expr {
+        StmtKind::SConst(_, e) => {
+            assert(tc_infer_expr_type(e) == "int")
+        },
+        _ => { assert(false) }
+    }
+    println("PASS: type inference for literals")
+}
+
+// ── Compound Assignment to Immutable ────────────────────────────
+
+func test_compound_assign_immutable() {
+    const result = tc_parse_and_check("const x = 5; x += 1")
+    const errors = result[0]
+    assert(len(errors) > 0)
+    assert(has_error_containing(errors, "immutable"))
+    println("PASS: compound assignment to immutable detected")
+}
+
+// ── Nested Scopes ───────────────────────────────────────────────
+
+func test_nested_scopes() {
+    const src = "const x = 5; if true { const y = x; println(y) }; println(x)"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: nested scopes work correctly")
+}
+
+// ── Duplicate Function Warning ──────────────────────────────────
+
+func test_duplicate_function() {
+    const src = "func foo() { 1 }; func foo() { 2 }"
+    const result = tc_parse_and_check(src)
+    const warnings = result[1]
+    assert(has_error_containing(warnings, "duplicate"))
+    println("PASS: duplicate function warning")
+}
+
+// ── For Loop Scope ──────────────────────────────────────────────
+
+func test_for_loop_scope() {
+    const src = "for i in [1, 2, 3] { println(i) }"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: for loop variable in scope")
+}
+
+// ── Function Parameters in Scope ────────────────────────────────
+
+func test_function_params_scope() {
+    const src = "func greet(name) { println(name) }"
+    const result = tc_parse_and_check(src)
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: function parameters in scope")
+}
+
+// ── Run All Tests ───────────────────────────────────────────────
+
+test_undefined_variable()
+test_immutable_assignment()
+test_mutable_assignment_ok()
+test_unused_variable()
+test_underscore_no_warning()
+test_valid_program()
+test_function_arity()
+test_function_arity_ok()
+test_undefined_function()
+test_builtin_functions()
+test_break_outside_loop()
+test_continue_outside_loop()
+test_return_outside_function()
+test_non_exhaustive_match()
+test_exhaustive_match_wildcard()
+test_exhaustive_match_all_variants()
+test_empty_match_warning()
+test_type_inference_literals()
+test_compound_assign_immutable()
+test_nested_scopes()
+test_duplicate_function()
+test_for_loop_scope()
+test_function_params_scope()
+
+println("")
+println("All type checker tests passed!")

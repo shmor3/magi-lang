@@ -1,0 +1,1075 @@
+// MAGI Self-Hosted Compiler — Type Checker
+//
+// Walks the AST from parse() and validates correctness:
+//   - Variable resolution (undefined, immutable assignment)
+//   - Function validation (arity, duplicates)
+//   - Match exhaustiveness (enum variants, wildcard)
+//   - Import validation (known stdlib modules)
+//   - Basic type inference (literals, binary ops)
+//   - Lint warnings (unused variables, unreachable code, empty match)
+//
+// Uses module-level mutable state (same pattern as parser/interpreter).
+// Large match blocks are split into helper functions to reduce stack depth
+// (the MAGI interpreter creates deep call stacks for match with many arms).
+
+// ── Type Checker State ──────────────────────────────────────────
+
+// Each scope is a map: name -> { "mutable": bool, "used": bool, "typ": string, "line": int }
+let tc_scopes = []
+// Function signatures: name -> { "arity": int, "min_arity": int, "has_rest": bool, "line": int }
+let tc_functions = {"__s": true}
+// Enum definitions: name -> [variant_names]
+let tc_enums = {"__s": true}
+// Struct definitions: name -> [field_names]
+let tc_structs = {"__s": true}
+// Errors and warnings accumulated during checking
+let tc_errors = []
+let tc_warnings = []
+// Track if we are inside a loop (for break/continue validation)
+let tc_loop_depth = 0
+// Track if we are inside a function (for return validation)
+let tc_func_depth = 0
+// Match arm enum pattern tracking (used during exhaustiveness check)
+let tc_enum_patterns = {"__s": true}
+
+// ── Known stdlib modules ────────────────────────────────────────
+
+const KNOWN_STDLIB_MODULES = [
+    "array", "array_ext", "big", "binary", "bits", "bloom", "bufio",
+    "build", "bytes", "cert", "cmp", "collections", "complex", "compress",
+    "concurrent", "container", "control", "conv", "crypto", "csv",
+    "debug", "embed", "encoding", "env", "error_chain", "errors",
+    "expvar", "filepath", "flag", "fmt", "fs", "glob", "graph", "hash",
+    "heap", "hex", "html", "http", "image", "inspect", "io", "iter",
+    "json", "lazy", "log", "map", "math", "matrix", "memo", "mime",
+    "multipart", "net", "number", "observe", "option", "os", "path",
+    "pattern", "pipe", "platform", "pool", "process", "profile",
+    "protocol", "ptr", "queue", "rand", "reflect", "regex", "result",
+    "ring", "runtime", "semver", "serialize", "signal", "simd", "slice",
+    "sort", "sql", "state", "stream", "string", "string_ext", "struct",
+    "sync", "sysinfo", "template", "test", "text", "thread", "time",
+    "tls", "trace", "tuple", "type", "unicode", "unsafe", "url",
+    "uuid", "validate", "wasm", "xml", "yaml", "zip"
+]
+
+// ── Known builtin functions ─────────────────────────────────────
+
+const KNOWN_BUILTINS = [
+    "len", "push", "pop", "println", "print", "output", "assert",
+    "to_string", "to_int", "to_float", "typeof", "panic", "input",
+    "range", "map", "filter", "reduce", "keys", "values", "contains",
+    "contains_key", "split", "join", "trim", "replace", "starts_with",
+    "ends_with", "to_upper", "to_lower", "abs", "min", "max", "floor",
+    "ceil", "round", "sqrt", "pow", "append", "slice", "sort",
+    "reverse", "index_of", "chars", "char_at", "substring", "repeat",
+    "format", "parse_int", "parse_float", "is_null", "is_int",
+    "is_float", "is_string", "is_bool", "is_array", "is_map",
+    "tokenize", "parse", "eval", "type_name", "string_length",
+    "array_length", "hash", "clone", "freeze", "is_frozen",
+    "error", "is_error", "unwrap", "some", "none", "is_some", "is_none"
+]
+
+// ── Scope Management ────────────────────────────────────────────
+
+// Empty map {} is null in MAGI, so use a sentinel key to create a real map
+func tc_new_scope() {
+    {"__s": true}
+}
+
+func tc_push_scope() {
+    tc_scopes.push(tc_new_scope())
+}
+
+func tc_pop_scope() {
+    if len(tc_scopes) == 0 { return null }
+    const scope = tc_scopes.pop()
+    for name in scope.keys() {
+        if name == "__s" { continue }
+        const info = scope[name]
+        if !info.used && !starts_with(name, "_") {
+            tc_warnings.push(f"unused variable '{name}' (declared at line {info.line})")
+        }
+    }
+}
+
+func tc_define_var(name, is_mutable, type_str, line) {
+    if len(tc_scopes) == 0 { return null }
+    const idx = len(tc_scopes) - 1
+    let scope = tc_scopes[idx]
+    scope[name] = {"mutable": is_mutable, "used": false, "typ": type_str, "line": line}
+    tc_scopes[idx] = scope
+}
+
+func tc_lookup_var(name) {
+    let i = len(tc_scopes) - 1
+    while i >= 0 {
+        const scope = tc_scopes[i]
+        if scope.has(name) {
+            return scope[name]
+        }
+        i = i - 1
+    }
+    null
+}
+
+func tc_mark_used(name) {
+    let i = len(tc_scopes) - 1
+    while i >= 0 {
+        let scope = tc_scopes[i]
+        if scope.has(name) {
+            let info = scope[name]
+            info["used"] = true
+            scope[name] = info
+            tc_scopes[i] = scope
+            return null
+        }
+        i = i - 1
+    }
+}
+
+func tc_is_defined(name) {
+    tc_lookup_var(name) != null
+}
+
+func tc_is_mutable(name) {
+    const info = tc_lookup_var(name)
+    if info == null { return false }
+    info.mutable
+}
+
+func tc_is_builtin(name) {
+    KNOWN_BUILTINS.contains(name)
+}
+
+// ── Error/Warning Emitters ──────────────────────────────────────
+
+func tc_error_at(line, msg) {
+    tc_errors.push(f"line {line}: {msg}")
+}
+
+func tc_warn_at(line, msg) {
+    tc_warnings.push(f"line {line}: {msg}")
+}
+
+// ── Pre-registration Pass ───────────────────────────────────────
+
+func tc_count_required_params(params) {
+    let count = 0
+    for p in params {
+        if p.default_val == null && !p.rest && !p.kwargs {
+            count = count + 1
+        }
+    }
+    count
+}
+
+func tc_has_rest_param(params) {
+    for p in params {
+        if p.rest { return true }
+    }
+    false
+}
+
+func tc_register_func(fdef, line) {
+    const name = fdef.name
+    const params = fdef.params
+    const arity = len(params)
+    const min_arity = tc_count_required_params(params)
+    const has_rest = tc_has_rest_param(params)
+    if tc_functions.has(name) {
+        const existing = tc_functions[name]
+        tc_warn_at(line, f"duplicate definition of function '{name}' (first defined at line {existing.line})")
+    }
+    tc_functions[name] = {
+        "arity": arity, "min_arity": min_arity,
+        "has_rest": has_rest, "line": line,
+        "return_type": fdef.return_type
+    }
+}
+
+func tc_preregister(stmts) {
+    for stmt in stmts {
+        const kind = stmt.kind
+        match kind {
+            StmtKind::SFuncDef(fdef) => {
+                tc_register_func(fdef, stmt.span.start_line)
+            },
+            StmtKind::SAsyncFuncDef(fdef) => {
+                tc_register_func(fdef, stmt.span.start_line)
+            },
+            StmtKind::SEnumDef(name, variants, _methods) => {
+                let variant_names = []
+                for v in variants {
+                    variant_names.push(v.name)
+                }
+                tc_enums[name] = variant_names
+            },
+            StmtKind::SStructDef(name, fields, _methods) => {
+                let field_names = []
+                for f in fields {
+                    field_names.push(f.name)
+                }
+                tc_structs[name] = field_names
+            },
+            _ => {}
+        }
+    }
+}
+
+// ── Statement Checking ──────────────────────────────────────────
+
+func tc_check_stmts(stmts) {
+    let had_terminal = false
+    for stmt in stmts {
+        if had_terminal {
+            tc_warn_at(stmt.span.start_line, "unreachable code after return/break/continue")
+        }
+        tc_check_stmt(stmt)
+        match stmt.kind {
+            StmtKind::SReturn(_) => { had_terminal = true },
+            StmtKind::SBreak(_, _) => { had_terminal = true },
+            StmtKind::SContinue(_) => { had_terminal = true },
+            _ => {}
+        }
+    }
+}
+
+// Check assignment to a variable (must be defined and mutable)
+func tc_check_assign(name, line) {
+    if !tc_is_defined(name) {
+        tc_error_at(line, f"undefined variable '{name}'")
+    } else if !tc_is_mutable(name) {
+        tc_error_at(line, f"cannot assign to immutable variable '{name}'")
+    } else {
+        tc_mark_used(name)
+    }
+}
+
+// Split statement checking into groups to reduce match arm count.
+// Group 1: variable declarations and assignments
+func tc_check_stmt_vars(kind, line) {
+    match kind {
+        StmtKind::SConst(name, expr) => {
+            tc_check_expr(expr)
+            const t = tc_infer_expr_type(expr)
+            tc_define_var(name, false, t, line)
+            return null
+        },
+        StmtKind::SLet(name, expr) => {
+            tc_check_expr(expr)
+            const t = tc_infer_expr_type(expr)
+            tc_define_var(name, false, t, line)
+            return null
+        },
+        StmtKind::SLetMut(name, expr) => {
+            tc_check_expr(expr)
+            const t = tc_infer_expr_type(expr)
+            tc_define_var(name, true, t, line)
+            return null
+        },
+        StmtKind::SLetDestructure(pattern, is_mut, expr) => {
+            tc_check_expr(expr)
+            tc_define_destructure_vars(pattern, is_mut, line)
+            return null
+        },
+        StmtKind::SAssignment(name, expr) => {
+            tc_check_expr(expr)
+            tc_check_assign(name, line)
+            return null
+        },
+        StmtKind::SCompoundAssign(name, _op, expr) => {
+            tc_check_expr(expr)
+            tc_check_assign(name, line)
+            return null
+        },
+        StmtKind::SFieldAssign(obj_expr, _field, val_expr) => {
+            tc_check_expr(obj_expr)
+            tc_check_expr(val_expr)
+            return null
+        },
+        StmtKind::SIndexAssign(obj_expr, idx_expr, val_expr) => {
+            tc_check_expr(obj_expr)
+            tc_check_expr(idx_expr)
+            tc_check_expr(val_expr)
+            return null
+        },
+        StmtKind::STupleAssign(names, expr) => {
+            tc_check_expr(expr)
+            for name in names { tc_check_assign(name, line) }
+            return null
+        },
+        StmtKind::SIncrement(name) => {
+            tc_check_assign(name, line)
+            return null
+        },
+        StmtKind::SDecrement(name) => {
+            tc_check_assign(name, line)
+            return null
+        },
+        _ => {}
+    }
+}
+
+// Group 2: control flow
+func tc_check_stmt_flow(kind, line) {
+    match kind {
+        StmtKind::SReturn(expr) => {
+            if expr != null { tc_check_expr(expr) }
+            if tc_func_depth == 0 {
+                tc_error_at(line, "return statement outside of function")
+            }
+            return null
+        },
+        StmtKind::SBreak(_label, expr) => {
+            if expr != null { tc_check_expr(expr) }
+            if tc_loop_depth == 0 {
+                tc_error_at(line, "break statement outside of loop")
+            }
+            return null
+        },
+        StmtKind::SContinue(_label) => {
+            if tc_loop_depth == 0 {
+                tc_error_at(line, "continue statement outside of loop")
+            }
+            return null
+        },
+        StmtKind::SIf(cond, then_block, else_block) => {
+            tc_check_expr(cond)
+            tc_push_scope()
+            tc_check_block(then_block)
+            tc_pop_scope()
+            if else_block != null {
+                tc_push_scope()
+                tc_check_block(else_block)
+                tc_pop_scope()
+            }
+            return null
+        },
+        StmtKind::SWhileLoop(_label, cond, body) => {
+            tc_check_expr(cond)
+            tc_push_scope()
+            tc_loop_depth = tc_loop_depth + 1
+            tc_check_block(body)
+            tc_loop_depth = tc_loop_depth - 1
+            tc_pop_scope()
+            return null
+        },
+        StmtKind::SDoWhile(_label, cond, body) => {
+            tc_push_scope()
+            tc_loop_depth = tc_loop_depth + 1
+            tc_check_block(body)
+            tc_loop_depth = tc_loop_depth - 1
+            tc_pop_scope()
+            tc_check_expr(cond)
+            return null
+        },
+        StmtKind::SMatch(expr, arms) => {
+            tc_check_expr(expr)
+            tc_check_match_arms(arms, line)
+            return null
+        },
+        _ => {}
+    }
+}
+
+// Group 3: for loops (separate to keep match small)
+func tc_check_stmt_for(kind, line) {
+    match kind {
+        StmtKind::SForLoop(_label, pattern, iterable, body) => {
+            tc_check_expr(iterable)
+            tc_push_scope()
+            tc_loop_depth = tc_loop_depth + 1
+            // The parser may pass a plain string or a ForPattern
+            if typeof(pattern) == "string" {
+                tc_define_var(pattern, false, "unknown", line)
+            } else {
+                tc_define_for_pattern_vars(pattern, line)
+            }
+            tc_check_block(body)
+            tc_loop_depth = tc_loop_depth - 1
+            tc_pop_scope()
+            return null
+        },
+        _ => {}
+    }
+}
+
+func tc_define_for_pattern_vars(pattern, line) {
+    match pattern {
+        ForPattern::Single(name) => {
+            tc_define_var(name, false, "unknown", line)
+        },
+        ForPattern::ArrayDestructure(elems) => {
+            for e in elems {
+                tc_define_destr_elem(e, line)
+            }
+        },
+        ForPattern::MapDestructure(elems) => {
+            for e in elems {
+                tc_define_destr_elem(e, line)
+            }
+        },
+        _ => {}
+    }
+}
+
+func tc_define_destr_elem(e, line) {
+    match e {
+        DestructureElement::DName(n) => {
+            tc_define_var(n, false, "unknown", line)
+        },
+        DestructureElement::DRest(n) => {
+            tc_define_var(n, false, "array", line)
+        },
+        _ => {}
+    }
+}
+
+// Group 4: definitions and other statements
+func tc_check_stmt_defs(kind, line) {
+    match kind {
+        StmtKind::SFuncDef(fdef) => {
+            tc_check_funcdef(fdef, line)
+            return null
+        },
+        StmtKind::SAsyncFuncDef(fdef) => {
+            tc_check_funcdef(fdef, line)
+            return null
+        },
+        StmtKind::SOutput(expr) => {
+            tc_check_expr(expr)
+            return null
+        },
+        StmtKind::SExprStmt(expr) => {
+            tc_check_expr(expr)
+            return null
+        },
+        StmtKind::SStructDef(_name, _fields, methods) => {
+            for m in methods { tc_check_funcdef(m, line) }
+            return null
+        },
+        StmtKind::SEnumDef(_name, _variants, methods) => {
+            for m in methods { tc_check_funcdef(m, line) }
+            return null
+        },
+        StmtKind::SImplBlock(_type_name, methods) => {
+            for m in methods { tc_check_funcdef(m, line) }
+            return null
+        },
+        StmtKind::SImplTrait(_trait_name, _type_name, methods) => {
+            for m in methods { tc_check_funcdef(m, line) }
+            return null
+        },
+        _ => {}
+    }
+}
+
+// Group 5: misc statements
+func tc_check_stmt_misc(kind, line) {
+    match kind {
+        StmtKind::SImportModule(path_parts, _alias, _items) => {
+            if len(path_parts) >= 2 {
+                const base = path_parts[0]
+                const mod_name = path_parts[1]
+                if base == "std" && !KNOWN_STDLIB_MODULES.contains(mod_name) {
+                    tc_warn_at(line, f"unknown stdlib module '{mod_name}'")
+                }
+            }
+            return null
+        },
+        StmtKind::SDefer(expr) => {
+            tc_check_expr(expr)
+            return null
+        },
+        StmtKind::SSpawn(expr) => {
+            tc_check_expr(expr)
+            return null
+        },
+        StmtKind::SThrow(expr) => {
+            tc_check_expr(expr)
+            return null
+        },
+        StmtKind::STryCatch(try_block, catch_var, catch_block, finally_block) => {
+            tc_push_scope()
+            tc_check_block(try_block)
+            tc_pop_scope()
+            tc_push_scope()
+            tc_define_var(catch_var, false, "unknown", line)
+            tc_check_block(catch_block)
+            tc_pop_scope()
+            if finally_block != null {
+                tc_push_scope()
+                tc_check_block(finally_block)
+                tc_pop_scope()
+            }
+            return null
+        },
+        StmtKind::STestDef(_name, body) => {
+            tc_push_scope()
+            tc_func_depth = tc_func_depth + 1
+            tc_check_block(body)
+            tc_func_depth = tc_func_depth - 1
+            tc_pop_scope()
+            return null
+        },
+        StmtKind::SModuleDef(_name, body) => {
+            tc_push_scope()
+            tc_preregister(body.stmts)
+            tc_check_stmts(body.stmts)
+            tc_pop_scope()
+            return null
+        },
+        _ => {}
+    }
+}
+
+func tc_check_stmt(stmt) {
+    const kind = stmt.kind
+    const line = stmt.span.start_line
+    // Try each group; each returns null (no-op) if it doesn't handle the kind
+    tc_check_stmt_vars(kind, line)
+    tc_check_stmt_flow(kind, line)
+    tc_check_stmt_for(kind, line)
+    tc_check_stmt_defs(kind, line)
+    tc_check_stmt_misc(kind, line)
+}
+
+// ── Function Definition Checking ────────────────────────────────
+
+func tc_check_funcdef(fdef, line) {
+    tc_push_scope()
+    tc_func_depth = tc_func_depth + 1
+    for param in fdef.params {
+        tc_define_var(param.name, false, param.type_ann, line)
+        if param.name == "self" { tc_mark_used("self") }
+        if param.default_val != null { tc_check_expr(param.default_val) }
+    }
+    tc_check_block(fdef.body)
+    tc_func_depth = tc_func_depth - 1
+    tc_pop_scope()
+}
+
+// ── Block Checking ──────────────────────────────────────────────
+
+func tc_check_block(block) {
+    if block == null { return null }
+    tc_check_stmts(block.stmts)
+    if block.tail_expr != null {
+        tc_check_expr(block.tail_expr)
+    }
+}
+
+// ── Destructure Variable Definitions ────────────────────────────
+
+func tc_define_destructure_vars(pattern, is_mutable, line) {
+    match pattern {
+        DestructurePattern::DArray(elems) => {
+            for e in elems { tc_define_destr_elem_mut(e, is_mutable, line) }
+        },
+        DestructurePattern::DMap(elems) => {
+            for e in elems { tc_define_destr_elem_mut(e, is_mutable, line) }
+        },
+        DestructurePattern::DTuple(elems) => {
+            for e in elems { tc_define_destr_elem_mut(e, is_mutable, line) }
+        },
+        _ => {}
+    }
+}
+
+func tc_define_destr_elem_mut(e, is_mutable, line) {
+    match e {
+        DestructureElement::DName(n) => {
+            tc_define_var(n, is_mutable, "unknown", line)
+        },
+        DestructureElement::DRest(n) => {
+            tc_define_var(n, is_mutable, "array", line)
+        },
+        _ => {}
+    }
+}
+
+// ── Expression Checking ─────────────────────────────────────────
+// Split into groups to reduce match arm count per function.
+
+func tc_check_expr(expr) {
+    if expr == null { return null }
+    const kind = expr.kind
+    const line = expr.span.start_line
+    // Try each group
+    tc_check_expr_basic(kind, line)
+    tc_check_expr_compound(kind, line)
+    tc_check_expr_advanced(kind, line)
+}
+
+// Group 1: literals, variables, basic ops
+func tc_check_expr_basic(kind, line) {
+    match kind {
+        ExprKind::ELiteral(lit) => {
+            tc_check_literal(lit)
+            return null
+        },
+        ExprKind::EVariable(name) => {
+            if !tc_is_defined(name) && !tc_enums.has(name) && !tc_structs.has(name) && !tc_functions.has(name) {
+                tc_error_at(line, f"undefined variable '{name}'")
+            } else {
+                tc_mark_used(name)
+            }
+            return null
+        },
+        ExprKind::EBinaryOp(op, left, right) => {
+            tc_check_expr(left)
+            tc_check_expr(right)
+            return null
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            tc_check_expr(operand)
+            return null
+        },
+        ExprKind::ECall(name, args, _type_args) => {
+            for arg in args { tc_check_expr(arg) }
+            tc_validate_call(name, args, line)
+            return null
+        },
+        ExprKind::EMethodCall(obj, _method, args, _type_args) => {
+            tc_check_expr(obj)
+            for arg in args { tc_check_expr(arg) }
+            return null
+        },
+        ExprKind::EPlaceholder => { return true },
+        _ => {}
+    }
+}
+
+func tc_check_literal(lit) {
+    match lit {
+        Literal::ArrayLit(elems) => {
+            for e in elems { tc_check_expr(e) }
+        },
+        Literal::MapLit(pairs) => {
+            for pair in pairs {
+                tc_check_expr(pair[0])
+                tc_check_expr(pair[1])
+            }
+        },
+        Literal::SetLit(elems) => {
+            for e in elems { tc_check_expr(e) }
+        },
+        _ => {}
+    }
+}
+
+func tc_validate_call(name, args, line) {
+    if tc_functions.has(name) {
+        const sig = tc_functions[name]
+        const n_args = len(args)
+        if !sig.has_rest {
+            if n_args < sig.min_arity {
+                tc_error_at(line, f"function '{name}' expects at least {sig.min_arity} arguments, got {n_args}")
+            } else if n_args > sig.arity {
+                tc_error_at(line, f"function '{name}' expects at most {sig.arity} arguments, got {n_args}")
+            }
+        } else {
+            if n_args < sig.min_arity {
+                tc_error_at(line, f"function '{name}' expects at least {sig.min_arity} arguments, got {n_args}")
+            }
+        }
+    } else if !tc_is_builtin(name) && !tc_enums.has(name) && !tc_structs.has(name) && !tc_is_defined(name) {
+        tc_error_at(line, f"undefined function '{name}'")
+    }
+}
+
+// Group 2: compound expressions (control flow, blocks, pipes)
+func tc_check_expr_compound(kind, line) {
+    match kind {
+        ExprKind::EPipe(left, right) => {
+            tc_check_expr(left)
+            tc_check_expr(right)
+            return null
+        },
+        ExprKind::EIfElse(cond, then_expr, else_expr) => {
+            tc_check_expr(cond)
+            tc_check_expr(then_expr)
+            if else_expr != null { tc_check_expr(else_expr) }
+            return null
+        },
+        ExprKind::EBlock(block) => {
+            tc_push_scope()
+            tc_check_block(block)
+            tc_pop_scope()
+            return null
+        },
+        ExprKind::EIndex(obj, idx) => {
+            tc_check_expr(obj)
+            tc_check_expr(idx)
+            return null
+        },
+        ExprKind::EFieldAccess(obj, _field) => {
+            tc_check_expr(obj)
+            return null
+        },
+        ExprKind::ERange(start, end, _inclusive) => {
+            tc_check_expr(start)
+            tc_check_expr(end)
+            return null
+        },
+        ExprKind::EAwait(inner) => {
+            tc_check_expr(inner)
+            return null
+        },
+        ExprKind::ESpawn(inner) => {
+            tc_check_expr(inner)
+            return null
+        },
+        ExprKind::EYield(inner) => {
+            if inner != null { tc_check_expr(inner) }
+            return null
+        },
+        _ => {}
+    }
+}
+
+// Group 3: advanced expressions (lambda, match, comprehensions, constructs)
+func tc_check_expr_advanced(kind, line) {
+    match kind {
+        ExprKind::ELambda(params, body) => {
+            tc_push_scope()
+            tc_func_depth = tc_func_depth + 1
+            for p in params { tc_define_var(p.name, false, p.type_ann, line) }
+            tc_check_expr(body)
+            tc_func_depth = tc_func_depth - 1
+            tc_pop_scope()
+        },
+        ExprKind::EMatch(subject, arms) => {
+            tc_check_expr(subject)
+            tc_check_match_arms(arms, line)
+        },
+        ExprKind::EStringInterp(parts) => {
+            tc_check_interp_parts(parts)
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            tc_check_expr(left)
+            tc_check_expr(right)
+        },
+        ExprKind::EOptionalChain(obj, _field) => {
+            tc_check_expr(obj)
+        },
+        ExprKind::ESpread(inner) => {
+            tc_check_expr(inner)
+        },
+        ExprKind::ELoop(body) => {
+            tc_push_scope()
+            tc_loop_depth = tc_loop_depth + 1
+            tc_check_block(body)
+            tc_loop_depth = tc_loop_depth - 1
+            tc_pop_scope()
+        },
+        ExprKind::ETryCatch(try_expr, catch_var, catch_expr) => {
+            tc_check_expr(try_expr)
+            tc_push_scope()
+            tc_define_var(catch_var, false, "unknown", line)
+            tc_check_expr(catch_expr)
+            tc_pop_scope()
+        },
+        ExprKind::EListComp(expr, pattern, iterable, cond) => {
+            tc_check_expr(iterable)
+            tc_push_scope()
+            tc_define_var(pattern, false, "unknown", line)
+            if cond != null { tc_check_expr(cond) }
+            tc_check_expr(expr)
+            tc_pop_scope()
+        },
+        ExprKind::EMapComp(key_expr, val_expr, pattern, iterable, cond) => {
+            tc_check_expr(iterable)
+            tc_push_scope()
+            tc_define_var(pattern, false, "unknown", line)
+            if cond != null { tc_check_expr(cond) }
+            tc_check_expr(key_expr)
+            tc_check_expr(val_expr)
+            tc_pop_scope()
+        },
+        ExprKind::EEnumConstruct(enum_name, variant_name, args) => {
+            for arg in args { tc_check_expr(arg) }
+            if tc_enums.has(enum_name) {
+                const variants = tc_enums[enum_name]
+                if !variants.contains(variant_name) {
+                    tc_error_at(line, f"enum '{enum_name}' has no variant '{variant_name}'")
+                }
+            }
+        },
+        ExprKind::EStructConstruct(struct_name, field_pairs) => {
+            for pair in field_pairs { tc_check_expr(pair[1]) }
+            if tc_structs.has(struct_name) {
+                const known_fields = tc_structs[struct_name]
+                for pair in field_pairs {
+                    if !known_fields.contains(pair[0]) {
+                        tc_warn_at(line, f"struct '{struct_name}' has no field '{pair[0]}'")
+                    }
+                }
+            }
+        },
+        ExprKind::ETryPropagate(inner) => {
+            tc_check_expr(inner)
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            for e in elems { tc_check_expr(e) }
+        },
+        _ => {}
+    }
+}
+
+func tc_check_interp_parts(parts) {
+    for part in parts {
+        match part {
+            StringPart::ExprPart(expr) => {
+                tc_check_expr(expr)
+            },
+            _ => {}
+        }
+    }
+}
+
+// ── Match Arm Checking ──────────────────────────────────────────
+
+func tc_check_match_arms(arms, line) {
+    if len(arms) == 0 {
+        tc_warn_at(line, "empty match expression")
+        return null
+    }
+
+    let has_wildcard = false
+    tc_enum_patterns = {"__s": true}
+
+    for arm in arms {
+        tc_push_scope()
+        tc_define_pattern_vars(arm.pattern, line)
+        if arm.guard != null { tc_check_expr(arm.guard) }
+        tc_check_expr(arm.body)
+        tc_pop_scope()
+
+        tc_analyze_pattern_coverage(arm.pattern)
+        if tc_pattern_is_wildcard(arm.pattern) {
+            has_wildcard = true
+        }
+    }
+
+    // Check exhaustiveness for enum matches
+    if !has_wildcard {
+        for enum_name in tc_enum_patterns.keys() {
+            if enum_name == "__s" { continue }
+            if tc_enums.has(enum_name) {
+                const all_variants = tc_enums[enum_name]
+                const matched_variants = tc_enum_patterns[enum_name]
+                let missing = []
+                for v in all_variants {
+                    if !matched_variants.contains(v) {
+                        missing.push(v)
+                    }
+                }
+                if len(missing) > 0 {
+                    const missing_str = missing.join(", ")
+                    tc_error_at(line, f"non-exhaustive match on enum '{enum_name}': missing variants {missing_str}")
+                }
+            }
+        }
+    }
+}
+
+func tc_pattern_is_wildcard(pattern) {
+    match pattern {
+        Pattern::PWildcard => true,
+        Pattern::PVariable(_) => true,
+        _ => false
+    }
+}
+
+func tc_analyze_pattern_coverage(pattern) {
+    match pattern {
+        Pattern::PEnum(enum_name, variant_name, _) => {
+            if !tc_enum_patterns.has(enum_name) {
+                tc_enum_patterns[enum_name] = []
+            }
+            let matched = tc_enum_patterns[enum_name]
+            if !matched.contains(variant_name) {
+                matched.push(variant_name)
+                tc_enum_patterns[enum_name] = matched
+            }
+        },
+        Pattern::POr(sub_patterns) => {
+            for p in sub_patterns {
+                tc_analyze_pattern_coverage(p)
+            }
+        },
+        _ => {}
+    }
+}
+
+func tc_define_pattern_vars(pattern, line) {
+    match pattern {
+        Pattern::PVariable(name) => {
+            if name != "_" { tc_define_var(name, false, "unknown", line) }
+        },
+        Pattern::PEnum(_enum_name, _variant, bindings) => {
+            for b in bindings { tc_define_pattern_vars(b, line) }
+        },
+        Pattern::PArray(elems) => {
+            for e in elems { tc_define_pattern_vars(e, line) }
+        },
+        Pattern::PMap(entries) => {
+            for e in entries { tc_define_pattern_vars(e, line) }
+        },
+        Pattern::POr(sub_patterns) => {
+            if len(sub_patterns) > 0 { tc_define_pattern_vars(sub_patterns[0], line) }
+        },
+        Pattern::PRest(name) => {
+            if name != "_" { tc_define_var(name, false, "array", line) }
+        },
+        Pattern::PBinding(name, inner) => {
+            tc_define_var(name, false, "unknown", line)
+            tc_define_pattern_vars(inner, line)
+        },
+        Pattern::PType(name, _type) => {
+            if name != "_" { tc_define_var(name, false, _type, line) }
+        },
+        _ => {}
+    }
+}
+
+// ── Basic Type Inference ────────────────────────────────────────
+
+func tc_infer_expr_type(expr) {
+    if expr == null { return "unknown" }
+    const kind = expr.kind
+    match kind {
+        ExprKind::ELiteral(lit) => { return tc_infer_literal_type(lit) },
+        ExprKind::EVariable(name) => {
+            const info = tc_lookup_var(name)
+            if info != null && info.typ != "" && info.typ != "unknown" {
+                return info.typ
+            }
+            return "unknown"
+        },
+        ExprKind::EBinaryOp(op, left, right) => {
+            return tc_infer_binop_type(op, left, right)
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            return tc_infer_unop_type(op, operand)
+        },
+        ExprKind::ECall(name, _args, _) => {
+            if tc_functions.has(name) {
+                const sig = tc_functions[name]
+                if sig.return_type != "" { return sig.return_type }
+            }
+            return "unknown"
+        },
+        ExprKind::EStringInterp(_) => { return "string" },
+        ExprKind::ERange(_, _, _) => { return "array" },
+        ExprKind::ETupleLiteral(_) => { return "tuple" },
+        ExprKind::EEnumConstruct(name, _, _) => { return name },
+        ExprKind::EStructConstruct(name, _) => { return name },
+        _ => { return "unknown" }
+    }
+}
+
+func tc_infer_literal_type(lit) {
+    match lit {
+        Literal::IntLit(_) => "int",
+        Literal::FloatLit(_) => "float",
+        Literal::StringLit(_) => "string",
+        Literal::BoolLit(_) => "bool",
+        Literal::NullLit => "null",
+        Literal::ArrayLit(_) => "array",
+        Literal::MapLit(_) => "map",
+        Literal::SetLit(_) => "set",
+        _ => "unknown"
+    }
+}
+
+func tc_infer_binop_type(op, left, right) {
+    // Comparison and logical ops always return bool
+    match op {
+        BinOp::Eq => { return "bool" },
+        BinOp::NotEq => { return "bool" },
+        BinOp::Lt => { return "bool" },
+        BinOp::Gt => { return "bool" },
+        BinOp::LtEq => { return "bool" },
+        BinOp::GtEq => { return "bool" },
+        BinOp::And => { return "bool" },
+        BinOp::Or => { return "bool" },
+        BinOp::In => { return "bool" },
+        _ => {}
+    }
+    // Arithmetic ops: infer from operand types
+    const lt = tc_infer_expr_type(left)
+    const rt = tc_infer_expr_type(right)
+    match op {
+        BinOp::Add => {
+            if lt == "string" || rt == "string" { return "string" }
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            return "unknown"
+        },
+        BinOp::Sub => {
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            return "unknown"
+        },
+        BinOp::Mul => {
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            return "unknown"
+        },
+        BinOp::Div => {
+            if lt == "float" || rt == "float" { return "float" }
+            if lt == "int" && rt == "int" { return "int" }
+            return "unknown"
+        },
+        BinOp::Mod => {
+            if lt == "int" && rt == "int" { return "int" }
+            return "unknown"
+        },
+        _ => { return "int" }
+    }
+}
+
+func tc_infer_unop_type(op, operand) {
+    match op {
+        UnOp::Not => "bool",
+        UnOp::Neg => {
+            const t = tc_infer_expr_type(operand)
+            if t == "float" { "float" } else { "int" }
+        },
+        _ => "unknown"
+    }
+}
+
+// ── Entry Point ─────────────────────────────────────────────────
+
+func check(program) {
+    // Reset state
+    tc_scopes = []
+    tc_functions = {"__s": true}
+    tc_enums = {"__s": true}
+    tc_structs = {"__s": true}
+    tc_errors = []
+    tc_warnings = []
+    tc_loop_depth = 0
+    tc_func_depth = 0
+
+    // Initialize global scope
+    tc_push_scope()
+
+    // Pass 1: pre-register functions, enums, structs
+    tc_preregister(program.statements)
+
+    // Pass 2: check all statements
+    tc_check_stmts(program.statements)
+
+    // Pop global scope (emits unused variable warnings)
+    tc_pop_scope()
+
+    // Return (errors, warnings) as a two-element array
+    let result = []
+    result.push(tc_errors)
+    result.push(tc_warnings)
+    result
+}
