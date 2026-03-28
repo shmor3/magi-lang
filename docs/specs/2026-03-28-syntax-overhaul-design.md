@@ -357,6 +357,19 @@ const name = match direction {
 
 All enum variants must be covered or a `_` wildcard present. Enforced as compile error.
 
+### Match Guards
+
+```magi
+const label = match n {
+    _ if n % 15 == 0 => "FizzBuzz",
+    _ if n % 3 == 0 => "Fizz",
+    _ if n % 5 == 0 => "Buzz",
+    _ => to_string(n),
+}
+```
+
+Guards add conditions to match arms with `if`. A `_` with a guard is not exhaustive — a plain `_` must follow.
+
 ---
 
 ## Error Handling
@@ -590,6 +603,143 @@ const b = [...a, 4, 5]    // [1, 2, 3, 4, 5]
 14. `|>` — pipe
 15. `=>` — arrow function (lowest)
 16. `=` `+=` `-=` etc. — assignment
+
+---
+
+## Implicit Returns
+
+The last expression in a function body is the return value. No `return` keyword needed.
+
+```magi
+func add(a int, b int) -> int { a + b }          // returns a + b
+func max(a int, b int) -> int {
+    if a > b { a } else { b }                     // returns if-expression
+}
+```
+
+Use `return` for early exits:
+
+```magi
+func divide(a int, b int) -> (int, string) {
+    if b == 0 { return 0, "division by zero" }    // early return
+    a / b, null                                     // implicit return
+}
+```
+
+---
+
+## Multi-Return Destructuring
+
+No parentheses needed. Comma-separated names create separate bindings:
+
+```magi
+let result, err = divide(10, 3)     // two separate bindings
+const a, b, c = get_three()         // three separate bindings
+let _, err = do_something()         // discard first value
+```
+
+Parentheses allowed for clarity but not required:
+
+```magi
+const (x, y) = get_point()          // same as: const x, y = get_point()
+```
+
+---
+
+## Pipe Operator
+
+`|>` passes the left value as the first argument to the right function:
+
+```magi
+const result = data |> filter(x => x > 0) |> map(x => x * 2)
+// equivalent to: map(filter(data, x => x > 0), x => x * 2)
+```
+
+Pipe to an arrow function for inline transforms:
+
+```magi
+const avg = items |> reduce(0, (a, b) => a + b) |> (sum => sum / items.length())
+```
+
+Pipe only works on single values. Handle errors before piping:
+
+```magi
+let data, err = fs.read("file.txt")
+if err { return null, err }
+const result = data |> parse() |> transform()
+```
+
+---
+
+## Built-in Functions
+
+Always available, no import needed:
+
+```magi
+println(value)           // print with newline, returns value
+print(value)             // print without newline, returns value
+len(collection)          // length of array, string, map, bytes
+to_string(value)         // convert any value to string
+parse_int(s)             // parse string to int (returns null on failure)
+parse_float(s)           // parse string to float (returns null on failure)
+typeof(value)            // returns type name as string
+assert(condition)        // panic if false
+```
+
+---
+
+## Built-in Methods on Primitives
+
+### string
+
+```magi
+s.length()               // character count
+s.split(delim)           // split into []string
+s.trim()                 // strip whitespace
+s.to_upper()             // uppercase
+s.to_lower()             // lowercase
+s.contains(sub)          // true if sub found
+s.starts_with(prefix)    // prefix check
+s.ends_with(suffix)      // suffix check
+s.replace(old, new)      // replace all occurrences
+s.chars()                // split into individual characters
+s.bytes()                // convert to []byte
+s.substring(start, end)  // slice
+```
+
+### array
+
+```magi
+arr.length()             // element count
+arr.push(item)           // append (mutates if let, error if const)
+arr.pop()                // remove last (mutates)
+arr.map(f)               // transform each element
+arr.filter(f)            // keep elements where f returns true
+arr.reduce(init, f)      // fold into single value
+arr.sort()               // sort in place
+arr.sort_by(f)           // sort by key function
+arr.reverse()            // reverse in place
+arr.contains(item)       // true if item found
+arr.find(f)              // first element where f is true
+arr.flatten()            // flatten nested arrays
+arr.join(sep)            // join into string
+arr.slice(start, end)    // sub-array
+arr.enumerate()          // returns [(index, value)]
+arr.zip(other)           // pair elements
+arr.chunk(n)             // split into groups of n
+arr.group_by(f)          // group into map by key function
+```
+
+### map
+
+```magi
+m.keys()                 // []string of keys
+m.values()               // []any of values
+m.entries()              // [](string, any) pairs
+m.contains(key)          // true if key exists
+m.remove(key)            // remove key
+m.merge(other)           // combine maps
+```
 
 ---
 

@@ -299,6 +299,69 @@ const parsed = filter_map(numbers, (s) => {
 println(parsed)  // [1, 3, 5]
 ```
 
+## Defer
+
+```magi
+import std.fs
+
+func process_file(path string) -> (string, string) {
+    let file, err = fs.open(path)
+    if err { return null, err }
+    defer fs.close(file)
+
+    let content, err = fs.read_all(file)
+    if err { return null, err }
+
+    content, null
+}
+
+let data, err = process_file("input.txt")
+if err {
+    println(f"error: {err}")
+} else {
+    println(f"read {len(data)} bytes")
+}
+```
+
+## Labeled Break
+
+```magi
+const matrix = [[1, 2, 3], [4, 0, 6], [7, 8, 9]]
+
+let found = false
+'search: for row in matrix {
+    for cell in row {
+        if cell == 0 {
+            found = true
+            break 'search
+        }
+    }
+}
+
+println(f"found zero: {found}")
+```
+
+## Attributes
+
+```magi
+#[test]
+func test_addition() {
+    assert(1 + 1 == 2)
+}
+
+#[test]
+func test_string_length() {
+    assert(len("hello") == 5)
+}
+
+#[deprecated("use parse_config instead")]
+func load_config(path string) -> (map[string]string, string) {
+    let text, err = fs.read(path)
+    if err { return null, err }
+    json.parse(text)
+}
+```
+
 ## Complete Program — Todo App
 
 ```magi
@@ -316,7 +379,7 @@ func Todo.display(self) -> string {
     f"[{status}] {self.title}"
 }
 
-func load_todos(path string) -> ([]Todo, string) {
+func load_todos(path string) -> ([]map[string]string, string) {
     let text, err = fs.read(path)
     if err { return [], null }
 
@@ -334,7 +397,7 @@ func save_todos(path string, todos []Todo) -> string {
 
 func add_todo(todos []Todo, title string) -> []Todo {
     const todo = Todo {
-        id: todos.length() + 1,
+        id: len(todos) + 1,
         title: title,
         done: false,
         created: time.now(),
@@ -349,7 +412,7 @@ func complete_todo(todos []Todo, id int) -> []Todo {
 }
 
 // Main
-let todos, _ = load_todos("todos.json")
+let todos = []Todo{}
 
 todos = add_todo(todos, "Write MAGI spec")
 todos = add_todo(todos, "Implement syntax overhaul")
