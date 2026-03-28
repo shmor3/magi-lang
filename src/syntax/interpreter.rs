@@ -13048,14 +13048,21 @@ impl<'a> Interpreter<'a> {
 
                 // Module namespace dispatch: math.sqrt(x) → sqrt(x)
                 if let DataType::Map(ref map) = obj {
-                    if map.get("__module").is_some() && map.get(method).is_some() {
-                        // This is a module namespace — dispatch as a regular function call
-                        let mut eval_args = Vec::new();
-                        for arg in args { eval_args.push(self.eval_expr(arg)?); }
-                        // Build a synthetic function call
+                    if let Some(DataType::String(module_name)) = map.get("__module") {
+                        // Module namespace — resolve function name
+                        // Try: method directly ("sqrt"), prefixed ("math_sqrt"), module-prefixed ("fs_read")
+                        let prefixed = format!("{}_{}", module_name, method);
+                        let fn_name = if map.get(method).is_some() {
+                            method.clone()
+                        } else if map.get(&prefixed).is_some() {
+                            prefixed
+                        } else {
+                            // Try the method name directly as a function call
+                            method.clone()
+                        };
                         let call_expr = Expression {
                             kind: ExpressionKind::Call {
-                                name: method.clone(),
+                                name: fn_name,
                                 args: args.clone(),
                                 kwargs: kwargs.clone(),
                             },

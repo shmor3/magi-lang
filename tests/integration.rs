@@ -21623,3 +21623,20 @@ fn test_multi_return_with_existing_tuple_destructure() {
         output a
     "#), DataType::Int64(10));
 }
+
+#[test]
+fn test_qualified_import_math() {
+    let result = run_eval_unique("import std.math; output math.sqrt(16.0);", "qual_math");
+    assert!(result.contains("4"));
+}
+
+#[test]
+fn test_qualified_import_multi() {
+    let result = run_eval_unique(r#"
+        import std.{math, path}
+        output math.abs(-7);
+        output path.join("/home", "user");
+    "#, "qual_multi");
+    assert!(result.contains("7"));
+    assert!(result.contains("/home/user"));
+}
