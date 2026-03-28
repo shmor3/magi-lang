@@ -1,0 +1,208 @@
+// MAGI Self-Hosted Compiler — Intermediate Representation
+//
+// Shared IR used by all compilation backends.
+// Stack-based instruction set that maps naturally to WASM.
+//
+// NOTE: MAGI struct fields are value-typed (arrays inside structs are copies).
+// All mutable IR state uses module-level variables (like the parser/lexer).
+
+// ── Instruction ──────────────────────────────────────────────────
+
+enum Instruction {
+    // Constants
+    PushNull,
+    PushBool(bool),
+    PushI64(int),
+    PushF64(float),
+    PushString(int),   // index into string pool
+
+    // Locals & Globals
+    LocalGet(int),
+    LocalSet(int),
+    GlobalGet(int),
+    GlobalSet(int),
+
+    // Arithmetic (i64)
+    I64Add,
+    I64Sub,
+    I64Mul,
+    I64Div,
+    I64Rem,
+    I64Neg,
+
+    // Arithmetic (f64)
+    F64Add,
+    F64Sub,
+    F64Mul,
+    F64Div,
+
+    // Comparison (i64)
+    I64Eq,
+    I64Ne,
+    I64Lt,
+    I64Gt,
+    I64Le,
+    I64Ge,
+
+    // Logical
+    BoolNot,
+
+    // Control flow
+    Block,
+    Loop,
+    End,
+    Br(int),
+    BrIf(int),
+    If,
+    IfVoid,
+    Else,
+    Return,
+    Drop,
+
+    // Functions & I/O
+    Call(string, int),  // name, arg_count
+    Print,
+
+    // Collections
+    ArrayNew(int),   // element count
+    ArrayGet,
+    StringConcat,
+
+    // Runtime dispatch
+    RuntimeCall(string),
+}
+
+func Instruction.dump(self) {
+    match self {
+        Instruction::PushNull => "push_null",
+        Instruction::PushBool(b) => f"push_bool({b})",
+        Instruction::PushI64(n) => f"push_i64({n})",
+        Instruction::PushF64(f) => f"push_f64({f})",
+        Instruction::PushString(i) => f"push_string({i})",
+        Instruction::LocalGet(i) => f"local_get({i})",
+        Instruction::LocalSet(i) => f"local_set({i})",
+        Instruction::GlobalGet(i) => f"global_get({i})",
+        Instruction::GlobalSet(i) => f"global_set({i})",
+        Instruction::I64Add => "i64.add",
+        Instruction::I64Sub => "i64.sub",
+        Instruction::I64Mul => "i64.mul",
+        Instruction::I64Div => "i64.div",
+        Instruction::I64Rem => "i64.rem",
+        Instruction::I64Neg => "i64.neg",
+        Instruction::F64Add => "f64.add",
+        Instruction::F64Sub => "f64.sub",
+        Instruction::F64Mul => "f64.mul",
+        Instruction::F64Div => "f64.div",
+        Instruction::I64Eq => "i64.eq",
+        Instruction::I64Ne => "i64.ne",
+        Instruction::I64Lt => "i64.lt",
+        Instruction::I64Gt => "i64.gt",
+        Instruction::I64Le => "i64.le",
+        Instruction::I64Ge => "i64.ge",
+        Instruction::BoolNot => "bool.not",
+        Instruction::Block => "block",
+        Instruction::Loop => "loop",
+        Instruction::End => "end",
+        Instruction::Br(d) => f"br({d})",
+        Instruction::BrIf(d) => f"br_if({d})",
+        Instruction::If => "if",
+        Instruction::IfVoid => "if_void",
+        Instruction::Else => "else",
+        Instruction::Return => "return",
+        Instruction::Drop => "drop",
+        Instruction::Call(name, argc) => f"call({name}, {argc})",
+        Instruction::Print => "print",
+        Instruction::ArrayNew(n) => f"array_new({n})",
+        Instruction::ArrayGet => "array_get",
+        Instruction::StringConcat => "string_concat",
+        Instruction::RuntimeCall(name) => f"runtime_call({name})",
+    }
+}
+
+// ── IrLocal ───────────────────────────────────────────────────────
+
+struct IrLocal {
+    name: string,
+    idx: int,
+}
+
+// ── IrFunction ───────────────────────────────────────────────────
+// Stored as an array of maps in the module's functions list.
+// Each function is a map: { name, param_count, locals, instructions }
+
+func ir_func_new(name, param_count) {
+    { "name": name, "param_count": param_count, "locals": [], "instructions": [] }
+}
+
+func ir_func_local_count(f) {
+    len(f["locals"])
+}
+
+func ir_func_find_local(f, name) {
+    const locs = f["locals"]
+    let found = -1
+    let i = 0
+    while i < len(locs) {
+        const loc = locs[i]
+        if loc["name"] == name {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ── IrModule ─────────────────────────────────────────────────────
+// Stored as module-level mutable arrays.
+
+let ir_strings = []
+let ir_functions = []
+let ir_globals = []
+
+func ir_module_reset() {
+    ir_strings = []
+    ir_functions = []
+    ir_globals = []
+}
+
+// Intern a string, return its index
+func ir_intern_string(s) {
+    let i = 0
+    while i < len(ir_strings) {
+        if ir_strings[i] == s {
+            return i
+        }
+        i = i + 1
+    }
+    const idx = len(ir_strings)
+    ir_strings.push(s)
+    idx
+}
+
+// Add a function to the module
+func ir_add_function(f) {
+    ir_functions.push(f)
+}
+
+// Find a function by name, return index or -1
+func ir_find_function(name) {
+    let i = 0
+    while i < len(ir_functions) {
+        const f = ir_functions[i]
+        if f["name"] == name {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// ── Test helper: create a snapshot of current module state ────────
+
+func ir_snapshot() {
+    {
+        "functions": ir_functions,
+        "strings": ir_strings,
+        "globals": ir_globals,
+    }
+}

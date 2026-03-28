@@ -1,0 +1,569 @@
+// MAGI Self-Hosted Compiler — IR Virtual Machine
+//
+// Stack-based interpreter for the IR instruction set.
+// Entry point: run_ir(module_snapshot) -> array (output lines)
+//
+// DESIGN: Fully iterative VM. No recursive execution functions.
+// Uses an explicit call stack (vm_call_stack) for function calls.
+// Control flow (loop/if) is handled with a frame stack (vm_frame_stack).
+//
+// NOTE: Uses module-level globals for instruction buffer to avoid
+// the MAGI len() bug on array parameters extracted from nested maps.
+
+// ── VM State (module-level mutable) ──────────────────────────────
+
+let vm_stack = []
+let vm_locals = []
+let vm_globals = []
+let vm_output = []
+let vm_strings = []
+let vm_functions = []
+
+// Flat instruction buffer for current function
+let vm_instrs = []
+let vm_n = 0
+let vm_ip = 0
+
+// Frame stack for nested control flow (loop/if/block inside current function)
+// Each frame: { "type": "loop"/"if"/"if_void"/"block", "start": int, "end": int }
+let vm_frame_stack = []
+
+// Call stack: saved frames when calling a sub-function
+// Each entry: { "instrs", "n", "ip", "stack", "locals", "frames" }
+let vm_call_stack = []
+
+// ── Stack Helpers ─────────────────────────────────────────────────
+
+func vm_push(v) { vm_stack.push(v) }
+
+func vm_pop() {
+    const n = len(vm_stack)
+    if n == 0 { return null }
+    const v = vm_stack[n - 1]
+    vm_stack = vm_stack.slice(0, n - 1)
+    v
+}
+
+func vm_peek() {
+    const n = len(vm_stack)
+    if n == 0 { null } else { vm_stack[n - 1] }
+}
+
+// ── Value Helpers ─────────────────────────────────────────────────
+
+func vm_truthy(v) {
+    if v == null { return false }
+    if v == false { return false }
+    if v == 0 { return false }
+    if v == "" { return false }
+    true
+}
+
+func vm_str(v) {
+    if v == null { return "null" }
+    to_string(v)
+}
+
+// ── Scan helpers ─────────────────────────────────────────────────
+// Operate on vm_instrs + vm_n globals.
+
+func vm_scan_end(from) {
+    let depth = 1
+    let i = from
+    while i < vm_n {
+        const d = vm_instrs[i].dump()
+        if d == "block" || d == "loop" || d == "if_void" || d == "if" {
+            depth = depth + 1
+        } else if d == "end" {
+            depth = depth - 1
+            if depth == 0 { return i }
+        }
+        i = i + 1
+    }
+    vm_n
+}
+
+func vm_scan_else_end(from) {
+    // Returns [else_or_end_pos, has_else]
+    let depth = 1
+    let i = from
+    while i < vm_n {
+        const d = vm_instrs[i].dump()
+        if d == "block" || d == "loop" || d == "if_void" || d == "if" {
+            depth = depth + 1
+        } else if d == "end" {
+            depth = depth - 1
+            if depth == 0 { return [i, false] }
+        } else if d == "else" && depth == 1 {
+            return [i, true]
+        }
+        i = i + 1
+    }
+    [vm_n, false]
+}
+
+// ── Setup function frame ──────────────────────────────────────────
+// IMPORTANT: vm_n and vm_instrs must be set BEFORE calling vm_setup_func.
+// Call vm_prepare_instrs(f) at call-site to set vm_instrs/vm_n safely,
+// then call vm_setup_func(f, args) which must NOT call len() on any
+// array derived from f's map fields (MAGI interpreter bug: calling len()
+// inside a function on an array from a parameter's map field corrupts
+// subsequent .dump() calls on enum variants with int payloads).
+
+func vm_setup_func(f, args) {
+    // IMPORTANT: do NOT call len() on f["instructions"] or f["locals"] here.
+    // Those arrays contain enum variants; calling len() on param-derived enum arrays
+    // corrupts subsequent .dump() calls (MAGI interpreter bug).
+    // Instead, use the pre-computed counts stored in the function map by the compiler:
+    //   f["instruction_count"] and f["local_count"]
+    vm_instrs = f["instructions"]
+    vm_n = f["instruction_count"]
+    vm_ip = 0
+    vm_frame_stack = []
+    vm_stack = []
+    vm_locals = []
+    let pi = 0
+    while pi < len(args) {
+        vm_locals.push(args[pi])
+        pi = pi + 1
+    }
+    const f_lc = f["local_count"]
+    while len(vm_locals) < f_lc {
+        vm_locals.push(null)
+    }
+}
+
+// ── Runtime + builtin dispatch ────────────────────────────────────
+
+func vm_rt(name, arg) {
+    match name {
+        "to_string" => vm_str(arg),
+        "array_len" => {
+            if arg == null { 0 } else { len(arg) }
+        },
+        _ => null,
+    }
+}
+
+// ── Main Execution Loop ───────────────────────────────────────────
+// Runs until vm_ip >= vm_n or return. Returns final result.
+// Call stack is managed by vm_call_stack (saved/restored when calling functions).
+
+func vm_exec() {
+    let result = null
+    let running = true
+    let vm_steps = 0
+
+    while running && vm_ip < vm_n {
+        vm_steps = vm_steps + 1
+        if vm_steps > 100000 {
+            println(f"[VM ERROR] Exceeded 100000 steps at ip={vm_ip}")
+            return null
+        }
+        const instr = vm_instrs[vm_ip]
+        vm_ip = vm_ip + 1
+        const d = instr.dump()
+        }
+
+        if d == "push_null" {
+            vm_push(null)
+        } else if d == "push_bool(true)" {
+            vm_push(true)
+        } else if d == "push_bool(false)" {
+            vm_push(false)
+        } else if d.slice(0, 9) == "push_i64(" {
+            match instr { Instruction::PushI64(n) => vm_push(n), _ => {} }
+        } else if d.slice(0, 9) == "push_f64(" {
+            match instr { Instruction::PushF64(f) => vm_push(f), _ => {} }
+        } else if d.slice(0, 10) == "push_bool(" {
+            match instr { Instruction::PushBool(b) => vm_push(b), _ => {} }
+        } else if d.slice(0, 12) == "push_string(" {
+            match instr {
+                Instruction::PushString(idx) => {
+                    if idx < len(vm_strings) { vm_push(vm_strings[idx]) }
+                    else { vm_push("") }
+                },
+                _ => {},
+            }
+
+        } else if d.slice(0, 10) == "local_get(" {
+            match instr {
+                Instruction::LocalGet(idx) => {
+                    if idx < len(vm_locals) { vm_push(vm_locals[idx]) }
+                    else { vm_push(null) }
+                },
+                _ => {},
+            }
+        } else if d.slice(0, 10) == "local_set(" {
+            match instr {
+                Instruction::LocalSet(idx) => {
+                    const v = vm_pop()
+                    while len(vm_locals) <= idx { vm_locals.push(null) }
+                    vm_locals[idx] = v
+                },
+                _ => {},
+            }
+        } else if d.slice(0, 11) == "global_get(" {
+            match instr {
+                Instruction::GlobalGet(idx) => {
+                    if idx < len(vm_globals) { vm_push(vm_globals[idx]) }
+                    else { vm_push(null) }
+                },
+                _ => {},
+            }
+        } else if d.slice(0, 11) == "global_set(" {
+            match instr {
+                Instruction::GlobalSet(idx) => {
+                    const v = vm_pop()
+                    while len(vm_globals) <= idx { vm_globals.push(null) }
+                    vm_globals[idx] = v
+                },
+                _ => {},
+            }
+
+        } else if d == "i64.add" {
+            const b = vm_pop(); const a = vm_pop()
+            if reflect_type_of(a) == "string" || reflect_type_of(b) == "string" {
+                vm_push(vm_str(a) + vm_str(b))
+            } else { vm_push(a + b) }
+        } else if d == "i64.sub" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a - b)
+        } else if d == "i64.mul" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a * b)
+        } else if d == "i64.div" {
+            const b = vm_pop(); const a = vm_pop()
+            if b == 0 { vm_push(0) } else { vm_push(a / b) }
+        } else if d == "i64.rem" {
+            const b = vm_pop(); const a = vm_pop()
+            if b == 0 { vm_push(0) } else { vm_push(a % b) }
+        } else if d == "i64.neg" {
+            const a = vm_pop(); vm_push(0 - a)
+        } else if d == "f64.add" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a + b)
+        } else if d == "f64.sub" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a - b)
+        } else if d == "f64.mul" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a * b)
+        } else if d == "f64.div" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a / b)
+        } else if d == "i64.eq" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a == b)
+        } else if d == "i64.ne" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a != b)
+        } else if d == "i64.lt" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a < b)
+        } else if d == "i64.gt" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a > b)
+        } else if d == "i64.le" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a <= b)
+        } else if d == "i64.ge" {
+            const b = vm_pop(); const a = vm_pop(); vm_push(a >= b)
+        } else if d == "bool.not" {
+            const a = vm_pop(); vm_push(!vm_truthy(a))
+
+        } else if d == "drop" {
+            vm_pop()
+        } else if d == "print" {
+            const v = vm_pop()
+            const s = vm_str(v)
+            vm_output.push(s)
+            println(s)
+        } else if d == "string_concat" {
+            const b = vm_pop(); const a = vm_pop()
+            vm_push(vm_str(a) + vm_str(b))
+
+        } else if d.slice(0, 10) == "array_new(" {
+            match instr {
+                Instruction::ArrayNew(count) => {
+                    let elems = []
+                    let ai = 0
+                    while ai < count {
+                        elems.push(vm_pop())
+                        ai = ai + 1
+                    }
+                    let arr = []
+                    let ri = len(elems) - 1
+                    while ri >= 0 {
+                        arr.push(elems[ri])
+                        ri = ri - 1
+                    }
+                    vm_push(arr)
+                },
+                _ => {},
+            }
+        } else if d == "array_get" {
+            const idx = vm_pop()
+            const arr = vm_pop()
+            if arr != null && idx >= 0 && idx < len(arr) {
+                vm_push(arr[idx])
+            } else {
+                vm_push(null)
+            }
+
+        } else if d.slice(0, 13) == "runtime_call(" {
+            match instr {
+                Instruction::RuntimeCall(name) => {
+                    const arg = vm_pop()
+                    vm_push(vm_rt(name, arg))
+                },
+                _ => {},
+            }
+
+        } else if d.slice(0, 5) == "call(" {
+            match instr {
+                Instruction::Call(cname, argc) => {
+                    // Collect args from stack (reversed)
+                    let cargs = []
+                    let ci = 0
+                    while ci < argc {
+                        cargs.push(vm_pop())
+                        ci = ci + 1
+                    }
+                    let rargs = []
+                    let ri = len(cargs) - 1
+                    while ri >= 0 {
+                        rargs.push(cargs[ri])
+                        ri = ri - 1
+                    }
+                    // Try user-defined function
+                    let found_f = null
+                    let fi = 0
+                    while fi < len(vm_functions) {
+                        const ff = vm_functions[fi]
+                        if ff["name"] == cname { found_f = ff }
+                        fi = fi + 1
+                    }
+                    if found_f != null {
+                        // Save current frame to call stack
+                        const saved = {
+                            "instrs": vm_instrs,
+                            "n": vm_n,
+                            "ip": vm_ip,
+                            "stack": vm_stack,
+                            "locals": vm_locals,
+                            "frames": vm_frame_stack,
+                        }
+                        vm_call_stack.push(saved)
+                        // Set up callee
+                        vm_setup_func(found_f, rargs)
+                    } else {
+                        // Builtin
+                        const br = vm_builtin(cname, rargs)
+                        vm_push(br)
+                    }
+                },
+                _ => {},
+            }
+
+        } else if d == "return" {
+            result = vm_pop()
+            // Restore caller frame if any
+            const cs_n = len(vm_call_stack)
+            if cs_n > 0 {
+                const saved = vm_call_stack[cs_n - 1]
+                vm_call_stack = vm_call_stack.slice(0, cs_n - 1)
+                vm_instrs = saved["instrs"]
+                vm_n = saved["n"]
+                vm_ip = saved["ip"]
+                vm_stack = saved["stack"]
+                vm_locals = saved["locals"]
+                vm_frame_stack = saved["frames"]
+                // Push return value onto caller stack
+                vm_push(result)
+            } else {
+                running = false
+            }
+
+        } else if d == "loop" {
+            // Push a loop frame so BrIf/Br can find boundaries
+            const loop_end = vm_scan_end(vm_ip)
+            const frame = { "type": "loop", "start": vm_ip, "end": loop_end }
+            vm_frame_stack.push(frame)
+            // Continue executing into loop body
+
+        } else if d == "if" {
+            const cond = vm_pop()
+            const locs = vm_scan_else_end(vm_ip)
+            const split = locs[0]
+            const has_else = locs[1]
+            const end_pos = if has_else { vm_scan_end(split + 1) } else { split }
+            if vm_truthy(cond) {
+                // Execute then branch; push frame to skip else
+                const frame = { "type": "if", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
+                vm_frame_stack.push(frame)
+                // ip stays at vm_ip (first instr of then-branch)
+            } else {
+                if has_else {
+                    // Jump to else branch
+                    const frame = { "type": "if", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
+                    vm_frame_stack.push(frame)
+                    vm_ip = split + 1
+                } else {
+                    // No else: push null, skip to end
+                    vm_push(null)
+                    vm_ip = split + 1
+                }
+            }
+
+        } else if d == "if_void" {
+            const cond = vm_pop()
+            const locs = vm_scan_else_end(vm_ip)
+            const split = locs[0]
+            const has_else = locs[1]
+            const end_pos = if has_else { vm_scan_end(split + 1) } else { split }
+            if vm_truthy(cond) {
+                const frame = { "type": "if_void", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
+                vm_frame_stack.push(frame)
+                // ip stays at vm_ip
+            } else {
+                if has_else {
+                    const frame = { "type": "if_void", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
+                    vm_frame_stack.push(frame)
+                    vm_ip = split + 1
+                } else {
+                    vm_ip = split + 1
+                }
+            }
+
+        } else if d == "else" {
+            // Hit else during then-branch execution: jump to end
+            const fns = len(vm_frame_stack)
+            if fns > 0 {
+                const fr = vm_frame_stack[fns - 1]
+                vm_frame_stack = vm_frame_stack.slice(0, fns - 1)
+                vm_ip = fr["end"] + 1
+            }
+
+        } else if d == "end" {
+            // End of if/loop/block frame
+            const fns = len(vm_frame_stack)
+            if fns > 0 {
+                const fr = vm_frame_stack[fns - 1]
+                if fr["type"] == "loop" {
+                    // Loop: jump back to start (re-enter loop body)
+                    vm_ip = fr["start"]
+                    // Frame stays on stack
+                } else {
+                    // if/if_void/block: pop frame
+                    vm_frame_stack = vm_frame_stack.slice(0, fns - 1)
+                    // After end, push null if this was a non-void if with no else
+                }
+            }
+
+        } else if d == "block" {
+            const block_end = vm_scan_end(vm_ip)
+            const frame = { "type": "block", "start": vm_ip, "end": block_end }
+            vm_frame_stack.push(frame)
+
+        } else if d.slice(0, 6) == "br_if(" {
+            const cond = vm_pop()
+            if vm_truthy(cond) {
+                match instr {
+                    Instruction::BrIf(depth) => {
+                        vm_ip = vm_br(depth)
+                    },
+                    _ => {},
+                }
+            }
+
+        } else if d.slice(0, 3) == "br(" {
+            match instr {
+                Instruction::Br(depth) => {
+                    vm_ip = vm_br(depth)
+                },
+                _ => {},
+            }
+        }
+        // Unknown instructions silently skipped
+    }
+
+    result
+}
+
+// ── Branch helper ─────────────────────────────────────────────────
+// Pop `depth` frames and return new ip.
+
+func vm_br(depth) {
+    let bd = depth
+    let target_ip = vm_n  // default: exit function
+    let fns = len(vm_frame_stack)
+    while bd >= 0 && fns > 0 {
+        const fr = vm_frame_stack[fns - 1]
+        vm_frame_stack = vm_frame_stack.slice(0, fns - 1)
+        fns = fns - 1
+        if bd == 0 {
+            if fr["type"] == "loop" {
+                // Br(0) on loop = continue (jump to start, re-push frame)
+                vm_frame_stack.push(fr)
+                fns = fns + 1
+                target_ip = fr["start"]
+            } else {
+                target_ip = fr["end"] + 1
+            }
+            bd = -1  // done
+        } else {
+            bd = bd - 1
+            target_ip = fr["end"] + 1
+        }
+    }
+    target_ip
+}
+
+// ── Builtins ─────────────────────────────────────────────────────
+
+func vm_builtin(name, args) {
+    match name {
+        "println" => {
+            const s = if len(args) > 0 { vm_str(args[0]) } else { "" }
+            vm_output.push(s)
+            println(s)
+            null
+        },
+        "to_string" => {
+            if len(args) > 0 { vm_str(args[0]) } else { "" }
+        },
+        "len" => {
+            if len(args) > 0 { len(args[0]) } else { 0 }
+        },
+        "assert" => {
+            if len(args) > 0 && !vm_truthy(args[0]) {
+                panic("VM assertion failed")
+            }
+            null
+        },
+        _ => null,
+    }
+}
+
+// ── Entry Point ───────────────────────────────────────────────────
+
+func run_ir(module_snapshot) {
+    vm_stack = []
+    vm_locals = []
+    vm_globals = []
+    vm_output = []
+    vm_strings = module_snapshot["strings"]
+    vm_functions = module_snapshot["functions"]
+    vm_call_stack = []
+
+    let main_f = null
+    let i = 0
+    while i < len(vm_functions) {
+        const f = vm_functions[i]
+        if f["name"] == "__main" { main_f = f }
+        i = i + 1
+    }
+    if main_f == null { return [] }
+
+    vm_setup_func(main_f, [])
+    vm_exec()
+    vm_output
+}
+
+// ── Pipeline ─────────────────────────────────────────────────────
+
+func compile_and_run(source) {
+    const program = parse(source)
+    const module = compile_to_ir(program)
+    run_ir(module)
+}

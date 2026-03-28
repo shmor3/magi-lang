@@ -1,0 +1,242 @@
+// Tests for self/compiler/ (IR, compile, VM)
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/compiler/ir.magi self/compiler/compile.magi self/compiler/vm.magi self/tests/test_compiler.magi > /tmp/_compiler_test.magi && RUST_MIN_STACK=33554432 cargo run --bin magi -- run /tmp/_compiler_test.magi
+
+// ── Arithmetic ────────────────────────────────────────────────────
+
+func test_compile_arithmetic() {
+    const out = compile_and_run("println(1 + 2)")
+    assert(len(out) == 1)
+    assert(out[0] == "3")
+    println("PASS: compile arithmetic")
+}
+
+func test_compile_subtraction() {
+    const out = compile_and_run("println(10 - 3)")
+    assert(len(out) == 1)
+    assert(out[0] == "7")
+    println("PASS: compile subtraction")
+}
+
+func test_compile_multiplication() {
+    const out = compile_and_run("println(4 * 5)")
+    assert(len(out) == 1)
+    assert(out[0] == "20")
+    println("PASS: compile multiplication")
+}
+
+func test_compile_division() {
+    const out = compile_and_run("println(12 / 4)")
+    assert(len(out) == 1)
+    assert(out[0] == "3")
+    println("PASS: compile division")
+}
+
+func test_compile_modulo() {
+    const out = compile_and_run("println(10 % 3)")
+    assert(len(out) == 1)
+    assert(out[0] == "1")
+    println("PASS: compile modulo")
+}
+
+// ── Variables ─────────────────────────────────────────────────────
+
+func test_compile_const() {
+    const out = compile_and_run("const x = 42\nprintln(x)")
+    assert(len(out) == 1)
+    assert(out[0] == "42")
+    println("PASS: compile const variable")
+}
+
+func test_compile_let() {
+    const out = compile_and_run("let x = 10\nprintln(x)")
+    assert(len(out) == 1)
+    assert(out[0] == "10")
+    println("PASS: compile let variable")
+}
+
+func test_compile_assignment() {
+    const out = compile_and_run("let x = 5\nx = 99\nprintln(x)")
+    assert(len(out) == 1)
+    assert(out[0] == "99")
+    println("PASS: compile assignment")
+}
+
+// ── Boolean & Comparison ──────────────────────────────────────────
+
+func test_compile_comparison_gt() {
+    const out = compile_and_run("println(3 > 2)")
+    assert(len(out) == 1)
+    assert(out[0] == "true")
+    println("PASS: compile comparison gt")
+}
+
+func test_compile_comparison_lt() {
+    const out = compile_and_run("println(1 < 5)")
+    assert(len(out) == 1)
+    assert(out[0] == "true")
+    println("PASS: compile comparison lt")
+}
+
+func test_compile_comparison_eq() {
+    const out = compile_and_run("println(5 == 5)")
+    assert(len(out) == 1)
+    assert(out[0] == "true")
+    println("PASS: compile comparison eq")
+}
+
+func test_compile_comparison_ne() {
+    const out = compile_and_run("println(3 != 4)")
+    assert(len(out) == 1)
+    assert(out[0] == "true")
+    println("PASS: compile comparison ne")
+}
+
+// ── If/Else ───────────────────────────────────────────────────────
+
+func test_compile_if_true() {
+    const out = compile_and_run("if true { println(1) } else { println(2) }")
+    assert(len(out) == 1)
+    assert(out[0] == "1")
+    println("PASS: compile if true branch")
+}
+
+func test_compile_if_false() {
+    const out = compile_and_run("if false { println(1) } else { println(2) }")
+    assert(len(out) == 1)
+    assert(out[0] == "2")
+    println("PASS: compile if false branch")
+}
+
+func test_compile_if_condition() {
+    const out = compile_and_run("const x = 10\nif x > 5 { println(1) } else { println(0) }")
+    assert(len(out) == 1)
+    assert(out[0] == "1")
+    println("PASS: compile if with condition")
+}
+
+// ── While Loop ────────────────────────────────────────────────────
+
+func test_compile_while_loop() {
+    const out = compile_and_run("let i = 0\nwhile i < 3 { println(i)\ni = i + 1 }")
+    assert(len(out) == 3)
+    assert(out[0] == "0")
+    assert(out[1] == "1")
+    assert(out[2] == "2")
+    println("PASS: compile while loop")
+}
+
+// ── Strings ───────────────────────────────────────────────────────
+
+func test_compile_string_println() {
+    const out = compile_and_run("println(\"hello\")")
+    assert(len(out) == 1)
+    assert(out[0] == "hello")
+    println("PASS: compile string println")
+}
+
+func test_compile_string_concat() {
+    const out = compile_and_run("println(\"hello\" + \" world\")")
+    assert(len(out) == 1)
+    assert(out[0] == "hello world")
+    println("PASS: compile string concat")
+}
+
+// ── Multiple Outputs ──────────────────────────────────────────────
+
+func test_compile_multiple_outputs() {
+    const out = compile_and_run("println(1)\nprintln(2)\nprintln(3)")
+    assert(len(out) == 3)
+    assert(out[0] == "1")
+    assert(out[1] == "2")
+    assert(out[2] == "3")
+    println("PASS: compile multiple outputs")
+}
+
+// ── IR Module Structure ───────────────────────────────────────────
+
+func test_ir_module_new() {
+    ir_module_reset()
+    assert(len(ir_functions) == 0)
+    assert(len(ir_strings) == 0)
+    assert(len(ir_globals) == 0)
+    println("PASS: ir_module_new")
+}
+
+func test_ir_string_interning() {
+    ir_module_reset()
+    const i1 = ir_intern_string("hello")
+    const i2 = ir_intern_string("world")
+    const i3 = ir_intern_string("hello")
+    assert(i1 == 0)
+    assert(i2 == 1)
+    assert(i3 == 0)
+    println("PASS: ir string interning")
+}
+
+func test_ir_function() {
+    const f = ir_func_new("test_fn", 2)
+    assert(f["name"] == "test_fn")
+    assert(f["param_count"] == 2)
+    assert(len(f["instructions"]) == 0)
+    println("PASS: ir_func_new")
+}
+
+func test_ir_local_tracking() {
+    const locs = [{ "name": "x", "idx": 0 }, { "name": "y", "idx": 1 }]
+    const f = { "name": "fn", "param_count": 0, "locals": locs, "instructions": [] }
+    assert(ir_func_find_local(f, "x") == 0)
+    assert(ir_func_find_local(f, "y") == 1)
+    assert(ir_func_find_local(f, "z") == -1)
+    println("PASS: ir local tracking")
+}
+
+// ── compile_to_ir ─────────────────────────────────────────────────
+
+func test_compile_to_ir_basic() {
+    const prog = parse("println(42)")
+    const m = compile_to_ir(prog)
+    const funcs = m["functions"]
+    assert(len(funcs) > 0)
+    const main_f = funcs[len(funcs) - 1]
+    assert(main_f["name"] == "__main")
+    assert(len(main_f["instructions"]) > 0)
+    println("PASS: compile_to_ir produces __main")
+}
+
+func test_compile_to_ir_strings() {
+    const prog = parse("println(\"hello\")")
+    const m = compile_to_ir(prog)
+    const strs = m["strings"]
+    assert(len(strs) == 1)
+    assert(strs[0] == "hello")
+    println("PASS: compile_to_ir interns strings")
+}
+
+// ── Run All Tests ─────────────────────────────────────────────────
+
+test_ir_module_new()
+test_ir_string_interning()
+test_ir_function()
+test_ir_local_tracking()
+test_compile_to_ir_basic()
+test_compile_to_ir_strings()
+test_compile_arithmetic()
+test_compile_subtraction()
+test_compile_multiplication()
+test_compile_division()
+test_compile_modulo()
+test_compile_const()
+test_compile_let()
+test_compile_assignment()
+test_compile_comparison_gt()
+test_compile_comparison_lt()
+test_compile_comparison_eq()
+test_compile_comparison_ne()
+test_compile_if_true()
+test_compile_if_false()
+test_compile_if_condition()
+test_compile_while_loop()
+test_compile_string_println()
+test_compile_string_concat()
+test_compile_multiple_outputs()
+println("All compiler tests passed!")

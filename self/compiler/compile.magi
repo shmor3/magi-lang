@@ -1,0 +1,495 @@
+// MAGI Self-Hosted Compiler — AST → IR Compiler
+//
+// Walks the AST (from parser.magi) and emits IR instructions.
+// Uses module-level state (ir_strings, ir_functions, ir_globals from ir.magi).
+// Entry point: compile_to_ir(program) -> snapshot map
+
+// ── Current Function State (module-level mutable) ─────────────────
+
+let cc_instrs = []       // current function's instruction list
+let cc_locals = []       // current function's local variables (array of name strings)
+let cc_param_count = 0   // current function's param count
+let cc_func_name = "__main"
+
+// Saved function stacks (for nested function defs)
+let cc_saved_stack = []
+
+// ── Helpers ───────────────────────────────────────────────────────
+
+func cc_emit(instr) {
+    cc_instrs.push(instr)
+}
+
+func cc_intern(s) {
+    ir_intern_string(s)
+}
+
+func cc_define_local(name) {
+    const idx = len(cc_locals)
+    cc_locals.push(name)
+    idx
+}
+
+func cc_resolve_local(name) {
+    // Search from end (innermost scope first)
+    let i = len(cc_locals) - 1
+    while i >= 0 {
+        if cc_locals[i] == name {
+            return i
+        }
+        i = i - 1
+    }
+    -1
+}
+
+func cc_resolve_global(name) {
+    let i = 0
+    while i < len(ir_globals) {
+        if ir_globals[i] == name {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+func cc_save_func() {
+    const saved = {
+        "instrs": cc_instrs,
+        "locals": cc_locals,
+        "param_count": cc_param_count,
+        "name": cc_func_name,
+    }
+    cc_saved_stack.push(saved)
+}
+
+func cc_restore_func() {
+    const n = len(cc_saved_stack)
+    if n == 0 { return null }
+    const saved = cc_saved_stack[n - 1]
+    cc_saved_stack = cc_saved_stack.slice(0, n - 1)
+    cc_instrs = saved["instrs"]
+    cc_locals = saved["locals"]
+    cc_param_count = saved["param_count"]
+    cc_func_name = saved["name"]
+}
+
+func cc_finish_func() {
+    // Build the function map and add it to the module.
+    // Pre-compute counts here (at compile time) so the VM never needs to
+    // call len() on instructions/locals arrays inside a function
+    // (MAGI interpreter bug: len() on param-derived enum arrays corrupts dispatch).
+    const f = {
+        "name": cc_func_name,
+        "param_count": cc_param_count,
+        "locals": cc_locals,
+        "local_count": len(cc_locals),
+        "instructions": cc_instrs,
+        "instruction_count": len(cc_instrs),
+    }
+    ir_add_function(f)
+}
+
+// ── Compile Expression ────────────────────────────────────────────
+
+func cc_compile_expr(expr) {
+    const kind = expr.kind
+    match kind {
+        ExprKind::ELiteral(lit) => cc_compile_literal(lit),
+        ExprKind::EVariable(name) => cc_compile_variable(name),
+        ExprKind::EBinaryOp(op, left, right) => cc_compile_binop(op, left, right),
+        ExprKind::EUnaryOp(op, operand) => cc_compile_unaryop(op, operand),
+        ExprKind::ECall(name, args, _) => cc_compile_call(name, args),
+        ExprKind::EMethodCall(obj, method, args, _) => cc_compile_method_call(obj, method, args),
+        ExprKind::EIfElse(cond, then_b, else_b) => cc_compile_if_else_expr(cond, then_b, else_b),
+        ExprKind::EBlock(block) => cc_compile_block_expr(block),
+        ExprKind::EStringInterp(parts) => cc_compile_string_interp(parts),
+        _ => {
+            cc_emit(Instruction::PushNull)
+        },
+    }
+}
+
+func cc_compile_literal(lit) {
+    match lit {
+        Literal::IntLit(n) => cc_emit(Instruction::PushI64(n)),
+        Literal::FloatLit(f) => cc_emit(Instruction::PushF64(f)),
+        Literal::StringLit(s) => {
+            const idx = cc_intern(s)
+            cc_emit(Instruction::PushString(idx))
+        },
+        Literal::BoolLit(b) => cc_emit(Instruction::PushBool(b)),
+        Literal::NullLit => cc_emit(Instruction::PushNull),
+        Literal::ArrayLit(elems) => {
+            let i = 0
+            while i < len(elems) {
+                cc_compile_expr(elems[i])
+                i = i + 1
+            }
+            cc_emit(Instruction::ArrayNew(len(elems)))
+        },
+        _ => cc_emit(Instruction::PushNull),
+    }
+}
+
+func cc_compile_variable(name) {
+    const local_idx = cc_resolve_local(name)
+    if local_idx >= 0 {
+        cc_emit(Instruction::LocalGet(local_idx))
+    } else {
+        const gi = cc_resolve_global(name)
+        if gi >= 0 {
+            cc_emit(Instruction::GlobalGet(gi))
+        } else {
+            // Unknown — null (function calls use Call, not variable lookup)
+            cc_emit(Instruction::PushNull)
+        }
+    }
+}
+
+func cc_compile_binop(op, left, right) {
+    cc_compile_expr(left)
+    cc_compile_expr(right)
+    match op {
+        BinOp::Add => cc_emit(Instruction::I64Add),
+        BinOp::Sub => cc_emit(Instruction::I64Sub),
+        BinOp::Mul => cc_emit(Instruction::I64Mul),
+        BinOp::Div => cc_emit(Instruction::I64Div),
+        BinOp::Mod => cc_emit(Instruction::I64Rem),
+        BinOp::Eq => cc_emit(Instruction::I64Eq),
+        BinOp::NotEq => cc_emit(Instruction::I64Ne),
+        BinOp::Lt => cc_emit(Instruction::I64Lt),
+        BinOp::Gt => cc_emit(Instruction::I64Gt),
+        BinOp::LtEq => cc_emit(Instruction::I64Le),
+        BinOp::GtEq => cc_emit(Instruction::I64Ge),
+        BinOp::And => {
+            // Redo: pop right, then and with left already on stack
+            // Actually just use the two values already pushed
+            cc_emit(Instruction::I64Mul)  // truthy && truthy — works for 0/1
+        },
+        BinOp::Or => {
+            cc_emit(Instruction::I64Add)  // truthy || truthy — any nonzero
+        },
+        _ => cc_emit(Instruction::PushNull),
+    }
+}
+
+func cc_compile_unaryop(op, operand) {
+    cc_compile_expr(operand)
+    match op {
+        UnOp::Not => cc_emit(Instruction::BoolNot),
+        UnOp::Neg => cc_emit(Instruction::I64Neg),
+    }
+}
+
+func cc_compile_call(name, args) {
+    let i = 0
+    while i < len(args) {
+        cc_compile_expr(args[i])
+        i = i + 1
+    }
+    cc_emit(Instruction::Call(name, len(args)))
+}
+
+func cc_compile_method_call(obj, method, args) {
+    cc_compile_expr(obj)
+    let i = 0
+    while i < len(args) {
+        cc_compile_expr(args[i])
+        i = i + 1
+    }
+    cc_emit(Instruction::Call(method, len(args) + 1))
+}
+
+func cc_compile_if_else_expr(cond, then_b, else_b) {
+    cc_compile_expr(cond)
+    cc_emit(Instruction::If)
+    cc_compile_block_expr(then_b)
+    if else_b != null {
+        cc_emit(Instruction::Else)
+        cc_compile_block_expr(else_b)
+    } else {
+        cc_emit(Instruction::Else)
+        cc_emit(Instruction::PushNull)
+    }
+    cc_emit(Instruction::End)
+}
+
+func cc_compile_block_expr(block) {
+    const stmts = block.stmts
+    let i = 0
+    while i < len(stmts) {
+        cc_compile_stmt(stmts[i])
+        i = i + 1
+    }
+    if block.tail_expr != null {
+        cc_compile_expr(block.tail_expr)
+    } else if len(stmts) == 0 {
+        cc_emit(Instruction::PushNull)
+    } else {
+        cc_emit(Instruction::PushNull)
+    }
+}
+
+func cc_compile_string_interp(parts) {
+    if len(parts) == 0 {
+        cc_emit(Instruction::PushString(cc_intern("")))
+        return null
+    }
+    let i = 0
+    while i < len(parts) {
+        const part = parts[i]
+        match part {
+            StringPart::LiteralPart(s) => {
+                cc_emit(Instruction::PushString(cc_intern(s)))
+            },
+            StringPart::ExprPart(expr) => {
+                cc_compile_expr(expr)
+                cc_emit(Instruction::RuntimeCall("to_string"))
+            },
+        }
+        if i > 0 {
+            cc_emit(Instruction::StringConcat)
+        }
+        i = i + 1
+    }
+}
+
+// ── Compile Statement ─────────────────────────────────────────────
+
+func cc_compile_stmt(stmt) {
+    const kind = stmt.kind
+    match kind {
+        StmtKind::SOutput(expr) => {
+            cc_compile_expr(expr)
+            cc_emit(Instruction::Print)
+        },
+        StmtKind::SLet(name, expr) => {
+            cc_compile_expr(expr)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SLetMut(name, expr) => {
+            cc_compile_expr(expr)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SConst(name, expr) => {
+            cc_compile_expr(expr)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SAssignment(name, expr) => {
+            cc_compile_expr(expr)
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalSet(local_idx))
+            } else {
+                let gi = cc_resolve_global(name)
+                if gi < 0 {
+                    ir_globals.push(name)
+                    gi = len(ir_globals) - 1
+                }
+                cc_emit(Instruction::GlobalSet(gi))
+            }
+        },
+        StmtKind::SCompoundAssign(name, op, expr) => {
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalGet(local_idx))
+                cc_compile_expr(expr)
+                match op {
+                    BinOp::Add => cc_emit(Instruction::I64Add),
+                    BinOp::Sub => cc_emit(Instruction::I64Sub),
+                    BinOp::Mul => cc_emit(Instruction::I64Mul),
+                    BinOp::Div => cc_emit(Instruction::I64Div),
+                    BinOp::Mod => cc_emit(Instruction::I64Rem),
+                    _ => {},
+                }
+                cc_emit(Instruction::LocalSet(local_idx))
+            }
+        },
+        StmtKind::SReturn(expr) => {
+            if expr != null {
+                cc_compile_expr(expr)
+            } else {
+                cc_emit(Instruction::PushNull)
+            }
+            cc_emit(Instruction::Return)
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            cc_emit(Instruction::Loop)
+            cc_compile_expr(cond)
+            cc_emit(Instruction::BoolNot)
+            cc_emit(Instruction::BrIf(1))
+            const bstmts = body.stmts
+            let wi = 0
+            while wi < len(bstmts) {
+                cc_compile_stmt(bstmts[wi])
+                wi = wi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            cc_emit(Instruction::Br(0))
+            cc_emit(Instruction::End)
+        },
+        StmtKind::SForLoop(var_name, iterable, body, _) => {
+            cc_compile_expr(iterable)
+            const iter_idx = cc_define_local("__iter_arr")
+            cc_emit(Instruction::LocalSet(iter_idx))
+            cc_emit(Instruction::PushI64(0))
+            const i_idx = cc_define_local("__iter_i")
+            cc_emit(Instruction::LocalSet(i_idx))
+            const var_idx = cc_define_local(var_name)
+            cc_emit(Instruction::PushNull)
+            cc_emit(Instruction::LocalSet(var_idx))
+            cc_emit(Instruction::Loop)
+            // Condition: __i >= len(arr) => break
+            cc_emit(Instruction::LocalGet(i_idx))
+            cc_emit(Instruction::LocalGet(iter_idx))
+            cc_emit(Instruction::RuntimeCall("array_len"))
+            cc_emit(Instruction::I64Ge)
+            cc_emit(Instruction::BrIf(1))
+            // var = arr[i]
+            cc_emit(Instruction::LocalGet(iter_idx))
+            cc_emit(Instruction::LocalGet(i_idx))
+            cc_emit(Instruction::ArrayGet)
+            cc_emit(Instruction::LocalSet(var_idx))
+            const fstmts = body.stmts
+            let fi = 0
+            while fi < len(fstmts) {
+                cc_compile_stmt(fstmts[fi])
+                fi = fi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            // i++
+            cc_emit(Instruction::LocalGet(i_idx))
+            cc_emit(Instruction::PushI64(1))
+            cc_emit(Instruction::I64Add)
+            cc_emit(Instruction::LocalSet(i_idx))
+            cc_emit(Instruction::Br(0))
+            cc_emit(Instruction::End)
+        },
+        StmtKind::SIf(cond, then_b, else_b) => {
+            cc_compile_expr(cond)
+            cc_emit(Instruction::IfVoid)
+            const tstmts = then_b.stmts
+            let ti = 0
+            while ti < len(tstmts) {
+                cc_compile_stmt(tstmts[ti])
+                ti = ti + 1
+            }
+            if then_b.tail_expr != null {
+                cc_compile_expr(then_b.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            if else_b != null {
+                cc_emit(Instruction::Else)
+                const estmts = else_b.stmts
+                let ei = 0
+                while ei < len(estmts) {
+                    cc_compile_stmt(estmts[ei])
+                    ei = ei + 1
+                }
+                if else_b.tail_expr != null {
+                    cc_compile_expr(else_b.tail_expr)
+                    cc_emit(Instruction::Drop)
+                }
+            }
+            cc_emit(Instruction::End)
+        },
+        StmtKind::SFuncDef(fdef) => {
+            cc_save_func()
+            cc_instrs = []
+            cc_locals = []
+            cc_param_count = len(fdef.params)
+            cc_func_name = fdef.name
+            // Register params as locals
+            let pi = 0
+            while pi < len(fdef.params) {
+                const param = fdef.params[pi]
+                cc_define_local(param.name)
+                pi = pi + 1
+            }
+            // Compile body
+            const body = fdef.body
+            const bstmts = body.stmts
+            let bi = 0
+            while bi < len(bstmts) {
+                cc_compile_stmt(bstmts[bi])
+                bi = bi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Return)
+            } else {
+                // Check if last instruction is already a return
+                const n_instrs = len(cc_instrs)
+                const last_is_ret = n_instrs > 0 &&
+                    cc_instrs[n_instrs - 1].dump() == "return"
+                if !last_is_ret {
+                    cc_emit(Instruction::PushNull)
+                    cc_emit(Instruction::Return)
+                }
+            }
+            cc_finish_func()
+            cc_restore_func()
+        },
+        StmtKind::SExprStmt(expr) => {
+            cc_compile_expr(expr)
+            cc_emit(Instruction::Drop)
+        },
+        StmtKind::SIncrement(name) => {
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalGet(local_idx))
+                cc_emit(Instruction::PushI64(1))
+                cc_emit(Instruction::I64Add)
+                cc_emit(Instruction::LocalSet(local_idx))
+            }
+        },
+        StmtKind::SDecrement(name) => {
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalGet(local_idx))
+                cc_emit(Instruction::PushI64(1))
+                cc_emit(Instruction::I64Sub)
+                cc_emit(Instruction::LocalSet(local_idx))
+            }
+        },
+        _ => {
+            // Declarations and unsupported — emit nothing
+        },
+    }
+}
+
+// ── Entry Point ───────────────────────────────────────────────────
+
+func compile_to_ir(program) {
+    // Reset all compiler state
+    ir_module_reset()
+    cc_instrs = []
+    cc_locals = []
+    cc_param_count = 0
+    cc_func_name = "__main"
+    cc_saved_stack = []
+
+    // Compile all top-level statements
+    const stmts = program.statements
+    let i = 0
+    while i < len(stmts) {
+        cc_compile_stmt(stmts[i])
+        i = i + 1
+    }
+    cc_emit(Instruction::Return)
+
+    // Finalize __main
+    cc_finish_func()
+
+    ir_snapshot()
+}
