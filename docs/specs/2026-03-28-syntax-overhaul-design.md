@@ -1,218 +1,177 @@
-# MAGI Syntax Overhaul Design
+# MAGI Syntax — Final Specification
 
 **Date**: 2026-03-28
-**Status**: Draft
+**Status**: Final
 **Goal**: Make MAGI easy to learn, write, read, understand, maintain, and ship.
 
-## Design Principle
+**Design Principle**: Can a developer from any mainstream language read this code and understand it without a manual?
 
-Every syntax choice must pass this test: can a developer coming from any mainstream language read this code and understand it without a manual?
+---
 
-## Summary of Changes
+## Keywords
 
-| Area | Before | After |
-|------|--------|-------|
-| Print | `output x;` (statement) | `print(x)` / `println(x)` (expression, returns argument) |
-| Imports | `use std::math::*;` | `import std.math` — qualified: `math.sin()` |
-| Functions | `fn` | `func` |
-| Enum display | Shows `{__enum: Color, __variant: Red}` | Auto-formats: `Color::Red` |
-| Enum numbering | No iota | `= 0` with auto-increment |
-| Errors | try/catch/throw/Result/?/Option | Multi-return `val, err = f()` |
-| Methods | `impl Type { fn method(self) }` | `func Type.method(self)` — dot receiver |
-| Interfaces | `trait` + explicit `impl Trait for Type` | `interface` + implicit satisfaction |
-| Mutability | `let mut x` | `const` immutable, `let` mutable |
-| Operator overload | `__add__`, `__str__` dunders | Named interfaces: `Add`, `Display`, `Equal` |
-| Composition | None | Removed — `\|>` pipe is sufficient |
-
-## Removed
-
-- `output` — replaced by `print()` / `println()`
-- `throw` — replaced by `return null, "error"`
-- `try` / `catch` / `finally` — no exceptions
-- `impl` — dot receiver functions
-- `trait` — replaced by `interface`
-- `use` — replaced by `import`
-- `let mut` — `let` is now mutable, `const` is immutable
-- `fn` — replaced by `func`
-- `__dunder__` methods — replaced by named interfaces
-- `>>` / `<<` composition — `|>` pipe is sufficient
-- `|x| expr` lambdas — replaced by `x => expr` arrow functions
-- `_` partial application — arrow functions cover it
-- `loop` — use `while true`
-- `Result` / `Ok` / `Err` — multi-return errors
-- `Some` / `None` / `?` — use null + `??`
-
-## Added
-
-- `import` — module imports
-- `interface` — replaces `trait`
-- `func` — replaces `fn`
-
-## 1. Print as Expression
-
-```magi
-println("hello")              // prints "hello\n", returns "hello"
-print("no newline")           // prints, returns value
-const x = println(compute())  // prints result, x holds the result
+```
+const  let  func  struct  enum  interface  type  import
+if  else  for  in  while  match  select
+break  continue  return  defer  spawn  await  async
+true  false  null
 ```
 
-- `print(val)` — no newline, returns `val`
-- `println(val)` — with newline, returns `val`
-- Both accept any type
+**Removed from language**: `output`, `fn`, `throw`, `try`, `catch`, `finally`, `impl`, `trait`, `use`, `loop`, `unsafe`, `yield`, `move`, `ref`, `dyn`, `where`, `mod`, `pub`, `mut`, `Some`, `None`, `Ok`, `Err`
 
-## 2. Import System
+---
 
-```magi
-import std.math
-import std.fs
-import std.{net, json, yaml}    // multi-import
-import std.math as m            // alias
-import canvas                   // package
-import ./util                   // relative
+## Types
+
+### Primitives
+
+All lowercase:
+
+```
+int       // 64-bit signed integer (default)
+float     // 64-bit floating point (default)
+string    // UTF-8 string
+bool      // true or false
+byte      // unsigned 8-bit
+
+int32     // 32-bit signed
+uint32    // 32-bit unsigned
+uint64    // 64-bit unsigned
+float32   // 32-bit float
 ```
 
-Rules:
-- Last segment becomes the namespace: `math.sin()`, `fs.read()`
-- No wildcard imports — always qualified
-- No selective imports — import the module, use what you need
+### Composite Types
 
-```magi
-import std.math
-import std.{fs, json}
-
-const angle = math.sin(3.14)
-let data, err = fs.read("config.json")
-if err { return err }
+```
+[]int                    // array of int
+map[string]int           // map with string keys, int values
+(int, string)            // tuple
+set[int]                 // set
+[]byte                   // byte array
 ```
 
-## 3. Functions — `func`
+### Type Aliases
 
 ```magi
-func add(a, b) { a + b }
+type ID = int
+type Handler = func(Request) -> Response
+type Matrix = [][]float
+type Node = { value: int, children: []Node }   // recursive allowed
+```
+
+---
+
+## Bindings
+
+```magi
+const x = 5             // immutable — cannot reassign
+let count = 0           // mutable — can reassign
+count = count + 1       // ok
+x = 10                  // compile error
+```
+
+- `const` — immutable (default, encouraged)
+- `let` — mutable
+- All variables must be initialized. `let x: int` without a value is a compile error.
+
+### Destructuring
+
+```magi
+const [a, b, c] = [1, 2, 3]
+let [head, ...rest] = [1, 2, 3, 4]
+const {name, age} = person
+const (x, y) = get_point()
+```
+
+Works with `const`, `let`, `for` loops, and function parameters.
+
+---
+
+## Functions
+
+```magi
+func add(a int, b int) -> int {
+    a + b
+}
 
 func greet(name string) -> string {
     f"Hello, {name}!"
 }
+
+// Type annotations optional for dynamic usage:
+func double(x) { x * 2 }
 ```
 
-`func` is familiar to Go, Swift, and Kotlin developers. Reads as English.
+### Parameters
 
-## 4. Dot Receiver Methods
+- Immutable by default
+- Prefix with `let` to make mutable: `func process(let items []int) { items.push(42) }`
+
+### Multiple Return Values
+
+```magi
+func divide(a int, b int) -> (int, string) {
+    if b == 0 { return 0, "division by zero" }
+    a / b, null
+}
+
+let result, err = divide(10, 3)
+if err { return null, err }
+```
+
+### Arrow Functions (Lambdas)
+
+```magi
+const double = x => x * 2
+const add = (a, b) => a + b
+const process = (x) => {
+    const cleaned = x.trim()
+    parse_int(cleaned) * 2
+}
+
+numbers |> filter(x => x % 2 == 0) |> map(x => x * x)
+```
+
+---
+
+## Methods — Dot Receivers
 
 ```magi
 struct Vec2 { x: float, y: float }
 
-func Vec2.length(self) {
+func Vec2.length(self) -> float {
     math.sqrt(self.x * self.x + self.y * self.y)
 }
 
-func Vec2.scale(self, factor) {
+func Vec2.scale(self, factor float) -> Vec2 {
     Vec2 { x: self.x * factor, y: self.y * factor }
 }
 ```
 
-Rules:
-- `func Type.method(self, args)` — dot syntax, explicit `self`
-- No `impl` blocks — each method is a standalone function
-- Works on structs, enums, any type
+- `func Type.method(self)` — dot syntax, explicit `self`
+- Works on structs, enums, and primitives
+- No `impl` blocks
+
+### Methods on Primitives
 
 ```magi
-const a = Vec2 { x: 3.0, y: 4.0 }
-println(a.length())      // 5.0
-println(a.scale(2.0))    // Vec2 { x: 6.0, y: 8.0 }
+func int.abs(self) -> int {
+    if self < 0 { -self } else { self }
+}
+
+func string.words(self) -> []string {
+    self.split(" ")
+}
+
+println((-5).abs())       // 5
+println("hello world".words())  // ["hello", "world"]
 ```
 
-## 5. Operator Overloading via Interfaces
+---
 
-Operators are defined by implementing named interfaces. Every name is a complete English word.
+## Interfaces
 
-```magi
-interface Add {
-    func add(self, other) -> self
-}
-
-interface Display {
-    func display(self) -> string
-}
-
-interface Equal {
-    func equal(self, other) -> bool
-}
-
-interface Compare {
-    func compare(self, other) -> int
-}
-
-interface Iterable {
-    func iterate(self) -> Iterator
-}
-
-interface Callable {
-    func call(self, args) -> any
-}
-
-interface Index {
-    func index(self, key) -> any
-}
-
-interface Length {
-    func length(self) -> int
-}
-
-interface Contains {
-    func contains(self, key) -> bool
-}
-```
-
-To make `+` work on Vec2, implement `Add`:
-
-```magi
-func Vec2.add(self, other) {
-    Vec2 { x: self.x + other.x, y: self.y + other.y }
-}
-
-func Vec2.display(self) {
-    f"({self.x}, {self.y})"
-}
-
-func Vec2.equal(self, other) {
-    self.x == other.x && self.y == other.y
-}
-```
-
-Usage — the compiler maps operators to interface methods:
-
-```magi
-const a = Vec2 { x: 1.0, y: 2.0 }
-const b = Vec2 { x: 3.0, y: 4.0 }
-println(a + b)       // calls a.add(b) → (4.0, 6.0)
-println(a == b)      // calls a.equal(b) → false
-println(a)           // calls a.display() → (1.0, 2.0)
-```
-
-Operator → interface mapping (all plain English, no abbreviations):
-
-| Operator | Interface | Method |
-|----------|-----------|--------|
-| `+` | `Add` | `add(self, other)` |
-| `-` | `Subtract` | `subtract(self, other)` |
-| `*` | `Multiply` | `multiply(self, other)` |
-| `/` | `Divide` | `divide(self, other)` |
-| `%` | `Modulo` | `modulo(self, other)` |
-| `==` | `Equal` | `equal(self, other)` |
-| `<` `>` `<=` `>=` | `Compare` | `compare(self, other) -> int` |
-| `-x` (unary) | `Negate` | `negate(self)` |
-| `[]` | `Index` | `index(self, key)` |
-| `[]=` | `SetIndex` | `set_index(self, key, value)` |
-| `for..in` | `Iterable` | `iterate(self)` |
-| `println()` | `Display` | `display(self)` |
-| `()` | `Callable` | `call(self, args)` |
-| `len()` | `Length` | `length(self)` |
-| `in` | `Contains` | `contains(self, key)` |
-
-## 6. Interfaces (Implicit Satisfaction)
-
-Any type with matching methods satisfies the interface automatically.
+Implicit satisfaction. No `implements` declaration.
 
 ```magi
 interface Shape {
@@ -222,19 +181,18 @@ interface Shape {
 
 struct Circle { radius: float }
 
-func Circle.area(self) { 3.14159 * self.radius * self.radius }
-func Circle.perimeter(self) { 2.0 * 3.14159 * self.radius }
+func Circle.area(self) -> float { 3.14159 * self.radius * self.radius }
+func Circle.perimeter(self) -> float { 2.0 * 3.14159 * self.radius }
 
-// Circle satisfies Shape — no declaration needed
+// Circle satisfies Shape automatically
 
 func print_shape(s Shape) {
-    println(f"area={s.area()}, perimeter={s.perimeter()}")
+    println(f"area={s.area()}")
 }
-
-print_shape(Circle { radius: 5.0 })
 ```
 
-Embedding:
+### Embedding
+
 ```magi
 interface Reader {
     func read(self, n int) -> ([]byte, string)
@@ -250,268 +208,163 @@ interface ReadWriter {
 }
 ```
 
-## 7. Enums
+If embedded interfaces have conflicting methods, it's a compile error. Define your own to resolve.
 
-### Auto-Display
+### Multiple Bounds
 
 ```magi
-enum Color {
-    Red,
-    Green,
-    Blue,
-    Rgb(int, int, int),
-}
-
-println(Color::Red)              // Color::Red
-println(Color::Rgb(255, 0, 0))   // Color::Rgb(255, 0, 0)
+func process<T: Display + Compare>(x T) { ... }
 ```
 
-### Iota-Style Numbering
+Use `+` to combine interface requirements.
+
+---
+
+## Operator Interfaces
+
+Operators map to named interface methods. All plain English.
+
+| Operator | Interface | Method |
+|----------|-----------|--------|
+| `+` | `Add` | `add(self, other)` |
+| `-` | `Subtract` | `subtract(self, other)` |
+| `*` | `Multiply` | `multiply(self, other)` |
+| `/` | `Divide` | `divide(self, other)` |
+| `%` | `Modulo` | `modulo(self, other)` |
+| `==` | `Equal` | `equal(self, other)` |
+| `<` `>` `<=` `>=` | `Compare` | `compare(self, other) -> int` |
+| `-x` (unary) | `Negate` | `negate(self)` |
+| `[]` | `Index` | `index(self, key)` |
+| `[]=` | `SetIndex` | `set_index(self, key, value)` |
+| `for..in` | `Iterable` | `iterate(self)` |
+| `println()` | `Display` | `display(self) -> string` |
+| `()` | `Callable` | `call(self, args)` |
+| `len()` | `Length` | `length(self) -> int` |
+| `in` | `Contains` | `contains(self, key) -> bool` |
+
+```magi
+func Vec2.add(self, other Vec2) -> Vec2 {
+    Vec2 { x: self.x + other.x, y: self.y + other.y }
+}
+
+func Vec2.display(self) -> string {
+    f"({self.x}, {self.y})"
+}
+
+const a = Vec2 { x: 1.0, y: 2.0 }
+const b = Vec2 { x: 3.0, y: 4.0 }
+println(a + b)     // (4.0, 6.0)
+```
+
+---
+
+## Enums
+
+### Simple
 
 ```magi
 enum Direction {
     North = 0,
-    East,
-    South,
-    West,
+    East,       // 1
+    South,      // 2
+    West,       // 3
 }
 ```
 
-### Methods on Enums
+### With Data
 
 ```magi
-func Color.display(self) {
+enum Token {
+    Number(float),
+    String(string),
+    Ident(string),
+    Plus,
+    Eof,
+}
+```
+
+### Auto-Display
+
+```magi
+println(Direction::North)          // Direction::North
+println(Token::Number(3.14))       // Token::Number(3.14)
+```
+
+Numbered enums don't show the number in display. Override with `display()`.
+
+### Methods
+
+```magi
+func Token.display(self) -> string {
     match self {
-        Color::Red => "red",
-        Color::Green => "green",
-        Color::Blue => "blue",
-        Color::Rgb(r, g, b) => f"#{r:02x}{g:02x}{b:02x}",
+        Token::Number(n) => f"{n}",
+        Token::String(s) => f"\"{s}\"",
+        Token::Ident(name) => name,
+        Token::Plus => "+",
+        Token::Eof => "EOF",
     }
 }
 ```
 
-## 8. Error Handling — Errors Are Values
+---
+
+## Control Flow
+
+### If/Else (Expression)
 
 ```magi
-func read_config(path) {
-    let text, err = fs.read(path)
-    if err { return null, f"read failed: {err}" }
+const max = if a > b { a } else { b }
+```
 
-    let config, err = json.parse(text)
-    if err { return null, f"parse failed: {err}" }
+### For Loop
 
-    config, null
-}
+```magi
+for x in [1, 2, 3] { println(x) }
+for i in 0..10 { println(i) }
+for i in 0..=10 { println(i) }         // inclusive
+for [key, val] in entries { println(f"{key}: {val}") }
+```
 
-func main() {
-    let config, err = read_config("app.json")
-    if err {
-        println(f"error: {err}")
-        return
+No C-style for loops. Use `for i in 0..n` instead.
+
+### Labeled Break/Continue
+
+```magi
+'outer: for row in matrix {
+    for cell in row {
+        if cell == 0 { break 'outer }
     }
-    println(config)
 }
 ```
 
-Rules:
-- Fallible functions return `value, error`
-- Error is `null` on success
-- Check with `if err` (truthiness)
-- No try/catch/throw/Result/Option/?
-- `??` and `?.` stay for null convenience
-
-## 9. Mutability
+### While
 
 ```magi
-const x = 5        // immutable — cannot reassign
-let count = 0      // mutable — can reassign
-count = count + 1  // ok
-x = 10             // compile error
+while condition { ... }
+while true { ... }      // infinite loop (replaces `loop`)
 ```
 
-Matches JavaScript: `const` is frozen, `let` is mutable.
-
-## 10. Concurrency
+### Match (Exhaustive)
 
 ```magi
-// spawn launches a concurrent task
-const task = spawn fetch_data(url)
-const result = await task
-
-// select waits on multiple channels
-select {
-    msg from inbox => println(msg),
-    tick from timer => update(),
-    _ => println("timeout"),
+const name = match direction {
+    Direction::North => "north",
+    Direction::East => "east",
+    Direction::South => "south",
+    Direction::West => "west",
 }
 ```
 
-- `spawn expr` — launches concurrent task, returns a future
-- `await expr` — waits for future to resolve, multi-return stays intact
-- `select` — waits on multiple channels, first ready wins
-- `defer expr` — runs when function exits (cleanup without try/finally)
+All enum variants must be covered or a `_` wildcard present. Enforced as compile error.
+
+---
+
+## Error Handling
+
+Errors are values. Multi-return. No exceptions.
 
 ```magi
-async func fetch(url) {
-    let resp, err = net.get(url)
-    if err { return null, err }
-    resp.body, null
-}
-
-// await unwraps the future, multi-return comes through
-let body, err = await fetch("https://api.example.com")
-if err { return null, err }
-```
-
-```magi
-func process_file(path) {
-    let file, err = fs.open(path)
-    if err { return null, err }
-    defer fs.close(file)
-
-    let data, err = fs.read_all(file)
-    if err { return null, err }
-    data, null
-}
-```
-
-## 11. Lambdas — Arrow Functions
-
-```magi
-// Single expression:
-const double = x => x * 2
-const add = (a, b) => a + b
-
-// Multi-line block:
-const process = (x) => {
-    const cleaned = x.trim()
-    parse_int(cleaned) * 2
-}
-
-// In higher-order functions:
-numbers |> filter(x => x % 2 == 0) |> map(x => x * x)
-```
-
-- `x => expr` — single argument, no parens needed
-- `(a, b) => expr` — multiple arguments
-- `(x) => { block }` — multi-line
-- Replaces `|x| expr` pipe-style lambdas
-
-## 12. Generics
-
-```magi
-func max<T: Compare>(a T, b T) -> T {
-    if a.compare(b) > 0 { a } else { b }
-}
-
-struct Stack<T> {
-    items: [T],
-}
-
-func Stack<T>.push(self, item T) {
-    self.items.push(item)
-}
-
-func Stack<T>.pop(self) -> T {
-    self.items.pop()
-}
-```
-
-- `<T>` for type parameters
-- `T: Interface` for bounds
-- Works on functions, structs, and receiver methods
-
-## 13. Type Aliases
-
-```magi
-type ID = int
-type Handler = func(Request) -> Response
-type StringMap = map[string]string
-```
-
-## 14. Visibility
-
-Everything is public. Modules are the privacy boundary.
-
-- No `pub`/`private`/`export` keywords
-- If a module exports it, it's available
-- Convention: prefix internal helpers with `_` (not enforced)
-
-```magi
-func parse(input) { ... }         // public API
-func _tokenize(input) { ... }     // internal — convention, not enforced
-```
-
-## 15. Semicolons
-
-Optional. Newlines end statements. Semicolons allowed for multiple statements on one line.
-
-```magi
-// Normal — no semicolons:
-const x = 5
-const y = 10
-println(x + y)
-
-// One-liner — semicolons allowed:
-const a = 1; const b = 2; println(a + b)
-```
-
-## 16. What Stays Unchanged
-
-- `const` / `let` for bindings
-- `struct` for types
-- `enum` for enumerated types
-- `if` / `else` as expressions
-- `for` / `while` (no `loop` — use `while true`)
-- `match` with pattern matching (exhaustive enforcement)
-- `break` / `continue` / `return`
-- `f"..."` string interpolation
-- `|>` pipe operator
-- `[x for x in arr if cond]` comprehensions
-- `..` and `..=` range operators
-- `??` null coalesce and `?.` optional chain
-- `...` spread operator
-- Generics with `<T>` syntax
-- `type` aliases
-
-## 17. Removed (Complete List)
-
-- `output` — replaced by `print()` / `println()`
-- `throw` — replaced by `return null, "error"`
-- `try` / `catch` / `finally` — no exceptions
-- `impl` — dot receiver functions
-- `trait` — replaced by `interface`
-- `use` — replaced by `import`
-- `let mut` — `let` is now mutable, `const` is immutable
-- `fn` — replaced by `func`
-- `__dunder__` methods — replaced by named interfaces
-- `>>` / `<<` composition — `|>` pipe is sufficient
-- `|x| expr` lambdas — replaced by `x => expr` arrow functions
-- `_` partial application — arrow functions cover it
-- `loop` — use `while true`
-- `Result` / `Ok` / `Err` — multi-return errors
-- `Some` / `None` / `?` — use null + `??`
-
-## 18. Full Example
-
-```magi
-import std.{math, fs, json}
-
-struct Config {
-    host: string,
-    port: int,
-    debug: bool,
-}
-
-func Config.address(self) {
-    f"{self.host}:{self.port}"
-}
-
-func Config.display(self) {
-    f"Config({self.address()})"
-}
-
-func load_config(path) {
+func read_config(path string) -> (Config, string) {
     let text, err = fs.read(path)
     if err { return null, f"read: {err}" }
 
@@ -521,59 +374,236 @@ func load_config(path) {
     const config = Config {
         host: data.host ?? "localhost",
         port: data.port ?? 8080,
-        debug: data.debug ?? false,
     }
     config, null
 }
 
-enum LogLevel {
-    Debug = 0,
-    Info,
-    Warn,
-    Error,
+let config, err = read_config("app.json")
+if err {
+    println(f"error: {err}")
+    return
 }
-
-func LogLevel.display(self) {
-    match self {
-        LogLevel::Debug => "DEBUG",
-        LogLevel::Info => "INFO",
-        LogLevel::Warn => "WARN",
-        LogLevel::Error => "ERROR",
-    }
-}
-
-func log(level LogLevel, msg string) {
-    if level == LogLevel::Debug { return }
-    println(f"[{level}] {msg}")
-}
-
-func main() {
-    let config, err = load_config("config.json")
-    if err {
-        log(LogLevel::Error, err)
-        return
-    }
-
-    log(LogLevel::Info, f"starting {config}")
-
-    const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    const result = numbers
-        |> filter(n => n % 2 == 0)
-        |> map(n => n * n)
-        |> reduce(0, (acc, n) => acc + n)
-
-    println(f"sum of even squares: {result}")
-}
-
-main()
 ```
 
-## 12. Implementation Order
+Rules:
+- Fallible functions return `(value, error)` — error is `null` on success
+- Check with `if err` (truthiness: non-null is truthy)
+- `??` null coalesce and `?.` optional chain stay for convenience
+- Pipe `|>` only works on single values — handle errors first, then pipe
 
-1. **Lexer** — Add `import`, `interface`, `func`, `=>` tokens. Remove `output`, `throw`, `try`, `catch`, `finally`, `impl`, `trait`, `use`, `fn`, `loop` tokens. Make semicolons optional.
-2. **Parser** — Parse `import std.path`, `func` keyword, dot receivers `func Type.method(self)`, `interface` declarations, arrow functions `x => expr`, multiple return values, `type` aliases. Remove `|x|` lambda syntax, `loop`, try/catch/throw/impl/trait.
-3. **AST** — New nodes for imports, dot receivers, interfaces, arrow functions. Remove try/catch/throw/impl/trait/loop nodes.
-4. **Interpreter** — `print()`/`println()` as expression builtins. Multi-return values. Module namespacing from imports. Dot receiver dispatch. Implicit interface satisfaction. Named operator interfaces (`Add`, `Display`, `Equal`, etc.). Clean enum display. Remove exception machinery.
-5. **Type checker** — Interface satisfaction. Receiver validation. Multi-return types. Exhaustive match enforcement (error, not warning). Generics with interface bounds.
-6. **Tests** — Update all 3,263 tests to new syntax. Add tests for new features.
-7. **Docs** — Update spec.md, stdlib.md, examples, CLAUDE.md.
+---
+
+## Imports
+
+```magi
+import std.math
+import std.{fs, json, net}
+import std.math as m
+import canvas
+import ./util
+```
+
+- Last segment becomes namespace: `math.sin()`, `fs.read()`
+- No wildcard imports
+- Files are modules — no `mod` blocks
+
+---
+
+## Concurrency
+
+```magi
+const task = spawn fetch_data(url)
+const result = await task
+
+select {
+    msg from inbox => println(msg),
+    tick from timer => update(),
+    _ => println("timeout"),
+}
+```
+
+### Async Functions
+
+```magi
+async func fetch(url string) -> (string, string) {
+    let resp, err = net.get(url)
+    if err { return null, err }
+    resp.body, null
+}
+
+let body, err = await fetch("https://api.example.com")
+if err { return null, err }
+```
+
+`await` unwraps the future. Multi-return passes through.
+
+### Defer
+
+```magi
+func process_file(path string) -> (string, string) {
+    let file, err = fs.open(path)
+    if err { return null, err }
+    defer fs.close(file)      // unconditional cleanup on function exit
+
+    let data, err = fs.read_all(file)
+    if err { return null, err }
+    data, null
+}
+```
+
+Defer is for unconditional cleanup. It doesn't see error state.
+
+---
+
+## Generics
+
+```magi
+func max<T: Compare>(a T, b T) -> T {
+    if a.compare(b) > 0 { a } else { b }
+}
+
+func filter_map<T, U>(items []T, f func(T) -> (U, bool)) -> []U {
+    let result = []
+    for item in items {
+        const (val, ok) = f(item)
+        if ok { result.push(val) }
+    }
+    result
+}
+
+struct Stack<T> { items: []T }
+
+func Stack<T>.push(self, item T) { self.items.push(item) }
+func Stack<T>.pop(self) -> T { self.items.pop() }
+```
+
+---
+
+## Strings
+
+```magi
+const s = "hello"                     // regular string
+const f = f"value: {x + 1}"          // interpolation
+const m = """
+    multiline
+    string
+"""                                    // multiline
+const r = r"no\escape\here"          // raw string
+```
+
+---
+
+## Comments
+
+```magi
+// line comment
+/* block comment */
+/// doc comment — generates documentation
+```
+
+---
+
+## Semicolons
+
+Optional. Newlines end statements.
+
+```magi
+const x = 5
+const y = 10
+println(x + y)
+
+const a = 1; const b = 2; println(a + b)   // one-liner ok
+```
+
+---
+
+## Visibility
+
+Everything is public. Modules are the privacy boundary.
+
+```magi
+func parse(input string) { ... }       // public
+func _tokenize(input string) { ... }   // convention: internal
+```
+
+---
+
+## Attributes
+
+```magi
+#[test]
+func test_addition() {
+    assert(1 + 1 == 2)
+}
+
+#[deprecated("use new_func instead")]
+func old_func() { ... }
+
+#[ignore]
+func slow_test() { ... }
+```
+
+---
+
+## Struct Update (Spread)
+
+```magi
+const default = Config { host: "localhost", port: 8080, debug: false }
+const prod = Config { ...default, port: 443 }
+```
+
+Spread works in arrays too:
+
+```magi
+const a = [1, 2, 3]
+const b = [...a, 4, 5]    // [1, 2, 3, 4, 5]
+```
+
+---
+
+## Mutability Rules
+
+| Context | Default | Override |
+|---------|---------|---------|
+| `const x = ...` | Immutable binding, frozen fields | — |
+| `let x = ...` | Mutable binding, mutable fields | — |
+| Function params | Immutable | `func f(let x int)` for mutable |
+| Struct fields | Follow the binding | `const s` = frozen, `let s` = mutable |
+
+---
+
+## Operator Precedence (high to low)
+
+1. `()` `.` `[]` — call, field access, index
+2. `-x` `!x` — unary
+3. `*` `/` `%` — multiplicative
+4. `+` `-` — additive
+5. `..` `..=` — range
+6. `<<` `>>` — bitshift
+7. `&` — bitwise and
+8. `^` — bitwise xor
+9. `|` — bitwise or
+10. `==` `!=` `<` `>` `<=` `>=` — comparison
+11. `&&` — logical and
+12. `||` — logical or
+13. `??` — null coalesce
+14. `|>` — pipe
+15. `=>` — arrow function (lowest)
+16. `=` `+=` `-=` etc. — assignment
+
+---
+
+## Entry Point
+
+Top-level code executes directly. No `main()` required.
+
+```magi
+// This runs immediately:
+println("hello world")
+
+// Or use main for structure:
+func main() {
+    println("hello world")
+}
+main()
+```
