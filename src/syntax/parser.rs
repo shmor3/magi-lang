@@ -120,6 +120,7 @@ impl Parser {
             // If the current token starts a new statement, stop here.
             match self.peek_kind() {
                 TokenKind::Fn
+                | TokenKind::Func
                 | TokenKind::Let
                 | TokenKind::Const
                 | TokenKind::If
@@ -388,7 +389,7 @@ impl Parser {
             TokenKind::Output => self.parse_output_statement(start),
             TokenKind::Let => self.parse_let_statement(start),
             TokenKind::Const => self.parse_const_statement(start),
-            TokenKind::Fn => self.parse_function_def(start),
+            TokenKind::Fn | TokenKind::Func => self.parse_function_def(start),
             TokenKind::Async => self.parse_async_function_def(start),
             TokenKind::For => self.parse_for_loop(start, None),
             TokenKind::While => self.parse_while_loop(start, None),
@@ -422,7 +423,7 @@ impl Parser {
                     self.expect(&TokenKind::RParen)?; // consume ')'
                 }
                 match self.peek_kind() {
-                    TokenKind::Fn | TokenKind::Async | TokenKind::Mod
+                    TokenKind::Fn | TokenKind::Func | TokenKind::Async | TokenKind::Mod
                     | TokenKind::Enum | TokenKind::Struct | TokenKind::Const
                     | TokenKind::Type | TokenKind::Use => {
                         let mut stmt = self.parse_statement()?;
@@ -597,7 +598,7 @@ impl Parser {
 
         // Parse the definition that follows
         let mut stmt = match self.peek_kind() {
-            TokenKind::Fn => self.parse_function_def(start)?,
+            TokenKind::Fn | TokenKind::Func => self.parse_function_def(start)?,
             TokenKind::Async => self.parse_async_function_def(start)?,
             TokenKind::Enum => self.parse_enum_def(start)?,
             TokenKind::Struct => self.parse_struct_def(start)?,
@@ -611,7 +612,7 @@ impl Parser {
                     self.expect(&TokenKind::RParen)?; // consume ')'
                 }
                 let mut inner = match self.peek_kind() {
-                    TokenKind::Fn => self.parse_function_def(start)?,
+                    TokenKind::Fn | TokenKind::Func => self.parse_function_def(start)?,
                     TokenKind::Async => self.parse_async_function_def(start)?,
                     TokenKind::Enum => self.parse_enum_def(start)?,
                     TokenKind::Struct => self.parse_struct_def(start)?,
@@ -1559,7 +1560,7 @@ impl Parser {
 
     fn parse_async_function_def(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'async'
-        if !self.at(&TokenKind::Fn) {
+        if !self.at(&TokenKind::Fn) && !self.at(&TokenKind::Func) {
             return Err(SyntaxError {
                 line: self.peek().span.start_line as usize,
                 column: self.peek().span.start_col as usize,
@@ -1567,7 +1568,7 @@ impl Parser {
                 code: None,
             });
         }
-        self.advance(); // consume 'fn'
+        self.advance(); // consume 'fn'/'func'
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
 
@@ -1836,6 +1837,7 @@ impl Parser {
                 | TokenKind::For
                 | TokenKind::While
                 | TokenKind::Fn
+                | TokenKind::Func
                 | TokenKind::Async
                 | TokenKind::Break
                 | TokenKind::Continue
@@ -3919,10 +3921,10 @@ impl Parser {
             }
 
             if !is_getter && !is_setter {
-                if !self.at(&TokenKind::Fn) {
+                if !self.at(&TokenKind::Fn) && !self.at(&TokenKind::Func) {
                     return Err(SyntaxError { line: self.peek().span.start_line as usize, column: self.peek().span.start_col as usize, message: "Expected 'fn', 'get', or 'set' in impl block".into(), code: None });
                 }
-                self.advance(); // consume 'fn'
+                self.advance(); // consume 'fn'/'func'
             }
 
             let fn_start = self.peek().span;
@@ -3961,7 +3963,7 @@ impl Parser {
         let mut methods = Vec::new();
         let mut seen = std::collections::HashSet::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
-            if !self.at(&TokenKind::Fn) {
+            if !self.at(&TokenKind::Fn) && !self.at(&TokenKind::Func) {
                 return Err(SyntaxError { line: self.peek().span.start_line as usize, column: self.peek().span.start_col as usize, message: "Expected 'fn' in trait definition".into(), code: None });
             }
             let fn_start = self.peek().span;

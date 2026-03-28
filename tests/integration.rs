@@ -21423,3 +21423,9 @@ fn test_native_compile_recursion() {
     "#, "native_recursion_test");
     assert!(result.contains("3628800"));
 }
+
+#[test]
+fn test_func_keyword() {
+    let result = run_eval_unique("func add(a, b) { a + b } output add(1, 2);", "func_kw");
+    assert!(result.contains("3"));
+}
