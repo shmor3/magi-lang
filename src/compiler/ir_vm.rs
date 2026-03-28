@@ -168,7 +168,7 @@ impl IrVm {
     fn execute_instructions(&mut self, module: &IrModule, instructions: &[Instruction], _fn_idx: usize) -> Result<Val, String> {
         let mut ip = 0;
         let mut step_count: u64 = 0;
-        const MAX_STEPS: u64 = 1_000_000_000;
+        const MAX_STEPS: u64 = 100_000_000;
         while ip < instructions.len() {
             step_count += 1;
             if step_count > MAX_STEPS {
@@ -273,7 +273,7 @@ impl IrVm {
                     let target = self.resolve_branch(*depth);
                     match target {
                         Some(BranchTarget::Forward(_)) => { ip = self.find_end(instructions, ip, *depth); }
-                        Some(BranchTarget::Backward(loop_ip)) => { ip = loop_ip; continue; }
+                        Some(BranchTarget::Backward(loop_ip)) => { ip = loop_ip + 1; continue; }
                         None => {}
                     }
                 }
@@ -283,7 +283,7 @@ impl IrVm {
                         let target = self.resolve_branch(*depth);
                         match target {
                             Some(BranchTarget::Forward(_)) => { ip = self.find_end(instructions, ip, *depth); }
-                            Some(BranchTarget::Backward(loop_ip)) => { ip = loop_ip; continue; }
+                            Some(BranchTarget::Backward(loop_ip)) => { ip = loop_ip + 1; continue; }
                             None => {}
                         }
                     }
@@ -294,7 +294,7 @@ impl IrVm {
                     let target = self.resolve_branch(depth);
                     match target {
                         Some(BranchTarget::Forward(_)) => { ip = self.find_end(instructions, ip, depth); }
-                        Some(BranchTarget::Backward(loop_ip)) => { ip = loop_ip; continue; }
+                        Some(BranchTarget::Backward(loop_ip)) => { ip = loop_ip + 1; continue; }
                         None => {}
                     }
                 }
