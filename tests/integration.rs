@@ -21439,3 +21439,14 @@ fn test_interface_keyword() {
     "#, "interface_kw");
     assert!(result.contains("interface works"));
 }
+
+#[test]
+fn test_enum_display_clean() {
+    let result = run_eval_unique(r#"
+        enum Color { Red, Green, Rgb(int, int, int) }
+        output Color::Red;
+        output Color::Rgb(255, 0, 0);
+    "#, "enum_display");
+    assert!(result.contains("Color::Red"));
+    assert!(result.contains("Color::Rgb(255, 0, 0)"));
+}

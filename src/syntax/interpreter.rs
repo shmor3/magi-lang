@@ -15512,6 +15512,24 @@ fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
             if depth >= MAX_DISPLAY_DEPTH {
                 return "{...}".to_string();
             }
+            // Enum display: {__enum: "Color", __variant: "Red", __data: [...]}
+            if let (Some(DataType::String(enum_name)), Some(DataType::String(variant_name))) =
+                (map.get("__enum"), map.get("__variant"))
+            {
+                let data = map.get("__data");
+                let has_data = match data {
+                    Some(DataType::Array(arr)) => !arr.is_empty(),
+                    _ => false,
+                };
+                return if has_data {
+                    let arr = match data { Some(DataType::Array(a)) => a, _ => unreachable!() };
+                    let args: Vec<String> = arr.iter()
+                        .map(|v| datatype_to_display_depth(v, depth + 1)).collect();
+                    format!("{}::{}({})", enum_name, variant_name, args.join(", "))
+                } else {
+                    format!("{}::{}", enum_name, variant_name)
+                };
+            }
             const MAX_DISPLAY_ENTRIES: usize = 1000;
             let truncated = map.len() > MAX_DISPLAY_ENTRIES;
             let entries: Vec<String> = map
