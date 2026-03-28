@@ -1628,3 +1628,393 @@ func eval_operation(op_name, args) {
 
     }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Full String Operations with Edge Cases
+// ══════════════════════════════════════════════════════════════════
+
+func op_string_repeat(s, count) {
+    if count <= 0 { return "" }
+    let result = ""
+    let i = 0
+    while i < count { result = result + s; i = i + 1 }
+    result
+}
+
+func op_string_reverse(s) {
+    let result = ""
+    let i = len(s) - 1
+    while i >= 0 { result = result + s[i]; i = i - 1 }
+    result
+}
+
+func op_string_center(s, width, fill) {
+    if len(s) >= width { return s }
+    const padding = width - len(s)
+    const left = padding / 2
+    const right = padding - left
+    op_string_repeat(fill, left) + s + op_string_repeat(fill, right)
+}
+
+func op_string_count(haystack, needle) {
+    if len(needle) == 0 { return len(haystack) + 1 }
+    let count = 0
+    let i = 0
+    while i <= len(haystack) - len(needle) {
+        if haystack.substring(i, i + len(needle)) == needle {
+            count = count + 1; i = i + len(needle)
+        } else { i = i + 1 }
+    }
+    count
+}
+
+func op_string_words(s) {
+    let result = []
+    let current = ""
+    for c in s.chars() {
+        if c == " " || c == "\t" || c == "\n" || c == "\r" {
+            if len(current) > 0 { result.push(current); current = "" }
+        } else { current = current + c }
+    }
+    if len(current) > 0 { result.push(current) }
+    result
+}
+
+func op_string_capitalize(s) {
+    if len(s) == 0 { return "" }
+    to_upper(s[0]) + s.substring(1, len(s))
+}
+
+func op_string_last_index_of(haystack, needle) {
+    let i = len(haystack) - len(needle)
+    while i >= 0 {
+        if haystack.substring(i, i + len(needle)) == needle { return i }
+        i = i - 1
+    }
+    -1
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Stats Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_stats_mean(arr) {
+    if len(arr) == 0 { return 0.0 }
+    let sum = 0.0
+    for v in arr { sum = sum + op_to_f64(v) }
+    sum / op_to_f64(len(arr))
+}
+
+func op_stats_median(arr) {
+    if len(arr) == 0 { return 0.0 }
+    let sorted = arr.sort()
+    const n = len(sorted)
+    if n % 2 == 1 { op_to_f64(sorted[n / 2]) }
+    else { (op_to_f64(sorted[n / 2 - 1]) + op_to_f64(sorted[n / 2])) / 2.0 }
+}
+
+func op_stats_variance(arr) {
+    if len(arr) <= 1 { return 0.0 }
+    const mean = op_stats_mean(arr)
+    let sum_sq = 0.0
+    for v in arr { const diff = op_to_f64(v) - mean; sum_sq = sum_sq + diff * diff }
+    sum_sq / op_to_f64(len(arr) - 1)
+}
+
+func op_stats_stddev(arr) { sqrt(op_stats_variance(arr)) }
+
+func op_stats_covariance(xs, ys) {
+    if len(xs) != len(ys) || len(xs) <= 1 { return 0.0 }
+    const mx = op_stats_mean(xs)
+    const my = op_stats_mean(ys)
+    let sum = 0.0
+    let i = 0
+    while i < len(xs) { sum = sum + (op_to_f64(xs[i]) - mx) * (op_to_f64(ys[i]) - my); i = i + 1 }
+    sum / op_to_f64(len(xs) - 1)
+}
+
+func op_stats_correlation(xs, ys) {
+    const cov = op_stats_covariance(xs, ys)
+    const sx = op_stats_stddev(xs)
+    const sy = op_stats_stddev(ys)
+    if sx == 0.0 || sy == 0.0 { return 0.0 }
+    cov / (sx * sy)
+}
+
+func op_stats_percentile(arr, p) {
+    if len(arr) == 0 { return 0.0 }
+    let sorted = arr.sort()
+    const idx = op_to_f64(p) / 100.0 * op_to_f64(len(sorted) - 1)
+    const lower = floor(idx)
+    const upper = ceil(idx)
+    if lower == upper { return op_to_f64(sorted[lower]) }
+    const frac = idx - op_to_f64(lower)
+    op_to_f64(sorted[lower]) * (1.0 - frac) + op_to_f64(sorted[upper]) * frac
+}
+
+func op_stats_z_score(arr, value) {
+    const mean = op_stats_mean(arr)
+    const sd = op_stats_stddev(arr)
+    if sd == 0.0 { return 0.0 }
+    (op_to_f64(value) - mean) / sd
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Text Case Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_text_camel_case(s) {
+    let parts = []
+    let current = ""
+    for c in s.chars() {
+        if c == " " || c == "_" || c == "-" {
+            if len(current) > 0 { parts.push(current); current = "" }
+        } else { current = current + c }
+    }
+    if len(current) > 0 { parts.push(current) }
+    if len(parts) == 0 { return "" }
+    let result = to_lower(parts[0])
+    let i = 1
+    while i < len(parts) {
+        const p = parts[i]
+        if len(p) > 0 { result = result + to_upper(p[0]) + to_lower(p.substring(1, len(p))) }
+        i = i + 1
+    }
+    result
+}
+
+func op_text_snake_case(s) {
+    let result = ""
+    let prev_lower = false
+    for c in s.chars() {
+        if c == " " || c == "-" { result = result + "_"; prev_lower = false }
+        else if c >= "A" && c <= "Z" {
+            if prev_lower { result = result + "_" }
+            result = result + to_lower(c); prev_lower = false
+        } else { result = result + c; prev_lower = (c >= "a" && c <= "z") }
+    }
+    result
+}
+
+func op_text_title_case(s) {
+    let result = ""
+    let cap_next = true
+    for c in s.chars() {
+        if c == " " || c == "\t" || c == "-" || c == "_" { result = result + c; cap_next = true }
+        else if cap_next { result = result + to_upper(c); cap_next = false }
+        else { result = result + to_lower(c) }
+    }
+    result
+}
+
+func op_text_kebab_case(s) {
+    let result = ""
+    let prev_lower = false
+    for c in s.chars() {
+        if c == " " || c == "_" { result = result + "-"; prev_lower = false }
+        else if c >= "A" && c <= "Z" {
+            if prev_lower { result = result + "-" }
+            result = result + to_lower(c); prev_lower = false
+        } else { result = result + c; prev_lower = (c >= "a" && c <= "z") }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Format Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_fmt_number(n, decimals) {
+    const factor = power(10.0, op_to_f64(decimals))
+    to_string(round(op_to_f64(n) * factor) / factor)
+}
+
+func op_fmt_bytes(n) {
+    const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    let val = op_to_f64(n)
+    let ui = 0
+    while val >= 1024.0 && ui < len(units) - 1 { val = val / 1024.0; ui = ui + 1 }
+    if ui == 0 { f"{op_to_i64(val)} {units[ui]}" }
+    else { f"{round(val * 100.0) / 100.0} {units[ui]}" }
+}
+
+func op_fmt_duration(ms) {
+    const total = op_to_i64(ms)
+    if total < 1000 { return f"{total}ms" }
+    const s = total / 1000
+    if s < 60 { return f"{s}.{(total % 1000) / 100}s" }
+    const m = s / 60
+    if m < 60 { return f"{m}m {s % 60}s" }
+    f"{m / 60}h {m % 60}m"
+}
+
+func op_fmt_hex(n) {
+    const hex_chars = "0123456789abcdef"
+    let val = op_to_i64(n)
+    if val == 0 { return "0x0" }
+    let neg = val < 0
+    if neg { val = 0 - val }
+    let result = ""
+    while val > 0 { result = hex_chars[val % 16] + result; val = val / 16 }
+    if neg { "0x-" + result } else { "0x" + result }
+}
+
+func op_fmt_binary(n) {
+    let val = op_to_i64(n)
+    if val == 0 { return "0b0" }
+    let neg = val < 0
+    if neg { val = 0 - val }
+    let result = ""
+    while val > 0 { result = to_string(val % 2) + result; val = val / 2 }
+    if neg { "0b-" + result } else { "0b" + result }
+}
+
+func op_fmt_percent(n, decimals) { op_fmt_number(op_to_f64(n) * 100.0, decimals) + "%" }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Path Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_path_join(parts) { parts.join("/") }
+func op_path_dirname(path) {
+    const idx = op_string_last_index_of(path, "/")
+    if idx < 0 { return "." }
+    path.substring(0, idx)
+}
+func op_path_basename(path) {
+    const idx = op_string_last_index_of(path, "/")
+    if idx < 0 { return path }
+    path.substring(idx + 1, len(path))
+}
+func op_path_extension(path) {
+    const base = op_path_basename(path)
+    const idx = op_string_last_index_of(base, ".")
+    if idx < 0 { return "" }
+    base.substring(idx + 1, len(base))
+}
+func op_path_stem(path) {
+    const base = op_path_basename(path)
+    const idx = op_string_last_index_of(base, ".")
+    if idx < 0 { return base }
+    base.substring(0, idx)
+}
+func op_path_is_absolute(path) { len(path) > 0 && path[0] == "/" }
+func op_path_normalize(path) {
+    const parts = path.split("/")
+    let result = []
+    for part in parts {
+        if part == "." { continue }
+        if part == ".." && len(result) > 0 { result.pop(); continue }
+        if part != "" { result.push(part) }
+    }
+    const joined = result.join("/")
+    if op_path_is_absolute(path) { "/" + joined } else { joined }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Array Higher-Order Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_array_unique(arr) {
+    let seen = {"__init": true}
+    let result = []
+    for item in arr {
+        const key = to_string(item)
+        if !seen.has(key) { seen[key] = true; result.push(item) }
+    }
+    result
+}
+
+func op_array_chunk(arr, size) {
+    let result = []
+    let i = 0
+    while i < len(arr) { result.push(arr.slice(i, min(i + size, len(arr)))); i = i + size }
+    result
+}
+
+func op_array_window(arr, size) {
+    let result = []
+    let i = 0
+    while i + size <= len(arr) { result.push(arr.slice(i, i + size)); i = i + 1 }
+    result
+}
+
+func op_array_dedup(arr) {
+    if len(arr) == 0 { return [] }
+    let result = [arr[0]]
+    let i = 1
+    while i < len(arr) { if arr[i] != arr[i - 1] { result.push(arr[i]) }; i = i + 1 }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Map Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_map_from_entries(entries) {
+    let result = {"__init": true}
+    for entry in entries {
+        if typeof(entry) == "array" && len(entry) >= 2 {
+            result[to_string(entry[0])] = entry[1]
+        }
+    }
+    result
+}
+
+func op_map_to_entries(m) {
+    let result = []
+    for k in m.keys() {
+        if k == "__s" || k == "__init" { continue }
+        result.push([k, m[k]])
+    }
+    result
+}
+
+func op_map_invert(m) {
+    let result = {"__init": true}
+    for k in m.keys() {
+        if k == "__s" || k == "__init" { continue }
+        result[to_string(m[k])] = k
+    }
+    result
+}
+
+func op_map_deep_merge(a, b) {
+    let result = {}
+    for k in a.keys() { result[k] = a[k] }
+    for k in b.keys() {
+        if result.has(k) && typeof(result[k]) == "map" && typeof(b[k]) == "map" {
+            result[k] = op_map_deep_merge(result[k], b[k])
+        } else { result[k] = b[k] }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Crypto/Compress/Cert/Process/HTTP Operations (delegate to stage 0)
+// ══════════════════════════════════════════════════════════════════
+
+func op_crypto_md5(data) { md5(data) }
+func op_crypto_sha256(data) { sha256(data) }
+func op_crypto_sha512(data) { sha512(data) }
+func op_crypto_hmac(key, data, algo) { hmac(key, data, algo) }
+func op_crypto_random_bytes(n) { random_bytes(n) }
+func op_crypto_uuid() { uuid() }
+
+func op_compress_gzip(data) { gzip_compress(data) }
+func op_decompress_gzip(data) { gzip_decompress(data) }
+
+func op_cert_generate(cn, days) { cert_generate(cn, days) }
+func op_cert_parse(pem) { cert_parse(pem) }
+
+func op_run_command(cmd) { run_command(cmd) }
+func op_run_command_output(cmd) { run_command_output(cmd) }
+func op_exit(code) { exit(code) }
+func op_pid() { pid() }
+func op_env_get(key) { env_get(key) }
+func op_cwd() { cwd() }
+
+func op_http_get(url, headers) { http_get(url, headers) }
+func op_http_post(url, body, headers) { http_post(url, body, headers) }
+func op_http_put(url, body, headers) { http_put(url, body, headers) }
+func op_http_delete(url, headers) { http_delete(url, headers) }
