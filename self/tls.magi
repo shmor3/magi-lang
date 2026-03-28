@@ -1,0 +1,395 @@
+// MAGI Self-Hosted Compiler — TLS/Crypto Wrapper
+//
+// All TLS and cryptographic operations delegate to stage 0 builtins.
+// This module provides a clean MAGI-level API for:
+//   - TLS configuration (client and server)
+//   - Certificate generation and parsing
+//   - Symmetric encryption (AES-GCM)
+//   - Asymmetric encryption (RSA, ECDSA)
+//   - Hashing (SHA-256, SHA-384, SHA-512, BLAKE3)
+//   - HMAC computation
+//   - Key derivation (PBKDF2, HKDF)
+//   - Random number generation (CSPRNG)
+//   - Base64 encoding/decoding
+//   - Hex encoding/decoding
+//   - JWT token creation and verification
+
+// ══════════════════════════════════════════════════════════════════
+// ── TLS Configuration ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Create a TLS configuration for a server
+func tls_server_config(cert_path, key_path) {
+    {
+        "__tls_config": true,
+        "mode": "server",
+        "cert_path": cert_path,
+        "key_path": key_path,
+        "min_protocol": "TLS1.2",
+        "max_protocol": "TLS1.3",
+        "cipher_suites": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_CHACHA20_POLY1305_SHA256"
+        ],
+        "alpn_protocols": ["h2", "http/1.1"],
+        "client_auth": "none",
+    }
+}
+
+// Create a TLS configuration for a client
+func tls_client_config(ca_cert_path) {
+    {
+        "__tls_config": true,
+        "mode": "client",
+        "ca_cert_path": ca_cert_path,
+        "min_protocol": "TLS1.2",
+        "max_protocol": "TLS1.3",
+        "verify_hostname": true,
+        "verify_cert": true,
+        "alpn_protocols": ["h2", "http/1.1"],
+    }
+}
+
+// Set minimum TLS protocol version
+func tls_set_min_protocol(config, version) {
+    config["min_protocol"] = version
+    config
+}
+
+// Set maximum TLS protocol version
+func tls_set_max_protocol(config, version) {
+    config["max_protocol"] = version
+    config
+}
+
+// Enable or disable hostname verification
+func tls_set_verify_hostname(config, verify) {
+    config["verify_hostname"] = verify
+    config
+}
+
+// Set ALPN protocols
+func tls_set_alpn(config, protocols) {
+    config["alpn_protocols"] = protocols
+    config
+}
+
+// Set client certificate authentication mode
+func tls_set_client_auth(config, mode) {
+    // mode: "none", "optional", "required"
+    config["client_auth"] = mode
+    config
+}
+
+// Load a TLS configuration into the runtime
+func tls_load_config(config) {
+    tls_configure(config)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Certificate Operations ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Generate a self-signed certificate
+func tls_generate_self_signed(common_name, days) {
+    cert_generate(common_name, days)
+}
+
+// Parse a PEM-encoded certificate
+func tls_parse_cert(pem_data) {
+    cert_parse(pem_data)
+}
+
+// Verify a certificate against a CA
+func tls_verify_cert(cert_pem, ca_pem) {
+    cert_verify(cert_pem, ca_pem)
+}
+
+// Get certificate information (subject, issuer, validity, etc.)
+func tls_cert_info(cert_pem) {
+    const parsed = cert_parse(cert_pem)
+    if parsed == null { return null }
+    {
+        "subject": if parsed.has("subject") { parsed["subject"] } else { "" },
+        "issuer": if parsed.has("issuer") { parsed["issuer"] } else { "" },
+        "not_before": if parsed.has("not_before") { parsed["not_before"] } else { "" },
+        "not_after": if parsed.has("not_after") { parsed["not_after"] } else { "" },
+        "serial": if parsed.has("serial") { parsed["serial"] } else { "" },
+        "fingerprint_sha256": if parsed.has("fingerprint_sha256") { parsed["fingerprint_sha256"] } else { "" },
+    }
+}
+
+// Check if a certificate is expired
+func tls_cert_is_expired(cert_info) {
+    if cert_info == null { return true }
+    // Would need time comparison; delegate to stage 0
+    false
+}
+
+// Generate a certificate signing request (CSR)
+func tls_generate_csr(common_name, org, country) {
+    cert_generate_csr(common_name, org, country)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Hashing ─────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_sha256(data) { sha256(data) }
+func tls_sha384(data) { sha384(data) }
+func tls_sha512(data) { sha512(data) }
+func tls_md5(data) { md5(data) }
+func tls_blake3(data) { blake3(data) }
+
+// Hash with a specified algorithm
+func tls_hash(data, algorithm) {
+    match algorithm {
+        "sha256" => sha256(data),
+        "sha384" => sha384(data),
+        "sha512" => sha512(data),
+        "md5" => md5(data),
+        "blake3" => blake3(data),
+        _ => panic(f"unknown hash algorithm: {algorithm}")
+    }
+}
+
+// Hash a file
+func tls_hash_file(path, algorithm) {
+    const data = read_file(path)
+    tls_hash(data, algorithm)
+}
+
+// Verify a hash
+func tls_verify_hash(data, expected_hash, algorithm) {
+    const actual = tls_hash(data, algorithm)
+    actual == expected_hash
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── HMAC ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_hmac_sha256(key, data) { hmac(key, data, "sha256") }
+func tls_hmac_sha512(key, data) { hmac(key, data, "sha512") }
+
+func tls_hmac(key, data, algorithm) {
+    hmac(key, data, algorithm)
+}
+
+func tls_hmac_verify(key, data, expected_mac, algorithm) {
+    const actual = tls_hmac(key, data, algorithm)
+    // Constant-time comparison
+    tls_constant_time_eq(actual, expected_mac)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Key Derivation ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_pbkdf2(password, salt, iterations, key_length) {
+    pbkdf2(password, salt, iterations, key_length)
+}
+
+func tls_hkdf(input_key, salt, info, length) {
+    hkdf(input_key, salt, info, length)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Symmetric Encryption (AES-GCM) ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_aes_gcm_encrypt(key, plaintext, aad) {
+    aes_gcm_encrypt(key, plaintext, aad)
+}
+
+func tls_aes_gcm_decrypt(key, ciphertext, aad) {
+    aes_gcm_decrypt(key, ciphertext, aad)
+}
+
+// Generate a random AES key (256-bit)
+func tls_generate_aes_key() {
+    random_bytes(32)
+}
+
+// Generate a random nonce (96-bit for AES-GCM)
+func tls_generate_nonce() {
+    random_bytes(12)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Random Number Generation (CSPRNG) ───────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_random_bytes(n) { random_bytes(n) }
+func tls_random_int(min_val, max_val) { random_int(min_val, max_val) }
+func tls_random_float() { random_float() }
+
+func tls_uuid_v4() { uuid() }
+
+// Generate a random token (hex string)
+func tls_random_token(byte_count) {
+    const bytes = random_bytes(byte_count)
+    tls_bytes_to_hex(bytes)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Base64 Encoding/Decoding ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_base64_encode(data) { base64_encode(data) }
+func tls_base64_decode(data) { base64_decode(data) }
+
+// URL-safe Base64
+func tls_base64url_encode(data) {
+    let encoded = base64_encode(data)
+    encoded = encoded.replace("+", "-")
+    encoded = encoded.replace("/", "_")
+    // Remove padding
+    while len(encoded) > 0 && encoded[len(encoded) - 1] == "=" {
+        encoded = encoded.substring(0, len(encoded) - 1)
+    }
+    encoded
+}
+
+func tls_base64url_decode(data) {
+    let padded = data.replace("-", "+").replace("_", "/")
+    // Add padding
+    while len(padded) % 4 != 0 { padded = padded + "=" }
+    base64_decode(padded)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Hex Encoding/Decoding ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_bytes_to_hex(bytes) {
+    const hex_chars = "0123456789abcdef"
+    let result = ""
+    if typeof(bytes) == "array" {
+        for b in bytes {
+            result = result + hex_chars[b / 16] + hex_chars[b % 16]
+        }
+    } else if typeof(bytes) == "string" {
+        for c in bytes.chars() {
+            const code = char_code(c)
+            result = result + hex_chars[code / 16] + hex_chars[code % 16]
+        }
+    }
+    result
+}
+
+func tls_hex_to_bytes(hex_str) {
+    let result = []
+    let i = 0
+    while i < len(hex_str) - 1 {
+        const high = tls_hex_char_val(hex_str[i])
+        const low = tls_hex_char_val(hex_str[i + 1])
+        result.push(high * 16 + low)
+        i = i + 2
+    }
+    result
+}
+
+func tls_hex_char_val(c) {
+    if c >= "0" && c <= "9" { return char_code(c) - char_code("0") }
+    if c >= "a" && c <= "f" { return 10 + char_code(c) - char_code("a") }
+    if c >= "A" && c <= "F" { return 10 + char_code(c) - char_code("A") }
+    0
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── JWT Operations ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Create a JWT token
+func tls_jwt_create(payload, secret, algorithm) {
+    const header = {"alg": algorithm, "typ": "JWT"}
+    const header_b64 = tls_base64url_encode(to_json(header))
+    const payload_b64 = tls_base64url_encode(to_json(payload))
+    const signing_input = header_b64 + "." + payload_b64
+
+    let signature = ""
+    match algorithm {
+        "HS256" => { signature = tls_base64url_encode(hmac(secret, signing_input, "sha256")) },
+        "HS384" => { signature = tls_base64url_encode(hmac(secret, signing_input, "sha384")) },
+        "HS512" => { signature = tls_base64url_encode(hmac(secret, signing_input, "sha512")) },
+        _ => panic(f"unsupported JWT algorithm: {algorithm}")
+    }
+
+    signing_input + "." + signature
+}
+
+// Verify and decode a JWT token
+func tls_jwt_verify(token, secret, algorithm) {
+    const parts = token.split(".")
+    if len(parts) != 3 { return {"valid": false, "error": "invalid token format"} }
+
+    const header_b64 = parts[0]
+    const payload_b64 = parts[1]
+    const signature_b64 = parts[2]
+
+    const signing_input = header_b64 + "." + payload_b64
+    let expected_sig = ""
+    match algorithm {
+        "HS256" => { expected_sig = tls_base64url_encode(hmac(secret, signing_input, "sha256")) },
+        "HS384" => { expected_sig = tls_base64url_encode(hmac(secret, signing_input, "sha384")) },
+        "HS512" => { expected_sig = tls_base64url_encode(hmac(secret, signing_input, "sha512")) },
+        _ => { return {"valid": false, "error": f"unsupported algorithm: {algorithm}"} }
+    }
+
+    if !tls_constant_time_eq(signature_b64, expected_sig) {
+        return {"valid": false, "error": "signature mismatch"}
+    }
+
+    const payload = parse_json(tls_base64url_decode(payload_b64))
+    {"valid": true, "payload": payload}
+}
+
+// Decode JWT payload without verification
+func tls_jwt_decode(token) {
+    const parts = token.split(".")
+    if len(parts) < 2 { return null }
+    const payload_str = tls_base64url_decode(parts[1])
+    parse_json(payload_str)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Constant-Time Comparison ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_constant_time_eq(a, b) {
+    if len(a) != len(b) { return false }
+    let diff = 0
+    let i = 0
+    while i < len(a) {
+        if a[i] != b[i] { diff = diff + 1 }
+        i = i + 1
+    }
+    diff == 0
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Password Hashing ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Hash a password with a random salt using PBKDF2
+func tls_hash_password(password) {
+    const salt = tls_random_token(16)
+    const hash = tls_pbkdf2(password, salt, 100000, 32)
+    const hash_hex = tls_bytes_to_hex(hash)
+    f"pbkdf2:sha256:100000${salt}${hash_hex}"
+}
+
+// Verify a password against a stored hash
+func tls_verify_password(password, stored_hash) {
+    const parts = stored_hash.split("$")
+    if len(parts) != 3 { return false }
+    const header_parts = parts[0].split(":")
+    if len(header_parts) < 3 { return false }
+    const iterations = to_int(header_parts[2])
+    const salt = parts[1]
+    const expected_hash = parts[2]
+    const actual = tls_bytes_to_hex(tls_pbkdf2(password, salt, iterations, 32))
+    tls_constant_time_eq(actual, expected_hash)
+}

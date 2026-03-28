@@ -1,0 +1,340 @@
+// MAGI Self-Hosted Compiler — Diagnostics Engine
+//
+// Renders compiler errors and warnings with ariadne-style output:
+//   - Source-annotated error messages with line/column spans
+//   - Color-coded severity (error = red, warning = yellow, info = blue)
+//   - Multi-line span support
+//   - Related information and suggestions
+//   - Machine-readable JSON output mode
+
+// ══════════════════════════════════════════════════════════════════
+// ── Diagnostic Types ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const SEVERITY_ERROR = "error"
+const SEVERITY_WARNING = "warning"
+const SEVERITY_INFO = "info"
+const SEVERITY_HINT = "hint"
+
+// Create a diagnostic
+func diag_new(severity, code, message, file, line, col) {
+    {
+        "severity": severity,
+        "code": code,
+        "message": message,
+        "file": file,
+        "line": line,
+        "col": col,
+        "end_line": line,
+        "end_col": col,
+        "labels": [],
+        "notes": [],
+        "suggestions": [],
+    }
+}
+
+// Add a label (annotation) to a diagnostic
+func diag_add_label(diag, line, col, end_line, end_col, message, style) {
+    let labels = diag["labels"]
+    labels.push({
+        "line": line,
+        "col": col,
+        "end_line": end_line,
+        "end_col": end_col,
+        "message": message,
+        "style": style, // "primary", "secondary"
+    })
+    diag["labels"] = labels
+    diag
+}
+
+// Add a note to a diagnostic
+func diag_add_note(diag, note) {
+    let notes = diag["notes"]
+    notes.push(note)
+    diag["notes"] = notes
+    diag
+}
+
+// Add a suggestion (fix) to a diagnostic
+func diag_add_suggestion(diag, message, replacement, line, col, end_line, end_col) {
+    let suggestions = diag["suggestions"]
+    suggestions.push({
+        "message": message,
+        "replacement": replacement,
+        "line": line,
+        "col": col,
+        "end_line": end_line,
+        "end_col": end_col,
+    })
+    diag["suggestions"] = suggestions
+    diag
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── ANSI Color Codes ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const ANSI_RESET = "\x1b[0m"
+const ANSI_BOLD = "\x1b[1m"
+const ANSI_DIM = "\x1b[2m"
+const ANSI_RED = "\x1b[31m"
+const ANSI_GREEN = "\x1b[32m"
+const ANSI_YELLOW = "\x1b[33m"
+const ANSI_BLUE = "\x1b[34m"
+const ANSI_MAGENTA = "\x1b[35m"
+const ANSI_CYAN = "\x1b[36m"
+const ANSI_WHITE = "\x1b[37m"
+
+func diag_severity_color(severity) {
+    match severity {
+        "error" => ANSI_RED,
+        "warning" => ANSI_YELLOW,
+        "info" => ANSI_BLUE,
+        "hint" => ANSI_CYAN,
+        _ => ANSI_WHITE
+    }
+}
+
+func diag_severity_prefix(severity) {
+    match severity {
+        "error" => "error",
+        "warning" => "warning",
+        "info" => "info",
+        "hint" => "hint",
+        _ => "note"
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Text Rendering (Ariadne-style) ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Render a diagnostic to a human-readable string
+func diag_render(diag, source) {
+    let lines = []
+    const sev = diag["severity"]
+    const code = diag["code"]
+    const msg = diag["message"]
+    const file = diag["file"]
+    const line_num = diag["line"]
+    const col_num = diag["col"]
+
+    const color = diag_severity_color(sev)
+    const prefix = diag_severity_prefix(sev)
+
+    // Header: error[E001]: message
+    let header = ANSI_BOLD + color + prefix
+    if code != null && code != "" {
+        header = header + "[" + code + "]"
+    }
+    header = header + ANSI_RESET + ANSI_BOLD + ": " + msg + ANSI_RESET
+    lines.push(header)
+
+    // Location: --> file:line:col
+    const location = ANSI_BLUE + "  --> " + ANSI_RESET + file + ":" + to_string(line_num) + ":" + to_string(col_num)
+    lines.push(location)
+
+    // Source context
+    if source != null && source != "" {
+        const src_lines = source.split("\n")
+        const gutter_width = len(to_string(line_num + 2))
+
+        // Show lines around the error
+        const start_line = max(1, line_num - 1)
+        const end_line_num = min(len(src_lines), line_num + 1)
+
+        // Blank gutter line
+        lines.push(ANSI_BLUE + diag_pad_right("", gutter_width) + " |" + ANSI_RESET)
+
+        let i = start_line
+        while i <= end_line_num {
+            const src_idx = i - 1
+            if src_idx >= 0 && src_idx < len(src_lines) {
+                const src_line = src_lines[src_idx]
+                const line_str = to_string(i)
+                const padded_num = diag_pad_left(line_str, gutter_width)
+
+                if i == line_num {
+                    // Error line
+                    lines.push(ANSI_BLUE + padded_num + " | " + ANSI_RESET + src_line)
+
+                    // Underline
+                    let underline = ""
+                    let j = 0
+                    while j < col_num - 1 { underline = underline + " "; j = j + 1 }
+
+                    // Primary label
+                    const labels = diag["labels"]
+                    let label_msg = ""
+                    let underline_len = 1
+                    for label in labels {
+                        if label["line"] == line_num && label["style"] == "primary" {
+                            underline_len = max(1, label["end_col"] - label["col"])
+                            label_msg = label["message"]
+                        }
+                    }
+
+                    let carets = ""
+                    let k = 0
+                    while k < underline_len { carets = carets + "^"; k = k + 1 }
+
+                    let underline_str = diag_pad_right("", gutter_width) + " | " + underline + color + carets
+                    if label_msg != "" {
+                        underline_str = underline_str + " " + label_msg
+                    }
+                    underline_str = underline_str + ANSI_RESET
+
+                    lines.push(ANSI_BLUE + underline_str)
+                } else {
+                    // Context line
+                    lines.push(ANSI_BLUE + padded_num + " | " + ANSI_RESET + ANSI_DIM + src_line + ANSI_RESET)
+                }
+            }
+            i = i + 1
+        }
+
+        // Closing gutter
+        lines.push(ANSI_BLUE + diag_pad_right("", gutter_width) + " |" + ANSI_RESET)
+    }
+
+    // Notes
+    const notes = diag["notes"]
+    for note in notes {
+        lines.push(ANSI_BLUE + "  = " + ANSI_RESET + ANSI_BOLD + "note" + ANSI_RESET + ": " + note)
+    }
+
+    // Suggestions
+    const suggestions = diag["suggestions"]
+    for sug in suggestions {
+        lines.push(ANSI_GREEN + "  = " + ANSI_RESET + ANSI_BOLD + "help" + ANSI_RESET + ": " + sug["message"])
+        if sug["replacement"] != "" {
+            lines.push(ANSI_GREEN + "    " + sug["replacement"] + ANSI_RESET)
+        }
+    }
+
+    lines.push("") // blank line after diagnostic
+    lines.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── JSON Output Mode ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func diag_to_json(diag) {
+    let labels = []
+    for label in diag["labels"] {
+        labels.push({
+            "start": {"line": label["line"], "col": label["col"]},
+            "end": {"line": label["end_line"], "col": label["end_col"]},
+            "message": label["message"],
+            "style": label["style"]
+        })
+    }
+
+    {
+        "severity": diag["severity"],
+        "code": diag["code"],
+        "message": diag["message"],
+        "file": diag["file"],
+        "location": {"line": diag["line"], "col": diag["col"]},
+        "labels": labels,
+        "notes": diag["notes"],
+        "suggestions": diag["suggestions"]
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Diagnostic Collection ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// A diagnostic collector accumulates diagnostics and renders them
+let diag_collected = []
+let diag_error_count = 0
+let diag_warning_count = 0
+
+func diag_reset() {
+    diag_collected = []
+    diag_error_count = 0
+    diag_warning_count = 0
+}
+
+func diag_emit(diag) {
+    diag_collected.push(diag)
+    if diag["severity"] == SEVERITY_ERROR { diag_error_count = diag_error_count + 1 }
+    if diag["severity"] == SEVERITY_WARNING { diag_warning_count = diag_warning_count + 1 }
+}
+
+func diag_has_errors() { diag_error_count > 0 }
+
+func diag_render_all(source) {
+    let output = ""
+    for d in diag_collected {
+        output = output + diag_render(d, source)
+    }
+    // Summary
+    if diag_error_count > 0 || diag_warning_count > 0 {
+        let parts = []
+        if diag_error_count > 0 {
+            parts.push(ANSI_RED + ANSI_BOLD + to_string(diag_error_count) + " error(s)" + ANSI_RESET)
+        }
+        if diag_warning_count > 0 {
+            parts.push(ANSI_YELLOW + ANSI_BOLD + to_string(diag_warning_count) + " warning(s)" + ANSI_RESET)
+        }
+        output = output + parts.join(", ") + " generated.\n"
+    }
+    output
+}
+
+func diag_render_all_json() {
+    let items = []
+    for d in diag_collected {
+        items.push(diag_to_json(d))
+    }
+    to_json(items)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Utility Functions ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func diag_pad_left(s, width) {
+    let result = s
+    while len(result) < width { result = " " + result }
+    result
+}
+
+func diag_pad_right(s, width) {
+    let result = s
+    while len(result) < width { result = result + " " }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Convenience Constructors ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func diag_error(code, message, file, line, col) {
+    diag_new(SEVERITY_ERROR, code, message, file, line, col)
+}
+
+func diag_warning(code, message, file, line, col) {
+    diag_new(SEVERITY_WARNING, code, message, file, line, col)
+}
+
+func diag_info(code, message, file, line, col) {
+    diag_new(SEVERITY_INFO, code, message, file, line, col)
+}
+
+func diag_hint(code, message, file, line, col) {
+    diag_new(SEVERITY_HINT, code, message, file, line, col)
+}
+
+// Quick error emitter
+func diag_emit_error(code, message, file, line, col) {
+    diag_emit(diag_error(code, message, file, line, col))
+}
+
+func diag_emit_warning(code, message, file, line, col) {
+    diag_emit(diag_warning(code, message, file, line, col))
+}
