@@ -23,6 +23,9 @@ pub struct Parser {
     /// When true, suppress struct literal parsing (e.g., in if/while/for conditions
     /// and match guards where `{` starts a block, not a struct).
     no_struct_literal: bool,
+    /// When true, suppress arrow function parsing (e.g., in match guards where
+    /// `=>` is a match arm separator, not an arrow function).
+    no_arrow_fn: bool,
     /// Accumulated errors during error-recovering parse.
     errors: Vec<SyntaxError>,
     /// Comments collected by the lexer, sorted by line number.
@@ -38,6 +41,7 @@ impl Parser {
             pos: 0,
             depth: 0,
             no_struct_literal: false,
+            no_arrow_fn: false,
             errors: Vec::new(),
             comments: Vec::new(),
             comment_cursor: 0,
@@ -51,6 +55,7 @@ impl Parser {
             pos: 0,
             depth: 0,
             no_struct_literal: false,
+            no_arrow_fn: false,
             errors: Vec::new(),
             comments,
             comment_cursor: 0,
@@ -1995,17 +2000,63 @@ impl Parser {
     // Expressions — Pratt / precedence climbing
 
     fn parse_expression(&mut self) -> Result<Expression, SyntaxError> {
-        self.parse_pipe_expr()
+        let expr = self.parse_pipe_expr()?;
+
+        // Arrow function: `x => expr` (single parameter, no parens)
+        if !self.no_arrow_fn && self.at(&TokenKind::FatArrow) {
+            if let ExpressionKind::Variable(name) = &expr.kind {
+                let name = name.clone();
+                let start = expr.span;
+                self.advance(); // consume '=>'
+
+                let saved_no_struct = self.no_struct_literal;
+                let saved_arrow = self.no_arrow_fn;
+                self.no_struct_literal = false;
+                self.no_arrow_fn = false;
+                let body = if self.at(&TokenKind::LBrace) {
+                    let block = self.parse_block()?;
+                    Expression {
+                        span: block.span,
+                        kind: ExpressionKind::Block(block),
+                    }
+                } else {
+                    self.parse_expression()?
+                };
+                self.no_struct_literal = saved_no_struct;
+                self.no_arrow_fn = saved_arrow;
+
+                let span = start.merge(body.span);
+                return Ok(Expression {
+                    kind: ExpressionKind::Lambda {
+                        params: vec![FunctionParam {
+                            name,
+                            type_annotation: None,
+                            default: None,
+                            rest: false,
+                            kwargs: false,
+                            span: start,
+                        }],
+                        body: Box::new(body),
+                    },
+                    span,
+                });
+            }
+        }
+
+        Ok(expr)
     }
 
-    /// Parse an expression with struct literal parsing suppressed.
+    /// Parse an expression with struct literal and arrow function parsing suppressed.
     /// Used in contexts where `{` after an identifier starts a block, not a struct
-    /// (if/while/for conditions, match guards).
+    /// (if/while/for conditions, match guards) and `=>` is a match arm separator.
     fn parse_expression_no_struct(&mut self) -> Result<Expression, SyntaxError> {
         let saved = self.no_struct_literal;
+        let saved_arrow = self.no_arrow_fn;
         self.no_struct_literal = true;
+        self.no_arrow_fn = true;
         let result = self.parse_expression();
         self.no_struct_literal = saved;
+        self.no_arrow_fn = saved_arrow;
         result
     }
 
@@ -2684,11 +2735,82 @@ impl Parser {
             }
 
             TokenKind::LParen => {
-                self.advance();
+                // Try to parse as arrow function: (a, b, ...) => expr
+                // Speculatively look ahead for (ident, ident, ...) => pattern
+                let saved_pos = self.pos;
+                self.advance(); // consume '('
+
+                let mut names = Vec::new();
+                let mut name_spans = Vec::new();
+                let mut all_idents = true;
+
+                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                    if self.at(&TokenKind::Ident) {
+                        let t = self.advance().clone();
+                        names.push(t.text);
+                        name_spans.push(t.span);
+                    } else {
+                        all_idents = false;
+                        break;
+                    }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+
+                if all_idents && self.at(&TokenKind::RParen) {
+                    let rparen = self.advance().span; // consume ')'
+                    if self.at(&TokenKind::FatArrow) {
+                        self.advance(); // consume '=>'
+                        let start = tok.span;
+
+                        let saved_no_struct = self.no_struct_literal;
+                        self.no_struct_literal = false;
+                        let body = if self.at(&TokenKind::LBrace) {
+                            let block = self.parse_block()?;
+                            Expression {
+                                span: block.span,
+                                kind: ExpressionKind::Block(block),
+                            }
+                        } else {
+                            self.parse_expression()?
+                        };
+                        self.no_struct_literal = saved_no_struct;
+
+                        let span = start.merge(body.span);
+                        let params = names.into_iter().zip(name_spans).map(|(name, sp)| {
+                            FunctionParam {
+                                name,
+                                type_annotation: None,
+                                default: None,
+                                rest: false,
+                                kwargs: false,
+                                span: sp,
+                            }
+                        }).collect();
+
+                        return Ok(Expression {
+                            kind: ExpressionKind::Lambda {
+                                params,
+                                body: Box::new(body),
+                            },
+                            span,
+                        });
+                    }
+                    // Not an arrow function — backtrack
+                    let _ = rparen; // suppress warning
+                }
+
+                // Not an arrow function — backtrack and parse as normal paren expr
+                self.pos = saved_pos;
+                self.advance(); // consume '(' again
                 let saved_no_struct = self.no_struct_literal;
+                let saved_arrow = self.no_arrow_fn;
                 self.no_struct_literal = false; // parens disambiguate struct literals
+                self.no_arrow_fn = false; // parens create a new context for arrow fns
                 let expr = self.parse_expression()?;
                 self.no_struct_literal = saved_no_struct;
+                self.no_arrow_fn = saved_arrow;
                 let end = self.expect(&TokenKind::RParen)?;
                 // Preserve the expression but update span
                 Ok(Expression {
@@ -3029,8 +3151,13 @@ impl Parser {
 
             // Optional guard: `if condition`
             // Suppress struct literals in guard to avoid ambiguity with match arm body `{`
+            // Suppress arrow functions in guard since `=>` is the match arm separator
             let guard = if self.eat(&TokenKind::If) {
-                Some(self.parse_expression_no_struct()?)
+                let saved_arrow = self.no_arrow_fn;
+                self.no_arrow_fn = true;
+                let g = self.parse_expression_no_struct()?;
+                self.no_arrow_fn = saved_arrow;
+                Some(g)
             } else {
                 None
             };

@@ -21504,3 +21504,23 @@ fn test_import_module_run() {
     "#, "import_module_run");
     assert!(result.contains("2"));
 }
+
+// ── Arrow function syntax ──
+
+#[test]
+fn test_arrow_function_single() {
+    let result = run_eval_unique("const double = x => x * 2; output double(5);", "arrow1");
+    assert!(result.contains("10"));
+}
+
+#[test]
+fn test_arrow_function_multi() {
+    let result = run_eval_unique("const add = (a, b) => a + b; output add(3, 4);", "arrow2");
+    assert!(result.contains("7"));
+}
+
+#[test]
+fn test_arrow_in_pipe() {
+    let result = run_eval_unique("output([1,2,3].map(x => x * 10));", "arrow_pipe");
+    assert!(result.contains("[10, 20, 30]"));
+}
