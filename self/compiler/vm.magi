@@ -152,18 +152,11 @@ func vm_rt(name, arg) {
 func vm_exec() {
     let result = null
     let running = true
-    let vm_steps = 0
 
     while running && vm_ip < vm_n {
-        vm_steps = vm_steps + 1
-        if vm_steps > 100000 {
-            println(f"[VM ERROR] Exceeded 100000 steps at ip={vm_ip}")
-            return null
-        }
         const instr = vm_instrs[vm_ip]
         vm_ip = vm_ip + 1
         const d = instr.dump()
-        }
 
         if d == "push_null" {
             vm_push(null)
