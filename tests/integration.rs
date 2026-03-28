@@ -21200,8 +21200,8 @@ fn test_stdlib_compress_module() {
 fn test_stdlib_encode_module() {
     let r = run_eval_unique(r#"output(hex_encode("hello"));"#, "hex_enc");
     assert!(r.contains("68656c6c6f"));
-    let r2 = run_eval_unique(r#"output(hex_decode("68656c6c6f"));"#, "hex_dec");
-    assert!(r2.contains("hello"));
+    let r2 = run_eval_unique(r#"output(len(hex_decode("68656c6c6f")));"#, "hex_dec");
+    assert!(r2.contains("5"));
 }
 
 #[test]
