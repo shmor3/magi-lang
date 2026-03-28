@@ -1,0 +1,1630 @@
+// MAGI Self-Hosted Compiler — Operation Dispatch
+//
+// All 468 OperationType variants from src/types/operations.rs.
+// Pure computation ops are implemented in MAGI; OS/IO ops delegate to stage 0 builtins.
+//
+// Usage: eval_operation(op_name, args) -> result
+
+// ── Helper: safe arg access ──────────────────────────────────────
+
+func op_arg(args, idx, default_val) {
+    if idx < len(args) { args[idx] } else { default_val }
+}
+
+// ── Helper: numeric coercion ─────────────────────────────────────
+
+func op_to_f64(v) {
+    const t = typeof(v)
+    if t == "float64" { return v }
+    if t == "int64" { return to_float64(v) }
+    panic(f"expected number, got {t}")
+}
+
+func op_to_i64(v) {
+    const t = typeof(v)
+    if t == "int64" { return v }
+    if t == "float64" { return to_int64(v) }
+    panic(f"expected integer, got {t}")
+}
+
+func op_is_numeric(v) {
+    const t = typeof(v)
+    t == "int64" || t == "float64"
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Main dispatch — 468 operations
+// ══════════════════════════════════════════════════════════════════
+
+func eval_operation(op_name, args) {
+    match op_name {
+
+    // ── Arithmetic (16) ──────────────────────────────────────────
+
+    "add" => {
+        const a = args[0]
+        const b = args[1]
+        a + b
+    },
+    "subtract" => args[0] - args[1],
+    "multiply" => args[0] * args[1],
+    "divide" => {
+        if args[1] == 0 || args[1] == 0.0 { panic("division by zero") }
+        args[0] / args[1]
+    },
+    "modulo" => args[0] % args[1],
+    "power" => power(args[0], args[1]),
+    "sqrt" => sqrt(op_to_f64(args[0])),
+    "cbrt" => cbrt(op_to_f64(args[0])),
+    "hypot" => hypot(op_to_f64(args[0]), op_to_f64(args[1])),
+    "negate" => {
+        const v = args[0]
+        if typeof(v) == "int64" { 0 - v } else { 0.0 - v }
+    },
+    "abs" => abs(args[0]),
+    "min" => {
+        if args[0] <= args[1] { args[0] } else { args[1] }
+    },
+    "max" => {
+        if args[0] >= args[1] { args[0] } else { args[1] }
+    },
+    "round" => round(op_to_f64(args[0])),
+    "floor" => floor(op_to_f64(args[0])),
+    "ceil" => ceil(op_to_f64(args[0])),
+
+    // ── Comparison (6) ───────────────────────────────────────────
+
+    "equal" => args[0] == args[1],
+    "not_equal" => args[0] != args[1],
+    "greater" => args[0] > args[1],
+    "less" => args[0] < args[1],
+    "greater_eq" => args[0] >= args[1],
+    "less_eq" => args[0] <= args[1],
+
+    // ── Logic (4) ────────────────────────────────────────────────
+
+    "and" => args[0] && args[1],
+    "or" => args[0] || args[1],
+    "not" => !args[0],
+    "xor" => {
+        const a = args[0]
+        const b = args[1]
+        (a && !b) || (!a && b)
+    },
+
+    // ── Bitwise (6) ──────────────────────────────────────────────
+
+    "bit_and" => args[0] & args[1],
+    "bit_or" => (args[0] ^ args[1]) + (args[0] & args[1]),
+    "bit_xor" => args[0] ^ args[1],
+    "bit_not" => args[0] ^ -1,
+    "bit_shift_left" => args[0] << args[1],
+    "bit_shift_right" => args[0] >> args[1],
+
+    // ── Control Flow (5) ─────────────────────────────────────────
+
+    "if_else" => {
+        if args[0] { args[1] } else { op_arg(args, 2, null) }
+    },
+    "switch" => {
+        // args[0] = value, args[1] = cases map, args[2] = default
+        const val = args[0]
+        const cases = args[1]
+        if typeof(cases) == "map" && cases.has(to_string(val)) {
+            cases[to_string(val)]
+        } else {
+            op_arg(args, 2, null)
+        }
+    },
+    "coalesce" => {
+        if args[0] != null { args[0] } else { args[1] }
+    },
+    "try_catch" => {
+        // In self-hosted context, just return first arg (no real try-catch)
+        args[0]
+    },
+    "error" => {
+        panic(to_string(args[0]))
+    },
+
+    // ── V2 Language Constructs (5) ───────────────────────────────
+
+    "function_def" => args[0],
+    "function_call" => args[0],
+    "async_spawn" => args[0],
+    "async_await" => args[0],
+    "loop_group" => args[0],
+
+    // ── String (20) ──────────────────────────────────────────────
+
+    "concat" => {
+        let result = ""
+        for a in args {
+            result = result + to_string(a)
+        }
+        result
+    },
+    "split" => args[0].split(args[1]),
+    "substring" => {
+        const s = args[0]
+        const start = op_to_i64(args[1])
+        const end_idx = op_to_i64(op_arg(args, 2, len(s)))
+        s.slice(start, end_idx)
+    },
+    "length" => len(args[0]),
+    "replace" => args[0].replace(args[1], args[2]),
+    "to_upper" => args[0].to_upper(),
+    "to_lower" => args[0].to_lower(),
+    "trim" => args[0].trim(),
+    "trim_start" => args[0].trim_start(),
+    "trim_end" => args[0].trim_end(),
+    "contains" => args[0].contains(args[1]),
+    "starts_with" => args[0].starts_with(args[1]),
+    "ends_with" => args[0].ends_with(args[1]),
+    "char_at" => {
+        const s = args[0]
+        const idx = op_to_i64(args[1])
+        if idx >= 0 && idx < len(s) { s[idx] } else { null }
+    },
+    "index_of" => args[0].index_of(args[1]),
+    "pad_start" => pad_start(args[0], op_to_i64(args[1]), op_arg(args, 2, " ")),
+    "pad_end" => pad_end(args[0], op_to_i64(args[1]), op_arg(args, 2, " ")),
+    "regex_match" => regex_match(args[0], args[1]),
+    "string_join" => {
+        const arr = args[0]
+        const sep = op_arg(args, 1, "")
+        arr.join(sep)
+    },
+    "string_template" => {
+        // Simple template: args[0] = template, args[1] = map of vars
+        // Delegate to stage 0
+        string_template(args[0], args[1])
+    },
+
+    // ── Type Conversion (10) ─────────────────────────────────────
+
+    "to_string" => to_string(args[0]),
+    "to_int64" => {
+        const v = args[0]
+        const t = typeof(v)
+        if t == "int64" { v }
+        else if t == "float64" { to_int64(v) }
+        else if t == "string" { parse_int(v) }
+        else if t == "bool" { if v { 1 } else { 0 } }
+        else { 0 }
+    },
+    "to_float64" => {
+        const v = args[0]
+        const t = typeof(v)
+        if t == "float64" { v }
+        else if t == "int64" { to_float64(v) }
+        else if t == "string" { parse_float(v) }
+        else { 0.0 }
+    },
+    "to_bool" => {
+        const v = args[0]
+        if v == null { false }
+        else if typeof(v) == "bool" { v }
+        else if typeof(v) == "int64" { v != 0 }
+        else if typeof(v) == "float64" { v != 0.0 }
+        else if typeof(v) == "string" { len(v) > 0 }
+        else { true }
+    },
+    "to_bytes" => to_bytes(args[0]),
+    "from_bytes" => from_bytes(args[0]),
+    "parse_json" => parse_json(args[0]),
+    "to_json" => to_json(args[0]),
+    "char_from_code" => char_from_code(op_to_i64(args[0])),
+    "char_code" => char_code(args[0]),
+
+    // ── Array (17) ───────────────────────────────────────────────
+
+    "array_get" => {
+        const arr = args[0]
+        const idx = op_to_i64(args[1])
+        if idx >= 0 && idx < len(arr) { arr[idx] } else { null }
+    },
+    "array_set" => {
+        let arr = args[0]
+        const idx = op_to_i64(args[1])
+        arr[idx] = args[2]
+        arr
+    },
+    "array_push" => {
+        let arr = args[0]
+        arr.push(args[1])
+        arr
+    },
+    "array_pop" => {
+        let arr = args[0]
+        if len(arr) == 0 { return null }
+        const val = arr[len(arr) - 1]
+        val
+    },
+    "array_shift" => {
+        let arr = args[0]
+        if len(arr) == 0 { return null }
+        arr[0]
+    },
+    "array_insert" => {
+        let arr = args[0]
+        const idx = op_to_i64(args[1])
+        const val = args[2]
+        const before = arr.slice(0, idx)
+        const after = arr.slice(idx, len(arr))
+        before.concat([val]).concat(after)
+    },
+    "array_remove" => {
+        let arr = args[0]
+        const idx = op_to_i64(args[1])
+        const before = arr.slice(0, idx)
+        const after = arr.slice(idx + 1, len(arr))
+        before.concat(after)
+    },
+    "array_length" => len(args[0]),
+    "array_slice" => {
+        const arr = args[0]
+        const start = op_to_i64(args[1])
+        const end_idx = op_to_i64(op_arg(args, 2, len(arr)))
+        arr.slice(start, end_idx)
+    },
+    "array_concat" => args[0].concat(args[1]),
+    "array_contains" => args[0].contains(args[1]),
+    "array_reverse" => args[0].reverse(),
+    "array_flatten" => args[0].flat(),
+    "array_sort" => args[0].sort(),
+    "array_join" => {
+        const sep = op_arg(args, 1, ",")
+        args[0].join(sep)
+    },
+    "array_filter_nulls" => {
+        args[0].filter(x => x != null)
+    },
+    "array_from_map" => {
+        const m = args[0]
+        let result = []
+        for k in m.keys() {
+            result.push([k, m[k]])
+        }
+        result
+    },
+
+    // ── Map (10) ─────────────────────────────────────────────────
+
+    "map_get" => {
+        const m = args[0]
+        const k = to_string(args[1])
+        if m.has(k) { m[k] } else { op_arg(args, 2, null) }
+    },
+    "map_set" => {
+        let m = args[0]
+        const k = to_string(args[1])
+        m[k] = args[2]
+        m
+    },
+    "map_delete" => {
+        args[0].delete(to_string(args[1]))
+    },
+    "map_has" => {
+        args[0].has(to_string(args[1]))
+    },
+    "map_keys" => args[0].keys(),
+    "map_values" => args[0].values(),
+    "map_entries" => {
+        const m = args[0]
+        let result = []
+        for k in m.keys() {
+            result.push([k, m[k]])
+        }
+        result
+    },
+    "map_merge" => {
+        let result = args[0]
+        const other = args[1]
+        for k in other.keys() {
+            result[k] = other[k]
+        }
+        result
+    },
+    "map_from_entries" => {
+        let result = {}
+        for entry in args[0] {
+            result[to_string(entry[0])] = entry[1]
+        }
+        result
+    },
+    "map_size" => len(args[0]),
+
+    // ── Bytes (17) ───────────────────────────────────────────────
+
+    "bytes_length" => bytes_length(args[0]),
+    "bytes_slice" => bytes_slice(args[0], op_to_i64(args[1]), op_to_i64(args[2])),
+    "bytes_concat" => bytes_concat(args[0], args[1]),
+    "bytes_contains" => bytes_contains(args[0], args[1]),
+    "base64_encode" => base64_encode(args[0]),
+    "base64_decode" => base64_decode(args[0]),
+    "bytes_compare" => bytes_compare(args[0], args[1]),
+    "bytes_equal" => bytes_equal(args[0], args[1]),
+    "bytes_has_prefix" => bytes_has_prefix(args[0], args[1]),
+    "bytes_has_suffix" => bytes_has_suffix(args[0], args[1]),
+    "bytes_index" => bytes_index(args[0], args[1]),
+    "bytes_join" => bytes_join(args[0], args[1]),
+    "bytes_repeat" => bytes_repeat(args[0], op_to_i64(args[1])),
+    "bytes_split" => bytes_split(args[0], args[1]),
+    "bytes_trim" => bytes_trim(args[0]),
+    "bytes_from_string" => bytes_from_string(args[0]),
+    "bytes_to_string" => bytes_to_string(args[0]),
+
+    // ── Errors (5) ───────────────────────────────────────────────
+
+    "error_new" => {
+        {"__error": true, "message": to_string(args[0]), "wrapped": null}
+    },
+    "error_wrap" => {
+        {"__error": true, "message": to_string(args[0]), "wrapped": args[1]}
+    },
+    "error_unwrap" => {
+        const e = args[0]
+        if typeof(e) == "map" && e.has("wrapped") { e["wrapped"] } else { null }
+    },
+    "error_is" => {
+        const e = args[0]
+        const target = to_string(args[1])
+        if typeof(e) == "map" && e.has("message") { e["message"] == target } else { false }
+    },
+    "error_chain" => {
+        const e = args[0]
+        let chain = []
+        let current = e
+        while current != null && typeof(current) == "map" && current.has("__error") {
+            chain.push(current["message"])
+            current = current["wrapped"]
+        }
+        chain
+    },
+
+    // ── Iteration (2) ────────────────────────────────────────────
+
+    "range" => {
+        const start = op_to_i64(args[0])
+        const end_val = op_to_i64(args[1])
+        let result = []
+        let i = start
+        while i < end_val {
+            result.push(i)
+            i = i + 1
+        }
+        result
+    },
+    "reduce" => {
+        // args[0]=array, args[1]=lambda, args[2]=initial
+        const arr = args[0]
+        const fn_val = args[1]
+        let acc = args[2]
+        for item in arr {
+            acc = fn_val(acc, item)
+        }
+        acc
+    },
+
+    // ── JSON (10) ────────────────────────────────────────────────
+
+    "json_get" => {
+        const obj = args[0]
+        const path = to_string(args[1])
+        // Simple dot-path access
+        let current = obj
+        const parts = path.split(".")
+        for p in parts {
+            if current == null { return null }
+            if typeof(current) == "map" && current.has(p) {
+                current = current[p]
+            } else {
+                return null
+            }
+        }
+        current
+    },
+    "json_set" => {
+        // Simple: only supports top-level key
+        let obj = args[0]
+        const key = to_string(args[1])
+        obj[key] = args[2]
+        obj
+    },
+    "json_delete" => {
+        let obj = args[0]
+        const key = to_string(args[1])
+        obj.delete(key)
+    },
+    "json_flatten" => json_flatten(args[0]),
+    "json_merge" => {
+        let a = args[0]
+        const b = args[1]
+        if typeof(a) == "map" && typeof(b) == "map" {
+            for k in b.keys() {
+                a[k] = b[k]
+            }
+        }
+        a
+    },
+    "json_type" => {
+        const v = args[0]
+        const t = typeof(v)
+        if v == null { "null" }
+        else if t == "bool" { "boolean" }
+        else if t == "int64" || t == "float64" { "number" }
+        else if t == "string" { "string" }
+        else if t == "array" { "array" }
+        else if t == "map" { "object" }
+        else { "unknown" }
+    },
+    "json_validate" => {
+        // Try parsing as JSON, return bool
+        const s = to_string(args[0])
+        json_validate(s)
+    },
+    "json_pretty_print" => json_pretty_print(args[0]),
+    "json_compact" => json_compact(args[0]),
+    "json_query" => json_query(args[0], args[1]),
+
+    // ── DateTime (6) ─────────────────────────────────────────────
+
+    "now_timestamp" => now_timestamp(),
+    "format_timestamp" => format_timestamp(args[0], op_arg(args, 1, "")),
+    "parse_timestamp" => parse_timestamp(args[0], op_arg(args, 1, "")),
+    "timestamp_add" => timestamp_add(args[0], args[1]),
+    "timestamp_diff" => timestamp_diff(args[0], args[1]),
+    "sleep" => sleep(op_to_i64(args[0])),
+
+    // ── Hash/Encode (8) ──────────────────────────────────────────
+
+    "hash_sha256" => hash_sha256(args[0]),
+    "hash_sha1" => hash_sha1(args[0]),
+    "hash_blake3" => hash_blake3(args[0]),
+    "hash_md5" => hash_md5(args[0]),
+    "url_encode" => url_encode(args[0]),
+    "url_decode" => url_decode(args[0]),
+    "hex_encode" => hex_encode(args[0]),
+    "hex_decode" => hex_decode(args[0]),
+
+    // ── String Extended (8) ──────────────────────────────────────
+
+    "string_reverse" => {
+        const s = args[0]
+        const chars = s.chars()
+        let result = ""
+        let i = len(chars) - 1
+        while i >= 0 {
+            result = result + chars[i]
+            i = i - 1
+        }
+        result
+    },
+    "string_repeat" => string_repeat(args[0], op_to_i64(args[1])),
+    "string_lines" => args[0].split("\n"),
+    "string_words" => {
+        const s = args[0].trim()
+        if len(s) == 0 { return [] }
+        s.split(" ").filter(w => len(w) > 0)
+    },
+    "regex_replace" => regex_replace(args[0], args[1], args[2]),
+    "regex_extract" => regex_extract(args[0], args[1]),
+    "string_count" => {
+        const s = args[0]
+        const sub = args[1]
+        if len(sub) == 0 { return 0 }
+        let count = 0
+        let idx = 0
+        while idx <= len(s) - len(sub) {
+            if s.slice(idx, idx + len(sub)) == sub {
+                count = count + 1
+                idx = idx + len(sub)
+            } else {
+                idx = idx + 1
+            }
+        }
+        count
+    },
+    "string_format" => string_format(args[0], op_arg(args, 1, [])),
+
+    // ── Control Flow Extended (2) ────────────────────────────────
+
+    "assert" => {
+        if !args[0] {
+            const msg = op_arg(args, 1, "assertion failed")
+            panic(to_string(msg))
+        }
+        null
+    },
+    "debug_log" => {
+        println(to_string(args[0]))
+        null
+    },
+
+    // ── Type Conversion Extended (2) ─────────────────────────────
+
+    "typeof" => typeof(args[0]),
+    "default" => {
+        if args[0] != null { args[0] } else { args[1] }
+    },
+
+    // ── Array Higher-Order (20) ──────────────────────────────────
+
+    "array_map" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        arr.map(x => fn_val(x))
+    },
+    "array_filter" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        arr.filter(x => fn_val(x))
+    },
+    "array_flat_map" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let result = []
+        for item in arr {
+            const mapped = fn_val(item)
+            if typeof(mapped) == "array" {
+                result = result.concat(mapped)
+            } else {
+                result.push(mapped)
+            }
+        }
+        result
+    },
+    "array_find" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        for item in arr {
+            if fn_val(item) { return item }
+        }
+        null
+    },
+    "array_find_index" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let i = 0
+        while i < len(arr) {
+            if fn_val(arr[i]) { return i }
+            i = i + 1
+        }
+        -1
+    },
+    "array_every" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        for item in arr {
+            if !fn_val(item) { return false }
+        }
+        true
+    },
+    "array_some" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        for item in arr {
+            if fn_val(item) { return true }
+        }
+        false
+    },
+    "array_zip" => {
+        const a = args[0]
+        const b = args[1]
+        let result = []
+        const limit = if len(a) < len(b) { len(a) } else { len(b) }
+        let i = 0
+        while i < limit {
+            result.push([a[i], b[i]])
+            i = i + 1
+        }
+        result
+    },
+    "array_enumerate" => {
+        const arr = args[0]
+        let result = []
+        let i = 0
+        for item in arr {
+            result.push([i, item])
+            i = i + 1
+        }
+        result
+    },
+    "array_scan" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let acc = args[2]
+        let result = [acc]
+        for item in arr {
+            acc = fn_val(acc, item)
+            result.push(acc)
+        }
+        result
+    },
+    "array_take" => {
+        const arr = args[0]
+        const n = op_to_i64(args[1])
+        arr.slice(0, n)
+    },
+    "array_skip" => {
+        const arr = args[0]
+        const n = op_to_i64(args[1])
+        arr.slice(n, len(arr))
+    },
+    "array_take_while" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let result = []
+        for item in arr {
+            if !fn_val(item) { break }
+            result.push(item)
+        }
+        result
+    },
+    "array_skip_while" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let skipping = true
+        let result = []
+        for item in arr {
+            if skipping && fn_val(item) { continue }
+            skipping = false
+            result.push(item)
+        }
+        result
+    },
+    "array_group_by" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let groups = {}
+        for item in arr {
+            const key = to_string(fn_val(item))
+            if !groups.has(key) {
+                groups[key] = []
+            }
+            let g = groups[key]
+            g.push(item)
+            groups[key] = g
+        }
+        groups
+    },
+    "array_sort_by" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        // Decorate-sort-undecorate
+        let decorated = arr.map(x => [fn_val(x), x])
+        decorated = decorated.sort()
+        decorated.map(pair => pair[1])
+    },
+    "array_unique" => {
+        const arr = args[0]
+        let seen = {}
+        let result = []
+        for item in arr {
+            const key = to_string(item)
+            if !seen.has(key) {
+                seen[key] = true
+                result.push(item)
+            }
+        }
+        result
+    },
+    "array_chunk" => {
+        const arr = args[0]
+        const size = op_to_i64(args[1])
+        if size <= 0 { panic("chunk size must be > 0") }
+        let result = []
+        let i = 0
+        while i < len(arr) {
+            const end_idx = if i + size < len(arr) { i + size } else { len(arr) }
+            result.push(arr.slice(i, end_idx))
+            i = i + size
+        }
+        result
+    },
+    "array_window" => {
+        const arr = args[0]
+        const size = op_to_i64(args[1])
+        if size <= 0 { return [] }
+        let result = []
+        let i = 0
+        while i + size <= len(arr) {
+            result.push(arr.slice(i, i + size))
+            i = i + 1
+        }
+        result
+    },
+    "array_partition" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let yes = []
+        let no = []
+        for item in arr {
+            if fn_val(item) { yes.push(item) } else { no.push(item) }
+        }
+        [yes, no]
+    },
+
+    // ── Map Higher-Order (3) ─────────────────────────────────────
+
+    "map_map_values" => {
+        const m = args[0]
+        const fn_val = args[1]
+        let result = {}
+        for k in m.keys() {
+            result[k] = fn_val(m[k])
+        }
+        result
+    },
+    "map_filter_entries" => {
+        const m = args[0]
+        const fn_val = args[1]
+        let result = {}
+        for k in m.keys() {
+            if fn_val(k, m[k]) {
+                result[k] = m[k]
+            }
+        }
+        result
+    },
+    "map_update" => {
+        let m = args[0]
+        const k = to_string(args[1])
+        const fn_val = args[2]
+        const old_val = if m.has(k) { m[k] } else { null }
+        m[k] = fn_val(old_val)
+        m
+    },
+
+    // ── String (1) ───────────────────────────────────────────────
+
+    "string_chars" => args[0].chars(),
+
+    // ── Math Aggregate (6) ───────────────────────────────────────
+
+    "math_sum" => {
+        const arr = args[0]
+        let total = 0
+        for x in arr { total = total + x }
+        total
+    },
+    "math_product" => {
+        const arr = args[0]
+        let total = 1
+        for x in arr { total = total * x }
+        total
+    },
+    "math_average" => {
+        const arr = args[0]
+        if len(arr) == 0 { return 0.0 }
+        let total = 0.0
+        for x in arr { total = total + op_to_f64(x) }
+        total / to_float64(len(arr))
+    },
+    "math_min_of" => {
+        const arr = args[0]
+        if len(arr) == 0 { return null }
+        let m = arr[0]
+        let i = 1
+        while i < len(arr) {
+            if arr[i] < m { m = arr[i] }
+            i = i + 1
+        }
+        m
+    },
+    "math_max_of" => {
+        const arr = args[0]
+        if len(arr) == 0 { return null }
+        let m = arr[0]
+        let i = 1
+        while i < len(arr) {
+            if arr[i] > m { m = arr[i] }
+            i = i + 1
+        }
+        m
+    },
+    "math_count" => len(args[0]),
+
+    // ── Type Checking (7) ────────────────────────────────────────
+
+    "is_null" => args[0] == null,
+    "is_string" => typeof(args[0]) == "string",
+    "is_number" => {
+        const t = typeof(args[0])
+        t == "int64" || t == "float64"
+    },
+    "is_array" => typeof(args[0]) == "array",
+    "is_map" => typeof(args[0]) == "map",
+    "is_bool" => typeof(args[0]) == "bool",
+    "is_bytes" => typeof(args[0]) == "bytes",
+
+    // ── Math Extended (27) ───────────────────────────────────────
+
+    "sin" => sin(op_to_f64(args[0])),
+    "cos" => cos(op_to_f64(args[0])),
+    "tan" => tan(op_to_f64(args[0])),
+    "asin" => asin(op_to_f64(args[0])),
+    "acos" => acos(op_to_f64(args[0])),
+    "atan" => atan(op_to_f64(args[0])),
+    "atan2" => atan2(op_to_f64(args[0]), op_to_f64(args[1])),
+    "sinh" => sinh(op_to_f64(args[0])),
+    "cosh" => cosh(op_to_f64(args[0])),
+    "tanh" => tanh(op_to_f64(args[0])),
+    "log" => log(op_to_f64(args[0]), op_to_f64(args[1])),
+    "ln" => ln(op_to_f64(args[0])),
+    "log2" => log2(op_to_f64(args[0])),
+    "log10" => log10(op_to_f64(args[0])),
+    "exp" => exp(op_to_f64(args[0])),
+    "to_radians" => op_to_f64(args[0]) * 3.14159265358979323846 / 180.0,
+    "to_degrees" => op_to_f64(args[0]) * 180.0 / 3.14159265358979323846,
+    "clamp" => {
+        const v = args[0]
+        const lo = args[1]
+        const hi = args[2]
+        if v < lo { lo } else if v > hi { hi } else { v }
+    },
+    "lerp" => {
+        const a = op_to_f64(args[0])
+        const b = op_to_f64(args[1])
+        const t = op_to_f64(args[2])
+        a + (b - a) * t
+    },
+    "sign" => {
+        const v = args[0]
+        if v > 0 { 1 } else if v < 0 { -1 } else { 0 }
+    },
+    "gcd" => {
+        let a = abs(op_to_i64(args[0]))
+        let b = abs(op_to_i64(args[1]))
+        while b != 0 {
+            const t = b
+            b = a % b
+            a = t
+        }
+        a
+    },
+    "lcm" => {
+        let a = abs(op_to_i64(args[0]))
+        let b = abs(op_to_i64(args[1]))
+        if a == 0 || b == 0 { return 0 }
+        let ga = a
+        let gb = b
+        while gb != 0 {
+            const t = gb
+            gb = ga % gb
+            ga = t
+        }
+        (a / ga) * b
+    },
+    "is_nan" => is_nan(args[0]),
+    "is_infinite" => is_infinite(args[0]),
+    "is_finite" => {
+        const v = args[0]
+        !is_nan(v) && !is_infinite(v)
+    },
+    "approx_eq" => {
+        const a = op_to_f64(args[0])
+        const b = op_to_f64(args[1])
+        const eps = op_to_f64(op_arg(args, 2, 0.000001))
+        abs(a - b) < eps
+    },
+    "remap" => {
+        // remap(value, in_min, in_max, out_min, out_max)
+        const v = op_to_f64(args[0])
+        const in_min = op_to_f64(args[1])
+        const in_max = op_to_f64(args[2])
+        const out_min = op_to_f64(args[3])
+        const out_max = op_to_f64(args[4])
+        out_min + (v - in_min) * (out_max - out_min) / (in_max - in_min)
+    },
+
+    // ── Random (10) ──────────────────────────────────────────────
+
+    "random_int" => random_int(op_to_i64(args[0]), op_to_i64(args[1])),
+    "random_float" => random_float(),
+    "random_bool" => random_bool(),
+    "random_bytes" => random_bytes(op_to_i64(args[0])),
+    "random_range" => random_range(op_to_i64(args[0]), op_to_i64(args[1])),
+    "random_choice" => random_choice(args[0]),
+    "random_shuffle" => random_shuffle(args[0]),
+    "random_sample" => random_sample(args[0], op_to_i64(args[1])),
+    "random_uuid" => random_uuid(),
+    "random_string" => random_string(op_to_i64(args[0])),
+
+    // ── Filesystem (15) ──────────────────────────────────────────
+
+    "fs_read" => fs_read(args[0]),
+    "fs_write" => fs_write(args[0], args[1]),
+    "fs_append" => fs_append(args[0], args[1]),
+    "fs_exists" => fs_exists(args[0]),
+    "fs_remove" => fs_remove(args[0]),
+    "fs_list" => fs_list(args[0]),
+    "fs_mkdir" => fs_mkdir(args[0]),
+    "fs_copy" => fs_copy(args[0], args[1]),
+    "fs_move" => fs_move(args[0], args[1]),
+    "fs_size" => fs_size(args[0]),
+    "fs_is_file" => fs_is_file(args[0]),
+    "fs_is_dir" => fs_is_dir(args[0]),
+    "fs_chmod" => fs_chmod(args[0], args[1]),
+    "fs_symlink" => fs_symlink(args[0], args[1]),
+    "fs_readlink" => fs_readlink(args[0]),
+
+    // ── Environment (7) ──────────────────────────────────────────
+
+    "env_get" => env_get(args[0]),
+    "env_has" => env_has(args[0]),
+    "env_keys" => env_keys(),
+    "os_name" => os_name(),
+    "os_arch" => os_arch(),
+    "process_pid" => process_pid(),
+    "current_dir" => current_dir(),
+
+    // ── Network (10) ─────────────────────────────────────────────
+
+    "http_get" => http_get(args[0]),
+    "http_post" => http_post(args[0], args[1], op_arg(args, 2, {})),
+    "http_put" => http_put(args[0], args[1], op_arg(args, 2, {})),
+    "http_delete" => http_delete(args[0]),
+    "http_request" => http_request(args[0], args[1], op_arg(args, 2, null), op_arg(args, 3, {})),
+    "http_head" => http_head(args[0]),
+    "http_options" => http_options(args[0]),
+    "http_patch" => http_patch(args[0], args[1], op_arg(args, 2, {})),
+    "url_parse" => url_parse(args[0]),
+    "url_join" => url_join(args[0], args[1]),
+
+    // ── TCP (7) ──────────────────────────────────────────────────
+
+    "tcp_connect" => tcp_connect(args[0]),
+    "tcp_write" => tcp_write(args[0], args[1]),
+    "tcp_read" => tcp_read(args[0], op_to_i64(op_arg(args, 1, 4096))),
+    "tcp_close" => tcp_close(args[0]),
+    "tcp_bind" => tcp_bind(args[0]),
+    "tcp_accept" => tcp_accept(args[0]),
+    "tcp_server_close" => tcp_server_close(args[0]),
+
+    // ── UDP (4) ──────────────────────────────────────────────────
+
+    "udp_bind" => udp_bind(args[0]),
+    "udp_send_to" => udp_send_to(args[0], args[1], args[2]),
+    "udp_recv_from" => udp_recv_from(args[0]),
+    "udp_close" => udp_close(args[0]),
+
+    // ── WebSocket (4) ────────────────────────────────────────────
+
+    "ws_connect" => ws_connect(args[0]),
+    "ws_send" => ws_send(args[0], args[1]),
+    "ws_receive" => ws_receive(args[0]),
+    "ws_close" => ws_close(args[0]),
+
+    // ── SSE (3) ──────────────────────────────────────────────────
+
+    "sse_connect" => sse_connect(args[0]),
+    "sse_read_event" => sse_read_event(args[0]),
+    "sse_close" => sse_close(args[0]),
+
+    // ── HTTP Server (4) ──────────────────────────────────────────
+
+    "http_server_start" => http_server_start(args[0]),
+    "http_server_receive" => http_server_receive(args[0]),
+    "http_server_respond" => http_server_respond(args[0], args[1]),
+    "http_server_stop" => http_server_stop(args[0]),
+
+    // ── Certificate (6) ──────────────────────────────────────────
+
+    "cert_generate" => cert_generate(args[0]),
+    "cert_parse" => cert_parse(args[0]),
+    "cert_info" => cert_info(args[0]),
+    "cert_verify" => cert_verify(args[0], args[1]),
+    "key_generate" => key_generate(op_arg(args, 0, "rsa")),
+    "cert_self_signed" => cert_self_signed(args[0], args[1]),
+
+    // ── Path (10) ────────────────────────────────────────────────
+
+    "path_join" => path_join(args[0], args[1]),
+    "path_basename" => path_basename(args[0]),
+    "path_dirname" => path_dirname(args[0]),
+    "path_extension" => path_extension(args[0]),
+    "path_stem" => path_stem(args[0]),
+    "path_is_absolute" => path_is_absolute(args[0]),
+    "path_normalize" => path_normalize(args[0]),
+    "path_split" => path_split(args[0]),
+    "path_with_extension" => path_with_extension(args[0], args[1]),
+    "path_parent" => path_parent(args[0]),
+
+    // ── YAML (6) ─────────────────────────────────────────────────
+
+    "yaml_parse" => yaml_parse(args[0]),
+    "yaml_stringify" => yaml_stringify(args[0]),
+    "yaml_validate" => yaml_validate(args[0]),
+    "yaml_to_json" => yaml_to_json(args[0]),
+    "yaml_from_json" => yaml_from_json(args[0]),
+    "yaml_merge" => yaml_merge(args[0], args[1]),
+
+    // ── XML (2) ──────────────────────────────────────────────────
+
+    "xml_parse" => xml_parse(args[0]),
+    "xml_stringify" => xml_stringify(args[0]),
+
+    // ── CSV (4) ──────────────────────────────────────────────────
+
+    "csv_parse" => csv_parse(args[0]),
+    "csv_stringify" => csv_stringify(args[0]),
+    "csv_headers" => csv_headers(args[0]),
+    "csv_parse_rows" => csv_parse_rows(args[0]),
+
+    // ── TOML (2) ─────────────────────────────────────────────────
+
+    "toml_parse" => toml_parse(args[0]),
+    "toml_stringify" => toml_stringify(args[0]),
+
+    // ── Regex (5) ────────────────────────────────────────────────
+
+    "regex_split" => regex_split(args[0], args[1]),
+    "regex_escape" => regex_escape(args[0]),
+    "regex_test" => regex_test(args[0], args[1]),
+    "regex_captures" => regex_captures(args[0], args[1]),
+    "regex_find_all" => regex_find_all(args[0], args[1]),
+
+    // ── UUID (4) ─────────────────────────────────────────────────
+
+    "uuid_v4" => random_uuid(),
+    "uuid_parse" => uuid_parse(args[0]),
+    "uuid_is_valid" => uuid_is_valid(args[0]),
+    "uuid_nil" => "00000000-0000-0000-0000-000000000000",
+
+    // ── Crypto Extended (4) ──────────────────────────────────────
+
+    "hash_sha512" => hash_sha512(args[0]),
+    "hmac_sha256" => hmac_sha256(args[0], args[1]),
+    "hash_crc32" => hash_crc32(args[0]),
+    "constant_time_eq" => constant_time_eq(args[0], args[1]),
+
+    // ── Compress (6) ─────────────────────────────────────────────
+
+    "compress_zstd" => compress_zstd(args[0]),
+    "decompress_zstd" => decompress_zstd(args[0]),
+    "compress_lz4" => compress_lz4(args[0]),
+    "decompress_lz4" => decompress_lz4(args[0]),
+    "compress_gzip" => compress_gzip(args[0]),
+    "decompress_gzip" => decompress_gzip(args[0]),
+
+    // ── Format (6) ───────────────────────────────────────────────
+
+    "fmt_number" => fmt_number(args[0], op_arg(args, 1, 0)),
+    "fmt_bytes" => fmt_bytes(op_to_i64(args[0])),
+    "fmt_duration" => fmt_duration(args[0]),
+    "fmt_hex" => fmt_hex(args[0]),
+    "fmt_binary" => fmt_binary(args[0]),
+    "fmt_percent" => fmt_percent(op_to_f64(args[0]), op_arg(args, 1, 2)),
+
+    // ── Convert Extended (2) ─────────────────────────────────────
+
+    "parse_int" => parse_int(args[0]),
+    "parse_float" => parse_float(args[0]),
+
+    // ── Time Extended (8) ────────────────────────────────────────
+
+    "duration" => duration(args[0]),
+    "elapsed" => elapsed(args[0]),
+    "time_sleep" => sleep(op_to_i64(args[0])),
+    "add_duration" => add_duration(args[0], args[1]),
+    "sub_duration" => sub_duration(args[0], args[1]),
+    "time_diff" => time_diff(args[0], args[1]),
+    "start_of" => start_of(args[0], args[1]),
+    "end_of" => end_of(args[0], args[1]),
+
+    // ── Stats (12) ───────────────────────────────────────────────
+
+    "stats_mean" => {
+        const arr = args[0]
+        if len(arr) == 0 { return 0.0 }
+        let sum = 0.0
+        for x in arr { sum = sum + op_to_f64(x) }
+        sum / to_float64(len(arr))
+    },
+    "stats_median" => {
+        let arr = args[0].sort()
+        const n = len(arr)
+        if n == 0 { return 0.0 }
+        if n % 2 == 1 {
+            op_to_f64(arr[n / 2])
+        } else {
+            (op_to_f64(arr[n / 2 - 1]) + op_to_f64(arr[n / 2])) / 2.0
+        }
+    },
+    "stats_mode" => {
+        const arr = args[0]
+        let counts = {}
+        for x in arr {
+            const k = to_string(x)
+            if counts.has(k) {
+                counts[k] = counts[k] + 1
+            } else {
+                counts[k] = 1
+            }
+        }
+        let best_key = null
+        let best_count = 0
+        for k in counts.keys() {
+            if counts[k] > best_count {
+                best_count = counts[k]
+                best_key = k
+            }
+        }
+        // Return the original value, not the string key
+        for x in arr {
+            if to_string(x) == best_key { return x }
+        }
+        null
+    },
+    "stats_variance" => {
+        const arr = args[0]
+        const n = len(arr)
+        if n == 0 { return 0.0 }
+        let sum = 0.0
+        for x in arr { sum = sum + op_to_f64(x) }
+        const mean = sum / to_float64(n)
+        let var_sum = 0.0
+        for x in arr {
+            const diff = op_to_f64(x) - mean
+            var_sum = var_sum + diff * diff
+        }
+        var_sum / to_float64(n)
+    },
+    "stats_std_dev" => {
+        const arr = args[0]
+        const n = len(arr)
+        if n == 0 { return 0.0 }
+        let sum = 0.0
+        for x in arr { sum = sum + op_to_f64(x) }
+        const mean = sum / to_float64(n)
+        let var_sum = 0.0
+        for x in arr {
+            const diff = op_to_f64(x) - mean
+            var_sum = var_sum + diff * diff
+        }
+        sqrt(var_sum / to_float64(n))
+    },
+    "stats_min_by" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        if len(arr) == 0 { return null }
+        let best = arr[0]
+        let best_key = fn_val(arr[0])
+        let i = 1
+        while i < len(arr) {
+            const k = fn_val(arr[i])
+            if k < best_key {
+                best = arr[i]
+                best_key = k
+            }
+            i = i + 1
+        }
+        best
+    },
+    "stats_max_by" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        if len(arr) == 0 { return null }
+        let best = arr[0]
+        let best_key = fn_val(arr[0])
+        let i = 1
+        while i < len(arr) {
+            const k = fn_val(arr[i])
+            if k > best_key {
+                best = arr[i]
+                best_key = k
+            }
+            i = i + 1
+        }
+        best
+    },
+    "stats_sum" => {
+        let total = 0
+        for x in args[0] { total = total + x }
+        total
+    },
+    "stats_percentile" => stats_percentile(args[0], op_to_f64(args[1])),
+    "stats_quantile" => stats_quantile(args[0], op_to_f64(args[1])),
+    "stats_covariance" => stats_covariance(args[0], args[1]),
+    "stats_correlation" => stats_correlation(args[0], args[1]),
+
+    // ── Text (10) ────────────────────────────────────────────────
+
+    "text_wrap" => text_wrap(args[0], op_to_i64(args[1])),
+    "text_dedent" => text_dedent(args[0]),
+    "text_indent" => text_indent(args[0], args[1]),
+    "text_pad_left" => pad_start(args[0], op_to_i64(args[1]), op_arg(args, 2, " ")),
+    "text_pad_right" => pad_end(args[0], op_to_i64(args[1]), op_arg(args, 2, " ")),
+    "text_truncate" => {
+        const s = args[0]
+        const max_len = op_to_i64(args[1])
+        const suffix = op_arg(args, 2, "...")
+        if len(s) <= max_len { s }
+        else { s.slice(0, max_len - len(suffix)) + suffix }
+    },
+    "text_slug" => text_slug(args[0]),
+    "text_camel_case" => text_camel_case(args[0]),
+    "text_snake_case" => text_snake_case(args[0]),
+    "text_title_case" => text_title_case(args[0]),
+
+    // ── Encode Extended (4) ──────────────────────────────────────
+
+    "html_escape" => html_escape(args[0]),
+    "html_unescape" => html_unescape(args[0]),
+    "base32_encode" => base32_encode(args[0]),
+    "base32_decode" => base32_decode(args[0]),
+
+    // ── Reflect (8) ──────────────────────────────────────────────
+
+    "reflect_type_of" => typeof(args[0]),
+    "reflect_type_name" => {
+        const v = args[0]
+        const t = typeof(v)
+        if t == "map" && v.has("__struct") { v["__struct"] }
+        else if t == "map" && v.has("__enum") { v["__enum"] }
+        else { t }
+    },
+    "reflect_is_type" => typeof(args[0]) == args[1],
+    "reflect_fields" => {
+        const v = args[0]
+        if typeof(v) == "map" {
+            v.keys().filter(k => !k.starts_with("__"))
+        } else {
+            []
+        }
+    },
+    "reflect_has_field" => {
+        const v = args[0]
+        const field = to_string(args[1])
+        typeof(v) == "map" && v.has(field)
+    },
+    "reflect_callable" => {
+        const v = args[0]
+        typeof(v) == "map" && v.has("__lambda")
+    },
+    "reflect_arity" => {
+        const v = args[0]
+        if typeof(v) == "map" && v.has("params") {
+            len(v["params"])
+        } else {
+            0
+        }
+    },
+    "reflect_inspect" => reflect_inspect(args[0]),
+
+    // ── Collections (8) ──────────────────────────────────────────
+
+    "set_from" => {
+        const arr = args[0]
+        let seen = {}
+        let result = []
+        for item in arr {
+            const k = to_string(item)
+            if !seen.has(k) {
+                seen[k] = true
+                result.push(item)
+            }
+        }
+        result
+    },
+    "set_union" => {
+        const a = args[0]
+        const b = args[1]
+        let seen = {}
+        let result = []
+        for item in a {
+            const k = to_string(item)
+            if !seen.has(k) {
+                seen[k] = true
+                result.push(item)
+            }
+        }
+        for item in b {
+            const k = to_string(item)
+            if !seen.has(k) {
+                seen[k] = true
+                result.push(item)
+            }
+        }
+        result
+    },
+    "set_intersection" => {
+        const a = args[0]
+        const b = args[1]
+        let b_set = {}
+        for item in b { b_set[to_string(item)] = true }
+        let result = []
+        for item in a {
+            if b_set.has(to_string(item)) {
+                result.push(item)
+            }
+        }
+        result
+    },
+    "set_difference" => {
+        const a = args[0]
+        const b = args[1]
+        let b_set = {}
+        for item in b { b_set[to_string(item)] = true }
+        let result = []
+        for item in a {
+            if !b_set.has(to_string(item)) {
+                result.push(item)
+            }
+        }
+        result
+    },
+    "set_symmetric_difference" => {
+        const a = args[0]
+        const b = args[1]
+        let a_set = {}
+        let b_set = {}
+        for item in a { a_set[to_string(item)] = true }
+        for item in b { b_set[to_string(item)] = true }
+        let result = []
+        for item in a {
+            if !b_set.has(to_string(item)) { result.push(item) }
+        }
+        for item in b {
+            if !a_set.has(to_string(item)) { result.push(item) }
+        }
+        result
+    },
+    "counter" => {
+        let counts = {}
+        for item in args[0] {
+            const k = to_string(item)
+            if counts.has(k) { counts[k] = counts[k] + 1 }
+            else { counts[k] = 1 }
+        }
+        counts
+    },
+    "most_common" => {
+        const arr = args[0]
+        const n = op_to_i64(op_arg(args, 1, 1))
+        let counts = {}
+        for item in arr {
+            const k = to_string(item)
+            if counts.has(k) { counts[k] = counts[k] + 1 }
+            else { counts[k] = 1 }
+        }
+        let entries = []
+        for k in counts.keys() {
+            entries.push([k, counts[k]])
+        }
+        entries = entries.sort()
+        entries = entries.reverse()
+        entries.slice(0, n)
+    },
+    "ordered_map" => {
+        // Return args[0] as-is (maps are already ordered in MAGI)
+        args[0]
+    },
+
+    // ── Sort (8) ─────────────────────────────────────────────────
+
+    "sort_asc" => args[0].sort(),
+    "sort_desc" => args[0].sort().reverse(),
+    "sort_by" => {
+        const arr = args[0]
+        const fn_val = args[1]
+        let decorated = arr.map(x => [fn_val(x), x])
+        decorated = decorated.sort()
+        decorated.map(pair => pair[1])
+    },
+    "sort_by_key" => {
+        const arr = args[0]
+        const key = args[1]
+        let decorated = arr.map(x => [x[key], x])
+        decorated = decorated.sort()
+        decorated.map(pair => pair[1])
+    },
+    "stable_sort" => args[0].sort(),
+    "is_sorted" => {
+        const arr = args[0]
+        let i = 1
+        while i < len(arr) {
+            if arr[i] < arr[i - 1] { return false }
+            i = i + 1
+        }
+        true
+    },
+    "binary_search" => {
+        const arr = args[0]
+        const target = args[1]
+        let lo = 0
+        let hi = len(arr) - 1
+        while lo <= hi {
+            const mid = (lo + hi) / 2
+            if arr[mid] == target { return mid }
+            if arr[mid] < target { lo = mid + 1 }
+            else { hi = mid - 1 }
+        }
+        -1
+    },
+    "sort_reverse" => args[0].reverse(),
+
+    // ── Subprocess (3) ───────────────────────────────────────────
+
+    "exec" => exec_cmd(args[0], op_arg(args, 1, [])),
+    "exec_status" => exec_status(args[0], op_arg(args, 1, [])),
+    "exec_output" => exec_output(args[0], op_arg(args, 1, [])),
+
+    // ── Sync (6) ─────────────────────────────────────────────────
+
+    "mutex_new" => mutex_new(),
+    "mutex_lock" => mutex_lock(args[0]),
+    "mutex_unlock" => mutex_unlock(args[0]),
+    "waitgroup_new" => waitgroup_new(),
+    "waitgroup_done" => waitgroup_done(args[0]),
+    "waitgroup_wait" => waitgroup_wait(args[0]),
+
+    // ── Concurrency (1) ──────────────────────────────────────────
+
+    "await_all" => await_all(args[0]),
+
+    // ── Log (4) ──────────────────────────────────────────────────
+
+    "log_info" => {
+        println(f"[INFO] {to_string(args[0])}")
+        null
+    },
+    "log_warn" => {
+        println(f"[WARN] {to_string(args[0])}")
+        null
+    },
+    "log_error" => {
+        println(f"[ERROR] {to_string(args[0])}")
+        null
+    },
+    "log_debug" => {
+        println(f"[DEBUG] {to_string(args[0])}")
+        null
+    },
+
+    // ── Itertools (5) ────────────────────────────────────────────
+
+    "iter_chain" => {
+        let result = []
+        for arr in args {
+            if typeof(arr) == "array" {
+                result = result.concat(arr)
+            }
+        }
+        result
+    },
+    "iter_cycle" => {
+        // iter_cycle(arr, n) - repeat array n times
+        const arr = args[0]
+        const n = op_to_i64(args[1])
+        let result = []
+        let i = 0
+        while i < n {
+            result = result.concat(arr)
+            i = i + 1
+        }
+        result
+    },
+    "iter_repeat" => {
+        // iter_repeat(val, n) - create array of val repeated n times
+        const val = args[0]
+        const n = op_to_i64(args[1])
+        let result = []
+        let i = 0
+        while i < n {
+            result.push(val)
+            i = i + 1
+        }
+        result
+    },
+    "iter_product" => {
+        // Cartesian product of two arrays
+        const a = args[0]
+        const b = args[1]
+        let result = []
+        for x in a {
+            for y in b {
+                result.push([x, y])
+            }
+        }
+        result
+    },
+    "iter_pairwise" => {
+        // Adjacent pairs
+        const arr = args[0]
+        let result = []
+        let i = 0
+        while i + 1 < len(arr) {
+            result.push([arr[i], arr[i + 1]])
+            i = i + 1
+        }
+        result
+    },
+
+    // ── Template (1) ─────────────────────────────────────────────
+
+    "template_render" => template_render(args[0], args[1]),
+
+    // ── Flag (2) ─────────────────────────────────────────────────
+
+    "flag_parse" => flag_parse(args[0]),
+    "flag_args" => flag_args(),
+
+    // ── Additional Math (7) ──────────────────────────────────────
+
+    "gamma" => gamma(op_to_f64(args[0])),
+    "lgamma" => lgamma(op_to_f64(args[0])),
+    "erf" => erf(op_to_f64(args[0])),
+    "erfc" => erfc(op_to_f64(args[0])),
+    "expm1" => expm1(op_to_f64(args[0])),
+    "nextafter" => nextafter(op_to_f64(args[0]), op_to_f64(args[1])),
+    "signbit" => signbit(op_to_f64(args[0])),
+
+    // ── Additional OS (3) ────────────────────────────────────────
+
+    "chown" => chown(args[0], op_to_i64(args[1]), op_to_i64(args[2])),
+    "hardlink" => hardlink(args[0], args[1]),
+    "pipe" => pipe(),
+
+    // ── Additional strconv (2) ───────────────────────────────────
+
+    "format_float" => format_float(op_to_f64(args[0]), op_arg(args, 1, "g"), op_arg(args, 2, -1)),
+    "parse_uint" => parse_uint(args[0], op_arg(args, 1, 10)),
+
+    // ── Additional CLI (3) ───────────────────────────────────────
+
+    "cli_fix" => cli_fix(args[0]),
+    "cli_clean" => cli_clean(args[0]),
+    "cli_tree" => cli_tree(args[0]),
+
+    // ── Platform: Terminal (4) ───────────────────────────────────
+
+    "raw_mode_enable" => raw_mode_enable(),
+    "raw_mode_disable" => raw_mode_disable(),
+    "read_byte" => read_byte(),
+    "read_byte_timeout" => read_byte_timeout(op_to_i64(args[0])),
+
+    // ── Platform: SDL2 Graphics (11) ─────────────────────────────
+
+    "sdl_init" => sdl_init(args[0], op_to_i64(args[1]), op_to_i64(args[2])),
+    "sdl_set_color" => sdl_set_color(op_to_i64(args[0]), op_to_i64(args[1]), op_to_i64(args[2]), op_to_i64(args[3])),
+    "sdl_clear" => sdl_clear(),
+    "sdl_present" => sdl_present(),
+    "sdl_draw_pixel" => sdl_draw_pixel(op_to_i64(args[0]), op_to_i64(args[1])),
+    "sdl_draw_line" => sdl_draw_line(op_to_i64(args[0]), op_to_i64(args[1]), op_to_i64(args[2]), op_to_i64(args[3])),
+    "sdl_fill_rect" => sdl_fill_rect(op_to_i64(args[0]), op_to_i64(args[1]), op_to_i64(args[2]), op_to_i64(args[3])),
+    "sdl_poll_event" => sdl_poll_event(),
+    "sdl_delay" => sdl_delay(op_to_i64(args[0])),
+    "sdl_ticks" => sdl_ticks(),
+    "sdl_destroy" => sdl_destroy(),
+
+    // ── Platform: Audio (4) ──────────────────────────────────────
+
+    "audio_stream_new" => audio_stream_new(op_to_i64(args[0]), op_to_i64(args[1])),
+    "audio_write_samples" => audio_write_samples(args[0], args[1]),
+    "audio_drain" => audio_drain(args[0]),
+    "audio_close" => audio_close(args[0]),
+
+    // ── Platform: WebGPU (12) ────────────────────────────────────
+
+    "gpu_init" => gpu_init(args[0]),
+    "gpu_create_buffer" => gpu_create_buffer(args[0], args[1]),
+    "gpu_create_shader" => gpu_create_shader(args[0]),
+    "gpu_create_pipeline" => gpu_create_pipeline(args[0]),
+    "gpu_begin_render_pass" => gpu_begin_render_pass(args[0]),
+    "gpu_draw" => gpu_draw(args[0], op_to_i64(args[1])),
+    "gpu_end_render_pass" => gpu_end_render_pass(args[0]),
+    "gpu_submit" => gpu_submit(args[0]),
+    "gpu_present" => gpu_present(args[0]),
+    "gpu_write_buffer" => gpu_write_buffer(args[0], args[1]),
+    "gpu_create_texture" => gpu_create_texture(args[0]),
+    "gpu_destroy" => gpu_destroy(args[0]),
+
+    // ── Fallback ─────────────────────────────────────────────────
+
+    _ => panic(f"unknown operation: {op_name}"),
+
+    }
+}

@@ -1,0 +1,291 @@
+// Tests for self/ops.magi — operation dispatch
+//
+// Covers all major operation categories with at least 50 test cases.
+
+let pass_count = 0
+let fail_count = 0
+
+func check(name, got, expected) {
+    if got == expected {
+        pass_count = pass_count + 1
+    } else {
+        println(f"FAIL: {name} — got {got}, expected {expected}")
+        fail_count = fail_count + 1
+    }
+}
+
+func check_approx(name, got, expected, eps) {
+    if abs(got - expected) < eps {
+        pass_count = pass_count + 1
+    } else {
+        println(f"FAIL: {name} — got {got}, expected {expected}")
+        fail_count = fail_count + 1
+    }
+}
+
+// ── Arithmetic ───────────────────────────────────────────────────
+
+check("add int", eval_operation("add", [3, 4]), 7)
+check("add float", eval_operation("add", [1.5, 2.5]), 4.0)
+check("subtract", eval_operation("subtract", [10, 3]), 7)
+check("multiply", eval_operation("multiply", [6, 7]), 42)
+check("divide", eval_operation("divide", [15, 3]), 5)
+check("modulo", eval_operation("modulo", [10, 3]), 1)
+check("negate int", eval_operation("negate", [5]), -5)
+check("abs neg", eval_operation("abs", [-7]), 7)
+check("abs pos", eval_operation("abs", [3]), 3)
+check("min", eval_operation("min", [3, 5]), 3)
+check("max", eval_operation("max", [3, 5]), 5)
+check("round", eval_operation("round", [3.7]), 4.0)
+check("floor", eval_operation("floor", [3.9]), 3.0)
+check("ceil", eval_operation("ceil", [3.1]), 4.0)
+
+// ── Comparison ───────────────────────────────────────────────────
+
+check("equal true", eval_operation("equal", [5, 5]), true)
+check("equal false", eval_operation("equal", [5, 6]), false)
+check("not_equal", eval_operation("not_equal", [5, 6]), true)
+check("greater", eval_operation("greater", [5, 3]), true)
+check("less", eval_operation("less", [3, 5]), true)
+check("greater_eq", eval_operation("greater_eq", [5, 5]), true)
+check("less_eq", eval_operation("less_eq", [3, 5]), true)
+
+// ── Logic ────────────────────────────────────────────────────────
+
+check("and true", eval_operation("and", [true, true]), true)
+check("and false", eval_operation("and", [true, false]), false)
+check("or", eval_operation("or", [false, true]), true)
+check("not", eval_operation("not", [false]), true)
+check("xor", eval_operation("xor", [true, false]), true)
+check("xor same", eval_operation("xor", [true, true]), false)
+
+// ── Bitwise ──────────────────────────────────────────────────────
+
+check("bit_and", eval_operation("bit_and", [0b1100, 0b1010]), 0b1000)
+check("bit_xor", eval_operation("bit_xor", [0b1100, 0b1010]), 0b0110)
+check("bit_shift_left", eval_operation("bit_shift_left", [1, 3]), 8)
+check("bit_shift_right", eval_operation("bit_shift_right", [8, 3]), 1)
+
+// ── String ───────────────────────────────────────────────────────
+
+check("concat", eval_operation("concat", ["hello", " ", "world"]), "hello world")
+check("split", eval_operation("split", ["a,b,c", ","]), ["a", "b", "c"])
+check("substring", eval_operation("substring", ["hello world", 0, 5]), "hello")
+check("length", eval_operation("length", ["hello"]), 5)
+check("replace", eval_operation("replace", ["hello world", "world", "magi"]), "hello magi")
+check("to_upper", eval_operation("to_upper", ["hello"]), "HELLO")
+check("to_lower", eval_operation("to_lower", ["HELLO"]), "hello")
+check("trim", eval_operation("trim", ["  hello  "]), "hello")
+check("trim_start", eval_operation("trim_start", ["  hello  "]), "hello  ")
+check("trim_end", eval_operation("trim_end", ["  hello  "]), "  hello")
+check("contains", eval_operation("contains", ["hello world", "world"]), true)
+check("starts_with", eval_operation("starts_with", ["hello world", "hello"]), true)
+check("ends_with", eval_operation("ends_with", ["hello world", "world"]), true)
+check("char_at", eval_operation("char_at", ["hello", 1]), "e")
+check("string_reverse", eval_operation("string_reverse", ["abc"]), "cba")
+check("string_lines", eval_operation("string_lines", ["a\nb\nc"]), ["a", "b", "c"])
+check("string_words", eval_operation("string_words", ["hello  world"]), ["hello", "world"])
+check("string_count", eval_operation("string_count", ["abcabc", "abc"]), 2)
+check("string_chars", eval_operation("string_chars", ["hi"]), ["h", "i"])
+check("string_join", eval_operation("string_join", [["a", "b", "c"], ","]), "a,b,c")
+
+// ── Type Conversion ──────────────────────────────────────────────
+
+check("to_string int", eval_operation("to_string", [42]), "42")
+check("to_int64 str", eval_operation("to_int64", ["42"]), 42)
+check("to_float64 str", eval_operation("to_float64", ["3.14"]), 3.14)
+check("to_bool true", eval_operation("to_bool", [1]), true)
+check("to_bool false", eval_operation("to_bool", [0]), false)
+check("to_bool null", eval_operation("to_bool", [null]), false)
+
+// ── Array ────────────────────────────────────────────────────────
+
+check("array_get", eval_operation("array_get", [[10, 20, 30], 1]), 20)
+check("array_get oob", eval_operation("array_get", [[10, 20], 5]), null)
+check("array_length", eval_operation("array_length", [[1, 2, 3]]), 3)
+check("array_slice", eval_operation("array_slice", [[1, 2, 3, 4, 5], 1, 3]), [2, 3])
+check("array_concat", eval_operation("array_concat", [[1, 2], [3, 4]]), [1, 2, 3, 4])
+check("array_contains", eval_operation("array_contains", [[1, 2, 3], 2]), true)
+check("array_contains miss", eval_operation("array_contains", [[1, 2, 3], 5]), false)
+check("array_reverse", eval_operation("array_reverse", [[1, 2, 3]]), [3, 2, 1])
+check("array_sort", eval_operation("array_sort", [[3, 1, 2]]), [1, 2, 3])
+check("array_join", eval_operation("array_join", [[1, 2, 3], ","]), "1,2,3")
+check("array_filter_nulls", eval_operation("array_filter_nulls", [[1, null, 2, null, 3]]), [1, 2, 3])
+check("array_insert", eval_operation("array_insert", [[1, 3], 1, 2]), [1, 2, 3])
+check("array_remove", eval_operation("array_remove", [[1, 2, 3], 1]), [1, 3])
+check("array_flatten", eval_operation("array_flatten", [[[1, 2], [3, 4]]]), [1, 2, 3, 4])
+
+// ── Array Higher-Order ───────────────────────────────────────────
+
+check("array_find", eval_operation("array_find", [[1, 2, 3, 4], x => x > 2]), 3)
+check("array_find_index", eval_operation("array_find_index", [[1, 2, 3, 4], x => x > 2]), 2)
+check("array_every", eval_operation("array_every", [[2, 4, 6], x => x % 2 == 0]), true)
+check("array_every false", eval_operation("array_every", [[2, 3, 6], x => x % 2 == 0]), false)
+check("array_some", eval_operation("array_some", [[1, 3, 4], x => x % 2 == 0]), true)
+check("array_zip", eval_operation("array_zip", [[1, 2, 3], ["a", "b", "c"]]), [[1, "a"], [2, "b"], [3, "c"]])
+check("array_enumerate", eval_operation("array_enumerate", [["a", "b"]]), [[0, "a"], [1, "b"]])
+check("array_take", eval_operation("array_take", [[1, 2, 3, 4, 5], 3]), [1, 2, 3])
+check("array_skip", eval_operation("array_skip", [[1, 2, 3, 4, 5], 2]), [3, 4, 5])
+check("array_unique", eval_operation("array_unique", [[1, 2, 2, 3, 3, 3]]), [1, 2, 3])
+check("array_chunk", eval_operation("array_chunk", [[1, 2, 3, 4, 5], 2]), [[1, 2], [3, 4], [5]])
+check("array_window", eval_operation("array_window", [[1, 2, 3, 4], 2]), [[1, 2], [2, 3], [3, 4]])
+
+// ── Map ──────────────────────────────────────────────────────────
+
+check("map_get", eval_operation("map_get", [{"a": 1, "b": 2}, "a"]), 1)
+check("map_get default", eval_operation("map_get", [{"a": 1}, "z", 99]), 99)
+check("map_has true", eval_operation("map_has", [{"a": 1}, "a"]), true)
+check("map_has false", eval_operation("map_has", [{"a": 1}, "z"]), false)
+check("map_keys", eval_operation("map_keys", [{"x": 1, "y": 2}]), ["x", "y"])
+check("map_size", eval_operation("map_size", [{"a": 1, "b": 2}]), 2)
+check("map_from_entries", eval_operation("map_from_entries", [[["a", 1], ["b", 2]]]), {"a": 1, "b": 2})
+
+// ── Errors ───────────────────────────────────────────────────────
+
+const err1 = eval_operation("error_new", ["oops"])
+check("error_new", err1["message"], "oops")
+const err2 = eval_operation("error_wrap", ["wrapper", err1])
+check("error_wrap", err2["message"], "wrapper")
+check("error_unwrap", eval_operation("error_unwrap", [err2])["message"], "oops")
+check("error_is", eval_operation("error_is", [err1, "oops"]), true)
+check("error_chain", eval_operation("error_chain", [err2]), ["wrapper", "oops"])
+
+// ── Type Checking ────────────────────────────────────────────────
+
+check("is_null true", eval_operation("is_null", [null]), true)
+check("is_null false", eval_operation("is_null", [0]), false)
+check("is_string", eval_operation("is_string", ["hi"]), true)
+check("is_number int", eval_operation("is_number", [42]), true)
+check("is_number float", eval_operation("is_number", [3.14]), true)
+check("is_array", eval_operation("is_array", [[1, 2]]), true)
+check("is_map", eval_operation("is_map", [{"a": 1}]), true)
+check("is_bool", eval_operation("is_bool", [true]), true)
+check("typeof", eval_operation("typeof", [42]), "int64")
+
+// ── Math Extended ────────────────────────────────────────────────
+
+check_approx("sin 0", eval_operation("sin", [0.0]), 0.0, 0.0001)
+check_approx("cos 0", eval_operation("cos", [0.0]), 1.0, 0.0001)
+check_approx("tan 0", eval_operation("tan", [0.0]), 0.0, 0.0001)
+check_approx("exp 0", eval_operation("exp", [0.0]), 1.0, 0.0001)
+check_approx("ln e", eval_operation("ln", [2.718281828]), 1.0, 0.001)
+check_approx("log2 8", eval_operation("log2", [8.0]), 3.0, 0.0001)
+check_approx("log10 100", eval_operation("log10", [100.0]), 2.0, 0.0001)
+check("sign pos", eval_operation("sign", [42]), 1)
+check("sign neg", eval_operation("sign", [-5]), -1)
+check("sign zero", eval_operation("sign", [0]), 0)
+check("clamp low", eval_operation("clamp", [1, 5, 10]), 5)
+check("clamp mid", eval_operation("clamp", [7, 5, 10]), 7)
+check("clamp high", eval_operation("clamp", [15, 5, 10]), 10)
+check_approx("lerp", eval_operation("lerp", [0.0, 10.0, 0.5]), 5.0, 0.0001)
+check("gcd", eval_operation("gcd", [12, 8]), 4)
+check("lcm", eval_operation("lcm", [4, 6]), 12)
+check("approx_eq", eval_operation("approx_eq", [1.0000001, 1.0]), true)
+
+// ── Math Aggregate ───────────────────────────────────────────────
+
+check("math_sum", eval_operation("math_sum", [[1, 2, 3, 4]]), 10)
+check("math_product", eval_operation("math_product", [[1, 2, 3, 4]]), 24)
+check_approx("math_average", eval_operation("math_average", [[1, 2, 3, 4]]), 2.5, 0.0001)
+check("math_min_of", eval_operation("math_min_of", [[3, 1, 4, 1, 5]]), 1)
+check("math_max_of", eval_operation("math_max_of", [[3, 1, 4, 1, 5]]), 5)
+check("math_count", eval_operation("math_count", [[1, 2, 3]]), 3)
+
+// ── Stats ────────────────────────────────────────────────────────
+
+check_approx("stats_mean", eval_operation("stats_mean", [[1, 2, 3, 4, 5]]), 3.0, 0.0001)
+check_approx("stats_median odd", eval_operation("stats_median", [[1, 3, 2]]), 2.0, 0.0001)
+check_approx("stats_median even", eval_operation("stats_median", [[1, 2, 3, 4]]), 2.5, 0.0001)
+check("stats_mode", eval_operation("stats_mode", [[1, 2, 2, 3]]), 2)
+check("stats_sum", eval_operation("stats_sum", [[10, 20, 30]]), 60)
+
+// ── Iteration ────────────────────────────────────────────────────
+
+check("range", eval_operation("range", [0, 5]), [0, 1, 2, 3, 4])
+check("range offset", eval_operation("range", [3, 6]), [3, 4, 5])
+
+// ── JSON ─────────────────────────────────────────────────────────
+
+check("json_type null", eval_operation("json_type", [null]), "null")
+check("json_type int", eval_operation("json_type", [42]), "number")
+check("json_type string", eval_operation("json_type", ["hi"]), "string")
+check("json_type array", eval_operation("json_type", [[1]]), "array")
+check("json_type map", eval_operation("json_type", [{"a": 1}]), "object")
+check("json_type bool", eval_operation("json_type", [true]), "boolean")
+check("json_get", eval_operation("json_get", [{"a": {"b": 42}}, "a.b"]), 42)
+
+// ── Control Flow ─────────────────────────────────────────────────
+
+check("if_else true", eval_operation("if_else", [true, "yes", "no"]), "yes")
+check("if_else false", eval_operation("if_else", [false, "yes", "no"]), "no")
+check("coalesce non-null", eval_operation("coalesce", [42, 99]), 42)
+check("coalesce null", eval_operation("coalesce", [null, 99]), 99)
+check("default val", eval_operation("default", [null, 42]), 42)
+check("default non-null", eval_operation("default", [7, 42]), 7)
+
+// ── Collections ──────────────────────────────────────────────────
+
+check("set_from", eval_operation("set_from", [[1, 2, 2, 3, 3]]), [1, 2, 3])
+check("set_union", eval_operation("set_union", [[1, 2, 3], [2, 3, 4]]), [1, 2, 3, 4])
+check("set_intersection", eval_operation("set_intersection", [[1, 2, 3], [2, 3, 4]]), [2, 3])
+check("set_difference", eval_operation("set_difference", [[1, 2, 3], [2, 3, 4]]), [1])
+check("counter", eval_operation("counter", [["a", "b", "a", "c", "a"]]), {"a": 3, "b": 1, "c": 1})
+
+// ── Sort ─────────────────────────────────────────────────────────
+
+check("sort_asc", eval_operation("sort_asc", [[3, 1, 2]]), [1, 2, 3])
+check("sort_desc", eval_operation("sort_desc", [[3, 1, 2]]), [3, 2, 1])
+check("is_sorted true", eval_operation("is_sorted", [[1, 2, 3]]), true)
+check("is_sorted false", eval_operation("is_sorted", [[3, 1, 2]]), false)
+check("binary_search found", eval_operation("binary_search", [[1, 2, 3, 4, 5], 3]), 2)
+check("binary_search miss", eval_operation("binary_search", [[1, 2, 3, 4, 5], 6]), -1)
+check("sort_reverse", eval_operation("sort_reverse", [[1, 2, 3]]), [3, 2, 1])
+
+// ── Itertools ────────────────────────────────────────────────────
+
+check("iter_chain", eval_operation("iter_chain", [[1, 2], [3, 4]]), [1, 2, 3, 4])
+check("iter_repeat", eval_operation("iter_repeat", [42, 3]), [42, 42, 42])
+check("iter_cycle", eval_operation("iter_cycle", [[1, 2], 3]), [1, 2, 1, 2, 1, 2])
+check("iter_product", eval_operation("iter_product", [[1, 2], ["a", "b"]]), [[1, "a"], [1, "b"], [2, "a"], [2, "b"]])
+check("iter_pairwise", eval_operation("iter_pairwise", [[1, 2, 3, 4]]), [[1, 2], [2, 3], [3, 4]])
+
+// ── Reflect ──────────────────────────────────────────────────────
+
+check("reflect_type_of", eval_operation("reflect_type_of", [42]), "int64")
+check("reflect_is_type", eval_operation("reflect_is_type", ["hello", "string"]), true)
+check("reflect_has_field", eval_operation("reflect_has_field", [{"x": 1}, "x"]), true)
+check("reflect_has_field miss", eval_operation("reflect_has_field", [{"x": 1}, "y"]), false)
+
+// ── Text ─────────────────────────────────────────────────────────
+
+check("text_truncate short", eval_operation("text_truncate", ["hi", 10]), "hi")
+check("text_truncate long", eval_operation("text_truncate", ["hello world", 8, "..."]), "hello...")
+
+// ── Log ──────────────────────────────────────────────────────────
+
+check("log_info returns null", eval_operation("log_info", ["test"]), null)
+
+// ── UUID ─────────────────────────────────────────────────────────
+
+check("uuid_nil", eval_operation("uuid_nil", []), "00000000-0000-0000-0000-000000000000")
+
+// ── Path (delegation) ────────────────────────────────────────────
+
+check("path_join", eval_operation("path_join", ["/home", "user"]), "/home/user")
+check("path_basename", eval_operation("path_basename", ["/home/user/file.txt"]), "file.txt")
+check("path_dirname", eval_operation("path_dirname", ["/home/user/file.txt"]), "/home/user")
+check("path_extension", eval_operation("path_extension", ["file.txt"]), "txt")
+check("path_stem", eval_operation("path_stem", ["file.txt"]), "file")
+check("path_is_absolute true", eval_operation("path_is_absolute", ["/home"]), true)
+check("path_is_absolute false", eval_operation("path_is_absolute", ["home"]), false)
+
+// ── Remap ────────────────────────────────────────────────────────
+
+check_approx("remap", eval_operation("remap", [5.0, 0.0, 10.0, 0.0, 100.0]), 50.0, 0.001)
+
+// ── Summary ──────────────────────────────────────────────────────
+
+println(f"\nops.magi tests: {pass_count} passed, {fail_count} failed, {pass_count + fail_count} total")
+if fail_count > 0 {
+    panic(f"{fail_count} tests failed")
+}
