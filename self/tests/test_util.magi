@@ -1,0 +1,928 @@
+// Tests for self/util.magi
+// Run: cat self/util.magi self/tests/test_util.magi | magi run -
+
+let test_count = 0
+let pass_count = 0
+
+func check(name, condition) {
+    test_count = test_count + 1
+    if condition {
+        pass_count = pass_count + 1
+    } else {
+        println(f"FAIL: {name}")
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 1. Encoding Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_hex_encode() {
+    check("hex_encode empty", hex_encode("") == "")
+    check("hex_encode hello", hex_encode("hello") == "68656c6c6f")
+    check("hex_encode_upper", hex_encode_upper("AB") == "4142")
+    println("PASS: hex_encode")
+}
+
+func test_hex_decode() {
+    check("hex_decode hello", hex_decode("68656c6c6f") == "hello")
+    check("hex_decode empty", hex_decode("") == "")
+    check("hex_decode uppercase", hex_decode("4142") == "AB")
+    check("hex_decode odd error", typeof(hex_decode("0")) == "map")
+    println("PASS: hex_decode")
+}
+
+func test_base64_encode() {
+    check("base64_encode empty", base64_encode("") == "")
+    check("base64_encode hello", base64_encode("hello") == "aGVsbG8=")
+    check("base64_encode a", base64_encode("a") == "YQ==")
+    check("base64_encode ab", base64_encode("ab") == "YWI=")
+    check("base64_encode abc", base64_encode("abc") == "YWJj")
+    println("PASS: base64_encode")
+}
+
+func test_base64_decode() {
+    check("base64_decode hello", base64_decode("aGVsbG8=") == "hello")
+    check("base64_decode empty", base64_decode("") == "")
+    check("base64_decode no padding", base64_decode("aGVsbG8") == "hello")
+    check("base64_decode a", base64_decode("YQ==") == "a")
+    check("base64_decode abc", base64_decode("YWJj") == "abc")
+    println("PASS: base64_decode")
+}
+
+func test_base32_encode() {
+    check("base32_encode empty", base32_encode("") == "")
+    check("base32_encode hello", base32_encode("hello") == "NBSWY3DP")
+    println("PASS: base32_encode")
+}
+
+func test_base32_decode() {
+    check("base32_decode hello", base32_decode("NBSWY3DP") == "hello")
+    check("base32_decode empty", base32_decode("") == "")
+    println("PASS: base32_decode")
+}
+
+func test_url_encode_decode() {
+    check("url_encode spaces", url_encode("hello world") == "hello%20world")
+    check("url_encode special", url_encode("a+b=c").contains("%2B"))
+    check("url_decode spaces", url_decode("hello%20world") == "hello world")
+    check("url_decode plus", url_decode("hello+world") == "hello world")
+    println("PASS: url_encode/decode")
+}
+
+func test_html_escape_unescape() {
+    check("html_escape basic", html_escape("<b>foo & bar</b>") == "&lt;b&gt;foo &amp; bar&lt;/b&gt;")
+    check("html_unescape basic", html_unescape("&lt;b&gt;foo &amp; bar&lt;/b&gt;") == "<b>foo & bar</b>")
+    check("html_escape quotes", html_escape("\"hello\"").contains("&quot;"))
+    println("PASS: html_escape/unescape")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 2. String Algorithm Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_levenshtein() {
+    check("levenshtein same", levenshtein("hello", "hello") == 0)
+    check("levenshtein empty a", levenshtein("", "abc") == 3)
+    check("levenshtein empty b", levenshtein("abc", "") == 3)
+    check("levenshtein both empty", levenshtein("", "") == 0)
+    check("levenshtein cat/hat", levenshtein("cat", "hat") == 1)
+    check("levenshtein kitten/sitting", levenshtein("kitten", "sitting") == 3)
+    println("PASS: levenshtein")
+}
+
+func test_slugify() {
+    check("slugify basic", slugify("Hello World!") == "hello-world")
+    check("slugify spaces", slugify("  foo  bar  ") == "foo-bar")
+    check("slugify version", slugify("MAGI v1.0") == "magi-v1-0")
+    println("PASS: slugify")
+}
+
+func test_case_conversion() {
+    check("to_snake_case camel", to_snake_case("helloWorld") == "hello_world")
+    check("to_snake_case pascal", to_snake_case("HelloWorld") == "hello_world")
+    check("to_snake_case kebab", to_snake_case("hello-world") == "hello_world")
+    check("to_camel_case", to_camel_case("hello_world") == "helloWorld")
+    check("to_camel_case kebab", to_camel_case("foo-bar-baz") == "fooBarBaz")
+    check("to_pascal_case", to_pascal_case("hello_world") == "HelloWorld")
+    check("to_kebab_case", to_kebab_case("helloWorld") == "hello-world")
+    check("to_screaming_snake", to_screaming_snake_case("helloWorld") == "HELLO_WORLD")
+    check("to_title_case", to_title_case("hello_world") == "Hello World")
+    println("PASS: case_conversion")
+}
+
+func test_padding() {
+    check("pad_left", pad_left("42", 5, "0") == "00042")
+    check("pad_right", pad_right("hi", 5, ".") == "hi...")
+    check("pad_center", pad_center("hi", 6, "-") == "--hi--")
+    check("pad_center odd", len(pad_center("hi", 7, "-")) == 7)
+    println("PASS: padding")
+}
+
+func test_word_wrap() {
+    check("word_wrap short", word_wrap("hello world", 80) == "hello world")
+    check("word_wrap break", word_wrap("hello world foo bar", 11) == "hello world\nfoo bar")
+    println("PASS: word_wrap")
+}
+
+func test_truncate() {
+    check("truncate no-op", truncate("hello", 10) == "hello")
+    check("truncate cut", truncate("hello world", 8) == "hello...")
+    check("truncate exact", truncate("hello", 5) == "hello")
+    println("PASS: truncate")
+}
+
+func test_indent_dedent() {
+    check("indent basic", indent("hello\nworld", "  ") == "  hello\n  world")
+    check("dedent basic", dedent("  hello\n  world") == "hello\nworld")
+    check("dedent uneven", dedent("    hello\n  world") == "  hello\nworld")
+    println("PASS: indent/dedent")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 3. JSON Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_json_parse() {
+    const null_val = json_parse("null")
+    check("json_parse null", json_is_null(null_val))
+
+    const bool_val = json_parse("true")
+    check("json_parse true", json_is_bool(bool_val) && json_get_value(bool_val) == true)
+
+    const num_val = json_parse("42")
+    check("json_parse number", json_is_number(num_val) && json_get_value(num_val) == 42)
+
+    const str_val = json_parse("\"hello\"")
+    check("json_parse string", json_is_string(str_val) && json_get_value(str_val) == "hello")
+
+    const arr_val = json_parse("[1, 2, 3]")
+    check("json_parse array", json_is_array(arr_val))
+    check("json_parse array len", len(arr_val["value"]) == 3)
+
+    const obj_val = json_parse("{\"name\": \"MAGI\", \"version\": 1}")
+    check("json_parse object", json_is_object(obj_val))
+    check("json_parse object keys", len(obj_val["keys"]) == 2)
+    check("json_parse object key0", obj_val["keys"][0] == "name")
+
+    println("PASS: json_parse")
+}
+
+func test_json_stringify() {
+    check("json_stringify null", json_stringify(json_null()) == "null")
+    check("json_stringify bool", json_stringify(json_bool(true)) == "true")
+    check("json_stringify number", json_stringify(json_number(42)) == "42")
+    check("json_stringify string", json_stringify(json_string("hello")) == "\"hello\"")
+    check("json_stringify array", json_stringify(json_array([json_number(1), json_number(2)])) == "[1,2]")
+
+    const obj = json_object(["a"], [json_number(1)])
+    check("json_stringify object", json_stringify(obj) == "{\"a\":1}")
+    println("PASS: json_stringify")
+}
+
+func test_json_pretty() {
+    const obj = json_object(["name"], [json_string("MAGI")])
+    const pretty = json_stringify_pretty(obj)
+    check("json_pretty has newlines", pretty.contains("\n"))
+    check("json_pretty has indent", pretty.contains("  "))
+    println("PASS: json_stringify_pretty")
+}
+
+func test_json_path() {
+    const data = json_parse("{\"users\": [{\"name\": \"Alice\"}, {\"name\": \"Bob\"}]}")
+    const first_name = json_path(data, "users.0.name")
+    check("json_path nested", json_is_string(first_name) && json_get_value(first_name) == "Alice")
+
+    const missing = json_path(data, "users.5.name")
+    check("json_path missing", json_is_null(missing))
+    println("PASS: json_path")
+}
+
+func test_json_merge_patch() {
+    const base = json_parse("{\"a\": 1, \"b\": 2}")
+    const patch = json_parse("{\"b\": 3, \"c\": 4}")
+    const merged = json_merge_patch(base, patch)
+    check("json_merge keys", len(merged["keys"]) == 3)
+    // b should be overwritten to 3
+    const b_idx = merged["keys"].indexOf("b")
+    check("json_merge override", json_get_value(merged["values"][b_idx]) == 3)
+    println("PASS: json_merge_patch")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 4. Regex Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_regex_test() {
+    check("regex_test literal", regex_test("hello", "say hello world"))
+    check("regex_test no match", !regex_test("xyz", "hello"))
+    check("regex_test dot", regex_test("h.llo", "hello"))
+    check("regex_test star", regex_test("he*llo", "hllo"))
+    check("regex_test star2", regex_test("he*llo", "heeeello"))
+    check("regex_test plus", regex_test("he+llo", "hello"))
+    check("regex_test plus no match", !regex_test("he+llo", "hllo"))
+    check("regex_test question", regex_test("colou?r", "color"))
+    check("regex_test question2", regex_test("colou?r", "colour"))
+    println("PASS: regex_test")
+}
+
+func test_regex_match() {
+    const m = regex_match("\\d+", "abc123def")
+    check("regex_match digits", m != null)
+    check("regex_match start", m[0] == 3)
+    check("regex_match end", m[1] == 6)
+
+    const no_match = regex_match("xyz", "hello")
+    check("regex_match none", no_match == null)
+    println("PASS: regex_match")
+}
+
+func test_regex_find_all() {
+    const matches = regex_find_all("\\d+", "a1b22c333")
+    check("regex_find_all count", len(matches) == 3)
+    check("regex_find_all first", matches[0][0] == 1 && matches[0][1] == 2)
+    check("regex_find_all third", matches[2][0] == 6 && matches[2][1] == 9)
+    println("PASS: regex_find_all")
+}
+
+func test_regex_replace() {
+    check("regex_replace basic", regex_replace("\\d+", "a1b2c3", "X") == "aXbXcX")
+    check("regex_replace none", regex_replace("xyz", "hello", "X") == "hello")
+    println("PASS: regex_replace")
+}
+
+func test_regex_split() {
+    const parts = regex_split(",\\s*", "a, b,c,  d")
+    check("regex_split count", len(parts) == 4)
+    check("regex_split first", parts[0] == "a")
+    check("regex_split last", parts[3] == "d")
+    println("PASS: regex_split")
+}
+
+func test_regex_char_class() {
+    check("regex [a-z]", regex_test("[a-z]+", "hello"))
+    check("regex [A-Z]", regex_test("[A-Z]+", "HELLO"))
+    check("regex [^0-9]", regex_test("[^0-9]+", "abc"))
+    check("regex \\w", regex_test("\\w+", "hello"))
+    check("regex \\s", regex_test("\\s+", "  "))
+    println("PASS: regex_char_class")
+}
+
+func test_regex_anchors() {
+    check("regex ^ start", regex_test("^hello", "hello world"))
+    check("regex ^ no start", !regex_test("^world", "hello world"))
+    check("regex $ end", regex_test("world$", "hello world"))
+    check("regex $ no end", !regex_test("hello$", "hello world"))
+    check("regex ^...$", regex_test("^hello$", "hello"))
+    println("PASS: regex_anchors")
+}
+
+func test_regex_escape() {
+    const escaped = regex_escape("hello.world")
+    check("regex_escape dot", escaped.contains("\\."))
+    check("regex_escape keeps alpha", escaped.contains("hello"))
+    println("PASS: regex_escape")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 5. YAML Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_yaml_scalar() {
+    check("yaml null", yaml_parse("null")["__type"] == "yaml_null")
+    check("yaml true", yaml_parse("true")["__type"] == "yaml_bool" && yaml_parse("true")["value"] == true)
+    check("yaml int", yaml_parse("42")["__type"] == "yaml_int" && yaml_parse("42")["value"] == 42)
+    check("yaml string", yaml_parse("hello")["__type"] == "yaml_string" && yaml_parse("hello")["value"] == "hello")
+    println("PASS: yaml_scalar")
+}
+
+func test_yaml_sequence() {
+    const yaml = "- one\n- two\n- three"
+    const result = yaml_parse(yaml)
+    check("yaml sequence type", result["__type"] == "yaml_sequence")
+    check("yaml sequence len", len(result["value"]) == 3)
+    check("yaml sequence first", result["value"][0]["value"] == "one")
+    println("PASS: yaml_sequence")
+}
+
+func test_yaml_mapping() {
+    const yaml = "name: MAGI\nversion: 1"
+    const result = yaml_parse(yaml)
+    check("yaml mapping type", result["__type"] == "yaml_mapping")
+    check("yaml mapping keys", len(result["keys"]) == 2)
+    check("yaml mapping name", result["values"][0]["value"] == "MAGI")
+    println("PASS: yaml_mapping")
+}
+
+func test_yaml_stringify() {
+    const val = yaml_mapping(
+        [yaml_string("name"), yaml_string("version")],
+        [yaml_string("MAGI"), yaml_int(1)]
+    )
+    const s = yaml_stringify(val)
+    check("yaml_stringify has name", s.contains("name"))
+    check("yaml_stringify has MAGI", s.contains("MAGI"))
+    println("PASS: yaml_stringify")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 6. UUID Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_uuid_parse() {
+    const result = uuid_parse("550e8400-e29b-41d4-a716-446655440000")
+    check("uuid_parse valid", !result.has("error"))
+    check("uuid_parse version", result["version"] == 4)
+
+    const bad = uuid_parse("not-a-uuid")
+    check("uuid_parse invalid", bad.has("error"))
+
+    const short = uuid_parse("550e8400-e29b-41d4-a716")
+    check("uuid_parse short", short.has("error"))
+    println("PASS: uuid_parse")
+}
+
+func test_uuid_is_valid() {
+    check("uuid valid", uuid_is_valid("550e8400-e29b-41d4-a716-446655440000"))
+    check("uuid invalid", !uuid_is_valid("not-a-uuid"))
+    check("uuid no hyphens", !uuid_is_valid("550e8400e29b41d4a716446655440000"))
+    println("PASS: uuid_is_valid")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 8. HTTP Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_url_parse() {
+    const result = url_parse("https://example.com:8080/path?query=1#frag")
+    check("url scheme", result["scheme"] == "https")
+    check("url host", result["host"] == "example.com")
+    check("url port", result["port"] == 8080)
+    check("url path", result["path"] == "/path")
+    check("url query", result["query"] == "query=1")
+    check("url fragment", result["fragment"] == "frag")
+
+    const simple = url_parse("http://localhost/api")
+    check("url default port", simple["port"] == 80)
+    check("url path api", simple["path"] == "/api")
+    println("PASS: url_parse")
+}
+
+func test_query_parse() {
+    const params = query_parse("name=Alice&age=30&city=NYC")
+    check("query name", params["name"] == "Alice")
+    check("query age", params["age"] == "30")
+    check("query city", params["city"] == "NYC")
+    println("PASS: query_parse")
+}
+
+func test_query_stringify() {
+    const params = {"a": "1", "b": "hello world"}
+    const qs = query_stringify(params)
+    check("query_stringify a", qs.contains("a=1"))
+    check("query_stringify b encoded", qs.contains("b=hello%20world"))
+    println("PASS: query_stringify")
+}
+
+func test_http_parse_request() {
+    const raw = "GET /api/users HTTP/1.1\r\nHost: example.com\r\nAccept: application/json\r\n\r\n"
+    const req = http_parse_request(raw)
+    check("http req method", req["method"] == "GET")
+    check("http req path", req["path"] == "/api/users")
+    check("http req host", req["headers"]["Host"] == "example.com")
+    println("PASS: http_parse_request")
+}
+
+func test_http_parse_response() {
+    const raw = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<h1>Hello</h1>"
+    const res = http_parse_response(raw)
+    check("http res status", res["status"] == 200)
+    check("http res reason", res["reason"] == "OK")
+    check("http res content-type", res["headers"]["Content-Type"] == "text/html")
+    check("http res body", res["body"] == "<h1>Hello</h1>")
+    println("PASS: http_parse_response")
+}
+
+func test_http_status_reason() {
+    check("status 200", http_status_reason(200) == "OK")
+    check("status 404", http_status_reason(404) == "Not Found")
+    check("status 500", http_status_reason(500) == "Internal Server Error")
+    println("PASS: http_status_reason")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 9. Crypto Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_constant_time_eq() {
+    check("ct_eq same", constant_time_eq("hello", "hello"))
+    check("ct_eq diff", !constant_time_eq("hello", "world"))
+    check("ct_eq diff len", !constant_time_eq("hello", "hell"))
+    check("ct_eq empty", constant_time_eq("", ""))
+    println("PASS: constant_time_eq")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 10. Date/Time Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_civil_from_days() {
+    const epoch = civil_from_days(0)
+    check("civil epoch year", epoch[0] == 1970)
+    check("civil epoch month", epoch[1] == 1)
+    check("civil epoch day", epoch[2] == 1)
+    println("PASS: civil_from_days")
+}
+
+func test_days_from_civil() {
+    check("days epoch", days_from_civil(1970, 1, 1) == 0)
+    check("days roundtrip", days_from_civil(2024, 1, 15) > 0)
+    // Roundtrip
+    const days = days_from_civil(2024, 6, 15)
+    const ymd = civil_from_days(days)
+    check("days roundtrip y", ymd[0] == 2024)
+    check("days roundtrip m", ymd[1] == 6)
+    check("days roundtrip d", ymd[2] == 15)
+    println("PASS: days_from_civil")
+}
+
+func test_format_timestamp() {
+    const formatted = format_timestamp(0)
+    check("format epoch", formatted == "1970-01-01T00:00:00.000Z")
+
+    const ms = 1705312200000  // 2024-01-15T09:30:00.000Z
+    const formatted2 = format_timestamp(ms)
+    check("format 2024", formatted2.starts_with("2024-01-15"))
+    println("PASS: format_timestamp")
+}
+
+func test_parse_timestamp() {
+    check("parse date only", parse_timestamp("1970-01-01") == 0)
+    check("parse with Z", parse_timestamp("1970-01-01T00:00:00Z") == 0)
+    // Roundtrip
+    const ms = 1705312200000
+    const formatted = format_timestamp(ms)
+    const parsed = parse_timestamp(formatted)
+    check("parse roundtrip", parsed == ms)
+    println("PASS: parse_timestamp")
+}
+
+func test_format_duration() {
+    check("duration 0s", format_duration(0) == "0s")
+    check("duration 90s", format_duration(90000) == "1m 30s")
+    check("duration 1d", format_duration(86400000).contains("1d"))
+    println("PASS: format_duration")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 11. Math Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_gcd_lcm() {
+    check("gcd 12,8", gcd(12, 8) == 4)
+    check("gcd 7,13", gcd(7, 13) == 1)
+    check("gcd 0,5", gcd(0, 5) == 5)
+    check("lcm 4,6", lcm(4, 6) == 12)
+    check("lcm 0,5", lcm(0, 5) == 0)
+    println("PASS: gcd/lcm")
+}
+
+func test_factorial() {
+    check("factorial 0", factorial(0) == 1)
+    check("factorial 1", factorial(1) == 1)
+    check("factorial 5", factorial(5) == 120)
+    check("factorial 10", factorial(10) == 3628800)
+    println("PASS: factorial")
+}
+
+func test_fibonacci() {
+    check("fib 0", fibonacci(0) == 0)
+    check("fib 1", fibonacci(1) == 1)
+    check("fib 10", fibonacci(10) == 55)
+    check("fib 20", fibonacci(20) == 6765)
+    println("PASS: fibonacci")
+}
+
+func test_is_prime() {
+    check("prime 2", is_prime(2))
+    check("prime 3", is_prime(3))
+    check("not prime 4", !is_prime(4))
+    check("prime 17", is_prime(17))
+    check("not prime 100", !is_prime(100))
+    check("prime 997", is_prime(997))
+    println("PASS: is_prime")
+}
+
+func test_next_prime() {
+    check("next_prime 0", next_prime(0) == 2)
+    check("next_prime 4", next_prime(4) == 5)
+    check("next_prime 7", next_prime(7) == 7)
+    check("next_prime 100", next_prime(100) == 101)
+    println("PASS: next_prime")
+}
+
+func test_statistics() {
+    const nums = [1.0, 2.0, 3.0, 4.0, 5.0]
+    check("mean", math_mean(nums) == 3.0)
+    check("median", math_median(nums) == 3.0)
+    check("median even", math_median([1.0, 2.0, 3.0, 4.0]) == 2.5)
+    check("variance", math_variance(nums) == 2.0)
+
+    const modes = [1.0, 2.0, 2.0, 3.0, 3.0, 3.0]
+    check("mode", math_mode(modes) == 3.0)
+    println("PASS: statistics")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 12. Collection Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_set_operations() {
+    check("set_union", len(set_union([1, 2, 3], [3, 4, 5])) == 5)
+    check("set_intersection", len(set_intersection([1, 2, 3], [2, 3, 4])) == 2)
+    check("set_difference", len(set_difference([1, 2, 3], [2, 3])) == 1)
+    check("set_sym_diff", len(set_symmetric_difference([1, 2, 3], [2, 3, 4])) == 2)
+    println("PASS: set_operations")
+}
+
+func test_counter() {
+    const c = counter(["a", "b", "a", "c", "a", "b"])
+    check("counter a", c["a"] == 3)
+    check("counter b", c["b"] == 2)
+    check("counter c", c["c"] == 1)
+
+    const top = counter_most_common(c, 2)
+    check("most_common first", top[0][0] == "a")
+    check("most_common second", top[1][0] == "b")
+    println("PASS: counter")
+}
+
+func test_binary_heap() {
+    let h = heap_new()
+    heap_push(h, 5)
+    heap_push(h, 3)
+    heap_push(h, 7)
+    heap_push(h, 1)
+    check("heap peek", heap_peek(h) == 1)
+    check("heap size", heap_size(h) == 4)
+    check("heap pop 1", heap_pop(h) == 1)
+    check("heap pop 2", heap_pop(h) == 3)
+    check("heap pop 3", heap_pop(h) == 5)
+    check("heap pop 4", heap_pop(h) == 7)
+    check("heap empty", heap_pop(h) == null)
+    println("PASS: binary_heap")
+}
+
+func test_deque() {
+    let dq = deque_new()
+    deque_push_back(dq, 1)
+    deque_push_back(dq, 2)
+    deque_push_front(dq, 0)
+    check("deque size", deque_size(dq) == 3)
+    check("deque front", deque_front(dq) == 0)
+    check("deque back", deque_back(dq) == 2)
+    check("deque pop_front", deque_pop_front(dq) == 0)
+    check("deque pop_back", deque_pop_back(dq) == 2)
+    check("deque remaining", deque_size(dq) == 1)
+    println("PASS: deque")
+}
+
+func test_ordered_map() {
+    let om = ordered_map_new()
+    ordered_map_set(om, "b", 2)
+    ordered_map_set(om, "a", 1)
+    ordered_map_set(om, "c", 3)
+    check("ordered_map size", ordered_map_size(om) == 3)
+    check("ordered_map get", ordered_map_get(om, "a") == 1)
+    check("ordered_map has", ordered_map_has(om, "b"))
+    check("ordered_map not has", !ordered_map_has(om, "x"))
+
+    // Check insertion order preserved
+    const k = ordered_map_keys(om)
+    check("ordered_map order 0", k[0] == "b")
+    check("ordered_map order 1", k[1] == "a")
+    check("ordered_map order 2", k[2] == "c")
+
+    // Update existing key
+    ordered_map_set(om, "a", 10)
+    check("ordered_map update", ordered_map_get(om, "a") == 10)
+    check("ordered_map size after update", ordered_map_size(om) == 3)
+
+    // Remove
+    ordered_map_remove(om, "b")
+    check("ordered_map remove", !ordered_map_has(om, "b"))
+    check("ordered_map size after remove", ordered_map_size(om) == 2)
+
+    // Entries
+    const entries = ordered_map_entries(om)
+    check("ordered_map entries len", len(entries) == 2)
+    println("PASS: ordered_map")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 14. Semver Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_semver() {
+    const v = semver_parse("1.2.3")
+    check("semver parse major", v["major"] == 1)
+    check("semver parse minor", v["minor"] == 2)
+    check("semver parse patch", v["patch"] == 3)
+    check("semver parse no pre", v["pre"] == "")
+
+    const v2 = semver_parse("0.2.0-beta.1")
+    check("semver parse pre", v2["pre"] == "beta.1")
+
+    check("semver to_string", semver_to_string(v) == "1.2.3")
+    check("semver to_string pre", semver_to_string(v2) == "0.2.0-beta.1")
+
+    const a = semver_parse("1.0.0")
+    const b = semver_parse("0.9.9")
+    check("semver compare gt", semver_compare(a, b) > 0)
+
+    const c = semver_parse("1.0.0-alpha")
+    check("semver pre < release", semver_compare(c, a) < 0)
+
+    check("semver invalid", semver_parse("1.2").has("error"))
+    println("PASS: semver")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 15. CSV Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_csv() {
+    const data = csv_parse("name,age\nAlice,30\nBob,25")
+    check("csv headers", len(data["headers"]) == 2)
+    check("csv header name", data["headers"][0] == "name")
+    check("csv records count", len(data["records"]) == 2)
+    check("csv first record", data["records"][0][0] == "Alice")
+    check("csv second record age", data["records"][1][1] == "25")
+
+    // Quoted fields
+    const data2 = csv_parse("a,b\n\"hello, world\",test")
+    check("csv quoted field", data2["records"][0][0] == "hello, world")
+
+    // Write
+    const output = csv_write(["a", "b"], [["1", "2"], ["3", "4"]])
+    check("csv write has header", output.contains("a,b"))
+    check("csv write has data", output.contains("1,2"))
+    println("PASS: csv")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 16. Glob Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_glob() {
+    check("glob * match", glob_match("*.rs", "foo.rs"))
+    check("glob * no match", !glob_match("*.rs", "foo.txt"))
+    check("glob ? match", glob_match("test?", "test1"))
+    check("glob ? no match", !glob_match("test?", "test12"))
+    check("glob all", glob_match("*", "anything"))
+    check("glob exact", glob_match("hello", "hello"))
+    check("glob exact no match", !glob_match("hello", "world"))
+
+    // Path glob
+    check("glob_path basic", glob_match_path("src/*.rs", "src/main.rs"))
+    check("glob_path ** match", glob_match_path("src/**/*.rs", "src/util/mod.rs"))
+    println("PASS: glob")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 17. String Similarity Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_string_similarity() {
+    check("similarity same", levenshtein_similarity("hello", "hello") == 1.0)
+    check("similarity different", levenshtein_similarity("cat", "hat") > 0.5)
+
+    const best = fuzzy_match("colour", ["color", "collar", "dollar"])
+    check("fuzzy_match best", best == "color")
+
+    const suggestions = did_you_mean("prnt", ["print", "println", "sprint"], 2)
+    check("did_you_mean", len(suggestions) > 0)
+    println("PASS: string_similarity")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 18. TOML Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_toml_parse() {
+    const input = "name = \"MAGI\"\nversion = 1\n\n[package]\nauthor = \"test\""
+    const result = toml_parse(input)
+    check("toml root key", result["name"] == "MAGI")
+    check("toml root int", result["version"] == 1)
+    check("toml section", result["package"]["author"] == "test")
+
+    // Boolean
+    const input2 = "debug = true\nrelease = false"
+    const result2 = toml_parse(input2)
+    check("toml bool true", result2["debug"] == true)
+    check("toml bool false", result2["release"] == false)
+    println("PASS: toml_parse")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 20. String Utility Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_string_utils() {
+    check("string_reverse", string_reverse("hello") == "olleh")
+    check("is_palindrome true", is_palindrome("racecar"))
+    check("is_palindrome false", !is_palindrome("hello"))
+    check("capitalize", capitalize("hello") == "Hello")
+    check("uncapitalize", uncapitalize("Hello") == "hello")
+    check("is_blank spaces", is_blank("   "))
+    check("is_blank not", !is_blank("hello"))
+    check("strip_whitespace", strip_whitespace("h e l l o") == "hello")
+    check("squeeze", squeeze("aabbcc", "b") == "aabcc")
+    check("string_count", string_count("abababab", "ab") == 4)
+    check("chunk", len(chunk("abcdefgh", 3)) == 3)
+    check("chunk last", chunk("abcdefgh", 3)[2] == "gh")
+    println("PASS: string_utils")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 21. Number Formatting Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_format_number() {
+    check("format_number 1000", format_number(1000) == "1,000")
+    check("format_number 1000000", format_number(1000000) == "1,000,000")
+    check("format_number small", format_number(42) == "42")
+    check("format_number negative", format_number(-1234) == "-1,234")
+
+    check("format_bytes B", format_bytes(500).contains("B"))
+    check("format_bytes KB", format_bytes(1500).contains("KB"))
+    check("format_bytes MB", format_bytes(1500000).contains("MB"))
+    println("PASS: format_number")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 22. Sorting Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_sorting() {
+    check("binary_search found", binary_search([1, 3, 5, 7, 9], 5) == 2)
+    check("binary_search not found", binary_search([1, 3, 5, 7, 9], 4) == -1)
+
+    const sorted = merge_sort([5, 3, 1, 4, 2])
+    check("merge_sort", sorted[0] == 1 && sorted[4] == 5)
+
+    check("unique", len(unique([1, 2, 2, 3, 3, 3])) == 3)
+    check("flatten", len(flatten([[1, 2], [3, 4], [5]])) == 5)
+
+    const zipped = zip([1, 2, 3], ["a", "b", "c"])
+    check("zip", len(zipped) == 3 && zipped[0][0] == 1 && zipped[0][1] == "a")
+
+    const r = range(0, 5)
+    check("range", len(r) == 5 && r[0] == 0 && r[4] == 4)
+
+    const rs = range_step(0, 10, 3)
+    check("range_step", len(rs) == 4 && rs[0] == 0 && rs[3] == 9)
+    println("PASS: sorting")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 23. Math Extras Tests
+// ════════════════════════════════════════════════════════════════════
+
+func test_math_extras() {
+    check("clamp low", clamp(-5, 0, 10) == 0)
+    check("clamp high", clamp(15, 0, 10) == 10)
+    check("clamp in range", clamp(5, 0, 10) == 5)
+    check("lerp 0", lerp(0.0, 10.0, 0.0) == 0.0)
+    check("lerp 1", lerp(0.0, 10.0, 1.0) == 10.0)
+    check("lerp half", lerp(0.0, 10.0, 0.5) == 5.0)
+    check("math_sum", math_sum([1, 2, 3, 4, 5]) == 15)
+    check("math_product", math_product([1, 2, 3, 4]) == 24)
+    check("math_min", math_min([5, 3, 1, 4, 2]) == 1)
+    check("math_max", math_max([5, 3, 1, 4, 2]) == 5)
+    check("math_abs neg", math_abs(-5) == 5)
+    check("math_abs pos", math_abs(5) == 5)
+    check("math_sign pos", math_sign(42) == 1)
+    check("math_sign neg", math_sign(-42) == -1)
+    check("math_sign zero", math_sign(0) == 0)
+    check("int_pow", int_pow(2, 10) == 1024)
+    check("combinations C(5,2)", combinations(5, 2) == 10)
+    check("permutations P(5,2)", permutations(5, 2) == 20)
+    println("PASS: math_extras")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Run All Tests
+// ════════════════════════════════════════════════════════════════════
+
+// 1. Encoding
+test_hex_encode()
+test_hex_decode()
+test_base64_encode()
+test_base64_decode()
+test_base32_encode()
+test_base32_decode()
+test_url_encode_decode()
+test_html_escape_unescape()
+
+// 2. String algorithms
+test_levenshtein()
+test_slugify()
+test_case_conversion()
+test_padding()
+test_word_wrap()
+test_truncate()
+test_indent_dedent()
+
+// 3. JSON
+test_json_parse()
+test_json_stringify()
+test_json_pretty()
+test_json_path()
+test_json_merge_patch()
+
+// 4. Regex
+test_regex_test()
+test_regex_match()
+test_regex_find_all()
+test_regex_replace()
+test_regex_split()
+test_regex_char_class()
+test_regex_anchors()
+test_regex_escape()
+
+// 5. YAML
+test_yaml_scalar()
+test_yaml_sequence()
+test_yaml_mapping()
+test_yaml_stringify()
+
+// 6. UUID
+test_uuid_parse()
+test_uuid_is_valid()
+
+// 8. HTTP
+test_url_parse()
+test_query_parse()
+test_query_stringify()
+test_http_parse_request()
+test_http_parse_response()
+test_http_status_reason()
+
+// 9. Crypto
+test_constant_time_eq()
+
+// 10. Date/Time
+test_civil_from_days()
+test_days_from_civil()
+test_format_timestamp()
+test_parse_timestamp()
+test_format_duration()
+
+// 11. Math
+test_gcd_lcm()
+test_factorial()
+test_fibonacci()
+test_is_prime()
+test_next_prime()
+test_statistics()
+
+// 12. Collections
+test_set_operations()
+test_counter()
+test_binary_heap()
+test_deque()
+test_ordered_map()
+
+// 14. Semver
+test_semver()
+
+// 15. CSV
+test_csv()
+
+// 16. Glob
+test_glob()
+
+// 17. String Similarity
+test_string_similarity()
+
+// 18. TOML
+test_toml_parse()
+
+// 20. String utilities
+test_string_utils()
+
+// 21. Number formatting
+test_format_number()
+
+// 22. Sorting
+test_sorting()
+
+// 23. Math extras
+test_math_extras()
+
+println("")
+println(f"All util tests: {pass_count}/{test_count} passed")
+if pass_count == test_count {
+    println("All util tests passed!")
+}

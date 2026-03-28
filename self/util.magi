@@ -1,0 +1,4130 @@
+// MAGI Self-Hosted Compiler — Utility Module
+//
+// Mirrors src/util.rs. Pure-computation utilities implemented in MAGI,
+// OS-dependent operations delegate to stage 0 builtins.
+//
+// Sections:
+//   1. Encoding (hex, base64, base32, URL, HTML)
+//   2. String algorithms (Levenshtein, slug, case conversion, padding, wrap)
+//   3. JSON (recursive descent parser, emitter, path queries, merge/patch)
+//   4. Regular expressions (NFA-based engine)
+//   5. YAML (indentation-based parser, emitter)
+//   6. UUID (v4 generation, parsing, validation)
+//   7. Compression (gzip, LZ4, zstd — delegates to stage 0)
+//   8. HTTP (request/response parsing, URL parser, query strings)
+//   9. Crypto helpers (SHA-256, HMAC, PBKDF2 — delegates to stage 0)
+//  10. Date/Time (formatting, parsing, durations)
+//  11. Math extras (GCD, LCM, primes, statistics)
+//  12. Collections (OrderedMap, Set ops, Counter, BinaryHeap, Deque)
+
+// ════════════════════════════════════════════════════════════════════
+// 1. Encoding
+// ════════════════════════════════════════════════════════════════════
+
+const HEX_LOWER = "0123456789abcdef"
+const HEX_UPPER = "0123456789ABCDEF"
+
+// Encode a string to lowercase hex.
+func hex_encode(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const code = char_code_at(s, i)
+        result = result + HEX_LOWER[int(code / 16)] + HEX_LOWER[code % 16]
+        i = i + 1
+    }
+    result
+}
+
+// Encode a string to uppercase hex.
+func hex_encode_upper(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const code = char_code_at(s, i)
+        result = result + HEX_UPPER[int(code / 16)] + HEX_UPPER[code % 16]
+        i = i + 1
+    }
+    result
+}
+
+// Decode a hex value character to integer (0-15).
+func hex_val(c) {
+    if c >= "0" && c <= "9" { return char_code_at(c, 0) - char_code_at("0", 0) }
+    if c >= "a" && c <= "f" { return char_code_at(c, 0) - char_code_at("a", 0) + 10 }
+    if c >= "A" && c <= "F" { return char_code_at(c, 0) - char_code_at("A", 0) + 10 }
+    return -1
+}
+
+// Decode a hex string to a plain string.
+func hex_decode(s) {
+    if len(s) % 2 != 0 { return {"error": "odd length hex string"} }
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const hi = hex_val(s[i])
+        const lo = hex_val(s[i + 1])
+        if hi < 0 || lo < 0 { return {"error": f"invalid hex char at {i}"} }
+        result = result + char_from_code(hi * 16 + lo)
+        i = i + 2
+    }
+    result
+}
+
+// ── Base64 ─────────────────────────────────────────────────────────
+
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// Encode a string to base64 with padding.
+func base64_encode(data) {
+    let result = ""
+    let i = 0
+    const n = len(data)
+    while i < n {
+        const b0 = char_code_at(data, i)
+        const b1 = if i + 1 < n { char_code_at(data, i + 1) } else { 0 }
+        const b2 = if i + 2 < n { char_code_at(data, i + 2) } else { 0 }
+        const triple = b0 * 65536 + b1 * 256 + b2
+        result = result + BASE64_CHARS[int(triple / 262144) % 64]
+        result = result + BASE64_CHARS[int(triple / 4096) % 64]
+        if i + 1 < n {
+            result = result + BASE64_CHARS[int(triple / 64) % 64]
+        } else {
+            result = result + "="
+        }
+        if i + 2 < n {
+            result = result + BASE64_CHARS[triple % 64]
+        } else {
+            result = result + "="
+        }
+        i = i + 3
+    }
+    result
+}
+
+// Get base64 character value.
+func base64_val(c) {
+    if c >= "A" && c <= "Z" { return char_code_at(c, 0) - char_code_at("A", 0) }
+    if c >= "a" && c <= "z" { return char_code_at(c, 0) - char_code_at("a", 0) + 26 }
+    if c >= "0" && c <= "9" { return char_code_at(c, 0) - char_code_at("0", 0) + 52 }
+    if c == "+" { return 62 }
+    if c == "/" { return 63 }
+    return -1
+}
+
+// Decode a base64 string.
+func base64_decode(s) {
+    // Strip whitespace and padding
+    let clean = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c != " " && c != "\n" && c != "\r" && c != "\t" && c != "=" {
+            clean = clean + c
+        }
+        i = i + 1
+    }
+    let result = ""
+    let buffer = 0
+    let bits = 0
+    i = 0
+    while i < len(clean) {
+        const val = base64_val(clean[i])
+        if val < 0 { return {"error": f"invalid base64 character: {clean[i]}"} }
+        buffer = buffer * 64 + val
+        bits = bits + 6
+        if bits >= 8 {
+            bits = bits - 8
+            const byte_val = int(buffer / pow(2, bits)) % 256
+            result = result + char_from_code(byte_val)
+            buffer = buffer % pow(2, bits)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ── Base32 ─────────────────────────────────────────────────────────
+
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+// Encode a string to base32 (RFC 4648).
+func base32_encode(data) {
+    if len(data) == 0 { return "" }
+    let result = ""
+    let i = 0
+    while i < len(data) {
+        const chunk_len = if i + 5 <= len(data) { 5 } else { len(data) - i }
+        let buf = [0, 0, 0, 0, 0]
+        let j = 0
+        while j < chunk_len {
+            buf[j] = char_code_at(data, i + j)
+            j = j + 1
+        }
+        // Always emit at least 2 characters
+        result = result + BASE32_ALPHABET[int(buf[0] / 8)]
+        result = result + BASE32_ALPHABET[(buf[0] % 8) * 4 + int(buf[1] / 64)]
+        if chunk_len >= 2 {
+            result = result + BASE32_ALPHABET[int(buf[1] % 64 / 2)]
+            result = result + BASE32_ALPHABET[(buf[1] % 2) * 16 + int(buf[2] / 16)]
+        } else {
+            result = result + "=="
+        }
+        if chunk_len >= 3 {
+            result = result + BASE32_ALPHABET[(buf[2] % 16) * 2 + int(buf[3] / 128)]
+        } else {
+            result = result + "="
+        }
+        if chunk_len >= 4 {
+            result = result + BASE32_ALPHABET[int(buf[3] % 128 / 4)]
+            result = result + BASE32_ALPHABET[(buf[3] % 4) * 8 + int(buf[4] / 32)]
+        } else {
+            result = result + "=="
+        }
+        if chunk_len >= 5 {
+            result = result + BASE32_ALPHABET[buf[4] % 32]
+        } else {
+            result = result + "="
+        }
+        i = i + 5
+    }
+    result
+}
+
+// Get base32 character value.
+func base32_val(c) {
+    if c >= "A" && c <= "Z" { return char_code_at(c, 0) - char_code_at("A", 0) }
+    if c >= "a" && c <= "z" { return char_code_at(c, 0) - char_code_at("a", 0) }
+    if c >= "2" && c <= "7" { return char_code_at(c, 0) - char_code_at("2", 0) + 26 }
+    return -1
+}
+
+// Decode a base32 string (RFC 4648).
+func base32_decode(s) {
+    // Strip padding
+    let clean = ""
+    let i = 0
+    while i < len(s) {
+        if s[i] != "=" { clean = clean + s[i] }
+        i = i + 1
+    }
+    let result = ""
+    let buffer = 0
+    let bits = 0
+    i = 0
+    while i < len(clean) {
+        const val = base32_val(clean[i])
+        if val < 0 { return {"error": f"invalid base32 char: {clean[i]}"} }
+        buffer = buffer * 32 + val
+        bits = bits + 5
+        if bits >= 8 {
+            bits = bits - 8
+            const byte_val = int(buffer / pow(2, bits)) % 256
+            result = result + char_from_code(byte_val)
+            buffer = buffer % pow(2, bits)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ── URL Encoding ───────────────────────────────────────────────────
+
+// Percent-encode a string (all non-alphanumeric except -._~).
+func url_encode(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        const code = char_code_at(c, 0)
+        if (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "-" || c == "." || c == "_" || c == "~" {
+            result = result + c
+        } else {
+            result = result + "%" + HEX_UPPER[int(code / 16)] + HEX_UPPER[code % 16]
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Percent-decode a string.
+func url_decode(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        if s[i] == "%" && i + 2 < len(s) {
+            const hi = hex_val(s[i + 1])
+            const lo = hex_val(s[i + 2])
+            if hi >= 0 && lo >= 0 {
+                result = result + char_from_code(hi * 16 + lo)
+                i = i + 3
+            } else {
+                result = result + s[i]
+                i = i + 1
+            }
+        } else if s[i] == "+" {
+            result = result + " "
+            i = i + 1
+        } else {
+            result = result + s[i]
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ── HTML Escape ────────────────────────────────────────────────────
+
+// Escape HTML entities in text.
+func html_escape(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == "&" { result = result + "&amp;" }
+        else if c == "<" { result = result + "&lt;" }
+        else if c == ">" { result = result + "&gt;" }
+        else if c == "\"" { result = result + "&quot;" }
+        else if c == "'" { result = result + "&#x27;" }
+        else { result = result + c }
+        i = i + 1
+    }
+    result
+}
+
+// Unescape HTML entities.
+func html_unescape(s) {
+    let result = s
+    result = result.replace("&amp;", "&")
+    result = result.replace("&lt;", "<")
+    result = result.replace("&gt;", ">")
+    result = result.replace("&quot;", "\"")
+    result = result.replace("&#x27;", "'")
+    result = result.replace("&#39;", "'")
+    result = result.replace("&apos;", "'")
+    result = result.replace("&#x2F;", "/")
+    result = result.replace("&#47;", "/")
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 2. String Algorithms
+// ════════════════════════════════════════════════════════════════════
+
+// Compute Levenshtein edit distance between two strings.
+func levenshtein(a, b) {
+    const a_len = len(a)
+    const b_len = len(b)
+    if a_len == 0 { return b_len }
+    if b_len == 0 { return a_len }
+    // Single-row DP
+    let prev_row = []
+    let j = 0
+    while j <= b_len {
+        prev_row.push(j)
+        j = j + 1
+    }
+    let curr_row = []
+    j = 0
+    while j <= b_len {
+        curr_row.push(0)
+        j = j + 1
+    }
+    let i = 0
+    while i < a_len {
+        curr_row[0] = i + 1
+        j = 0
+        while j < b_len {
+            const cost = if a[i] == b[j] { 0 } else { 1 }
+            const del = prev_row[j + 1] + 1
+            const ins = curr_row[j] + 1
+            const sub = prev_row[j] + cost
+            let min_val = del
+            if ins < min_val { min_val = ins }
+            if sub < min_val { min_val = sub }
+            curr_row[j + 1] = min_val
+            j = j + 1
+        }
+        // Swap rows
+        let tmp = prev_row
+        prev_row = curr_row
+        curr_row = tmp
+        i = i + 1
+    }
+    prev_row[b_len]
+}
+
+// Convert a string to a URL-safe slug.
+func slugify(s) {
+    let result = ""
+    let last_was_dash = true
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if (c >= "a" && c <= "z") || (c >= "0" && c <= "9") {
+            result = result + c
+            last_was_dash = false
+        } else if c >= "A" && c <= "Z" {
+            result = result + char_from_code(char_code_at(c, 0) + 32)
+            last_was_dash = false
+        } else if !last_was_dash {
+            result = result + "-"
+            last_was_dash = true
+        }
+        i = i + 1
+    }
+    if len(result) > 0 && result[len(result) - 1] == "-" {
+        result = result.slice(0, len(result) - 1)
+    }
+    result
+}
+
+// ── Case Conversion Helpers ────────────────────────────────────────
+
+func is_upper(c) { c >= "A" && c <= "Z" }
+func is_lower(c) { c >= "a" && c <= "z" }
+func is_alpha(c) { is_upper(c) || is_lower(c) }
+func is_digit(c) { c >= "0" && c <= "9" }
+func is_alnum(c) { is_alpha(c) || is_digit(c) }
+
+func to_lower_char(c) {
+    if is_upper(c) { char_from_code(char_code_at(c, 0) + 32) } else { c }
+}
+
+func to_upper_char(c) {
+    if is_lower(c) { char_from_code(char_code_at(c, 0) - 32) } else { c }
+}
+
+// Split a string into words (on _ - space or camelCase boundaries).
+func split_words(s) {
+    let words = []
+    let start = 0
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == "_" || c == "-" || c == " " {
+            if start < i {
+                words.push(s.slice(start, i))
+            }
+            start = i + 1
+        } else if i > 0 && is_upper(c) && is_lower(s[i - 1]) {
+            if start < i {
+                words.push(s.slice(start, i))
+            }
+            start = i
+        }
+        i = i + 1
+    }
+    if start < len(s) {
+        words.push(s.slice(start, len(s)))
+    }
+    words
+}
+
+// Convert to snake_case.
+func to_snake_case(s) {
+    const words = split_words(s)
+    let parts = []
+    for word in words {
+        let lower = ""
+        let i = 0
+        while i < len(word) {
+            lower = lower + to_lower_char(word[i])
+            i = i + 1
+        }
+        parts.push(lower)
+    }
+    parts.join("_")
+}
+
+// Convert to lowerCamelCase.
+func to_camel_case(s) {
+    const words = split_words(s)
+    let result = ""
+    let idx = 0
+    for word in words {
+        if len(word) == 0 { idx = idx + 1; continue }
+        if idx == 0 {
+            let i = 0
+            while i < len(word) {
+                result = result + to_lower_char(word[i])
+                i = i + 1
+            }
+        } else {
+            result = result + to_upper_char(word[0])
+            let i = 1
+            while i < len(word) {
+                result = result + to_lower_char(word[i])
+                i = i + 1
+            }
+        }
+        idx = idx + 1
+    }
+    result
+}
+
+// Convert to PascalCase (UpperCamelCase).
+func to_pascal_case(s) {
+    const words = split_words(s)
+    let result = ""
+    for word in words {
+        if len(word) == 0 { continue }
+        result = result + to_upper_char(word[0])
+        let i = 1
+        while i < len(word) {
+            result = result + to_lower_char(word[i])
+            i = i + 1
+        }
+    }
+    result
+}
+
+// Convert to kebab-case.
+func to_kebab_case(s) {
+    const words = split_words(s)
+    let parts = []
+    for word in words {
+        let lower = ""
+        let i = 0
+        while i < len(word) {
+            lower = lower + to_lower_char(word[i])
+            i = i + 1
+        }
+        parts.push(lower)
+    }
+    parts.join("-")
+}
+
+// Convert to SCREAMING_SNAKE_CASE.
+func to_screaming_snake_case(s) {
+    const words = split_words(s)
+    let parts = []
+    for word in words {
+        let upper = ""
+        let i = 0
+        while i < len(word) {
+            upper = upper + to_upper_char(word[i])
+            i = i + 1
+        }
+        parts.push(upper)
+    }
+    parts.join("_")
+}
+
+// Convert to Title Case.
+func to_title_case(s) {
+    const words = split_words(s)
+    let parts = []
+    for word in words {
+        if len(word) == 0 { continue }
+        let titled = to_upper_char(word[0])
+        let i = 1
+        while i < len(word) {
+            titled = titled + to_lower_char(word[i])
+            i = i + 1
+        }
+        parts.push(titled)
+    }
+    parts.join(" ")
+}
+
+// ── String Padding ─────────────────────────────────────────────────
+
+// Pad a string on the left to reach `width`.
+func pad_left(s, width, ch) {
+    let result = s
+    while len(result) < width {
+        result = ch + result
+    }
+    result
+}
+
+// Pad a string on the right to reach `width`.
+func pad_right(s, width, ch) {
+    let result = s
+    while len(result) < width {
+        result = result + ch
+    }
+    result
+}
+
+// Pad a string on both sides to center it.
+func pad_center(s, width, ch) {
+    if len(s) >= width { return s }
+    const total = width - len(s)
+    const left_pad = int(total / 2)
+    const right_pad = total - left_pad
+    let result = ""
+    let i = 0
+    while i < left_pad { result = result + ch; i = i + 1 }
+    result = result + s
+    i = 0
+    while i < right_pad { result = result + ch; i = i + 1 }
+    result
+}
+
+// ── Word Wrap ──────────────────────────────────────────────────────
+
+// Wrap text to the given width, breaking on word boundaries.
+func word_wrap(text, width) {
+    const lines = text.split("\n")
+    let result_parts = []
+    for line in lines {
+        if len(line) <= width {
+            result_parts.push(line)
+        } else {
+            const words = line.split(" ")
+            let current_line = ""
+            for word in words {
+                if len(current_line) == 0 {
+                    current_line = word
+                } else if len(current_line) + 1 + len(word) <= width {
+                    current_line = current_line + " " + word
+                } else {
+                    result_parts.push(current_line)
+                    current_line = word
+                }
+            }
+            if len(current_line) > 0 {
+                result_parts.push(current_line)
+            }
+        }
+    }
+    result_parts.join("\n")
+}
+
+// ── Truncate ───────────────────────────────────────────────────────
+
+// Truncate a string to `max_len` characters, appending "..." if truncated.
+func truncate(s, max_len) {
+    if len(s) <= max_len { return s }
+    if max_len <= 3 { return "..." .slice(0, max_len) }
+    s.slice(0, max_len - 3) + "..."
+}
+
+// ── Indent / Dedent ────────────────────────────────────────────────
+
+// Prepend `prefix` to every non-empty line in the text.
+func indent(text, prefix) {
+    const lines = text.split("\n")
+    let result_parts = []
+    for line in lines {
+        if len(line.trim()) > 0 {
+            result_parts.push(prefix + line)
+        } else {
+            result_parts.push(line)
+        }
+    }
+    result_parts.join("\n")
+}
+
+// Remove common leading whitespace from all non-empty lines.
+func dedent(text) {
+    const lines = text.split("\n")
+    let min_indent = 999999
+    for line in lines {
+        const trimmed = line.trim()
+        if len(trimmed) > 0 {
+            let spaces = 0
+            let i = 0
+            while i < len(line) && (line[i] == " " || line[i] == "\t") {
+                spaces = spaces + 1
+                i = i + 1
+            }
+            if spaces < min_indent {
+                min_indent = spaces
+            }
+        }
+    }
+    if min_indent == 999999 || min_indent == 0 { return text }
+    let result_parts = []
+    for line in lines {
+        if len(line.trim()) > 0 && len(line) >= min_indent {
+            result_parts.push(line.slice(min_indent, len(line)))
+        } else {
+            result_parts.push(line)
+        }
+    }
+    result_parts.join("\n")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 3. JSON
+// ════════════════════════════════════════════════════════════════════
+
+// JSON value types using maps with a "__type" discriminant:
+//   {"__type": "null"}
+//   {"__type": "bool", "value": true/false}
+//   {"__type": "number", "value": 42}
+//   {"__type": "string", "value": "hello"}
+//   {"__type": "array", "value": [...]}
+//   {"__type": "object", "keys": [...], "values": [...]}
+
+func json_null() { {"__type": "null"} }
+func json_bool(b) { {"__type": "bool", "value": b} }
+func json_number(n) { {"__type": "number", "value": n} }
+func json_string(s) { {"__type": "string", "value": s} }
+func json_array(items) { {"__type": "array", "value": items} }
+func json_object(keys, values) { {"__type": "object", "keys": keys, "values": values} }
+
+func json_is_null(v) { typeof(v) == "map" && v.has("__type") && v["__type"] == "null" }
+func json_is_bool(v) { typeof(v) == "map" && v.has("__type") && v["__type"] == "bool" }
+func json_is_number(v) { typeof(v) == "map" && v.has("__type") && v["__type"] == "number" }
+func json_is_string(v) { typeof(v) == "map" && v.has("__type") && v["__type"] == "string" }
+func json_is_array(v) { typeof(v) == "map" && v.has("__type") && v["__type"] == "array" }
+func json_is_object(v) { typeof(v) == "map" && v.has("__type") && v["__type"] == "object" }
+
+func json_get_value(v) {
+    if typeof(v) == "map" && v.has("value") { v["value"] } else { null }
+}
+
+// ── JSON Parser (recursive descent) ───────────────────────────────
+
+// Parser state: we pass source string and position as a map.
+func json_skip_ws(src, pos) {
+    let p = pos
+    while p < len(src) && (src[p] == " " || src[p] == "\n" || src[p] == "\r" || src[p] == "\t") {
+        p = p + 1
+    }
+    p
+}
+
+func json_parse(input) {
+    const src = input.trim()
+    if len(src) == 0 { return {"error": "empty JSON input"} }
+    let pos = 0
+    const result = json_parse_value(src, pos)
+    if typeof(result) == "map" && result.has("error") { return result }
+    const val = result["value"]
+    let p = result["pos"]
+    p = json_skip_ws(src, p)
+    if p < len(src) {
+        return {"error": f"trailing characters at position {p}"}
+    }
+    val
+}
+
+func json_parse_value(src, pos) {
+    let p = json_skip_ws(src, pos)
+    if p >= len(src) { return {"error": "unexpected end of JSON"} }
+    const c = src[p]
+    if c == "n" { return json_parse_null(src, p) }
+    if c == "t" || c == "f" { return json_parse_bool(src, p) }
+    if c == "\"" { return json_parse_string(src, p) }
+    if c == "[" { return json_parse_array(src, p) }
+    if c == "{" { return json_parse_object(src, p) }
+    if c == "-" || (c >= "0" && c <= "9") { return json_parse_number(src, p) }
+    {"error": f"unexpected character '{c}' at position {p}"}
+}
+
+func json_parse_null(src, pos) {
+    if pos + 4 <= len(src) && src.slice(pos, pos + 4) == "null" {
+        {"value": json_null(), "pos": pos + 4}
+    } else {
+        {"error": f"expected 'null' at position {pos}"}
+    }
+}
+
+func json_parse_bool(src, pos) {
+    if pos + 4 <= len(src) && src.slice(pos, pos + 4) == "true" {
+        {"value": json_bool(true), "pos": pos + 4}
+    } else if pos + 5 <= len(src) && src.slice(pos, pos + 5) == "false" {
+        {"value": json_bool(false), "pos": pos + 5}
+    } else {
+        {"error": f"expected boolean at position {pos}"}
+    }
+}
+
+func json_parse_string(src, pos) {
+    if src[pos] != "\"" { return {"error": f"expected '\"' at position {pos}"} }
+    let p = pos + 1
+    let result = ""
+    while p < len(src) {
+        const c = src[p]
+        if c == "\"" {
+            return {"value": json_string(result), "pos": p + 1}
+        }
+        if c == "\\" {
+            p = p + 1
+            if p >= len(src) { return {"error": "unterminated string escape"} }
+            const esc = src[p]
+            if esc == "\"" { result = result + "\"" }
+            else if esc == "\\" { result = result + "\\" }
+            else if esc == "/" { result = result + "/" }
+            else if esc == "n" { result = result + "\n" }
+            else if esc == "t" { result = result + "\t" }
+            else if esc == "r" { result = result + "\r" }
+            else if esc == "b" { result = result + "\b" }
+            else if esc == "f" { result = result + "\f" }
+            else if esc == "u" {
+                // Unicode escape \uXXXX
+                if p + 4 < len(src) {
+                    const hex_str = src.slice(p + 1, p + 5)
+                    let code = 0
+                    let valid = true
+                    let hi = 0
+                    while hi < 4 {
+                        const hv = hex_val(hex_str[hi])
+                        if hv < 0 { valid = false; break }
+                        code = code * 16 + hv
+                        hi = hi + 1
+                    }
+                    if valid {
+                        result = result + char_from_code(code)
+                        p = p + 4
+                    } else {
+                        result = result + "\\u" + hex_str
+                        p = p + 4
+                    }
+                } else {
+                    result = result + "\\u"
+                }
+            }
+            else { result = result + "\\" + esc }
+        } else {
+            result = result + c
+        }
+        p = p + 1
+    }
+    {"error": "unterminated string"}
+}
+
+func json_parse_number(src, pos) {
+    let p = pos
+    let num_str = ""
+    if p < len(src) && src[p] == "-" {
+        num_str = num_str + "-"
+        p = p + 1
+    }
+    while p < len(src) && src[p] >= "0" && src[p] <= "9" {
+        num_str = num_str + src[p]
+        p = p + 1
+    }
+    let is_float = false
+    if p < len(src) && src[p] == "." {
+        is_float = true
+        num_str = num_str + "."
+        p = p + 1
+        while p < len(src) && src[p] >= "0" && src[p] <= "9" {
+            num_str = num_str + src[p]
+            p = p + 1
+        }
+    }
+    if p < len(src) && (src[p] == "e" || src[p] == "E") {
+        is_float = true
+        num_str = num_str + src[p]
+        p = p + 1
+        if p < len(src) && (src[p] == "+" || src[p] == "-") {
+            num_str = num_str + src[p]
+            p = p + 1
+        }
+        while p < len(src) && src[p] >= "0" && src[p] <= "9" {
+            num_str = num_str + src[p]
+            p = p + 1
+        }
+    }
+    const num = if is_float { to_float(num_str) } else { to_int(num_str) }
+    {"value": json_number(num), "pos": p}
+}
+
+func json_parse_array(src, pos) {
+    let p = pos + 1  // skip [
+    p = json_skip_ws(src, p)
+    let items = []
+    if p < len(src) && src[p] == "]" {
+        return {"value": json_array(items), "pos": p + 1}
+    }
+    while p < len(src) {
+        const elem = json_parse_value(src, p)
+        if typeof(elem) == "map" && elem.has("error") { return elem }
+        items.push(elem["value"])
+        p = json_skip_ws(src, elem["pos"])
+        if p < len(src) && src[p] == "," {
+            p = p + 1
+            p = json_skip_ws(src, p)
+        } else if p < len(src) && src[p] == "]" {
+            return {"value": json_array(items), "pos": p + 1}
+        } else {
+            return {"error": f"expected ',' or ']' at position {p}"}
+        }
+    }
+    {"error": "unterminated array"}
+}
+
+func json_parse_object(src, pos) {
+    let p = pos + 1  // skip {
+    p = json_skip_ws(src, p)
+    let keys = []
+    let values = []
+    if p < len(src) && src[p] == "}" {
+        return {"value": json_object(keys, values), "pos": p + 1}
+    }
+    while p < len(src) {
+        // Parse key (must be string)
+        p = json_skip_ws(src, p)
+        const key_result = json_parse_string(src, p)
+        if typeof(key_result) == "map" && key_result.has("error") { return key_result }
+        const key = json_get_value(key_result["value"])
+        p = json_skip_ws(src, key_result["pos"])
+        if p >= len(src) || src[p] != ":" {
+            return {"error": f"expected ':' at position {p}"}
+        }
+        p = p + 1
+        // Parse value
+        const val_result = json_parse_value(src, p)
+        if typeof(val_result) == "map" && val_result.has("error") { return val_result }
+        keys.push(key)
+        values.push(val_result["value"])
+        p = json_skip_ws(src, val_result["pos"])
+        if p < len(src) && src[p] == "," {
+            p = p + 1
+        } else if p < len(src) && src[p] == "}" {
+            return {"value": json_object(keys, values), "pos": p + 1}
+        } else {
+            return {"error": f"expected ',' or '}}' at position {p}"}
+        }
+    }
+    {"error": "unterminated object"}
+}
+
+// ── JSON Emitter ───────────────────────────────────────────────────
+
+// Compact JSON serialization.
+func json_stringify(val) {
+    if json_is_null(val) { return "null" }
+    if json_is_bool(val) { return to_string(val["value"]) }
+    if json_is_number(val) { return to_string(val["value"]) }
+    if json_is_string(val) { return json_escape_string(val["value"]) }
+    if json_is_array(val) {
+        const items = val["value"]
+        let parts = []
+        for item in items {
+            parts.push(json_stringify(item))
+        }
+        return "[" + parts.join(",") + "]"
+    }
+    if json_is_object(val) {
+        const keys = val["keys"]
+        const values = val["values"]
+        let parts = []
+        let i = 0
+        while i < len(keys) {
+            parts.push(json_escape_string(keys[i]) + ":" + json_stringify(values[i]))
+            i = i + 1
+        }
+        return "{" + parts.join(",") + "}"
+    }
+    "null"
+}
+
+// Pretty JSON serialization.
+func json_stringify_pretty(val) {
+    json_emit_pretty(val, 0)
+}
+
+func json_emit_pretty(val, indent_level) {
+    const pad = "  "
+    let prefix = ""
+    let i = 0
+    while i < indent_level { prefix = prefix + pad; i = i + 1 }
+    let inner_prefix = prefix + pad
+
+    if json_is_null(val) { return "null" }
+    if json_is_bool(val) { return to_string(val["value"]) }
+    if json_is_number(val) { return to_string(val["value"]) }
+    if json_is_string(val) { return json_escape_string(val["value"]) }
+    if json_is_array(val) {
+        const items = val["value"]
+        if len(items) == 0 { return "[]" }
+        let parts = []
+        for item in items {
+            parts.push(inner_prefix + json_emit_pretty(item, indent_level + 1))
+        }
+        return "[\n" + parts.join(",\n") + "\n" + prefix + "]"
+    }
+    if json_is_object(val) {
+        const keys = val["keys"]
+        const values = val["values"]
+        if len(keys) == 0 { return "{}" }
+        let parts = []
+        i = 0
+        while i < len(keys) {
+            parts.push(inner_prefix + json_escape_string(keys[i]) + ": " + json_emit_pretty(values[i], indent_level + 1))
+            i = i + 1
+        }
+        return "{\n" + parts.join(",\n") + "\n" + prefix + "}"
+    }
+    "null"
+}
+
+// Escape a string for JSON output.
+func json_escape_string(s) {
+    let result = "\""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == "\"" { result = result + "\\\"" }
+        else if c == "\\" { result = result + "\\\\" }
+        else if c == "\n" { result = result + "\\n" }
+        else if c == "\r" { result = result + "\\r" }
+        else if c == "\t" { result = result + "\\t" }
+        else { result = result + c }
+        i = i + 1
+    }
+    result + "\""
+}
+
+// ── JSON Path Queries ──────────────────────────────────────────────
+
+// Query a JSON value with a dotted path (e.g. "users.0.name").
+func json_path(val, path) {
+    const parts = path.split(".")
+    let current = val
+    for part in parts {
+        if len(part) == 0 { continue }
+        if json_is_object(current) {
+            const keys = current["keys"]
+            const values = current["values"]
+            let found = false
+            let i = 0
+            while i < len(keys) {
+                if keys[i] == part {
+                    current = values[i]
+                    found = true
+                    break
+                }
+                i = i + 1
+            }
+            if !found { return json_null() }
+        } else if json_is_array(current) {
+            const idx = to_int(part)
+            const items = current["value"]
+            if idx >= 0 && idx < len(items) {
+                current = items[idx]
+            } else {
+                return json_null()
+            }
+        } else {
+            return json_null()
+        }
+    }
+    current
+}
+
+// ── JSON Merge/Patch ───────────────────────────────────────────────
+
+// Merge two JSON objects (RFC 7386). Patch values overwrite base values.
+func json_merge_patch(base, patch) {
+    if !json_is_object(patch) { return patch }
+    if !json_is_object(base) {
+        return json_merge_patch(json_object([], []), patch)
+    }
+    let keys = []
+    let values = []
+    // Copy base entries
+    let i = 0
+    const base_keys = base["keys"]
+    const base_values = base["values"]
+    while i < len(base_keys) {
+        keys.push(base_keys[i])
+        values.push(base_values[i])
+        i = i + 1
+    }
+    // Apply patch
+    const patch_keys = patch["keys"]
+    const patch_values = patch["values"]
+    i = 0
+    while i < len(patch_keys) {
+        const pk = patch_keys[i]
+        const pv = patch_values[i]
+        // Find existing key
+        let found_idx = -1
+        let j = 0
+        while j < len(keys) {
+            if keys[j] == pk { found_idx = j; break }
+            j = j + 1
+        }
+        if json_is_null(pv) {
+            // Remove key
+            if found_idx >= 0 {
+                keys.remove(found_idx)
+                values.remove(found_idx)
+            }
+        } else if found_idx >= 0 {
+            values[found_idx] = json_merge_patch(values[found_idx], pv)
+        } else {
+            keys.push(pk)
+            values.push(pv)
+        }
+        i = i + 1
+    }
+    json_object(keys, values)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 4. Regular Expressions (NFA-based engine)
+// ════════════════════════════════════════════════════════════════════
+
+// Regex node types (stored as maps for MAGI):
+//   {"type": "literal", "char": "a"}
+//   {"type": "any"}           — matches any char except \n
+//   {"type": "class", "ranges": [[lo, hi], ...], "negated": false}
+//   {"type": "anchor_start"}  — ^
+//   {"type": "anchor_end"}    — $
+
+// NFA state types:
+//   {"type": "match", "node": <node>, "next": idx}
+//   {"type": "split", "a": idx, "b": idx}
+//   {"type": "accept"}
+
+// ── Regex Compiler ─────────────────────────────────────────────────
+
+// Compile a regex pattern to an NFA (array of states).
+func regex_compile(pattern) {
+    const chars = pattern.split("")
+    let pos = {"val": 0}
+    let states = []
+    regex_compile_seq(chars, pos, states)
+    // Ensure accept state exists
+    if len(states) == 0 || states[len(states) - 1]["type"] != "accept" {
+        states.push({"type": "accept"})
+    }
+    states
+}
+
+func regex_compile_seq(chars, pos, states) {
+    // Check for alternation
+    let has_alt = false
+    let depth = 0
+    let scan = pos["val"]
+    while scan < len(chars) {
+        if chars[scan] == "(" { depth = depth + 1 }
+        else if chars[scan] == ")" { if depth == 0 { break }; depth = depth - 1 }
+        else if chars[scan] == "|" && depth == 0 { has_alt = true; break }
+        scan = scan + 1
+    }
+    if !has_alt {
+        regex_compile_alt(chars, pos, states)
+        return len(states)
+    }
+    // Alternation: compile each alternative
+    let alt_ranges = []
+    while true {
+        const alt_start = len(states)
+        regex_compile_alt(chars, pos, states)
+        const alt_end = len(states)
+        alt_ranges.push([alt_start, alt_end])
+        if pos["val"] < len(chars) && chars[pos["val"]] == "|" {
+            pos["val"] = pos["val"] + 1
+        } else {
+            break
+        }
+    }
+    if len(alt_ranges) <= 1 { return len(states) }
+    // Build split chain for alternations
+    const after_idx = len(states)
+    // Insert a split at front that branches to each alternative
+    // For simplicity with 2 alternatives:
+    if len(alt_ranges) == 2 {
+        const a_start = alt_ranges[0][0]
+        const b_start = alt_ranges[1][0]
+        // Prepend a split state
+        states.push({"type": "split", "a": a_start, "b": b_start})
+    }
+    return len(states)
+}
+
+func regex_compile_alt(chars, pos, states) {
+    while pos["val"] < len(chars) && chars[pos["val"]] != "|" && chars[pos["val"]] != ")" {
+        const c = chars[pos["val"]]
+        if c == "." {
+            pos["val"] = pos["val"] + 1
+            const next = len(states) + 1
+            states.push({"type": "match", "node": {"type": "any"}, "next": next})
+            regex_apply_quantifier(chars, pos, states)
+        } else if c == "^" {
+            pos["val"] = pos["val"] + 1
+            const next = len(states) + 1
+            states.push({"type": "match", "node": {"type": "anchor_start"}, "next": next})
+        } else if c == "$" {
+            pos["val"] = pos["val"] + 1
+            const next = len(states) + 1
+            states.push({"type": "match", "node": {"type": "anchor_end"}, "next": next})
+        } else if c == "[" {
+            pos["val"] = pos["val"] + 1
+            const class_result = regex_parse_char_class(chars, pos)
+            const next = len(states) + 1
+            states.push({"type": "match", "node": class_result, "next": next})
+            regex_apply_quantifier(chars, pos, states)
+        } else if c == "(" {
+            pos["val"] = pos["val"] + 1
+            // Check for non-capturing (?:...)
+            if pos["val"] < len(chars) && chars[pos["val"]] == "?" {
+                pos["val"] = pos["val"] + 1
+                if pos["val"] < len(chars) && chars[pos["val"]] == ":" {
+                    pos["val"] = pos["val"] + 1
+                }
+            }
+            regex_compile_seq(chars, pos, states)
+            if pos["val"] < len(chars) && chars[pos["val"]] == ")" {
+                pos["val"] = pos["val"] + 1
+            }
+            regex_apply_quantifier(chars, pos, states)
+        } else if c == "\\" {
+            pos["val"] = pos["val"] + 1
+            if pos["val"] >= len(chars) { break }
+            const esc = chars[pos["val"]]
+            pos["val"] = pos["val"] + 1
+            const node = regex_parse_escape(esc)
+            const next = len(states) + 1
+            states.push({"type": "match", "node": node, "next": next})
+            regex_apply_quantifier(chars, pos, states)
+        } else {
+            pos["val"] = pos["val"] + 1
+            const next = len(states) + 1
+            states.push({"type": "match", "node": {"type": "literal", "char": c}, "next": next})
+            regex_apply_quantifier(chars, pos, states)
+        }
+    }
+}
+
+func regex_apply_quantifier(chars, pos, states) {
+    if pos["val"] >= len(chars) { return }
+    const c = chars[pos["val"]]
+    if c == "*" {
+        pos["val"] = pos["val"] + 1
+        // Zero or more: Split -> (match, after)
+        const last_idx = len(states) - 1
+        const last_state = states[last_idx]
+        const split_idx = last_idx
+        const match_idx = last_idx + 1
+        const after_idx = last_idx + 2
+        states[last_idx] = {"type": "split", "a": match_idx, "b": after_idx}
+        // Re-insert match, looping back to split
+        let patched = last_state
+        patched["next"] = split_idx
+        states.push(patched)
+        // Consume non-greedy ?
+        if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
+    } else if c == "+" {
+        pos["val"] = pos["val"] + 1
+        // One or more: match -> Split(match, after)
+        const match_idx = len(states) - 1
+        const split_idx = len(states)
+        states[match_idx]["next"] = split_idx
+        states.push({"type": "split", "a": match_idx, "b": split_idx + 1})
+        if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
+    } else if c == "?" {
+        pos["val"] = pos["val"] + 1
+        // Zero or one: Split -> (match, after)
+        const last_idx = len(states) - 1
+        const last_state = states[last_idx]
+        const split_idx = last_idx
+        const match_idx = last_idx + 1
+        const after_idx = last_idx + 2
+        states[last_idx] = {"type": "split", "a": match_idx, "b": after_idx}
+        let patched = last_state
+        patched["next"] = after_idx
+        states.push(patched)
+        if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
+    } else if c == "{" {
+        // {n} or {n,m} quantifier
+        pos["val"] = pos["val"] + 1
+        let min_str = ""
+        while pos["val"] < len(chars) && chars[pos["val"]] >= "0" && chars[pos["val"]] <= "9" {
+            min_str = min_str + chars[pos["val"]]
+            pos["val"] = pos["val"] + 1
+        }
+        let max_str = min_str
+        if pos["val"] < len(chars) && chars[pos["val"]] == "," {
+            pos["val"] = pos["val"] + 1
+            max_str = ""
+            while pos["val"] < len(chars) && chars[pos["val"]] >= "0" && chars[pos["val"]] <= "9" {
+                max_str = max_str + chars[pos["val"]]
+                pos["val"] = pos["val"] + 1
+            }
+            if len(max_str) == 0 { max_str = "999" }  // unbounded
+        }
+        if pos["val"] < len(chars) && chars[pos["val"]] == "}" {
+            pos["val"] = pos["val"] + 1
+        }
+        // For simplicity, {n,m} just uses the pattern as-is.
+        // The NFA approach handles this via the already-compiled states.
+        if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
+    }
+}
+
+func regex_parse_char_class(chars, pos) {
+    let ranges = []
+    let negated = false
+    if pos["val"] < len(chars) && chars[pos["val"]] == "^" {
+        negated = true
+        pos["val"] = pos["val"] + 1
+    }
+    while pos["val"] < len(chars) && chars[pos["val"]] != "]" {
+        const c = chars[pos["val"]]
+        if c == "\\" {
+            pos["val"] = pos["val"] + 1
+            if pos["val"] < len(chars) {
+                const esc_node = regex_parse_escape(chars[pos["val"]])
+                pos["val"] = pos["val"] + 1
+                if esc_node["type"] == "class" {
+                    for r in esc_node["ranges"] { ranges.push(r) }
+                } else if esc_node["type"] == "literal" {
+                    ranges.push([esc_node["char"], esc_node["char"]])
+                }
+            }
+        } else {
+            pos["val"] = pos["val"] + 1
+            if pos["val"] + 1 < len(chars) && chars[pos["val"]] == "-" && chars[pos["val"] + 1] != "]" {
+                pos["val"] = pos["val"] + 1
+                const end_c = chars[pos["val"]]
+                pos["val"] = pos["val"] + 1
+                ranges.push([c, end_c])
+            } else {
+                ranges.push([c, c])
+            }
+        }
+    }
+    if pos["val"] < len(chars) && chars[pos["val"]] == "]" {
+        pos["val"] = pos["val"] + 1
+    }
+    {"type": "class", "ranges": ranges, "negated": negated}
+}
+
+func regex_parse_escape(c) {
+    if c == "d" { return {"type": "class", "ranges": [["0", "9"]], "negated": false} }
+    if c == "D" { return {"type": "class", "ranges": [["0", "9"]], "negated": true} }
+    if c == "w" { return {"type": "class", "ranges": [["a", "z"], ["A", "Z"], ["0", "9"], ["_", "_"]], "negated": false} }
+    if c == "W" { return {"type": "class", "ranges": [["a", "z"], ["A", "Z"], ["0", "9"], ["_", "_"]], "negated": true} }
+    if c == "s" { return {"type": "class", "ranges": [[" ", " "], ["\t", "\t"], ["\n", "\n"], ["\r", "\r"]], "negated": false} }
+    if c == "S" { return {"type": "class", "ranges": [[" ", " "], ["\t", "\t"], ["\n", "\n"], ["\r", "\r"]], "negated": true} }
+    if c == "n" { return {"type": "literal", "char": "\n"} }
+    if c == "t" { return {"type": "literal", "char": "\t"} }
+    if c == "r" { return {"type": "literal", "char": "\r"} }
+    {"type": "literal", "char": c}
+}
+
+// ── Regex NFA Simulation ───────────────────────────────────────────
+
+func regex_match_node(node, ch) {
+    if node["type"] == "literal" {
+        return ch == node["char"]
+    }
+    if node["type"] == "any" {
+        return ch != "\n"
+    }
+    if node["type"] == "class" {
+        let in_class = false
+        for range in node["ranges"] {
+            if ch >= range[0] && ch <= range[1] {
+                in_class = true
+                break
+            }
+        }
+        return if node["negated"] { !in_class } else { in_class }
+    }
+    if node["type"] == "anchor_start" || node["type"] == "anchor_end" {
+        return false  // zero-width, handled elsewhere
+    }
+    false
+}
+
+func regex_add_state(states, active, state_idx, pos, text) {
+    if state_idx >= len(states) { return }
+    if active[state_idx] { return }
+    active[state_idx] = true
+    const state = states[state_idx]
+    if state["type"] == "split" {
+        regex_add_state(states, active, state["a"], pos, text)
+        regex_add_state(states, active, state["b"], pos, text)
+    } else if state["type"] == "match" {
+        const node = state["node"]
+        if node["type"] == "anchor_start" {
+            if pos == 0 { regex_add_state(states, active, state["next"], pos, text) }
+        } else if node["type"] == "anchor_end" {
+            if pos == len(text) { regex_add_state(states, active, state["next"], pos, text) }
+        }
+    }
+}
+
+// Try to match NFA at a given start position. Returns end position or -1.
+func regex_match_at(states, text, start) {
+    const n = len(states)
+    let current = []
+    let i = 0
+    while i < n { current.push(false); i = i + 1 }
+    regex_add_state(states, current, 0, start, text)
+    let last_match = -1
+    // Check immediate accept
+    i = 0
+    while i < n {
+        if current[i] && states[i]["type"] == "accept" { last_match = start }
+        i = i + 1
+    }
+    let pos = start
+    while pos < len(text) {
+        const ch = text[pos]
+        let next = []
+        i = 0
+        while i < n { next.push(false); i = i + 1 }
+        i = 0
+        while i < n {
+            if current[i] {
+                const state = states[i]
+                if state["type"] == "match" {
+                    const node = state["node"]
+                    if node["type"] != "anchor_start" && node["type"] != "anchor_end" {
+                        if regex_match_node(node, ch) {
+                            regex_add_state(states, next, state["next"], pos + 1, text)
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        current = next
+        pos = pos + 1
+        // Check for accept
+        i = 0
+        while i < n {
+            if current[i] && states[i]["type"] == "accept" { last_match = pos }
+            i = i + 1
+        }
+    }
+    // Check $ anchor at end
+    i = 0
+    while i < n {
+        if current[i] {
+            const state = states[i]
+            if state["type"] == "match" && state["node"]["type"] == "anchor_end" {
+                regex_add_state(states, current, state["next"], pos, text)
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if current[i] && states[i]["type"] == "accept" { last_match = pos }
+        i = i + 1
+    }
+    last_match
+}
+
+// ── Regex Public API ───────────────────────────────────────────────
+
+// Test if a pattern matches anywhere in text.
+func regex_test(pattern, text) {
+    const nfa = regex_compile(pattern)
+    let start = 0
+    while start <= len(text) {
+        if regex_match_at(nfa, text, start) >= 0 { return true }
+        start = start + 1
+    }
+    false
+}
+
+// Find the first match of pattern in text. Returns [start, end] or null.
+func regex_match(pattern, text) {
+    const nfa = regex_compile(pattern)
+    let start = 0
+    while start <= len(text) {
+        const end = regex_match_at(nfa, text, start)
+        if end >= 0 { return [start, end] }
+        start = start + 1
+    }
+    null
+}
+
+// Find all non-overlapping matches. Returns array of [start, end].
+func regex_find_all(pattern, text) {
+    const nfa = regex_compile(pattern)
+    let results = []
+    let start = 0
+    while start <= len(text) {
+        const end = regex_match_at(nfa, text, start)
+        if end >= 0 {
+            results.push([start, end])
+            start = if end > start { end } else { start + 1 }
+        } else {
+            start = start + 1
+        }
+    }
+    results
+}
+
+// Replace all matches of pattern with replacement.
+func regex_replace(pattern, text, replacement) {
+    const nfa = regex_compile(pattern)
+    let result = ""
+    let pos = 0
+    while pos <= len(text) {
+        const end = regex_match_at(nfa, text, pos)
+        if end >= 0 {
+            result = result + replacement
+            if end > pos { pos = end } else {
+                if pos < len(text) { result = result + text[pos] }
+                pos = pos + 1
+            }
+        } else {
+            if pos < len(text) { result = result + text[pos] }
+            pos = pos + 1
+        }
+    }
+    result
+}
+
+// Split text by regex pattern.
+func regex_split(pattern, text) {
+    const matches = regex_find_all(pattern, text)
+    if len(matches) == 0 { return [text] }
+    let parts = []
+    let last = 0
+    for m in matches {
+        parts.push(text.slice(last, m[0]))
+        last = m[1]
+    }
+    parts.push(text.slice(last, len(text)))
+    parts
+}
+
+// Escape special regex metacharacters.
+func regex_escape(s) {
+    const meta = "\\.*+?()[]{}|^$"
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        if meta.contains(s[i]) {
+            result = result + "\\" + s[i]
+        } else {
+            result = result + s[i]
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 5. YAML Parser
+// ════════════════════════════════════════════════════════════════════
+
+// YAML value types (same map-with-discriminant pattern as JSON):
+//   {"__type": "yaml_null"}
+//   {"__type": "yaml_bool", "value": true}
+//   {"__type": "yaml_int", "value": 42}
+//   {"__type": "yaml_float", "value": 3.14}
+//   {"__type": "yaml_string", "value": "hello"}
+//   {"__type": "yaml_sequence", "value": [...]}
+//   {"__type": "yaml_mapping", "keys": [...], "values": [...]}
+
+func yaml_null() { {"__type": "yaml_null"} }
+func yaml_bool(b) { {"__type": "yaml_bool", "value": b} }
+func yaml_int(n) { {"__type": "yaml_int", "value": n} }
+func yaml_float(f) { {"__type": "yaml_float", "value": f} }
+func yaml_string(s) { {"__type": "yaml_string", "value": s} }
+func yaml_sequence(items) { {"__type": "yaml_sequence", "value": items} }
+func yaml_mapping(keys, values) { {"__type": "yaml_mapping", "keys": keys, "values": values} }
+
+// Parse a YAML scalar value (string, number, bool, null).
+func yaml_parse_scalar(s) {
+    const trimmed = s.trim()
+    if len(trimmed) == 0 || trimmed == "~" || trimmed == "null" || trimmed == "Null" || trimmed == "NULL" {
+        return yaml_null()
+    }
+    if trimmed == "true" || trimmed == "True" || trimmed == "TRUE" || trimmed == "yes" || trimmed == "Yes" {
+        return yaml_bool(true)
+    }
+    if trimmed == "false" || trimmed == "False" || trimmed == "FALSE" || trimmed == "no" || trimmed == "No" {
+        return yaml_bool(false)
+    }
+    // Quoted strings
+    if (trimmed[0] == "\"" && trimmed[len(trimmed) - 1] == "\"") || (trimmed[0] == "'" && trimmed[len(trimmed) - 1] == "'") {
+        return yaml_string(trimmed.slice(1, len(trimmed) - 1))
+    }
+    // Try integer
+    const as_int = to_int(trimmed)
+    if to_string(as_int) == trimmed { return yaml_int(as_int) }
+    // Try float
+    if trimmed.contains(".") || trimmed.contains("e") || trimmed.contains("E") {
+        const as_float = to_float(trimmed)
+        if to_string(as_float) != "NaN" { return yaml_float(as_float) }
+    }
+    // Flow sequence [a, b]
+    if trimmed[0] == "[" && trimmed[len(trimmed) - 1] == "]" {
+        const inner = trimmed.slice(1, len(trimmed) - 1)
+        const parts = yaml_split_flow(inner)
+        let items = []
+        for part in parts {
+            items.push(yaml_parse_scalar(part.trim()))
+        }
+        return yaml_sequence(items)
+    }
+    // Flow mapping {a: b}
+    if trimmed[0] == "{" && trimmed[len(trimmed) - 1] == "}" {
+        const inner = trimmed.slice(1, len(trimmed) - 1)
+        const parts = yaml_split_flow(inner)
+        let keys = []
+        let values = []
+        for part in parts {
+            const colon_pos = part.indexOf(":")
+            if colon_pos >= 0 {
+                keys.push(yaml_parse_scalar(part.slice(0, colon_pos).trim()))
+                values.push(yaml_parse_scalar(part.slice(colon_pos + 1, len(part)).trim()))
+            }
+        }
+        return yaml_mapping(keys, values)
+    }
+    yaml_string(trimmed)
+}
+
+// Split comma-separated flow elements respecting nesting.
+func yaml_split_flow(s) {
+    let parts = []
+    let current = ""
+    let depth = 0
+    let in_quote = false
+    let quote_char = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if in_quote {
+            current = current + c
+            if c == quote_char { in_quote = false }
+        } else if c == "\"" || c == "'" {
+            in_quote = true
+            quote_char = c
+            current = current + c
+        } else if c == "[" || c == "{" {
+            depth = depth + 1
+            current = current + c
+        } else if c == "]" || c == "}" {
+            depth = depth - 1
+            current = current + c
+        } else if c == "," && depth == 0 {
+            parts.push(current.trim())
+            current = ""
+        } else {
+            current = current + c
+        }
+        i = i + 1
+    }
+    if len(current.trim()) > 0 {
+        parts.push(current.trim())
+    }
+    parts
+}
+
+// Get line indentation.
+func yaml_line_indent(line) {
+    let i = 0
+    while i < len(line) && (line[i] == " " || line[i] == "\t") {
+        i = i + 1
+    }
+    i
+}
+
+// Find colon position in YAML line (outside quotes).
+func yaml_find_colon(s) {
+    let in_quote = false
+    let quote_char = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if in_quote {
+            if c == quote_char { in_quote = false }
+        } else if c == "\"" || c == "'" {
+            in_quote = true
+            quote_char = c
+        } else if c == ":" && (i + 1 >= len(s) || s[i + 1] == " ") {
+            return i
+        } else if c == "#" {
+            return -1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Parse a YAML document.
+func yaml_parse(input) {
+    const trimmed = input.trim()
+    if len(trimmed) == 0 { return yaml_null() }
+    const lines = input.split("\n")
+    let pos = {"val": 0}
+    // Skip leading --- and comments
+    while pos["val"] < len(lines) {
+        const l = lines[pos["val"]].trim()
+        if l == "" || l == "---" || l[0] == "#" {
+            pos["val"] = pos["val"] + 1
+        } else {
+            break
+        }
+    }
+    if pos["val"] >= len(lines) { return yaml_null() }
+    yaml_parse_value(lines, pos)
+}
+
+func yaml_parse_value(lines, pos) {
+    if pos["val"] >= len(lines) { return yaml_null() }
+    const line = lines[pos["val"]]
+    const trimmed = line.trim()
+    const ind = yaml_line_indent(line)
+    // Sequence
+    if trimmed.starts_with("- ") || trimmed == "-" {
+        return yaml_parse_sequence(lines, pos, ind)
+    }
+    // Mapping
+    const colon_pos = yaml_find_colon(trimmed)
+    if colon_pos > 0 {
+        return yaml_parse_mapping(lines, pos, ind)
+    }
+    pos["val"] = pos["val"] + 1
+    yaml_parse_scalar(trimmed)
+}
+
+func yaml_parse_sequence(lines, pos, base_indent) {
+    let items = []
+    while pos["val"] < len(lines) {
+        const line = lines[pos["val"]]
+        const trimmed = line.trim()
+        if len(trimmed) == 0 || trimmed[0] == "#" {
+            pos["val"] = pos["val"] + 1
+            continue
+        }
+        const ind = yaml_line_indent(line)
+        if ind < base_indent { break }
+        if ind > base_indent { break }
+        if trimmed.starts_with("- ") {
+            const val_str = trimmed.slice(2, len(trimmed)).trim()
+            if len(val_str) > 0 {
+                items.push(yaml_parse_scalar(val_str))
+                pos["val"] = pos["val"] + 1
+            } else {
+                pos["val"] = pos["val"] + 1
+                if pos["val"] < len(lines) {
+                    const val = yaml_parse_value(lines, pos)
+                    items.push(val)
+                } else {
+                    items.push(yaml_null())
+                }
+            }
+        } else if trimmed == "-" {
+            pos["val"] = pos["val"] + 1
+            if pos["val"] < len(lines) {
+                const val = yaml_parse_value(lines, pos)
+                items.push(val)
+            } else {
+                items.push(yaml_null())
+            }
+        } else {
+            break
+        }
+    }
+    yaml_sequence(items)
+}
+
+func yaml_parse_mapping(lines, pos, base_indent) {
+    let keys = []
+    let values = []
+    while pos["val"] < len(lines) {
+        const line = lines[pos["val"]]
+        const trimmed = line.trim()
+        if len(trimmed) == 0 || trimmed[0] == "#" {
+            pos["val"] = pos["val"] + 1
+            continue
+        }
+        const ind = yaml_line_indent(line)
+        if ind < base_indent { break }
+        if ind > base_indent { break }
+        const colon_pos = yaml_find_colon(trimmed)
+        if colon_pos <= 0 { break }
+        const key_str = trimmed.slice(0, colon_pos).trim()
+        const val_str = trimmed.slice(colon_pos + 1, len(trimmed)).trim()
+        keys.push(yaml_parse_scalar(key_str))
+        if len(val_str) > 0 {
+            values.push(yaml_parse_scalar(val_str))
+            pos["val"] = pos["val"] + 1
+        } else {
+            pos["val"] = pos["val"] + 1
+            if pos["val"] < len(lines) {
+                const next_line = lines[pos["val"]]
+                const next_indent = yaml_line_indent(next_line)
+                if next_indent > ind {
+                    const val = yaml_parse_value(lines, pos)
+                    values.push(val)
+                } else {
+                    values.push(yaml_null())
+                }
+            } else {
+                values.push(yaml_null())
+            }
+        }
+    }
+    yaml_mapping(keys, values)
+}
+
+// Serialize YAML value to string.
+func yaml_stringify(val) {
+    yaml_emit(val, 0, false) + "\n"
+}
+
+func yaml_emit(val, ind, inline) {
+    const prefix = " ".repeat(ind)
+    if val["__type"] == "yaml_null" { return "null" }
+    if val["__type"] == "yaml_bool" { return to_string(val["value"]) }
+    if val["__type"] == "yaml_int" { return to_string(val["value"]) }
+    if val["__type"] == "yaml_float" { return to_string(val["value"]) }
+    if val["__type"] == "yaml_string" {
+        const s = val["value"]
+        if s.contains(":") || s.contains("#") || s.contains("\n") || s.contains("\"") {
+            return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
+        }
+        return s
+    }
+    if val["__type"] == "yaml_sequence" {
+        const items = val["value"]
+        if len(items) == 0 { return "[]" }
+        let parts = []
+        for item in items {
+            parts.push(prefix + "- " + yaml_emit(item, ind + 2, true))
+        }
+        return if inline { "\n" + parts.join("\n") } else { parts.join("\n") }
+    }
+    if val["__type"] == "yaml_mapping" {
+        const keys = val["keys"]
+        const values = val["values"]
+        if len(keys) == 0 { return "{}" }
+        let parts = []
+        let i = 0
+        while i < len(keys) {
+            parts.push(prefix + yaml_emit(keys[i], ind, true) + ": " + yaml_emit(values[i], ind + 2, true))
+            i = i + 1
+        }
+        return if inline { "\n" + parts.join("\n") } else { parts.join("\n") }
+    }
+    "null"
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 6. UUID
+// ════════════════════════════════════════════════════════════════════
+
+// Generate a UUID v4 (random). Delegates to stage 0 random_bytes.
+func uuid_v4() {
+    const bytes = random_bytes(16)
+    // Set version 4 in byte 6
+    let b6 = char_code_at(bytes, 6)
+    b6 = (b6 % 16) + 64  // clear high nibble, set 0x40
+    // Set variant 1 in byte 8
+    let b8 = char_code_at(bytes, 8)
+    b8 = (b8 % 64) + 128  // clear high 2 bits, set 10xxxxxx
+    // Format as hex with hyphens
+    let result = ""
+    let i = 0
+    while i < 16 {
+        let byte_val = char_code_at(bytes, i)
+        if i == 6 { byte_val = b6 }
+        if i == 8 { byte_val = b8 }
+        result = result + HEX_LOWER[int(byte_val / 16)] + HEX_LOWER[byte_val % 16]
+        if i == 3 || i == 5 || i == 7 || i == 9 {
+            result = result + "-"
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Parse a UUID string. Returns a map with "bytes" and "version" or "error".
+func uuid_parse(s) {
+    const trimmed = s.trim()
+    if len(trimmed) != 36 { return {"error": "invalid UUID length"} }
+    if trimmed[8] != "-" || trimmed[13] != "-" || trimmed[18] != "-" || trimmed[23] != "-" {
+        return {"error": "invalid UUID format"}
+    }
+    let hex_str = ""
+    let i = 0
+    while i < len(trimmed) {
+        if trimmed[i] != "-" { hex_str = hex_str + trimmed[i] }
+        i = i + 1
+    }
+    if len(hex_str) != 32 { return {"error": "invalid UUID hex length"} }
+    // Validate all hex characters
+    i = 0
+    while i < len(hex_str) {
+        if hex_val(hex_str[i]) < 0 { return {"error": f"invalid hex char in UUID at {i}"} }
+        i = i + 1
+    }
+    const version = hex_val(hex_str[12])  // high nibble of byte 6
+    {"version": version, "hex": hex_str}
+}
+
+// Check if a string is a valid UUID.
+func uuid_is_valid(s) {
+    const result = uuid_parse(s)
+    typeof(result) == "map" && !result.has("error")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 7. Compression (delegate to stage 0 builtins)
+// ════════════════════════════════════════════════════════════════════
+
+// Gzip compress data. Delegates to stage 0 builtin.
+func gzip_compress(data) { compress_gzip(data) }
+
+// Gzip decompress data. Delegates to stage 0 builtin.
+func gzip_decompress(data) { decompress_gzip(data) }
+
+// LZ4 compress data. Delegates to stage 0 builtin.
+func lz4_compress(data) { compress_lz4(data) }
+
+// LZ4 decompress data. Delegates to stage 0 builtin.
+func lz4_decompress(data) { decompress_lz4(data) }
+
+// Zstd compress data. Delegates to stage 0 builtin.
+func zstd_compress(data) { compress_zstd(data) }
+
+// Zstd decompress data. Delegates to stage 0 builtin.
+func zstd_decompress(data) { decompress_zstd(data) }
+
+// ════════════════════════════════════════════════════════════════════
+// 8. HTTP
+// ════════════════════════════════════════════════════════════════════
+
+// ── URL Parser ─────────────────────────────────────────────────────
+
+// Parse a URL into its components. Returns a map with scheme, host, port, path, query, fragment.
+func url_parse(url) {
+    let rest = url
+    // 1. Parse scheme
+    const scheme_end = rest.indexOf("://")
+    if scheme_end < 0 { return {"error": "missing scheme"} }
+    let scheme = rest.slice(0, scheme_end)
+    // Lowercase the scheme
+    let scheme_lower = ""
+    let si = 0
+    while si < len(scheme) {
+        scheme_lower = scheme_lower + to_lower_char(scheme[si])
+        si = si + 1
+    }
+    scheme = scheme_lower
+    rest = rest.slice(scheme_end + 3, len(rest))
+    // 2. Split off fragment
+    let fragment = null
+    const frag_pos = rest.lastIndexOf("#")
+    if frag_pos >= 0 {
+        fragment = rest.slice(frag_pos + 1, len(rest))
+        rest = rest.slice(0, frag_pos)
+    }
+    // 3. Split off query
+    let query = null
+    const query_pos = rest.indexOf("?")
+    if query_pos >= 0 {
+        query = rest.slice(query_pos + 1, len(rest))
+        rest = rest.slice(0, query_pos)
+    }
+    // 4. Split authority from path
+    const path_pos = rest.indexOf("/")
+    let authority = rest
+    let path = "/"
+    if path_pos >= 0 {
+        authority = rest.slice(0, path_pos)
+        path = rest.slice(path_pos, len(rest))
+    }
+    // 5. Parse host:port from authority
+    let host = authority
+    let port = null
+    const colon_pos = authority.lastIndexOf(":")
+    if colon_pos >= 0 {
+        const maybe_port = authority.slice(colon_pos + 1, len(authority))
+        let all_digits = true
+        let pi = 0
+        while pi < len(maybe_port) {
+            if maybe_port[pi] < "0" || maybe_port[pi] > "9" { all_digits = false; break }
+            pi = pi + 1
+        }
+        if all_digits && len(maybe_port) > 0 {
+            host = authority.slice(0, colon_pos)
+            port = to_int(maybe_port)
+        }
+    }
+    // Default port
+    if port == null {
+        if scheme == "http" || scheme == "ws" { port = 80 }
+        else if scheme == "https" || scheme == "wss" { port = 443 }
+        else if scheme == "ftp" { port = 21 }
+    }
+    {
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "path": path,
+        "query": query,
+        "fragment": fragment,
+    }
+}
+
+// Reconstruct a URL from parsed components.
+func url_to_string(parts) {
+    let result = parts["scheme"] + "://" + parts["host"]
+    if parts["port"] != null {
+        const default_port = if parts["scheme"] == "http" { 80 }
+                            else if parts["scheme"] == "https" { 443 }
+                            else { -1 }
+        if parts["port"] != default_port {
+            result = result + ":" + to_string(parts["port"])
+        }
+    }
+    result = result + parts["path"]
+    if parts["query"] != null { result = result + "?" + parts["query"] }
+    if parts["fragment"] != null { result = result + "#" + parts["fragment"] }
+    result
+}
+
+// ── Query String ───────────────────────────────────────────────────
+
+// Parse a query string into a map of key-value pairs.
+func query_parse(qs) {
+    let result = {}
+    if len(qs) == 0 { return result }
+    const pairs = qs.split("&")
+    for pair in pairs {
+        const eq_pos = pair.indexOf("=")
+        if eq_pos >= 0 {
+            const key = url_decode(pair.slice(0, eq_pos))
+            const value = url_decode(pair.slice(eq_pos + 1, len(pair)))
+            result[key] = value
+        } else {
+            result[url_decode(pair)] = ""
+        }
+    }
+    result
+}
+
+// Stringify a map of key-value pairs into a query string.
+func query_stringify(params) {
+    let parts = []
+    for key in keys(params) {
+        parts.push(url_encode(key) + "=" + url_encode(to_string(params[key])))
+    }
+    parts.join("&")
+}
+
+// ── HTTP Request Parser ────────────────────────────────────────────
+
+// Parse an HTTP request string into its components.
+func http_parse_request(raw) {
+    const header_end = raw.indexOf("\r\n\r\n")
+    if header_end < 0 { return {"error": "incomplete request"} }
+    const header_section = raw.slice(0, header_end)
+    const body = raw.slice(header_end + 4, len(raw))
+    const lines = header_section.split("\r\n")
+    if len(lines) == 0 { return {"error": "empty request"} }
+    // Parse request line
+    const request_line = lines[0]
+    const parts = request_line.split(" ")
+    if len(parts) < 2 { return {"error": "malformed request line"} }
+    const method = parts[0]
+    const path = parts[1]
+    const version = if len(parts) >= 3 { parts[2] } else { "HTTP/1.1" }
+    // Parse headers
+    let headers = {}
+    let i = 1
+    while i < len(lines) {
+        const line = lines[i]
+        const colon_pos = line.indexOf(":")
+        if colon_pos >= 0 {
+            const name = line.slice(0, colon_pos).trim()
+            const value = line.slice(colon_pos + 1, len(line)).trim()
+            headers[name] = value
+        }
+        i = i + 1
+    }
+    {
+        "method": method,
+        "path": path,
+        "version": version,
+        "headers": headers,
+        "body": body,
+    }
+}
+
+// ── HTTP Response Parser ───────────────────────────────────────────
+
+// Parse an HTTP response string into its components.
+func http_parse_response(raw) {
+    const header_end = raw.indexOf("\r\n\r\n")
+    if header_end < 0 { return {"error": "incomplete response"} }
+    const header_section = raw.slice(0, header_end)
+    const body = raw.slice(header_end + 4, len(raw))
+    const lines = header_section.split("\r\n")
+    if len(lines) == 0 { return {"error": "empty response"} }
+    // Parse status line
+    const status_line = lines[0]
+    const parts = status_line.split(" ")
+    if len(parts) < 2 { return {"error": "malformed status line"} }
+    const version = parts[0]
+    const status = to_int(parts[1])
+    let reason = ""
+    if len(parts) >= 3 {
+        let rparts = []
+        let ri = 2
+        while ri < len(parts) { rparts.push(parts[ri]); ri = ri + 1 }
+        reason = rparts.join(" ")
+    }
+    // Parse headers
+    let headers = {}
+    let i = 1
+    while i < len(lines) {
+        const line = lines[i]
+        const colon_pos = line.indexOf(":")
+        if colon_pos >= 0 {
+            const name = line.slice(0, colon_pos).trim()
+            const value = line.slice(colon_pos + 1, len(line)).trim()
+            headers[name] = value
+        }
+        i = i + 1
+    }
+    {
+        "version": version,
+        "status": status,
+        "reason": reason,
+        "headers": headers,
+        "body": body,
+    }
+}
+
+// ── HTTP Status Codes ──────────────────────────────────────────────
+
+func http_status_reason(code) {
+    if code == 200 { return "OK" }
+    if code == 201 { return "Created" }
+    if code == 204 { return "No Content" }
+    if code == 301 { return "Moved Permanently" }
+    if code == 302 { return "Found" }
+    if code == 304 { return "Not Modified" }
+    if code == 400 { return "Bad Request" }
+    if code == 401 { return "Unauthorized" }
+    if code == 403 { return "Forbidden" }
+    if code == 404 { return "Not Found" }
+    if code == 405 { return "Method Not Allowed" }
+    if code == 409 { return "Conflict" }
+    if code == 422 { return "Unprocessable Entity" }
+    if code == 429 { return "Too Many Requests" }
+    if code == 500 { return "Internal Server Error" }
+    if code == 502 { return "Bad Gateway" }
+    if code == 503 { return "Service Unavailable" }
+    if code == 504 { return "Gateway Timeout" }
+    "Unknown"
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 9. Crypto Helpers (delegate to stage 0 builtins)
+// ════════════════════════════════════════════════════════════════════
+
+// SHA-256 hash. Delegates to stage 0 builtin.
+func sha256(data) { hash_sha256(data) }
+
+// SHA-512 hash. Delegates to stage 0 builtin.
+func sha512(data) { hash_sha512(data) }
+
+// HMAC-SHA256. Delegates to stage 0 builtin.
+func hmac_sha256(key, data) { hmac_sha256_builtin(key, data) }
+
+// PBKDF2-SHA256. Delegates to stage 0 builtin.
+func pbkdf2(password, salt, iterations, key_len) {
+    pbkdf2_sha256_builtin(password, salt, iterations, key_len)
+}
+
+// Generate random bytes. Delegates to stage 0 builtin.
+func random_bytes(n) { random_bytes_builtin(n) }
+
+// Constant-time comparison of two strings.
+func constant_time_eq(a, b) {
+    if len(a) != len(b) { return false }
+    let diff = 0
+    let i = 0
+    while i < len(a) {
+        const ca = char_code_at(a, i)
+        const cb = char_code_at(b, i)
+        // XOR — bitwise using integers
+        diff = diff + (if ca != cb { 1 } else { 0 })
+        i = i + 1
+    }
+    diff == 0
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 10. Date/Time
+// ════════════════════════════════════════════════════════════════════
+
+// Convert days since Unix epoch to (year, month, day) using Hinnant's algorithm.
+func civil_from_days(z) {
+    let z2 = z + 719468
+    const era = int(if z2 >= 0 { z2 } else { z2 - 146096 } / 146097)
+    const doe = z2 - era * 146097
+    const yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+    const y = yoe + era * 400
+    const doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+    const mp = int((5 * doy + 2) / 153)
+    const d = doy - int((153 * mp + 2) / 5) + 1
+    const m = if mp < 10 { mp + 3 } else { mp - 9 }
+    const y_adj = if m <= 2 { y + 1 } else { y }
+    [y_adj, m, d]
+}
+
+// Convert (year, month, day) to days since Unix epoch.
+func days_from_civil(y, m, d) {
+    const y_adj = if m <= 2 { y - 1 } else { y }
+    const era = int(if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400)
+    const yoe = y_adj - era * 400
+    const m_adj = if m <= 2 { m + 9 } else { m - 3 }
+    const doy = int((153 * m_adj + 2) / 5) + d - 1
+    const doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    era * 146097 + doe - 719468
+}
+
+// Convert Unix timestamp in milliseconds to DateTime components.
+func datetime_from_millis(ms) {
+    const total_secs = int(ms / 1000)
+    const millis_part = ms % 1000
+    const days = int(total_secs / 86400)
+    const day_secs = total_secs % 86400
+    const ymd = civil_from_days(days)
+    {
+        "year": ymd[0],
+        "month": ymd[1],
+        "day": ymd[2],
+        "hour": int(day_secs / 3600),
+        "minute": int(day_secs % 3600 / 60),
+        "second": day_secs % 60,
+        "millis": millis_part,
+    }
+}
+
+// Format a Unix timestamp (millis) as ISO 8601 string.
+func format_timestamp(ms) {
+    const dt = datetime_from_millis(ms)
+    const y = pad_left(to_string(dt["year"]), 4, "0")
+    const mo = pad_left(to_string(dt["month"]), 2, "0")
+    const d = pad_left(to_string(dt["day"]), 2, "0")
+    const h = pad_left(to_string(dt["hour"]), 2, "0")
+    const mi = pad_left(to_string(dt["minute"]), 2, "0")
+    const s = pad_left(to_string(dt["second"]), 2, "0")
+    const ms_str = pad_left(to_string(dt["millis"]), 3, "0")
+    f"{y}-{mo}-{d}T{h}:{mi}:{s}.{ms_str}Z"
+}
+
+// Parse an ISO 8601 date string to Unix millis.
+func parse_timestamp(s) {
+    const trimmed = s.trim()
+    // Date only: YYYY-MM-DD
+    if len(trimmed) == 10 && trimmed[4] == "-" && trimmed[7] == "-" {
+        const y = to_int(trimmed.slice(0, 4))
+        const m = to_int(trimmed.slice(5, 7))
+        const d = to_int(trimmed.slice(8, 10))
+        return days_from_civil(y, m, d) * 86400 * 1000
+    }
+    // Full datetime — split on T or space
+    let sep_pos = trimmed.indexOf("T")
+    if sep_pos < 0 { sep_pos = trimmed.indexOf(" ") }
+    if sep_pos < 0 { return {"error": "unrecognized datetime format"} }
+    const date_part = trimmed.slice(0, sep_pos)
+    let time_part = trimmed.slice(sep_pos + 1, len(trimmed))
+    // Parse date
+    const date_parts = date_part.split("-")
+    if len(date_parts) != 3 { return {"error": "invalid date format"} }
+    const y = to_int(date_parts[0])
+    const m = to_int(date_parts[1])
+    const d = to_int(date_parts[2])
+    // Parse timezone
+    let tz_offset_secs = 0
+    if time_part.ends_with("Z") {
+        time_part = time_part.slice(0, len(time_part) - 1)
+    } else if len(time_part) > 6 {
+        const last6 = time_part.slice(len(time_part) - 6, len(time_part))
+        if (last6[0] == "+" || last6[0] == "-") && last6[3] == ":" {
+            const sign = if last6[0] == "+" { 1 } else { -1 }
+            const tz_h = to_int(last6.slice(1, 3))
+            const tz_m = to_int(last6.slice(4, 6))
+            tz_offset_secs = sign * (tz_h * 3600 + tz_m * 60)
+            time_part = time_part.slice(0, len(time_part) - 6)
+        }
+    }
+    // Parse time HH:MM:SS[.fff]
+    const time_parts = time_part.split(":")
+    const hour = to_int(time_parts[0])
+    const minute = if len(time_parts) >= 2 { to_int(time_parts[1]) } else { 0 }
+    let second = 0
+    let millis = 0
+    if len(time_parts) >= 3 {
+        const sec_str = time_parts[2]
+        const dot_pos = sec_str.indexOf(".")
+        if dot_pos >= 0 {
+            second = to_int(sec_str.slice(0, dot_pos))
+            let frac = sec_str.slice(dot_pos + 1, len(sec_str))
+            while len(frac) < 3 { frac = frac + "0" }
+            millis = to_int(frac.slice(0, 3))
+        } else {
+            second = to_int(sec_str)
+        }
+    }
+    const days = days_from_civil(y, m, d)
+    const total_secs = days * 86400 + hour * 3600 + minute * 60 + second - tz_offset_secs
+    total_secs * 1000 + millis
+}
+
+// Format a duration in milliseconds as a human-readable string.
+func format_duration(ms) {
+    let remaining = int(ms / 1000)
+    const days = int(remaining / 86400)
+    remaining = remaining % 86400
+    const hours = int(remaining / 3600)
+    remaining = remaining % 3600
+    const minutes = int(remaining / 60)
+    const seconds = remaining % 60
+    let parts = []
+    if days > 0 { parts.push(f"{days}d") }
+    if hours > 0 { parts.push(f"{hours}h") }
+    if minutes > 0 { parts.push(f"{minutes}m") }
+    if seconds > 0 || len(parts) == 0 { parts.push(f"{seconds}s") }
+    parts.join(" ")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 11. Math Extras
+// ════════════════════════════════════════════════════════════════════
+
+// Greatest common divisor.
+func gcd(a, b) {
+    let x = abs(a)
+    let y = abs(b)
+    while y != 0 {
+        const tmp = y
+        y = x % y
+        x = tmp
+    }
+    x
+}
+
+// Least common multiple.
+func lcm(a, b) {
+    if a == 0 || b == 0 { return 0 }
+    abs(a) * abs(b) / gcd(a, b)
+}
+
+// Factorial.
+func factorial(n) {
+    if n < 0 { return 0 }
+    if n <= 1 { return 1 }
+    let result = 1
+    let i = 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    result
+}
+
+// Fibonacci number (iterative).
+func fibonacci(n) {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    let a = 0
+    let b = 1
+    let i = 2
+    while i <= n {
+        const tmp = a + b
+        a = b
+        b = tmp
+        i = i + 1
+    }
+    b
+}
+
+// Check if a number is prime.
+func is_prime(n) {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 || n % 3 == 0 { return false }
+    let i = 5
+    while i * i <= n {
+        if n % i == 0 || n % (i + 2) == 0 { return false }
+        i = i + 6
+    }
+    true
+}
+
+// Find the next prime >= n.
+func next_prime(n) {
+    let candidate = if n < 2 { 2 } else { n }
+    while !is_prime(candidate) {
+        candidate = candidate + 1
+    }
+    candidate
+}
+
+// ── Statistics ─────────────────────────────────────────────────────
+
+// Arithmetic mean.
+func math_mean(nums) {
+    if len(nums) == 0 { return 0.0 }
+    let sum = 0.0
+    for n in nums { sum = sum + n }
+    sum / len(nums)
+}
+
+// Median.
+func math_median(nums) {
+    if len(nums) == 0 { return 0.0 }
+    let sorted = nums.slice(0, len(nums))
+    sorted.sort()
+    const mid = int(len(sorted) / 2)
+    if len(sorted) % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+// Mode (most frequent value). Returns the first mode if ties.
+func math_mode(nums) {
+    if len(nums) == 0 { return null }
+    let counts = {}
+    for n in nums {
+        const key = to_string(n)
+        if counts.has(key) {
+            counts[key] = counts[key] + 1
+        } else {
+            counts[key] = 1
+        }
+    }
+    let best_key = to_string(nums[0])
+    let best_count = 0
+    for key in keys(counts) {
+        if counts[key] > best_count {
+            best_count = counts[key]
+            best_key = key
+        }
+    }
+    to_float(best_key)
+}
+
+// Variance (population).
+func math_variance(nums) {
+    if len(nums) == 0 { return 0.0 }
+    const avg = math_mean(nums)
+    let sum_sq = 0.0
+    for n in nums {
+        const diff = n - avg
+        sum_sq = sum_sq + diff * diff
+    }
+    sum_sq / len(nums)
+}
+
+// Standard deviation (population).
+func math_stddev(nums) {
+    sqrt(math_variance(nums))
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 12. Collections
+// ════════════════════════════════════════════════════════════════════
+
+// ── Set Operations ─────────────────────────────────────────────────
+
+// Set union of two arrays.
+func set_union(a, b) {
+    let result = []
+    let seen = {}
+    for item in a {
+        const key = to_string(item)
+        if !seen.has(key) {
+            seen[key] = true
+            result.push(item)
+        }
+    }
+    for item in b {
+        const key = to_string(item)
+        if !seen.has(key) {
+            seen[key] = true
+            result.push(item)
+        }
+    }
+    result
+}
+
+// Set intersection of two arrays.
+func set_intersection(a, b) {
+    let b_set = {}
+    for item in b {
+        b_set[to_string(item)] = true
+    }
+    let result = []
+    let seen = {}
+    for item in a {
+        const key = to_string(item)
+        if b_set.has(key) && !seen.has(key) {
+            seen[key] = true
+            result.push(item)
+        }
+    }
+    result
+}
+
+// Set difference (a - b).
+func set_difference(a, b) {
+    let b_set = {}
+    for item in b {
+        b_set[to_string(item)] = true
+    }
+    let result = []
+    for item in a {
+        const key = to_string(item)
+        if !b_set.has(key) {
+            result.push(item)
+        }
+    }
+    result
+}
+
+// Set symmetric difference.
+func set_symmetric_difference(a, b) {
+    set_union(set_difference(a, b), set_difference(b, a))
+}
+
+// ── Counter (frequency counting) ──────────────────────────────────
+
+// Count occurrences of each element.
+func counter(items) {
+    let counts = {}
+    for item in items {
+        const key = to_string(item)
+        if counts.has(key) {
+            counts[key] = counts[key] + 1
+        } else {
+            counts[key] = 1
+        }
+    }
+    counts
+}
+
+// Get the N most common elements from a counter.
+func counter_most_common(counts, n) {
+    let entries = []
+    for key in keys(counts) {
+        entries.push([key, counts[key]])
+    }
+    // Sort by count descending
+    let i = 0
+    while i < len(entries) - 1 {
+        let j = i + 1
+        while j < len(entries) {
+            if entries[j][1] > entries[i][1] {
+                const tmp = entries[i]
+                entries[i] = entries[j]
+                entries[j] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n >= len(entries) { return entries }
+    entries.slice(0, n)
+}
+
+// ── Binary Heap (min-heap) ────────────────────────────────────────
+
+func heap_new() { [] }
+
+func heap_push(heap, val) {
+    heap.push(val)
+    // Sift up
+    let idx = len(heap) - 1
+    while idx > 0 {
+        const parent = int((idx - 1) / 2)
+        if heap[idx] < heap[parent] {
+            const tmp = heap[idx]
+            heap[idx] = heap[parent]
+            heap[parent] = tmp
+            idx = parent
+        } else {
+            break
+        }
+    }
+}
+
+func heap_pop(heap) {
+    if len(heap) == 0 { return null }
+    const min_val = heap[0]
+    const last = heap.pop()
+    if len(heap) > 0 {
+        heap[0] = last
+        // Sift down
+        let idx = 0
+        while true {
+            const left = 2 * idx + 1
+            const right = 2 * idx + 2
+            let smallest = idx
+            if left < len(heap) && heap[left] < heap[smallest] { smallest = left }
+            if right < len(heap) && heap[right] < heap[smallest] { smallest = right }
+            if smallest == idx { break }
+            const tmp = heap[idx]
+            heap[idx] = heap[smallest]
+            heap[smallest] = tmp
+            idx = smallest
+        }
+    }
+    min_val
+}
+
+func heap_peek(heap) {
+    if len(heap) == 0 { null } else { heap[0] }
+}
+
+func heap_size(heap) { len(heap) }
+
+// ── Deque (double-ended queue) ────────────────────────────────────
+
+func deque_new() { {"items": []} }
+
+func deque_push_back(dq, val) {
+    dq["items"].push(val)
+}
+
+func deque_push_front(dq, val) {
+    dq["items"].unshift(val)
+}
+
+func deque_pop_back(dq) {
+    if len(dq["items"]) == 0 { return null }
+    dq["items"].pop()
+}
+
+func deque_pop_front(dq) {
+    if len(dq["items"]) == 0 { return null }
+    dq["items"].shift()
+}
+
+func deque_front(dq) {
+    if len(dq["items"]) == 0 { null } else { dq["items"][0] }
+}
+
+func deque_back(dq) {
+    const items = dq["items"]
+    if len(items) == 0 { null } else { items[len(items) - 1] }
+}
+
+func deque_size(dq) { len(dq["items"]) }
+
+func deque_is_empty(dq) { len(dq["items"]) == 0 }
+
+// ── OrderedMap (insertion-order preserving) ────────────────────────
+
+// An OrderedMap is represented as {"__keys": [...], "__values": [...]}
+func ordered_map_new() { {"__keys": [], "__values": []} }
+
+func ordered_map_set(om, key, value) {
+    const ks = om["__keys"]
+    let i = 0
+    while i < len(ks) {
+        if ks[i] == key {
+            om["__values"][i] = value
+            return
+        }
+        i = i + 1
+    }
+    ks.push(key)
+    om["__values"].push(value)
+}
+
+func ordered_map_get(om, key) {
+    const ks = om["__keys"]
+    let i = 0
+    while i < len(ks) {
+        if ks[i] == key { return om["__values"][i] }
+        i = i + 1
+    }
+    null
+}
+
+func ordered_map_has(om, key) {
+    const ks = om["__keys"]
+    let i = 0
+    while i < len(ks) {
+        if ks[i] == key { return true }
+        i = i + 1
+    }
+    false
+}
+
+func ordered_map_remove(om, key) {
+    const ks = om["__keys"]
+    let i = 0
+    while i < len(ks) {
+        if ks[i] == key {
+            ks.remove(i)
+            om["__values"].remove(i)
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+func ordered_map_keys(om) { om["__keys"].slice(0, len(om["__keys"])) }
+
+func ordered_map_values(om) { om["__values"].slice(0, len(om["__values"])) }
+
+func ordered_map_size(om) { len(om["__keys"]) }
+
+func ordered_map_entries(om) {
+    let result = []
+    let i = 0
+    while i < len(om["__keys"]) {
+        result.push([om["__keys"][i], om["__values"][i]])
+        i = i + 1
+    }
+    result
+}
+
+// Iterate over ordered map calling fn(key, value) for each entry.
+func ordered_map_each(om, fn) {
+    let i = 0
+    while i < len(om["__keys"]) {
+        fn(om["__keys"][i], om["__values"][i])
+        i = i + 1
+    }
+}
+
+// Map over ordered map values, returning a new ordered map.
+func ordered_map_map_values(om, fn) {
+    let result = ordered_map_new()
+    let i = 0
+    while i < len(om["__keys"]) {
+        ordered_map_set(result, om["__keys"][i], fn(om["__values"][i]))
+        i = i + 1
+    }
+    result
+}
+
+// Filter ordered map entries, returning a new ordered map.
+func ordered_map_filter(om, pred) {
+    let result = ordered_map_new()
+    let i = 0
+    while i < len(om["__keys"]) {
+        if pred(om["__keys"][i], om["__values"][i]) {
+            ordered_map_set(result, om["__keys"][i], om["__values"][i])
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Merge two ordered maps. Values from b overwrite a.
+func ordered_map_merge(a, b) {
+    let result = ordered_map_new()
+    let i = 0
+    while i < len(a["__keys"]) {
+        ordered_map_set(result, a["__keys"][i], a["__values"][i])
+        i = i + 1
+    }
+    i = 0
+    while i < len(b["__keys"]) {
+        ordered_map_set(result, b["__keys"][i], b["__values"][i])
+        i = i + 1
+    }
+    result
+}
+
+// ── Stack ──────────────────────────────────────────────────────────
+
+func stack_new() { {"items": []} }
+func stack_push(st, val) { st["items"].push(val) }
+func stack_pop(st) {
+    if len(st["items"]) == 0 { return null }
+    st["items"].pop()
+}
+func stack_peek(st) {
+    const items = st["items"]
+    if len(items) == 0 { null } else { items[len(items) - 1] }
+}
+func stack_size(st) { len(st["items"]) }
+func stack_is_empty(st) { len(st["items"]) == 0 }
+
+// ── Ring Buffer ────────────────────────────────────────────────────
+
+func ring_buffer_new(capacity) {
+    let buf = []
+    let i = 0
+    while i < capacity { buf.push(null); i = i + 1 }
+    {"buf": buf, "head": 0, "tail": 0, "size": 0, "capacity": capacity}
+}
+
+func ring_buffer_push(rb, val) {
+    rb["buf"][rb["tail"]] = val
+    rb["tail"] = (rb["tail"] + 1) % rb["capacity"]
+    if rb["size"] < rb["capacity"] {
+        rb["size"] = rb["size"] + 1
+    } else {
+        rb["head"] = (rb["head"] + 1) % rb["capacity"]
+    }
+}
+
+func ring_buffer_pop(rb) {
+    if rb["size"] == 0 { return null }
+    const val = rb["buf"][rb["head"]]
+    rb["head"] = (rb["head"] + 1) % rb["capacity"]
+    rb["size"] = rb["size"] - 1
+    val
+}
+
+func ring_buffer_peek(rb) {
+    if rb["size"] == 0 { null } else { rb["buf"][rb["head"]] }
+}
+
+func ring_buffer_size(rb) { rb["size"] }
+
+func ring_buffer_to_array(rb) {
+    let result = []
+    let i = 0
+    while i < rb["size"] {
+        result.push(rb["buf"][(rb["head"] + i) % rb["capacity"]])
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 13. CRC32 Checksum
+// ════════════════════════════════════════════════════════════════════
+
+// Precomputed CRC32 table (IEEE polynomial 0xEDB88320).
+// Since MAGI doesn't have const arrays computed at compile time,
+// we build the table on first use.
+let _crc32_table = null
+
+func crc32_build_table() {
+    if _crc32_table != null { return _crc32_table }
+    let table = []
+    let i = 0
+    while i < 256 {
+        let crc = i
+        let j = 0
+        while j < 8 {
+            if crc % 2 != 0 {
+                // crc = (crc >> 1) ^ 0xEDB88320
+                crc = int(crc / 2)
+                // XOR with polynomial — need bitwise XOR via integer math
+                crc = bit_xor(crc, 3988292384)  // 0xEDB88320
+            } else {
+                crc = int(crc / 2)
+            }
+            j = j + 1
+        }
+        table.push(crc)
+        i = i + 1
+    }
+    _crc32_table = table
+    table
+}
+
+// Compute CRC32 checksum of a string (IEEE polynomial).
+func crc32(data) {
+    const table = crc32_build_table()
+    let crc = 4294967295  // 0xFFFFFFFF
+    let i = 0
+    while i < len(data) {
+        const byte_val = char_code_at(data, i)
+        const idx = bit_xor(crc, byte_val) % 256
+        crc = bit_xor(int(crc / 256), table[idx])
+        i = i + 1
+    }
+    bit_xor(crc, 4294967295)  // ^ 0xFFFFFFFF
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 14. Semver (Semantic Versioning)
+// ════════════════════════════════════════════════════════════════════
+
+// Parse a semver string "major.minor.patch[-pre]" into a map.
+func semver_parse(s) {
+    const trimmed = s.trim()
+    if len(trimmed) == 0 { return {"error": "empty version string"} }
+    // Split off build metadata (+...)
+    let ver_str = trimmed
+    const plus_pos = ver_str.indexOf("+")
+    if plus_pos >= 0 {
+        ver_str = ver_str.slice(0, plus_pos)
+    }
+    // Split off pre-release (-...)
+    let pre = ""
+    const dash_pos = ver_str.indexOf("-")
+    if dash_pos >= 0 {
+        pre = ver_str.slice(dash_pos + 1, len(ver_str))
+        ver_str = ver_str.slice(0, dash_pos)
+    }
+    const parts = ver_str.split(".")
+    if len(parts) != 3 {
+        return {"error": f"expected 3 version components, got {len(parts)}"}
+    }
+    const major = to_int(parts[0])
+    const minor = to_int(parts[1])
+    const patch = to_int(parts[2])
+    {"major": major, "minor": minor, "patch": patch, "pre": pre}
+}
+
+// Format a semver map back to string.
+func semver_to_string(v) {
+    let result = f"{v['major']}.{v['minor']}.{v['patch']}"
+    if len(v["pre"]) > 0 {
+        result = result + "-" + v["pre"]
+    }
+    result
+}
+
+// Compare two semver maps. Returns -1, 0, or 1.
+func semver_compare(a, b) {
+    if a["major"] != b["major"] { return if a["major"] < b["major"] { -1 } else { 1 } }
+    if a["minor"] != b["minor"] { return if a["minor"] < b["minor"] { -1 } else { 1 } }
+    if a["patch"] != b["patch"] { return if a["patch"] < b["patch"] { -1 } else { 1 } }
+    // Pre-release comparison
+    const a_pre = a["pre"]
+    const b_pre = b["pre"]
+    if len(a_pre) == 0 && len(b_pre) == 0 { return 0 }
+    if len(a_pre) == 0 { return 1 }   // release > pre-release
+    if len(b_pre) == 0 { return -1 }  // pre-release < release
+    if a_pre < b_pre { return -1 }
+    if a_pre > b_pre { return 1 }
+    0
+}
+
+// Check if version satisfies a constraint like ">=1.2.0", "<2.0.0".
+func semver_satisfies(version, constraint) {
+    const trimmed = constraint.trim()
+    let op = ""
+    let ver_str = trimmed
+    if trimmed.starts_with(">=") { op = ">="; ver_str = trimmed.slice(2, len(trimmed)) }
+    else if trimmed.starts_with("<=") { op = "<="; ver_str = trimmed.slice(2, len(trimmed)) }
+    else if trimmed.starts_with(">") { op = ">"; ver_str = trimmed.slice(1, len(trimmed)) }
+    else if trimmed.starts_with("<") { op = "<"; ver_str = trimmed.slice(1, len(trimmed)) }
+    else if trimmed.starts_with("=") { op = "="; ver_str = trimmed.slice(1, len(trimmed)) }
+    else { op = "=" }
+    const target = semver_parse(ver_str.trim())
+    if target.has("error") { return false }
+    const cmp = semver_compare(version, target)
+    if op == ">=" { return cmp >= 0 }
+    if op == "<=" { return cmp <= 0 }
+    if op == ">" { return cmp > 0 }
+    if op == "<" { return cmp < 0 }
+    cmp == 0
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 15. CSV Parser/Writer
+// ════════════════════════════════════════════════════════════════════
+
+// Parse a CSV string into {headers: [...], records: [[...], ...]}.
+func csv_parse(text) {
+    const lines = text.split("\n")
+    if len(lines) == 0 { return {"headers": [], "records": []} }
+    // Filter empty trailing lines
+    let non_empty = []
+    for line in lines {
+        if len(line.trim()) > 0 { non_empty.push(line) }
+    }
+    if len(non_empty) == 0 { return {"headers": [], "records": []} }
+    const headers = csv_parse_line(non_empty[0])
+    let records = []
+    let i = 1
+    while i < len(non_empty) {
+        records.push(csv_parse_line(non_empty[i]))
+        i = i + 1
+    }
+    {"headers": headers, "records": records}
+}
+
+// Parse a single CSV line into fields, handling quoted fields.
+func csv_parse_line(line) {
+    let fields = []
+    let current = ""
+    let in_quote = false
+    let i = 0
+    while i < len(line) {
+        const c = line[i]
+        if in_quote {
+            if c == "\"" {
+                if i + 1 < len(line) && line[i + 1] == "\"" {
+                    current = current + "\""
+                    i = i + 2
+                } else {
+                    in_quote = false
+                    i = i + 1
+                }
+            } else {
+                current = current + c
+                i = i + 1
+            }
+        } else if c == "\"" {
+            in_quote = true
+            i = i + 1
+        } else if c == "," {
+            fields.push(current)
+            current = ""
+            i = i + 1
+        } else {
+            current = current + c
+            i = i + 1
+        }
+    }
+    fields.push(current)
+    fields
+}
+
+// Write a CSV string from headers and rows.
+func csv_write(headers, rows) {
+    let result = csv_format_line(headers) + "\n"
+    for row in rows {
+        result = result + csv_format_line(row) + "\n"
+    }
+    result
+}
+
+// Format a single CSV line, quoting fields that contain commas or quotes.
+func csv_format_line(fields) {
+    let parts = []
+    for field in fields {
+        if field.contains(",") || field.contains("\"") || field.contains("\n") {
+            parts.push("\"" + field.replace("\"", "\"\"") + "\"")
+        } else {
+            parts.push(field)
+        }
+    }
+    parts.join(",")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 16. Glob Pattern Matching
+// ════════════════════════════════════════════════════════════════════
+
+// Match a filename against a glob pattern (* and ?).
+func glob_match(pattern, text) {
+    glob_match_inner(pattern, text, 0, 0)
+}
+
+func glob_match_inner(pattern, text, pi, ti) {
+    if pi == len(pattern) { return ti == len(text) }
+    if pattern[pi] == "*" {
+        // Try matching zero or more characters
+        let k = ti
+        while k <= len(text) {
+            if glob_match_inner(pattern, text, pi + 1, k) { return true }
+            k = k + 1
+        }
+        return false
+    }
+    if ti >= len(text) { return false }
+    if pattern[pi] == "?" || pattern[pi] == text[ti] {
+        return glob_match_inner(pattern, text, pi + 1, ti + 1)
+    }
+    false
+}
+
+// Match a path against a glob pattern with ** support.
+func glob_match_path(pattern, path) {
+    const pat_parts = pattern.split("/")
+    const path_parts = path.split("/")
+    glob_match_path_inner(pat_parts, path_parts, 0, 0)
+}
+
+func glob_match_path_inner(pat_parts, path_parts, pi, ti) {
+    if pi == len(pat_parts) { return ti == len(path_parts) }
+    if pat_parts[pi] == "**" {
+        // Match zero or more path components
+        let k = ti
+        while k <= len(path_parts) {
+            if glob_match_path_inner(pat_parts, path_parts, pi + 1, k) { return true }
+            k = k + 1
+        }
+        return false
+    }
+    if ti >= len(path_parts) { return false }
+    if glob_match(pat_parts[pi], path_parts[ti]) {
+        return glob_match_path_inner(pat_parts, path_parts, pi + 1, ti + 1)
+    }
+    false
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 17. String Similarity and Search
+// ════════════════════════════════════════════════════════════════════
+
+// Normalized Levenshtein similarity (0.0 to 1.0).
+func levenshtein_similarity(a, b) {
+    const max_len = if len(a) > len(b) { len(a) } else { len(b) }
+    if max_len == 0 { return 1.0 }
+    1.0 - levenshtein(a, b) / max_len
+}
+
+// Find the best match for `query` among `candidates`.
+// Returns the candidate with the lowest Levenshtein distance.
+func fuzzy_match(query, candidates) {
+    if len(candidates) == 0 { return null }
+    let best = candidates[0]
+    let best_dist = levenshtein(query, candidates[0])
+    let i = 1
+    while i < len(candidates) {
+        const dist = levenshtein(query, candidates[i])
+        if dist < best_dist {
+            best_dist = dist
+            best = candidates[i]
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Suggest similar names when a name is not found.
+func did_you_mean(name, candidates, max_distance) {
+    let suggestions = []
+    for candidate in candidates {
+        const dist = levenshtein(name, candidate)
+        if dist <= max_distance {
+            suggestions.push(candidate)
+        }
+    }
+    suggestions
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 18. TOML Parser (basic)
+// ════════════════════════════════════════════════════════════════════
+
+// Parse a TOML string into a nested map structure.
+func toml_parse(input) {
+    let root = {}
+    let current_section = []
+    const lines = input.split("\n")
+    let line_no = 0
+    while line_no < len(lines) {
+        let line = lines[line_no].trim()
+        line_no = line_no + 1
+        // Skip empty and comments
+        if len(line) == 0 || line[0] == "#" { continue }
+        // Table header [section]
+        if line[0] == "[" && line[len(line) - 1] == "]" {
+            if line[1] == "[" && line[len(line) - 2] == "]" {
+                // Array of tables [[section]]
+                const section_name = line.slice(2, len(line) - 2).trim()
+                current_section = section_name.split(".")
+            } else {
+                const section_name = line.slice(1, len(line) - 1).trim()
+                current_section = section_name.split(".")
+            }
+            // Ensure section path exists in root
+            toml_ensure_path(root, current_section)
+            continue
+        }
+        // Key = value
+        const eq_pos = line.indexOf("=")
+        if eq_pos < 0 { continue }
+        const key = line.slice(0, eq_pos).trim()
+        // Strip surrounding quotes from key
+        let clean_key = key
+        if len(key) >= 2 && key[0] == "\"" && key[len(key) - 1] == "\"" {
+            clean_key = key.slice(1, len(key) - 1)
+        }
+        const value_str = line.slice(eq_pos + 1, len(line)).trim()
+        const value = toml_parse_value(value_str)
+        // Insert into the right section
+        if len(current_section) == 0 {
+            root[clean_key] = value
+        } else {
+            let target = root
+            for sec in current_section {
+                if !target.has(sec) { target[sec] = {} }
+                target = target[sec]
+            }
+            target[clean_key] = value
+        }
+    }
+    root
+}
+
+func toml_ensure_path(root, path) {
+    let current = root
+    for key in path {
+        if !current.has(key) { current[key] = {} }
+        current = current[key]
+    }
+}
+
+func toml_parse_value(s) {
+    let trimmed = s.trim()
+    // Strip trailing comment
+    let in_string = false
+    let escape = false
+    let i = 0
+    while i < len(trimmed) {
+        const c = trimmed[i]
+        if escape { escape = false; i = i + 1; continue }
+        if c == "\\" && in_string { escape = true; i = i + 1; continue }
+        if c == "\"" { in_string = !in_string; i = i + 1; continue }
+        if c == "#" && !in_string {
+            trimmed = trimmed.slice(0, i).trim()
+            break
+        }
+        i = i + 1
+    }
+    if trimmed == "true" { return true }
+    if trimmed == "false" { return false }
+    // String
+    if len(trimmed) >= 2 && trimmed[0] == "\"" && trimmed[len(trimmed) - 1] == "\"" {
+        return toml_unescape(trimmed.slice(1, len(trimmed) - 1))
+    }
+    if len(trimmed) >= 2 && trimmed[0] == "'" && trimmed[len(trimmed) - 1] == "'" {
+        return trimmed.slice(1, len(trimmed) - 1)
+    }
+    // Array
+    if trimmed[0] == "[" && trimmed[len(trimmed) - 1] == "]" {
+        const inner = trimmed.slice(1, len(trimmed) - 1).trim()
+        if len(inner) == 0 { return [] }
+        const items = toml_split_elements(inner)
+        let result = []
+        for item in items {
+            const t = item.trim()
+            if len(t) > 0 { result.push(toml_parse_value(t)) }
+        }
+        return result
+    }
+    // Inline table
+    if trimmed[0] == "{" && trimmed[len(trimmed) - 1] == "}" {
+        const inner = trimmed.slice(1, len(trimmed) - 1).trim()
+        let table = {}
+        if len(inner) == 0 { return table }
+        const items = toml_split_elements(inner)
+        for item in items {
+            const t = item.trim()
+            const eq = t.indexOf("=")
+            if eq >= 0 {
+                let k = t.slice(0, eq).trim()
+                if len(k) >= 2 && k[0] == "\"" && k[len(k) - 1] == "\"" {
+                    k = k.slice(1, len(k) - 1)
+                }
+                table[k] = toml_parse_value(t.slice(eq + 1, len(t)).trim())
+            }
+        }
+        return table
+    }
+    // Number
+    const as_int = to_int(trimmed)
+    if to_string(as_int) == trimmed { return as_int }
+    const as_float = to_float(trimmed)
+    if to_string(as_float) != "NaN" { return as_float }
+    // Bare string fallback
+    trimmed
+}
+
+func toml_unescape(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        if s[i] == "\\" && i + 1 < len(s) {
+            const next = s[i + 1]
+            if next == "n" { result = result + "\n"; i = i + 2 }
+            else if next == "t" { result = result + "\t"; i = i + 2 }
+            else if next == "r" { result = result + "\r"; i = i + 2 }
+            else if next == "\\" { result = result + "\\"; i = i + 2 }
+            else if next == "\"" { result = result + "\""; i = i + 2 }
+            else { result = result + s[i]; i = i + 1 }
+        } else {
+            result = result + s[i]
+            i = i + 1
+        }
+    }
+    result
+}
+
+func toml_split_elements(s) {
+    let results = []
+    let depth_bracket = 0
+    let depth_brace = 0
+    let in_string = false
+    let escape = false
+    let start = 0
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if escape { escape = false; i = i + 1; continue }
+        if c == "\\" && in_string { escape = true; i = i + 1; continue }
+        if c == "\"" { in_string = !in_string; i = i + 1; continue }
+        if !in_string {
+            if c == "[" { depth_bracket = depth_bracket + 1 }
+            else if c == "]" { depth_bracket = depth_bracket - 1 }
+            else if c == "{" { depth_brace = depth_brace + 1 }
+            else if c == "}" { depth_brace = depth_brace - 1 }
+            else if c == "," && depth_bracket == 0 && depth_brace == 0 {
+                results.push(s.slice(start, i))
+                start = i + 1
+            }
+        }
+        i = i + 1
+    }
+    if start < len(s) {
+        results.push(s.slice(start, len(s)))
+    }
+    results
+}
+
+// Serialize a TOML table map to TOML string.
+func toml_stringify(table) {
+    let result = ""
+    // First pass: simple key-value pairs
+    for key in keys(table) {
+        const val = table[key]
+        if typeof(val) != "map" || typeof(val) == "array" {
+            result = result + toml_key_escape(key) + " = " + toml_value_to_string(val) + "\n"
+        }
+    }
+    // Second pass: sub-tables
+    for key in keys(table) {
+        const val = table[key]
+        if typeof(val) == "map" && typeof(val) != "array" {
+            result = result + "\n[" + key + "]\n"
+            result = result + toml_stringify(val)
+        }
+    }
+    result
+}
+
+func toml_key_escape(key) {
+    let needs_quote = false
+    let i = 0
+    while i < len(key) {
+        const c = key[i]
+        if !is_alnum(c) && c != "-" && c != "_" {
+            needs_quote = true
+            break
+        }
+        i = i + 1
+    }
+    if needs_quote {
+        "\"" + key.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    } else {
+        key
+    }
+}
+
+func toml_value_to_string(val) {
+    if val == null { return "\"\"" }
+    if val == true { return "true" }
+    if val == false { return "false" }
+    if typeof(val) == "int" { return to_string(val) }
+    if typeof(val) == "float" { return to_string(val) }
+    if typeof(val) == "string" {
+        return "\"" + val.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
+    }
+    if typeof(val) == "array" {
+        let parts = []
+        for item in val {
+            parts.push(toml_value_to_string(item))
+        }
+        return "[" + parts.join(", ") + "]"
+    }
+    to_string(val)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 19. Adler32 Checksum
+// ════════════════════════════════════════════════════════════════════
+
+func adler32(data) {
+    let a = 1
+    let b = 0
+    let i = 0
+    while i < len(data) {
+        a = (a + char_code_at(data, i)) % 65521
+        b = (b + a) % 65521
+        i = i + 1
+    }
+    b * 65536 + a
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 20. String Utilities (additional)
+// ════════════════════════════════════════════════════════════════════
+
+// Repeat a string n times.
+func string_repeat(s, n) {
+    let result = ""
+    let i = 0
+    while i < n {
+        result = result + s
+        i = i + 1
+    }
+    result
+}
+
+// Count occurrences of substring in string.
+func string_count(s, sub) {
+    if len(sub) == 0 { return 0 }
+    let count = 0
+    let pos = 0
+    while pos <= len(s) - len(sub) {
+        if s.slice(pos, pos + len(sub)) == sub {
+            count = count + 1
+            pos = pos + len(sub)
+        } else {
+            pos = pos + 1
+        }
+    }
+    count
+}
+
+// Reverse a string.
+func string_reverse(s) {
+    let result = ""
+    let i = len(s) - 1
+    while i >= 0 {
+        result = result + s[i]
+        i = i - 1
+    }
+    result
+}
+
+// Check if a string is a palindrome.
+func is_palindrome(s) {
+    let i = 0
+    let j = len(s) - 1
+    while i < j {
+        if s[i] != s[j] { return false }
+        i = i + 1
+        j = j - 1
+    }
+    true
+}
+
+// Capitalize the first character of a string.
+func capitalize(s) {
+    if len(s) == 0 { return "" }
+    to_upper_char(s[0]) + s.slice(1, len(s))
+}
+
+// Uncapitalize the first character.
+func uncapitalize(s) {
+    if len(s) == 0 { return "" }
+    to_lower_char(s[0]) + s.slice(1, len(s))
+}
+
+// Check if a string contains only whitespace.
+func is_blank(s) {
+    let i = 0
+    while i < len(s) {
+        if s[i] != " " && s[i] != "\t" && s[i] != "\n" && s[i] != "\r" { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Remove all whitespace from a string.
+func strip_whitespace(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            result = result + c
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Squeeze consecutive occurrences of a character into one.
+func squeeze(s, ch) {
+    if len(s) == 0 { return "" }
+    let result = s[0]
+    let i = 1
+    while i < len(s) {
+        if !(s[i] == ch && s[i - 1] == ch) {
+            result = result + s[i]
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Split a string into chunks of the given size.
+func chunk(s, size) {
+    let result = []
+    let i = 0
+    while i < len(s) {
+        const end = if i + size > len(s) { len(s) } else { i + size }
+        result.push(s.slice(i, end))
+        i = i + size
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 21. Number Formatting
+// ════════════════════════════════════════════════════════════════════
+
+// Format a number with thousands separators.
+func format_number(n) {
+    const s = to_string(int(n))
+    let negative = false
+    let digits = s
+    if s[0] == "-" {
+        negative = true
+        digits = s.slice(1, len(s))
+    }
+    let result = ""
+    let count = 0
+    let i = len(digits) - 1
+    while i >= 0 {
+        if count > 0 && count % 3 == 0 {
+            result = "," + result
+        }
+        result = digits[i] + result
+        count = count + 1
+        i = i - 1
+    }
+    if negative { "-" + result } else { result }
+}
+
+// Format bytes as human-readable size (KB, MB, GB, etc.).
+func format_bytes(bytes) {
+    const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    let size = to_float(bytes)
+    let unit_idx = 0
+    while size >= 1024.0 && unit_idx < len(units) - 1 {
+        size = size / 1024.0
+        unit_idx = unit_idx + 1
+    }
+    if unit_idx == 0 {
+        f"{int(size)} {units[unit_idx]}"
+    } else {
+        // Round to 1 decimal
+        const rounded = int(size * 10.0) / 10.0
+        f"{rounded} {units[unit_idx]}"
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 22. Sorting and Search Algorithms
+// ════════════════════════════════════════════════════════════════════
+
+// Binary search on a sorted array. Returns index or -1.
+func binary_search(arr, target) {
+    let lo = 0
+    let hi = len(arr) - 1
+    while lo <= hi {
+        const mid = int((lo + hi) / 2)
+        if arr[mid] == target { return mid }
+        if arr[mid] < target { lo = mid + 1 }
+        else { hi = mid - 1 }
+    }
+    -1
+}
+
+// Merge sort (returns new sorted array).
+func merge_sort(arr) {
+    if len(arr) <= 1 { return arr }
+    const mid = int(len(arr) / 2)
+    const left = merge_sort(arr.slice(0, mid))
+    const right = merge_sort(arr.slice(mid, len(arr)))
+    merge_arrays(left, right)
+}
+
+func merge_arrays(left, right) {
+    let result = []
+    let i = 0
+    let j = 0
+    while i < len(left) && j < len(right) {
+        if left[i] <= right[j] {
+            result.push(left[i])
+            i = i + 1
+        } else {
+            result.push(right[j])
+            j = j + 1
+        }
+    }
+    while i < len(left) { result.push(left[i]); i = i + 1 }
+    while j < len(right) { result.push(right[j]); j = j + 1 }
+    result
+}
+
+// Group array elements by a key function.
+func group_by(arr, key_fn) {
+    let groups = {}
+    for item in arr {
+        const key = key_fn(item)
+        const k = to_string(key)
+        if !groups.has(k) {
+            groups[k] = []
+        }
+        groups[k].push(item)
+    }
+    groups
+}
+
+// Unique elements preserving order.
+func unique(arr) {
+    let seen = {}
+    let result = []
+    for item in arr {
+        const k = to_string(item)
+        if !seen.has(k) {
+            seen[k] = true
+            result.push(item)
+        }
+    }
+    result
+}
+
+// Flatten a nested array by one level.
+func flatten(arr) {
+    let result = []
+    for item in arr {
+        if typeof(item) == "array" {
+            for sub in item {
+                result.push(sub)
+            }
+        } else {
+            result.push(item)
+        }
+    }
+    result
+}
+
+// Zip two arrays into an array of pairs.
+func zip(a, b) {
+    let result = []
+    const min_len = if len(a) < len(b) { len(a) } else { len(b) }
+    let i = 0
+    while i < min_len {
+        result.push([a[i], b[i]])
+        i = i + 1
+    }
+    result
+}
+
+// Unzip an array of pairs into two arrays.
+func unzip(pairs) {
+    let a = []
+    let b = []
+    for pair in pairs {
+        a.push(pair[0])
+        b.push(pair[1])
+    }
+    [a, b]
+}
+
+// Range of integers [start, end).
+func range(start, end) {
+    let result = []
+    let i = start
+    while i < end {
+        result.push(i)
+        i = i + 1
+    }
+    result
+}
+
+// Range with step.
+func range_step(start, end, step) {
+    let result = []
+    let i = start
+    if step > 0 {
+        while i < end {
+            result.push(i)
+            i = i + step
+        }
+    } else if step < 0 {
+        while i > end {
+            result.push(i)
+            i = i + step
+        }
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 23. Math Extras (additional)
+// ════════════════════════════════════════════════════════════════════
+
+// Clamp a number to [min, max].
+func clamp(n, min_val, max_val) {
+    if n < min_val { min_val }
+    else if n > max_val { max_val }
+    else { n }
+}
+
+// Linear interpolation between a and b.
+func lerp(a, b, t) {
+    a + (b - a) * t
+}
+
+// Map a value from one range to another.
+func map_range(value, from_min, from_max, to_min, to_max) {
+    const t = (value - from_min) / (from_max - from_min)
+    to_min + t * (to_max - to_min)
+}
+
+// Sum of an array.
+func math_sum(arr) {
+    let total = 0
+    for n in arr { total = total + n }
+    total
+}
+
+// Product of an array.
+func math_product(arr) {
+    if len(arr) == 0 { return 0 }
+    let total = 1
+    for n in arr { total = total * n }
+    total
+}
+
+// Min of an array.
+func math_min(arr) {
+    if len(arr) == 0 { return null }
+    let result = arr[0]
+    let i = 1
+    while i < len(arr) {
+        if arr[i] < result { result = arr[i] }
+        i = i + 1
+    }
+    result
+}
+
+// Max of an array.
+func math_max(arr) {
+    if len(arr) == 0 { return null }
+    let result = arr[0]
+    let i = 1
+    while i < len(arr) {
+        if arr[i] > result { result = arr[i] }
+        i = i + 1
+    }
+    result
+}
+
+// Power (integer exponentiation).
+func int_pow(base, exp) {
+    if exp < 0 { return 0 }
+    let result = 1
+    let i = 0
+    while i < exp {
+        result = result * base
+        i = i + 1
+    }
+    result
+}
+
+// Absolute value.
+func math_abs(n) {
+    if n < 0 { -n } else { n }
+}
+
+// Sign of a number (-1, 0, or 1).
+func math_sign(n) {
+    if n > 0 { 1 }
+    else if n < 0 { -1 }
+    else { 0 }
+}
+
+// Integer division (floor division).
+func div_floor(a, b) {
+    const q = int(a / b)
+    if (a % b != 0) && ((a < 0) != (b < 0)) { q - 1 } else { q }
+}
+
+// Modulo (always non-negative result).
+func mod_floor(a, b) {
+    const r = a % b
+    if r < 0 { r + abs(b) } else { r }
+}
+
+// Combinations C(n, k).
+func combinations(n, k) {
+    if k < 0 || k > n { return 0 }
+    if k == 0 || k == n { return 1 }
+    let result = 1
+    let i = 0
+    while i < k {
+        result = result * (n - i) / (i + 1)
+        i = i + 1
+    }
+    result
+}
+
+// Permutations P(n, k).
+func permutations(n, k) {
+    if k < 0 || k > n { return 0 }
+    let result = 1
+    let i = 0
+    while i < k {
+        result = result * (n - i)
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 24. Color Utilities
+// ════════════════════════════════════════════════════════════════════
+
+// Parse a hex color string (#RRGGBB or #RGB) to [r, g, b].
+func color_parse_hex(hex) {
+    let s = hex
+    if s[0] == "#" { s = s.slice(1, len(s)) }
+    if len(s) == 3 {
+        const r = hex_val(s[0]) * 17
+        const g = hex_val(s[1]) * 17
+        const b = hex_val(s[2]) * 17
+        return [r, g, b]
+    }
+    if len(s) == 6 {
+        const r = hex_val(s[0]) * 16 + hex_val(s[1])
+        const g = hex_val(s[2]) * 16 + hex_val(s[3])
+        const b = hex_val(s[4]) * 16 + hex_val(s[5])
+        return [r, g, b]
+    }
+    [0, 0, 0]
+}
+
+// Convert [r, g, b] to hex string #RRGGBB.
+func color_to_hex(rgb) {
+    const r = rgb[0]
+    const g = rgb[1]
+    const b = rgb[2]
+    "#" + HEX_LOWER[int(r / 16)] + HEX_LOWER[r % 16] + HEX_LOWER[int(g / 16)] + HEX_LOWER[g % 16] + HEX_LOWER[int(b / 16)] + HEX_LOWER[b % 16]
+}
+
+// Blend two colors with a ratio t (0.0 = color a, 1.0 = color b).
+func color_blend(a, b, t) {
+    const r = int(a[0] + (b[0] - a[0]) * t)
+    const g = int(a[1] + (b[1] - a[1]) * t)
+    const bl = int(a[2] + (b[2] - a[2]) * t)
+    [clamp(r, 0, 255), clamp(g, 0, 255), clamp(bl, 0, 255)]
+}
+
+// Lighten a color by percentage (0-100).
+func color_lighten(rgb, percent) {
+    color_blend(rgb, [255, 255, 255], percent / 100.0)
+}
+
+// Darken a color by percentage (0-100).
+func color_darken(rgb, percent) {
+    color_blend(rgb, [0, 0, 0], percent / 100.0)
+}
+
+// Convert RGB to grayscale using luminance weights.
+func color_grayscale(rgb) {
+    const gray = int(0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2])
+    [gray, gray, gray]
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 25. Path Utilities
+// ════════════════════════════════════════════════════════════════════
+
+// Get the file extension from a path.
+func path_extension(path) {
+    const last_dot = path.lastIndexOf(".")
+    const last_slash = path.lastIndexOf("/")
+    if last_dot < 0 || last_dot < last_slash { return "" }
+    path.slice(last_dot + 1, len(path))
+}
+
+// Get the filename from a path (last component).
+func path_filename(path) {
+    const last_slash = path.lastIndexOf("/")
+    if last_slash < 0 { return path }
+    path.slice(last_slash + 1, len(path))
+}
+
+// Get the directory part of a path.
+func path_dirname(path) {
+    const last_slash = path.lastIndexOf("/")
+    if last_slash < 0 { return "." }
+    if last_slash == 0 { return "/" }
+    path.slice(0, last_slash)
+}
+
+// Get the stem (filename without extension).
+func path_stem(path) {
+    const name = path_filename(path)
+    const dot = name.lastIndexOf(".")
+    if dot <= 0 { return name }
+    name.slice(0, dot)
+}
+
+// Join two path components.
+func path_join(a, b) {
+    if len(a) == 0 { return b }
+    if len(b) == 0 { return a }
+    if b[0] == "/" { return b }
+    if a[len(a) - 1] == "/" { a + b }
+    else { a + "/" + b }
+}
+
+// Normalize a path (resolve . and .. components).
+func path_normalize(path) {
+    const parts = path.split("/")
+    let result = []
+    for part in parts {
+        if part == "." || part == "" { continue }
+        if part == ".." {
+            if len(result) > 0 && result[len(result) - 1] != ".." {
+                result.pop()
+            } else {
+                result.push(part)
+            }
+        } else {
+            result.push(part)
+        }
+    }
+    let normalized = result.join("/")
+    if len(path) > 0 && path[0] == "/" { normalized = "/" + normalized }
+    if len(normalized) == 0 { normalized = "." }
+    normalized
+}
+
+// Check if a path is absolute.
+func path_is_absolute(path) {
+    len(path) > 0 && path[0] == "/"
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 26. Template Engine (simple)
+// ════════════════════════════════════════════════════════════════════
+
+// Simple template substitution: replace {{key}} with values from a map.
+func template_render(template, vars) {
+    let result = template
+    for key in keys(vars) {
+        const placeholder = "{{" + key + "}}"
+        result = result.replace(placeholder, to_string(vars[key]))
+    }
+    result
+}
+
+// Render a template with conditional blocks: {{#if key}}...{{/if}}.
+func template_render_full(template, vars) {
+    let result = template_render(template, vars)
+    // Process {{#if key}}...{{/if}} blocks
+    while result.contains("{{#if ") {
+        const if_start = result.indexOf("{{#if ")
+        if if_start < 0 { break }
+        const key_start = if_start + 6
+        const key_end = result.indexOf("}}", key_start)
+        if key_end < 0 { break }
+        const key = result.slice(key_start, key_end)
+        const block_start = key_end + 2
+        const end_tag = "{{/if}}"
+        const block_end = result.indexOf(end_tag, block_start)
+        if block_end < 0 { break }
+        const block_content = result.slice(block_start, block_end)
+        const after = result.slice(block_end + len(end_tag), len(result))
+        let replacement = ""
+        if vars.has(key) && vars[key] {
+            replacement = block_content
+        }
+        result = result.slice(0, if_start) + replacement + after
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 27. Diff Algorithm (simplified)
+// ════════════════════════════════════════════════════════════════════
+
+// Compute a simple line diff between two texts.
+// Returns an array of {op: "+"/"-"/"=", line: "..."} entries.
+func diff_lines(old_text, new_text) {
+    const old_lines = old_text.split("\n")
+    const new_lines = new_text.split("\n")
+    // Simple LCS-based diff using DP
+    const m = len(old_lines)
+    const n = len(new_lines)
+    // Build LCS length table
+    let dp = []
+    let i = 0
+    while i <= m {
+        let row = []
+        let j = 0
+        while j <= n { row.push(0); j = j + 1 }
+        dp.push(row)
+        i = i + 1
+    }
+    i = 1
+    while i <= m {
+        let j = 1
+        while j <= n {
+            if old_lines[i - 1] == new_lines[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            } else {
+                dp[i][j] = if dp[i - 1][j] > dp[i][j - 1] { dp[i - 1][j] } else { dp[i][j - 1] }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Backtrack to build diff
+    let result = []
+    i = m
+    let j = n
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && old_lines[i - 1] == new_lines[j - 1] {
+            result.push({"op": "=", "line": old_lines[i - 1]})
+            i = i - 1
+            j = j - 1
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            result.push({"op": "+", "line": new_lines[j - 1]})
+            j = j - 1
+        } else {
+            result.push({"op": "-", "line": old_lines[i - 1]})
+            i = i - 1
+        }
+    }
+    // Reverse to get correct order
+    let reversed = []
+    i = len(result) - 1
+    while i >= 0 {
+        reversed.push(result[i])
+        i = i - 1
+    }
+    reversed
+}
+
+// Format a diff as a unified diff string.
+func diff_format(diff_entries) {
+    let result = ""
+    for entry in diff_entries {
+        if entry["op"] == "+" {
+            result = result + "+ " + entry["line"] + "\n"
+        } else if entry["op"] == "-" {
+            result = result + "- " + entry["line"] + "\n"
+        } else {
+            result = result + "  " + entry["line"] + "\n"
+        }
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 28. Event Emitter Pattern
+// ════════════════════════════════════════════════════════════════════
+
+// Create a new event emitter.
+func emitter_new() { {"listeners": {}} }
+
+// Register a listener for an event.
+func emitter_on(emitter, event, handler) {
+    if !emitter["listeners"].has(event) {
+        emitter["listeners"][event] = []
+    }
+    emitter["listeners"][event].push(handler)
+}
+
+// Emit an event, calling all registered listeners.
+func emitter_emit(emitter, event, data) {
+    if emitter["listeners"].has(event) {
+        const handlers = emitter["listeners"][event]
+        for handler in handlers {
+            handler(data)
+        }
+    }
+}
+
+// Remove all listeners for an event.
+func emitter_off(emitter, event) {
+    if emitter["listeners"].has(event) {
+        emitter["listeners"][event] = []
+    }
+}
+
+// Count listeners for an event.
+func emitter_listener_count(emitter, event) {
+    if emitter["listeners"].has(event) {
+        len(emitter["listeners"][event])
+    } else {
+        0
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 29. Result Type Pattern
+// ════════════════════════════════════════════════════════════════════
+
+// Create an Ok result.
+func result_ok(value) { {"__result": "ok", "value": value} }
+
+// Create an Err result.
+func result_err(error) { {"__result": "err", "error": error} }
+
+// Check if a result is Ok.
+func result_is_ok(r) { typeof(r) == "map" && r.has("__result") && r["__result"] == "ok" }
+
+// Check if a result is Err.
+func result_is_err(r) { typeof(r) == "map" && r.has("__result") && r["__result"] == "err" }
+
+// Unwrap an Ok value, or panic on Err.
+func result_unwrap(r) {
+    if result_is_ok(r) { return r["value"] }
+    panic(f"unwrap on Err: {r['error']}")
+}
+
+// Unwrap an Ok value, or return default on Err.
+func result_unwrap_or(r, default_val) {
+    if result_is_ok(r) { r["value"] } else { default_val }
+}
+
+// Map over an Ok value.
+func result_map(r, fn) {
+    if result_is_ok(r) { result_ok(fn(r["value"])) } else { r }
+}
+
+// Chain results.
+func result_and_then(r, fn) {
+    if result_is_ok(r) { fn(r["value"]) } else { r }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 30. Option Type Pattern
+// ════════════════════════════════════════════════════════════════════
+
+// Create a Some option.
+func option_some(value) { {"__option": "some", "value": value} }
+
+// Create a None option.
+func option_none() { {"__option": "none"} }
+
+// Check if an option is Some.
+func option_is_some(o) { typeof(o) == "map" && o.has("__option") && o["__option"] == "some" }
+
+// Check if an option is None.
+func option_is_none(o) { typeof(o) == "map" && o.has("__option") && o["__option"] == "none" }
+
+// Unwrap a Some value, or panic on None.
+func option_unwrap(o) {
+    if option_is_some(o) { return o["value"] }
+    panic("unwrap on None")
+}
+
+// Unwrap a Some value, or return default on None.
+func option_unwrap_or(o, default_val) {
+    if option_is_some(o) { o["value"] } else { default_val }
+}
+
+// Map over a Some value.
+func option_map(o, fn) {
+    if option_is_some(o) { option_some(fn(o["value"])) } else { o }
+}
+
+// Filter an option: returns None if predicate fails.
+func option_filter(o, pred) {
+    if option_is_some(o) && pred(o["value"]) { o } else { option_none() }
+}
