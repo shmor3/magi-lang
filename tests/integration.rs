@@ -21524,3 +21524,34 @@ fn test_arrow_in_pipe() {
     let result = run_eval_unique("output([1,2,3].map(x => x * 10));", "arrow_pipe");
     assert!(result.contains("[10, 20, 30]"));
 }
+
+#[test]
+fn test_dot_receiver_method() {
+    let result = run_eval_unique(r#"
+        struct Counter { value: int }
+        func Counter.increment(self) {
+            Counter { value: self.value + 1 }
+        }
+        func Counter.get(self) { self.value }
+        const c = Counter { value: 0 };
+        const c2 = c.increment();
+        output c2.get();
+    "#, "dot_recv");
+    assert!(result.contains("1"));
+}
+
+#[test]
+fn test_dot_receiver_with_params() {
+    let result = run_eval_unique(r#"
+        struct Vec2 { x: int, y: int }
+        func Vec2.add(self, other) {
+            Vec2 { x: self.x + other.x, y: self.y + other.y }
+        }
+        func Vec2.x_val(self) { self.x }
+        const a = Vec2 { x: 1, y: 2 };
+        const b = Vec2 { x: 3, y: 4 };
+        const c = a.add(b);
+        output c.x_val();
+    "#, "dot_recv_params");
+    assert!(result.contains("4"));
+}

@@ -1592,6 +1592,48 @@ impl Parser {
             Vec::new()
         };
 
+        // Dot receiver syntax: func Type.method(self) { ... }
+        // Desugars to: impl Type { fn method(self) { ... } }
+        if self.at(&TokenKind::Dot) {
+            self.advance(); // consume '.'
+            let method_tok = self.expect_identifier()?;
+            let method_name = method_tok.text;
+            let receiver_type_name = name;
+
+            self.expect(&TokenKind::LParen)?;
+            let method_params = self.parse_function_params(&TokenKind::RParen)?;
+            self.expect(&TokenKind::RParen)?;
+
+            let return_type = if self.eat(&TokenKind::Arrow) {
+                Some(self.parse_type_annotation()?)
+            } else {
+                None
+            };
+
+            let body = self.parse_block()?;
+            let full_span = start.merge(body.span);
+
+            let method = FunctionDef {
+                name: method_name,
+                type_params,
+                params: method_params,
+                return_type,
+                body,
+                span: full_span,
+                is_getter: false,
+                is_setter: false,
+                where_clauses: Vec::new(),
+                deprecated: false,
+            };
+
+            return Ok(Statement {
+                span: full_span,
+                kind: StatementKind::ImplBlock { type_name: receiver_type_name, methods: vec![method] },
+                leading_comments: Vec::new(),
+                trailing_comment: None,
+            });
+        }
+
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_function_params(&TokenKind::RParen)?;
         self.expect(&TokenKind::RParen)?;
