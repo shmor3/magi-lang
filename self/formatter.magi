@@ -1,0 +1,410 @@
+// MAGI Self-Hosted Compiler — AST Pretty-Printer / Formatter
+//
+// Converts an AST back to well-formatted MAGI source code.
+// Uses 4-space indentation. Idempotent when re-parsed and re-formatted.
+
+// ── Constants ───────────────────────────────────────────────────────
+
+const FMT_NL = "\n"
+const FMT_OPEN = "\{"
+const FMT_CLOSE = "\}"
+
+// ── Indentation ─────────────────────────────────────────────────────
+
+func fmt_indent(depth) {
+    let s = ""
+    let i = 0
+    while i < depth {
+        s = s + "    "
+        i = i + 1
+    }
+    s
+}
+
+// ── Format Literal ──────────────────────────────────────────────────
+
+func fmt_literal(lit) {
+    match lit {
+        Literal::IntLit(n) => to_string(n),
+        Literal::FloatLit(f) => to_string(f),
+        Literal::StringLit(s) => "\"" + s + "\"",
+        Literal::BoolLit(b) => if b { "true" } else { "false" },
+        Literal::NullLit => "null",
+        Literal::ArrayLit(elems) => {
+            const parts = elems.map(e => fmt_expr(e, 0))
+            const joined = parts.join(", ")
+            "[" + joined + "]"
+        },
+        Literal::MapLit(entries) => {
+            if len(entries) == 0 { return FMT_OPEN + FMT_CLOSE }
+            const parts = entries.map(entry => {
+                const k = entry[0]
+                const v = fmt_expr(entry[1], 0)
+                k + ": " + v
+            })
+            const joined = parts.join(", ")
+            FMT_OPEN + " " + joined + " " + FMT_CLOSE
+        },
+        Literal::SetLit(elems) => {
+            const parts = elems.map(e => fmt_expr(e, 0))
+            const joined = parts.join(", ")
+            "#" + FMT_OPEN + joined + FMT_CLOSE
+        },
+    }
+}
+
+// ── Format Expression ────────────────────────────────────────────────
+
+func fmt_expr(e, depth) {
+    if e == null { return "null" }
+    const k = e.kind
+    match k {
+        ExprKind::ELiteral(lit) => fmt_literal(lit),
+        ExprKind::EVariable(name) => name,
+        ExprKind::EBinaryOp(op, left, right) => {
+            const ls = fmt_expr(left, depth)
+            const rs = fmt_expr(right, depth)
+            const sym = op.symbol()
+            ls + " " + sym + " " + rs
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const sym = op.symbol()
+            const os = fmt_expr(operand, depth)
+            sym + os
+        },
+        ExprKind::ECall(name, args, _) => {
+            const parts = args.map(a => fmt_expr(a, depth))
+            const joined = parts.join(", ")
+            name + "(" + joined + ")"
+        },
+        ExprKind::EMethodCall(obj, method, args, _) => {
+            const os = fmt_expr(obj, depth)
+            const parts = args.map(a => fmt_expr(a, depth))
+            const joined = parts.join(", ")
+            os + "." + method + "(" + joined + ")"
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            const os = fmt_expr(obj, depth)
+            os + "." + field
+        },
+        ExprKind::EIndex(obj, idx) => {
+            const os = fmt_expr(obj, depth)
+            const is_ = fmt_expr(idx, depth)
+            os + "[" + is_ + "]"
+        },
+        ExprKind::EPipe(left, right) => {
+            const ls = fmt_expr(left, depth)
+            const rs = fmt_expr(right, depth)
+            ls + " |> " + rs
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            const cs = fmt_expr(cond, depth)
+            const ts = fmt_block_inline(then_b, depth)
+            if else_b == null {
+                "if " + cs + " " + ts
+            } else {
+                const es = fmt_block_inline(else_b, depth)
+                "if " + cs + " " + ts + " else " + es
+            }
+        },
+        ExprKind::EBlock(blk) => fmt_block_inline(blk, depth),
+        ExprKind::ELambda(params, body) => {
+            const pnames = params.map(p => p.name)
+            const bs = fmt_expr(body, depth)
+            if len(pnames) == 1 {
+                const pn = pnames[0]
+                pn + " => " + bs
+            } else {
+                const joined = pnames.join(", ")
+                "(" + joined + ") => " + bs
+            }
+        },
+        ExprKind::EMatch(subject, arms) => {
+            const ss = fmt_expr(subject, depth)
+            const ind = fmt_indent(depth)
+            const arm_ind = fmt_indent(depth + 1)
+            let arm_strs = []
+            for arm in arms {
+                const ps = fmt_pattern(arm.pattern)
+                const bs = fmt_expr(arm.body, depth + 1)
+                arm_strs.push(arm_ind + ps + " => " + bs + ",")
+            }
+            const arms_joined = arm_strs.join(FMT_NL)
+            "match " + ss + " " + FMT_OPEN + FMT_NL + arms_joined + FMT_NL + ind + FMT_CLOSE
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            const ls = fmt_expr(left, depth)
+            const rs = fmt_expr(right, depth)
+            ls + " ?? " + rs
+        },
+        ExprKind::ERange(start, end_, inclusive) => {
+            const ss = fmt_expr(start, depth)
+            const es = fmt_expr(end_, depth)
+            const op = if inclusive { "..=" } else { ".." }
+            ss + op + es
+        },
+        ExprKind::EStringInterp(parts) => {
+            let content = ""
+            for part in parts {
+                match part {
+                    StringPart::LiteralPart(s) => { content = content + s },
+                    StringPart::ExprPart(e2) => {
+                        const es = fmt_expr(e2, depth)
+                        content = content + FMT_OPEN + es + FMT_CLOSE
+                    },
+                }
+            }
+            "f\"" + content + "\""
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            const parts = elems.map(e2 => fmt_expr(e2, depth))
+            const joined = parts.join(", ")
+            "(" + joined + ")"
+        },
+        ExprKind::EStructConstruct(name, fields) => {
+            if len(fields) == 0 {
+                name + " " + FMT_OPEN + FMT_CLOSE
+            } else {
+                const parts = fields.map(f2 => fmt_expr(f2, depth))
+                const joined = parts.join(", ")
+                name + " " + FMT_OPEN + " " + joined + " " + FMT_CLOSE
+            }
+        },
+        ExprKind::EEnumConstruct(enum_, variant, args) => {
+            if len(args) == 0 {
+                enum_ + "::" + variant
+            } else {
+                const parts = args.map(a => fmt_expr(a, depth))
+                const joined = parts.join(", ")
+                enum_ + "::" + variant + "(" + joined + ")"
+            }
+        },
+        ExprKind::EAwait(inner) => "await " + fmt_expr(inner, depth),
+        ExprKind::ESpawn(inner) => "spawn " + fmt_expr(inner, depth),
+        ExprKind::EYield(inner) => "yield " + fmt_expr(inner, depth),
+        ExprKind::EOptionalChain(obj, field) => fmt_expr(obj, depth) + "?." + field,
+        ExprKind::ESpread(inner) => "..." + fmt_expr(inner, depth),
+        ExprKind::ETryCatch(try_e, err_name, catch_e) => {
+            const ts = fmt_expr(try_e, depth)
+            const cs = fmt_expr(catch_e, depth)
+            "try " + ts + " catch " + err_name + " " + cs
+        },
+        ExprKind::ETryPropagate(inner) => fmt_expr(inner, depth) + "?",
+        ExprKind::EPlaceholder => "_",
+        ExprKind::ELoop(body) => "loop " + fmt_block_inline(body, depth),
+        _ => "<expr>",
+    }
+}
+
+// ── Format Pattern ──────────────────────────────────────────────────
+
+func fmt_pattern(pat) {
+    match pat {
+        Pattern::PWildcard => "_",
+        Pattern::PVariable(name) => name,
+        Pattern::PLiteral(lit) => fmt_literal(lit),
+        Pattern::PEnum(enum_, variant, fields) => {
+            if len(fields) == 0 {
+                enum_ + "::" + variant
+            } else {
+                const parts = fields.map(f2 => fmt_pattern(f2))
+                const joined = parts.join(", ")
+                enum_ + "::" + variant + "(" + joined + ")"
+            }
+        },
+        Pattern::PArray(elems) => {
+            const parts = elems.map(e => fmt_pattern(e))
+            const joined = parts.join(", ")
+            "[" + joined + "]"
+        },
+        Pattern::PMap(entries) => {
+            const parts = entries.map(e => fmt_pattern(e))
+            const joined = parts.join(", ")
+            FMT_OPEN + " " + joined + " " + FMT_CLOSE
+        },
+        Pattern::POr(pats) => {
+            const parts = pats.map(p => fmt_pattern(p))
+            parts.join(" | ")
+        },
+        Pattern::PRest(name) => "..." + name,
+        Pattern::PType(name, type_) => name + ": " + type_,
+        Pattern::PBinding(name, inner) => fmt_pattern(inner) + " @ " + name,
+        Pattern::PRange(lo, hi, inclusive) => {
+            const ls = fmt_pattern(lo)
+            const hs = fmt_pattern(hi)
+            const op = if inclusive { "..=" } else { ".." }
+            ls + op + hs
+        },
+    }
+}
+
+// ── Format Block (inline) ────────────────────────────────────────────
+
+func fmt_block_inline(blk, depth) {
+    if blk == null { return FMT_OPEN + FMT_CLOSE }
+    if len(blk.stmts) == 0 && blk.tail_expr == null { return FMT_OPEN + FMT_CLOSE }
+    const ind = fmt_indent(depth)
+    const inner_ind = fmt_indent(depth + 1)
+    let lines = []
+    for s in blk.stmts {
+        lines.push(inner_ind + fmt_stmt(s, depth + 1))
+    }
+    if blk.tail_expr != null {
+        lines.push(inner_ind + fmt_expr(blk.tail_expr, depth + 1))
+    }
+    const body = lines.join(FMT_NL)
+    FMT_OPEN + FMT_NL + body + FMT_NL + ind + FMT_CLOSE
+}
+
+// ── Format Statement ─────────────────────────────────────────────────
+
+func fmt_stmt(s, depth) {
+    const k = s.kind
+    const ind = fmt_indent(depth)
+    match k {
+        StmtKind::SLet(name, expr) =>
+            "let " + name + " = " + fmt_expr(expr, depth),
+        StmtKind::SLetMut(name, expr) =>
+            "let mut " + name + " = " + fmt_expr(expr, depth),
+        StmtKind::SConst(name, expr) =>
+            "const " + name + " = " + fmt_expr(expr, depth),
+        StmtKind::SAssignment(name, expr) =>
+            name + " = " + fmt_expr(expr, depth),
+        StmtKind::SCompoundAssign(name, op, expr) => {
+            const sym = op.symbol()
+            name + " " + sym + "= " + fmt_expr(expr, depth)
+        },
+        StmtKind::SReturn(expr) => {
+            if expr == null { "return" }
+            else { "return " + fmt_expr(expr, depth) }
+        },
+        StmtKind::SBreak(label, _) => {
+            if label == "" { "break" } else { "break '" + label }
+        },
+        StmtKind::SContinue(label) => {
+            if label == "" { "continue" } else { "continue '" + label }
+        },
+        StmtKind::SOutput(expr) =>
+            "output " + fmt_expr(expr, depth),
+        StmtKind::SExprStmt(expr) =>
+            fmt_expr(expr, depth),
+        StmtKind::SThrow(expr) =>
+            "throw " + fmt_expr(expr, depth),
+        StmtKind::SFuncDef(fd) =>
+            fmt_funcdef(fd, depth, false),
+        StmtKind::SAsyncFuncDef(fd) =>
+            fmt_funcdef(fd, depth, true),
+        StmtKind::SIf(cond, then_b, else_b) => {
+            const cs = fmt_expr(cond, depth)
+            const ts = fmt_block_inline(then_b, depth)
+            if else_b == null {
+                "if " + cs + " " + ts
+            } else {
+                const es = fmt_block_inline(else_b, depth)
+                "if " + cs + " " + ts + " else " + es
+            }
+        },
+        StmtKind::SWhileLoop(label, cond, body) => {
+            const cs = fmt_expr(cond, depth)
+            const bs = fmt_block_inline(body, depth)
+            if label == "" { "while " + cs + " " + bs }
+            else { "'" + label + ": while " + cs + " " + bs }
+        },
+        StmtKind::SForLoop(label, pat, iter, body) => {
+            const is_ = fmt_expr(iter, depth)
+            const bs = fmt_block_inline(body, depth)
+            if label == "" { "for " + pat + " in " + is_ + " " + bs }
+            else { "'" + label + ": for " + pat + " in " + is_ + " " + bs }
+        },
+        StmtKind::SMatch(subject, arms) => {
+            const ss = fmt_expr(subject, depth)
+            const arm_ind = fmt_indent(depth + 1)
+            let arm_strs = []
+            for arm in arms {
+                const ps = fmt_pattern(arm.pattern)
+                const bs = fmt_expr(arm.body, depth + 1)
+                arm_strs.push(arm_ind + ps + " => " + bs + ",")
+            }
+            const arms_joined = arm_strs.join(FMT_NL)
+            "match " + ss + " " + FMT_OPEN + FMT_NL + arms_joined + FMT_NL + ind + FMT_CLOSE
+        },
+        StmtKind::SStructDef(name, _, fields) => {
+            let field_strs = []
+            for f2 in fields {
+                const fa = fmt_indent(depth + 1)
+                field_strs.push(fa + f2.name + ": " + f2.type_ann + ",")
+            }
+            const fbody = field_strs.join(FMT_NL)
+            "struct " + name + " " + FMT_OPEN + FMT_NL + fbody + FMT_NL + ind + FMT_CLOSE
+        },
+        StmtKind::SEnumDef(name, _, variants) => {
+            let var_strs = []
+            for v in variants {
+                const va = fmt_indent(depth + 1)
+                if len(v.fields) == 0 {
+                    var_strs.push(va + v.name + ",")
+                } else {
+                    const fjoined = v.fields.join(", ")
+                    var_strs.push(va + v.name + "(" + fjoined + "),")
+                }
+            }
+            const vbody = var_strs.join(FMT_NL)
+            "enum " + name + " " + FMT_OPEN + FMT_NL + vbody + FMT_NL + ind + FMT_CLOSE
+        },
+        StmtKind::SImplBlock(name, methods) => {
+            let method_strs = []
+            for m in methods {
+                const ms = fmt_funcdef(m, depth + 1, false)
+                const ma = fmt_indent(depth + 1)
+                method_strs.push(ma + ms)
+            }
+            const mbody = method_strs.join(FMT_NL + FMT_NL)
+            "impl " + name + " " + FMT_OPEN + FMT_NL + mbody + FMT_NL + ind + FMT_CLOSE
+        },
+        StmtKind::SImport(path) => "import \"" + path + "\"",
+        StmtKind::STypeAlias(name, type_) => "type " + name + " = " + type_,
+        StmtKind::SDefer(expr) => "defer " + fmt_expr(expr, depth),
+        StmtKind::SIncrement(name) => name + "++",
+        StmtKind::SDecrement(name) => name + "--",
+        StmtKind::STryCatch(try_b, err_name, catch_b, finally_b) => {
+            const ts = fmt_block_inline(try_b, depth)
+            const cs = fmt_block_inline(catch_b, depth)
+            if finally_b == null {
+                "try " + ts + " catch " + err_name + " " + cs
+            } else {
+                const fs = fmt_block_inline(finally_b, depth)
+                "try " + ts + " catch " + err_name + " " + cs + " finally " + fs
+            }
+        },
+        _ => "/* stmt: " + k.describe() + " */",
+    }
+}
+
+// ── Format Function Definition ───────────────────────────────────────
+
+func fmt_funcdef(fd, depth, is_async) {
+    let pstrs = []
+    for p in fd.params {
+        if p.rest { pstrs.push("..." + p.name) }
+        else if p.type_ann != "" { pstrs.push(p.name + ": " + p.type_ann) }
+        else { pstrs.push(p.name) }
+    }
+    const pjoined = pstrs.join(", ")
+    const bs = fmt_block_inline(fd.body, depth)
+    const kw = if is_async { "async func" } else { "func" }
+    if fd.return_type != "" {
+        kw + " " + fd.name + "(" + pjoined + ") -> " + fd.return_type + " " + bs
+    } else {
+        kw + " " + fd.name + "(" + pjoined + ") " + bs
+    }
+}
+
+// ── Entry Point ──────────────────────────────────────────────────────
+
+func format_program(program) {
+    let parts = []
+    for s in program.statements {
+        parts.push(fmt_stmt(s, 0))
+    }
+    parts.join(FMT_NL) + FMT_NL
+}

@@ -1,0 +1,402 @@
+// Tests for self/optimizer.magi, self/linter.magi, self/formatter.magi
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/optimizer.magi self/linter.magi self/formatter.magi self/tests/test_tools.magi > /tmp/_tools_test.magi && cargo run --bin magi -- run /tmp/_tools_test.magi
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+func has_warning(warnings, needle) {
+    for w in warnings {
+        if w.contains(needle) { return true }
+    }
+    false
+}
+
+// ── Optimizer Tests ──────────────────────────────────────────────────
+
+func test_constant_fold_int_add() {
+    const s = span_new(1, 1)
+    const left = make_int_lit(1, s)
+    const right = make_int_lit(2, s)
+    const expr = make_binop(BinOp::Add, left, right, s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(n) => assert(n == 3),
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: constant fold int add")
+}
+
+func test_constant_fold_int_mul() {
+    const s = span_new(1, 1)
+    const left = make_int_lit(6, s)
+    const right = make_int_lit(7, s)
+    const expr = make_binop(BinOp::Mul, left, right, s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(n) => assert(n == 42),
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: constant fold int multiply")
+}
+
+func test_constant_fold_string_concat() {
+    const s = span_new(1, 1)
+    const left = make_str_lit("hello, ", s)
+    const right = make_str_lit("world", s)
+    const expr = make_binop(BinOp::Add, left, right, s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::StringLit(sv) => assert(sv == "hello, world"),
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: constant fold string concat")
+}
+
+func test_constant_fold_bool_and() {
+    const s = span_new(1, 1)
+    const left = make_bool_lit(true, s)
+    const right = make_bool_lit(false, s)
+    const expr = make_binop(BinOp::And, left, right, s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => assert(b == false),
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: constant fold bool and")
+}
+
+func test_constant_fold_unary_neg() {
+    const s = span_new(1, 1)
+    const inner = make_int_lit(5, s)
+    const expr = make_unaryop(UnOp::Neg, inner, s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(n) => assert(n == -5),
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: constant fold unary negation")
+}
+
+func test_constant_fold_unary_not() {
+    const s = span_new(1, 1)
+    const inner = make_bool_lit(true, s)
+    const expr = make_unaryop(UnOp::Not, inner, s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => assert(b == false),
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: constant fold unary not")
+}
+
+func test_dead_code_elimination() {
+    const s = span_new(1, 1)
+    const ret_stmt = make_return(make_int_lit(1, s), s)
+    const dead_stmt = make_output(make_str_lit("dead", s), s)
+    const stmts = [ret_stmt, dead_stmt]
+    const trimmed = eliminate_dead_stmts(stmts)
+    assert(len(trimmed) == 1)
+    println("PASS: dead code elimination after return")
+}
+
+func test_optimize_program() {
+    const s = span_new(1, 1)
+    const left = make_int_lit(10, s)
+    const right = make_int_lit(5, s)
+    const expr = make_binop(BinOp::Sub, left, right, s)
+    const stmt = make_output(expr, s)
+    const prog = program_new([stmt], s)
+    const opt_prog = optimize(prog)
+    assert(len(opt_prog.statements) == 1)
+    const ostmt = opt_prog.statements[0]
+    const ok = ostmt.kind
+    match ok {
+        StmtKind::SOutput(e) => {
+            const ek = e.kind
+            match ek {
+                ExprKind::ELiteral(lit) => {
+                    match lit {
+                        Literal::IntLit(n) => assert(n == 5),
+                        _ => assert(false),
+                    }
+                },
+                _ => assert(false),
+            }
+        },
+        _ => assert(false),
+    }
+    println("PASS: optimize program folds int subtraction")
+}
+
+func test_non_foldable_expr_unchanged() {
+    const s = span_new(1, 1)
+    const expr = make_var("x", s)
+    const result = opt_expr(expr)
+    const rk = result.kind
+    match rk {
+        ExprKind::EVariable(name) => assert(name == "x"),
+        _ => assert(false),
+    }
+    println("PASS: non-foldable expression preserved")
+}
+
+// ── Linter Tests ──────────────────────────────────────────────────────
+
+func test_lint_unused_variable() {
+    const s = span_new(1, 1)
+    const val = make_int_lit(42, s)
+    const decl_stmt = make_const("unused_var", val, s)
+    const prog = program_new([decl_stmt], s)
+    const warnings = lint(prog)
+    assert(has_warning(warnings, "unused"))
+    println("PASS: lint detects unused variable")
+}
+
+func test_lint_used_variable_no_warning() {
+    const s = span_new(1, 1)
+    const val = make_int_lit(10, s)
+    const decl_stmt = make_const("used_var", val, s)
+    const use_expr = make_var("used_var", s)
+    const use_stmt = make_output(use_expr, s)
+    const prog = program_new([decl_stmt, use_stmt], s)
+    const warnings = lint(prog)
+    assert(!has_warning(warnings, "unused variable 'used_var'"))
+    println("PASS: lint no warning for used variable")
+}
+
+func test_lint_unreachable_after_return() {
+    const s = span_new(1, 1)
+    const ret_stmt = make_return(make_int_lit(0, s), s)
+    const dead_stmt = stmt_new(StmtKind::SOutput(make_str_lit("dead", s)), s)
+    const blk = block_new([ret_stmt, dead_stmt], null, s)
+    const body = block_new([stmt_new(StmtKind::SExprStmt(expr_new(ExprKind::EBlock(blk), s)), s)], null, s)
+    const fd = funcdef_new("test_fn", [], blk, s)
+    const fstmt = stmt_new(StmtKind::SFuncDef(fd), s)
+    const prog = program_new([fstmt], s)
+    const warnings = lint(prog)
+    assert(has_warning(warnings, "unreachable"))
+    println("PASS: lint detects unreachable code after return")
+}
+
+func test_lint_non_exhaustive_match() {
+    const s = span_new(1, 1)
+    // Build a match with only enum patterns (no wildcard)
+    const arm1 = match_arm_new(Pattern::PEnum("Color", "Red", []), make_int_lit(1, s), s)
+    const arm2 = match_arm_new(Pattern::PEnum("Color", "Blue", []), make_int_lit(2, s), s)
+    const match_expr = expr_new(ExprKind::EMatch(make_var("c", s), [arm1, arm2]), s)
+    const stmt = make_expr_stmt(match_expr, s)
+    const prog = program_new([stmt], s)
+    const warnings = lint(prog)
+    assert(has_warning(warnings, "non-exhaustive"))
+    println("PASS: lint detects non-exhaustive match")
+}
+
+func test_lint_exhaustive_match_with_wildcard() {
+    const s = span_new(1, 1)
+    const arm1 = match_arm_new(Pattern::PEnum("Color", "Red", []), make_int_lit(1, s), s)
+    const arm2 = match_arm_new(Pattern::PWildcard, make_int_lit(0, s), s)
+    const match_expr = expr_new(ExprKind::EMatch(make_var("c", s), [arm1, arm2]), s)
+    const stmt = make_expr_stmt(match_expr, s)
+    const prog = program_new([stmt], s)
+    const warnings = lint(prog)
+    assert(!has_warning(warnings, "non-exhaustive"))
+    println("PASS: lint no warning for exhaustive match")
+}
+
+func test_lint_underscore_prefix_no_warning() {
+    const s = span_new(1, 1)
+    const val = make_int_lit(0, s)
+    const decl_stmt = make_const("_ignored", val, s)
+    const prog = program_new([decl_stmt], s)
+    const warnings = lint(prog)
+    assert(!has_warning(warnings, "unused variable '_ignored'"))
+    println("PASS: lint underscore prefix suppresses unused warning")
+}
+
+// ── Formatter Tests ───────────────────────────────────────────────────
+
+func test_format_literal_int() {
+    const s = span_new(1, 1)
+    assert(fmt_literal(Literal::IntLit(42)) == "42")
+    assert(fmt_literal(Literal::IntLit(-1)) == "-1")
+    println("PASS: format literal int")
+}
+
+func test_format_literal_string() {
+    const s = span_new(1, 1)
+    assert(fmt_literal(Literal::StringLit("hello")) == "\"hello\"")
+    println("PASS: format literal string")
+}
+
+func test_format_literal_bool() {
+    assert(fmt_literal(Literal::BoolLit(true)) == "true")
+    assert(fmt_literal(Literal::BoolLit(false)) == "false")
+    println("PASS: format literal bool")
+}
+
+func test_format_expr_variable() {
+    const s = span_new(1, 1)
+    const e = make_var("x", s)
+    assert(fmt_expr(e, 0) == "x")
+    println("PASS: format expr variable")
+}
+
+func test_format_expr_binop() {
+    const s = span_new(1, 1)
+    const e = make_binop(BinOp::Add, make_int_lit(1, s), make_int_lit(2, s), s)
+    assert(fmt_expr(e, 0) == "1 + 2")
+    println("PASS: format expr binop")
+}
+
+func test_format_expr_call() {
+    const s = span_new(1, 1)
+    const e = make_call("println", [make_str_lit("hi", s)], s)
+    assert(fmt_expr(e, 0) == "println(\"hi\")")
+    println("PASS: format expr call")
+}
+
+func test_format_stmt_const() {
+    const s = span_new(1, 1)
+    const st = make_const("x", make_int_lit(5, s), s)
+    assert(fmt_stmt(st, 0) == "const x = 5")
+    println("PASS: format stmt const")
+}
+
+func test_format_stmt_let() {
+    const s = span_new(1, 1)
+    const st = make_let("y", make_bool_lit(true, s), s)
+    assert(fmt_stmt(st, 0) == "let y = true")
+    println("PASS: format stmt let")
+}
+
+func test_format_stmt_return() {
+    const s = span_new(1, 1)
+    const st = make_return(make_int_lit(0, s), s)
+    assert(fmt_stmt(st, 0) == "return 0")
+    println("PASS: format stmt return")
+}
+
+func test_format_program_simple() {
+    const s = span_new(1, 1)
+    const st1 = make_const("x", make_int_lit(42, s), s)
+    const st2 = make_output(make_var("x", s), s)
+    const prog = program_new([st1, st2], s)
+    const result = format_program(prog)
+    assert(result.contains("const x = 42"))
+    assert(result.contains("output x"))
+    println("PASS: format program simple")
+}
+
+func test_format_indent() {
+    assert(fmt_indent(0) == "")
+    assert(fmt_indent(1) == "    ")
+    assert(fmt_indent(2) == "        ")
+    println("PASS: format indent")
+}
+
+func test_format_method_call() {
+    const s = span_new(1, 1)
+    const obj = make_var("arr", s)
+    const e = make_method_call(obj, "push", [make_int_lit(1, s)], s)
+    assert(fmt_expr(e, 0) == "arr.push(1)")
+    println("PASS: format method call")
+}
+
+func test_format_field_access() {
+    const s = span_new(1, 1)
+    const obj = make_var("point", s)
+    const e = make_field_access(obj, "x", s)
+    assert(fmt_expr(e, 0) == "point.x")
+    println("PASS: format field access")
+}
+
+func test_format_index() {
+    const s = span_new(1, 1)
+    const obj = make_var("arr", s)
+    const e = make_index(obj, make_int_lit(0, s), s)
+    assert(fmt_expr(e, 0) == "arr[0]")
+    println("PASS: format index")
+}
+
+func test_format_unary() {
+    const s = span_new(1, 1)
+    const e = make_unaryop(UnOp::Not, make_bool_lit(true, s), s)
+    assert(fmt_expr(e, 0) == "!true")
+    println("PASS: format unary op")
+}
+
+// ── Run All Tests ─────────────────────────────────────────────────────
+
+// Optimizer
+test_constant_fold_int_add()
+test_constant_fold_int_mul()
+test_constant_fold_string_concat()
+test_constant_fold_bool_and()
+test_constant_fold_unary_neg()
+test_constant_fold_unary_not()
+test_dead_code_elimination()
+test_optimize_program()
+test_non_foldable_expr_unchanged()
+
+// Linter
+test_lint_unused_variable()
+test_lint_used_variable_no_warning()
+test_lint_unreachable_after_return()
+test_lint_non_exhaustive_match()
+test_lint_exhaustive_match_with_wildcard()
+test_lint_underscore_prefix_no_warning()
+
+// Formatter
+test_format_literal_int()
+test_format_literal_string()
+test_format_literal_bool()
+test_format_expr_variable()
+test_format_expr_binop()
+test_format_expr_call()
+test_format_stmt_const()
+test_format_stmt_let()
+test_format_stmt_return()
+test_format_program_simple()
+test_format_indent()
+test_format_method_call()
+test_format_field_access()
+test_format_index()
+test_format_unary()
+
+println("")
+println("All Phase 7 tools tests passed!")

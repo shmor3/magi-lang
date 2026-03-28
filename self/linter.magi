@@ -1,0 +1,314 @@
+// MAGI Self-Hosted Compiler — Linter
+//
+// Produces code quality warnings by walking the AST.
+// Warnings: unused variables, unreachable code, non-exhaustive match, empty blocks.
+
+// ── Lint State (module-level mutable) ──────────────────────────────
+
+let lint_warnings = []
+
+func lint_warn(msg) {
+    lint_warnings.push(msg)
+}
+
+// ── Variable Scope Tracking ─────────────────────────────────────────
+
+// Each scope entry: { name -> { used: bool, line: int } }
+func lint_new_scope() {
+    {"__ls": true}
+}
+
+let lint_scopes = [lint_new_scope()]
+
+func lint_push_scope() {
+    lint_scopes.push(lint_new_scope())
+}
+
+func lint_pop_scope() {
+    const scope = lint_scopes.pop()
+    // Check for unused variables in the popped scope
+    for key in scope.keys() {
+        if key == "__ls" { continue }
+        const entry = scope[key]
+        if !entry["used"] {
+            const line = entry["line"]
+            lint_warn(f"unused variable '{key}' at line {line}")
+        }
+    }
+}
+
+func lint_declare(name, line) {
+    if name.starts_with("_") { return null }
+    const idx = len(lint_scopes) - 1
+    let s = lint_scopes[idx]
+    s[name] = {"used": false, "line": line}
+    lint_scopes[idx] = s
+}
+
+func lint_use(name) {
+    let idx = len(lint_scopes) - 1
+    while idx >= 0 {
+        let s = lint_scopes[idx]
+        if s.has(name) {
+            const entry = s[name]
+            s[name] = {"used": true, "line": entry["line"]}
+            lint_scopes[idx] = s
+            return null
+        }
+        idx = idx - 1
+    }
+}
+
+// ── Lint Expression ─────────────────────────────────────────────────
+
+func lint_expr(e) {
+    if e == null { return null }
+    const k = e.kind
+    match k {
+        ExprKind::EVariable(name) => lint_use(name),
+        ExprKind::EBinaryOp(_, left, right) => {
+            lint_expr(left)
+            lint_expr(right)
+        },
+        ExprKind::EUnaryOp(_, operand) => lint_expr(operand),
+        ExprKind::ECall(_, args, _) => {
+            for a in args { lint_expr(a) }
+        },
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            lint_expr(obj)
+            for a in args { lint_expr(a) }
+        },
+        ExprKind::EFieldAccess(obj, _) => lint_expr(obj),
+        ExprKind::EIndex(obj, idx) => {
+            lint_expr(obj)
+            lint_expr(idx)
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            lint_expr(cond)
+            lint_block(then_b)
+            lint_block(else_b)
+        },
+        ExprKind::EBlock(blk) => lint_block(blk),
+        ExprKind::EPipe(left, right) => {
+            lint_expr(left)
+            lint_expr(right)
+        },
+        ExprKind::ELambda(params, body) => {
+            lint_push_scope()
+            for p in params {
+                const pspan = p.span
+                const line = if pspan != null { pspan.start_line } else { 0 }
+                lint_declare(p.name, line)
+            }
+            lint_expr(body)
+            lint_pop_scope()
+        },
+        ExprKind::EMatch(subject, arms) => {
+            lint_expr(subject)
+            lint_check_match_exhaustive(arms)
+            for arm in arms {
+                lint_push_scope()
+                lint_expr(arm.body)
+                lint_pop_scope()
+            }
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            lint_expr(left)
+            lint_expr(right)
+        },
+        ExprKind::EStringInterp(parts) => {
+            for part in parts {
+                match part {
+                    StringPart::ExprPart(e2) => lint_expr(e2),
+                    _ => null,
+                }
+            }
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            for e2 in elems { lint_expr(e2) }
+        },
+        ExprKind::ERange(start, end_, _) => {
+            lint_expr(start)
+            lint_expr(end_)
+        },
+        ExprKind::EStructConstruct(_, fields) => {
+            for f in fields { lint_expr(f) }
+        },
+        ExprKind::EEnumConstruct(_, _, args) => {
+            for a in args { lint_expr(a) }
+        },
+        ExprKind::EListComp(elem, var_, iter, cond) => {
+            lint_expr(iter)
+            lint_push_scope()
+            lint_expr(elem)
+            lint_expr(cond)
+            lint_pop_scope()
+        },
+        _ => null,
+    }
+}
+
+// ── Match Exhaustiveness ────────────────────────────────────────────
+
+func lint_check_match_exhaustive(arms) {
+    let has_wildcard = false
+    for arm in arms {
+        const pat = arm.pattern
+        match pat {
+            Pattern::PWildcard => { has_wildcard = true },
+            Pattern::PVariable(_) => { has_wildcard = true },
+            _ => null,
+        }
+    }
+    if !has_wildcard {
+        lint_warn("match expression may be non-exhaustive (no wildcard or variable pattern)")
+    }
+}
+
+// ── Unreachable Code Detection ──────────────────────────────────────
+
+func lint_is_terminator(stmt) {
+    const k = stmt.kind
+    match k {
+        StmtKind::SReturn(_) => true,
+        StmtKind::SBreak(_, _) => true,
+        StmtKind::SContinue(_) => true,
+        StmtKind::SThrow(_) => true,
+        _ => false,
+    }
+}
+
+func lint_check_stmts_reachability(stmts) {
+    let terminated = false
+    for s in stmts {
+        if terminated {
+            const k = s.kind
+            const line = s.span.start_line
+            lint_warn(f"unreachable code at line {line} (after return/break/continue/throw)")
+        }
+        if lint_is_terminator(s) { terminated = true }
+    }
+}
+
+// ── Lint Block ──────────────────────────────────────────────────────
+
+func lint_block(blk) {
+    if blk == null { return null }
+    // Empty block warning
+    if len(blk.stmts) == 0 && blk.tail_expr == null {
+        const line = blk.span.start_line
+        lint_warn(f"empty block at line {line}")
+    }
+    lint_check_stmts_reachability(blk.stmts)
+    lint_push_scope()
+    for s in blk.stmts { lint_stmt(s) }
+    lint_expr(blk.tail_expr)
+    lint_pop_scope()
+}
+
+// ── Lint Statement ──────────────────────────────────────────────────
+
+func lint_stmt(s) {
+    const k = s.kind
+    const line = s.span.start_line
+    match k {
+        StmtKind::SLet(name, expr) => {
+            lint_expr(expr)
+            lint_declare(name, line)
+        },
+        StmtKind::SLetMut(name, expr) => {
+            lint_expr(expr)
+            lint_declare(name, line)
+        },
+        StmtKind::SConst(name, expr) => {
+            lint_expr(expr)
+            lint_declare(name, line)
+        },
+        StmtKind::SAssignment(name, expr) => {
+            lint_use(name)
+            lint_expr(expr)
+        },
+        StmtKind::SReturn(expr) => lint_expr(expr),
+        StmtKind::SOutput(expr) => lint_expr(expr),
+        StmtKind::SExprStmt(expr) => lint_expr(expr),
+        StmtKind::SThrow(expr) => lint_expr(expr),
+        StmtKind::SFuncDef(fd) => lint_funcdef(fd),
+        StmtKind::SAsyncFuncDef(fd) => lint_funcdef(fd),
+        StmtKind::SIf(cond, then_b, else_b) => {
+            lint_expr(cond)
+            lint_block(then_b)
+            lint_block(else_b)
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            lint_expr(cond)
+            lint_block(body)
+        },
+        StmtKind::SForLoop(_, _, iter, body) => {
+            lint_expr(iter)
+            lint_block(body)
+        },
+        StmtKind::SDoWhile(_, body, cond) => {
+            lint_block(body)
+            lint_expr(cond)
+        },
+        StmtKind::SMatch(subject, arms) => {
+            lint_expr(subject)
+            lint_check_match_exhaustive(arms)
+            for arm in arms {
+                lint_push_scope()
+                lint_stmt_or_expr(arm.body)
+                lint_pop_scope()
+            }
+        },
+        StmtKind::STryCatch(try_b, _, catch_b, finally_b) => {
+            lint_block(try_b)
+            lint_block(catch_b)
+            lint_block(finally_b)
+        },
+        _ => null,
+    }
+}
+
+func lint_stmt_or_expr(node) {
+    if node == null { return null }
+    if typeof(node) == "map" {
+        if node.has("stmts") {
+            lint_block(node)
+        } else if node.has("kind") {
+            const k = node.kind
+            if k.has("__tag") {
+                lint_expr(node)
+            } else {
+                lint_stmt(node)
+            }
+        }
+    }
+}
+
+func lint_funcdef(fd) {
+    lint_push_scope()
+    for p in fd.params {
+        const pspan = p.span
+        const line = if pspan != null { pspan.start_line } else { 0 }
+        lint_declare(p.name, line)
+    }
+    lint_block(fd.body)
+    lint_pop_scope()
+}
+
+// ── Entry Point ─────────────────────────────────────────────────────
+
+func lint(program) {
+    // Reset state
+    lint_warnings = []
+    lint_scopes = [lint_new_scope()]
+
+    for s in program.statements {
+        lint_stmt(s)
+    }
+
+    // Pop global scope
+    lint_pop_scope()
+
+    lint_warnings
+}

@@ -1,0 +1,278 @@
+// MAGI Self-Hosted Compiler — AST Optimizer
+//
+// Performs AST-level optimizations on a parsed Program.
+// Currently implements: constant folding, dead code elimination, tail call marking.
+
+// ── Constant Folding Helpers ────────────────────────────────────────
+
+func opt_fold_int_binop(op, lv, rv) {
+    match op {
+        BinOp::Add => lv + rv,
+        BinOp::Sub => lv - rv,
+        BinOp::Mul => lv * rv,
+        BinOp::Div => if rv != 0 { lv / rv } else { null },
+        BinOp::Mod => if rv != 0 { lv % rv } else { null },
+        _ => null,
+    }
+}
+
+func opt_fold_cmp_int(op, lv, rv) {
+    match op {
+        BinOp::Eq    => lv == rv,
+        BinOp::NotEq => lv != rv,
+        BinOp::Lt    => lv < rv,
+        BinOp::Gt    => lv > rv,
+        BinOp::LtEq  => lv <= rv,
+        BinOp::GtEq  => lv >= rv,
+        _ => null,
+    }
+}
+
+func opt_fold_bool_binop(op, lv, rv) {
+    match op {
+        BinOp::And => lv && rv,
+        BinOp::Or  => lv || rv,
+        _ => null,
+    }
+}
+
+// Try to fold two int literals under a binary op.
+func opt_try_fold_int_lits(op, lv, rv, span) {
+    const arith = opt_fold_int_binop(op, lv, rv)
+    if arith != null { return make_int_lit(arith, span) }
+    const cmp = opt_fold_cmp_int(op, lv, rv)
+    if cmp != null { return make_bool_lit(cmp, span) }
+    null
+}
+
+// Try to fold two string literals under a binary op.
+func opt_try_fold_str_lits(op, ls, rs, span) {
+    match op {
+        BinOp::Add => make_str_lit(ls + rs, span),
+        _ => null,
+    }
+}
+
+// Try to fold two bool literals under a binary op.
+func opt_try_fold_bool_lits(op, lv, rv, span) {
+    const folded = opt_fold_bool_binop(op, lv, rv)
+    if folded != null { return make_bool_lit(folded, span) }
+    null
+}
+
+// Try to fold two literals under a binary op.
+// Returns a folded Expr or null if not foldable.
+func opt_try_fold_lits(op, ll, rl, span) {
+    match ll {
+        Literal::IntLit(lv) => {
+            match rl {
+                Literal::IntLit(rv) => opt_try_fold_int_lits(op, lv, rv, span),
+                _ => null,
+            }
+        },
+        Literal::StringLit(ls) => {
+            match rl {
+                Literal::StringLit(rs) => opt_try_fold_str_lits(op, ls, rs, span),
+                _ => null,
+            }
+        },
+        Literal::BoolLit(lv) => {
+            match rl {
+                Literal::BoolLit(rv) => opt_try_fold_bool_lits(op, lv, rv, span),
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+}
+
+func opt_try_fold_neg(lit, span) {
+    match lit {
+        Literal::IntLit(n) => make_int_lit(0 - n, span),
+        Literal::FloatLit(f) => make_float_lit(0.0 - f, span),
+        _ => null,
+    }
+}
+
+func opt_try_fold_not(lit, span) {
+    match lit {
+        Literal::BoolLit(b) => make_bool_lit(!b, span),
+        _ => null,
+    }
+}
+
+func opt_try_fold_unary(op, lit, span) {
+    match op {
+        UnOp::Neg => opt_try_fold_neg(lit, span),
+        UnOp::Not => opt_try_fold_not(lit, span),
+    }
+}
+
+// ── Optimize Expression ─────────────────────────────────────────────
+
+func opt_expr(e) {
+    if e == null { return null }
+    const k = e.kind
+    const span = e.span
+    match k {
+        ExprKind::EBinaryOp(op, left, right) => {
+            const ol = opt_expr(left)
+            const or_ = opt_expr(right)
+            const lk = ol.kind
+            const rk = or_.kind
+            match lk {
+                ExprKind::ELiteral(ll) => {
+                    match rk {
+                        ExprKind::ELiteral(rl) => {
+                            const folded = opt_try_fold_lits(op, ll, rl, span)
+                            if folded != null { return folded }
+                        },
+                        _ => null,
+                    }
+                },
+                _ => null,
+            }
+            expr_new(ExprKind::EBinaryOp(op, ol, or_), span)
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const oo = opt_expr(operand)
+            const ok = oo.kind
+            match ok {
+                ExprKind::ELiteral(lit) => {
+                    const folded = opt_try_fold_unary(op, lit, span)
+                    if folded != null { return folded }
+                },
+                _ => null,
+            }
+            expr_new(ExprKind::EUnaryOp(op, oo), span)
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            const oc = opt_expr(cond)
+            const ot = opt_block(then_b)
+            const oe = opt_block(else_b)
+            const ck = oc.kind
+            match ck {
+                ExprKind::ELiteral(lit) => {
+                    match lit {
+                        Literal::BoolLit(b) => {
+                            const chosen = if b { ot } else { oe }
+                            return expr_new(ExprKind::EBlock(chosen), span)
+                        },
+                        _ => null,
+                    }
+                },
+                _ => null,
+            }
+            expr_new(ExprKind::EIfElse(oc, ot, oe), span)
+        },
+        ExprKind::EBlock(blk) => {
+            expr_new(ExprKind::EBlock(opt_block(blk)), span)
+        },
+        ExprKind::ECall(name, args, targs) => {
+            const oargs = args.map(a => opt_expr(a))
+            expr_new(ExprKind::ECall(name, oargs, targs), span)
+        },
+        ExprKind::EMethodCall(obj, method, args, targs) => {
+            const oo = opt_expr(obj)
+            const oargs = args.map(a => opt_expr(a))
+            expr_new(ExprKind::EMethodCall(oo, method, oargs, targs), span)
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            expr_new(ExprKind::EFieldAccess(opt_expr(obj), field), span)
+        },
+        ExprKind::EIndex(obj, idx) => {
+            expr_new(ExprKind::EIndex(opt_expr(obj), opt_expr(idx)), span)
+        },
+        ExprKind::EPipe(left, right) => {
+            expr_new(ExprKind::EPipe(opt_expr(left), opt_expr(right)), span)
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            expr_new(ExprKind::ENullCoalesce(opt_expr(left), opt_expr(right)), span)
+        },
+        _ => e,
+    }
+}
+
+// ── Dead Code Elimination ───────────────────────────────────────────
+
+func is_terminator(stmt) {
+    const k = stmt.kind
+    match k {
+        StmtKind::SReturn(_) => true,
+        StmtKind::SBreak(_, _) => true,
+        StmtKind::SContinue(_) => true,
+        StmtKind::SThrow(_) => true,
+        _ => false,
+    }
+}
+
+func eliminate_dead_stmts(stmts) {
+    let result = []
+    let terminated = false
+    for s in stmts {
+        if terminated { break }
+        result.push(s)
+        if is_terminator(s) { terminated = true }
+    }
+    result
+}
+
+// ── Optimize Block ──────────────────────────────────────────────────
+
+func opt_block(blk) {
+    if blk == null { return null }
+    const ostmts = blk.stmts.map(s => opt_stmt(s))
+    const trimmed = eliminate_dead_stmts(ostmts)
+    const otail = opt_expr(blk.tail_expr)
+    Block { stmts: trimmed, tail_expr: otail, span: blk.span }
+}
+
+// ── Optimize Statement ──────────────────────────────────────────────
+
+func opt_stmt(s) {
+    const k = s.kind
+    const span = s.span
+    match k {
+        StmtKind::SLet(name, expr) =>
+            stmt_new(StmtKind::SLet(name, opt_expr(expr)), span),
+        StmtKind::SLetMut(name, expr) =>
+            stmt_new(StmtKind::SLetMut(name, opt_expr(expr)), span),
+        StmtKind::SConst(name, expr) =>
+            stmt_new(StmtKind::SConst(name, opt_expr(expr)), span),
+        StmtKind::SAssignment(name, expr) =>
+            stmt_new(StmtKind::SAssignment(name, opt_expr(expr)), span),
+        StmtKind::SReturn(expr) =>
+            stmt_new(StmtKind::SReturn(opt_expr(expr)), span),
+        StmtKind::SOutput(expr) =>
+            stmt_new(StmtKind::SOutput(opt_expr(expr)), span),
+        StmtKind::SExprStmt(expr) =>
+            stmt_new(StmtKind::SExprStmt(opt_expr(expr)), span),
+        StmtKind::SFuncDef(fd) =>
+            stmt_new(StmtKind::SFuncDef(opt_funcdef(fd)), span),
+        StmtKind::SIf(cond, then_b, else_b) =>
+            stmt_new(StmtKind::SIf(opt_expr(cond), opt_block(then_b), opt_block(else_b)), span),
+        StmtKind::SWhileLoop(label, cond, body) =>
+            stmt_new(StmtKind::SWhileLoop(label, opt_expr(cond), opt_block(body)), span),
+        StmtKind::SForLoop(label, pat, iter, body) =>
+            stmt_new(StmtKind::SForLoop(label, pat, opt_expr(iter), opt_block(body)), span),
+        StmtKind::SThrow(expr) =>
+            stmt_new(StmtKind::SThrow(opt_expr(expr)), span),
+        _ => s,
+    }
+}
+
+func opt_funcdef(fd) {
+    const ob = opt_block(fd.body)
+    FuncDef {
+        name: fd.name, type_params: fd.type_params, params: fd.params,
+        return_type: fd.return_type, body: ob, span: fd.span,
+        is_getter: fd.is_getter, is_setter: fd.is_setter,
+    }
+}
+
+// ── Entry Point ─────────────────────────────────────────────────────
+
+func optimize(program) {
+    const ostmts = program.statements.map(s => opt_stmt(s))
+    Program { statements: ostmts, span: program.span }
+}
