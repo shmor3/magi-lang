@@ -1,0 +1,1499 @@
+// MAGI Self-Hosted Compiler — Tree-Walking Interpreter
+//
+// Takes an AST from parse() and executes it directly.
+// Uses module-level mutable state for the scope stack (same pattern as parser).
+
+// ── Signals ──────────────────────────────────────────────────────
+
+const RETURN_SIGNAL = "__return__"
+const BREAK_SIGNAL = "__break__"
+const CONTINUE_SIGNAL = "__continue__"
+
+func is_signal(val) {
+    if val == null { return false }
+    if typeof(val) != "map" { return false }
+    val.has("__signal")
+}
+
+func is_return(val) {
+    if !is_signal(val) { return false }
+    val["__signal"] == RETURN_SIGNAL
+}
+
+func is_break(val) {
+    if !is_signal(val) { return false }
+    val["__signal"] == BREAK_SIGNAL
+}
+
+func is_continue(val) {
+    if !is_signal(val) { return false }
+    val["__signal"] == CONTINUE_SIGNAL
+}
+
+func signal_value(val) {
+    if typeof(val) != "map" { return null }
+    if val.has("value") { val["value"] } else { null }
+}
+
+func make_return_signal(value) {
+    {"__signal": RETURN_SIGNAL, "value": value}
+}
+
+func make_break_signal() {
+    {"__signal": BREAK_SIGNAL}
+}
+
+func make_continue_signal() {
+    {"__signal": CONTINUE_SIGNAL}
+}
+
+// ── Scope Stack (module-level mutable) ───────────────────────────
+
+// Note: empty map {} is null in MAGI, so use sentinel to create real map
+func i_new_scope() {
+    {"__s": true}
+}
+
+let i_scopes = [i_new_scope()]
+
+func i_push_scope() {
+    i_scopes.push(i_new_scope())
+}
+
+func i_pop_scope() {
+    i_scopes.pop()
+}
+
+func i_get(name) {
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        const s = i_scopes[idx]
+        if s.has(name) {
+            const entry = s[name]
+            return entry["value"]
+        }
+        idx = idx - 1
+    }
+    panic(f"undefined variable: {name}")
+}
+
+func i_set(name, value, mutable) {
+    const idx = len(i_scopes) - 1
+    let s = i_scopes[idx]
+    s[name] = {"value": value, "mutable": mutable}
+    i_scopes[idx] = s
+}
+
+func i_update(name, value) {
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        let s = i_scopes[idx]
+        if s.has(name) {
+            const entry = s[name]
+            if !entry["mutable"] {
+                panic(f"cannot assign to immutable variable: {name}")
+            }
+            s[name] = {"value": value, "mutable": true}
+            i_scopes[idx] = s
+            return null
+        }
+        idx = idx - 1
+    }
+    panic(f"undefined variable: {name}")
+}
+
+// ── Function & Type Storage ─────────────────────────────────────
+
+let i_functions = {}
+let i_structs = {}
+let i_enums = {}
+
+// ── Entry Points ─────────────────────────────────────────────────
+
+func eval_source(code) {
+    const save_scopes = i_scopes
+    const save_functions = i_functions
+    const save_structs = i_structs
+    const save_enums = i_enums
+
+    i_scopes = [i_new_scope()]
+    i_functions = {"__init": true}
+    i_structs = {"__init": true}
+    i_enums = {"__init": true}
+
+    const prog = parse(code)
+    const result = eval_program(prog)
+
+    i_scopes = save_scopes
+    i_functions = save_functions
+    i_structs = save_structs
+    i_enums = save_enums
+
+    result
+}
+
+func eval_program(prog) {
+    let last = null
+    for s in prog.statements {
+        last = eval_stmt(s)
+        if is_signal(last) {
+            if is_return(last) {
+                return signal_value(last)
+            }
+            return last
+        }
+    }
+    last
+}
+
+// ── Statement Evaluation ─────────────────────────────────────────
+
+func eval_stmt(stmt) {
+    match stmt.kind {
+        StmtKind::SConst(name, expr) => {
+            const val = eval_expr(expr)
+            i_set(name, val, false)
+            null
+        },
+        StmtKind::SLet(name, expr) => {
+            const val = eval_expr(expr)
+            i_set(name, val, false)
+            null
+        },
+        StmtKind::SLetMut(name, expr) => {
+            const val = eval_expr(expr)
+            i_set(name, val, true)
+            null
+        },
+        StmtKind::SAssignment(name, expr) => {
+            const val = eval_expr(expr)
+            i_update(name, val)
+            null
+        },
+        StmtKind::SCompoundAssign(name, op, expr) => {
+            const current = i_get(name)
+            const rhs = eval_expr(expr)
+            const result = apply_binop(op, current, rhs)
+            i_update(name, result)
+            null
+        },
+        StmtKind::SFieldAssign(obj_expr, field, val_expr) => {
+            const val = eval_expr(val_expr)
+            i_field_assign(obj_expr, field, val)
+            null
+        },
+        StmtKind::SIndexAssign(obj_expr, idx_expr, val_expr) => {
+            const idx = eval_expr(idx_expr)
+            const val = eval_expr(val_expr)
+            i_index_assign(obj_expr, idx, val)
+            null
+        },
+        StmtKind::SFuncDef(fdef) => {
+            // Store function definition: capture params and body
+            i_functions[fdef.name] = {
+                "params": fdef.params,
+                "body": fdef.body,
+            }
+            null
+        },
+        StmtKind::SAsyncFuncDef(fdef) => {
+            i_functions[fdef.name] = {
+                "params": fdef.params,
+                "body": fdef.body,
+            }
+            null
+        },
+        StmtKind::SReturn(expr) => {
+            let val = null
+            if expr != null {
+                val = eval_expr(expr)
+            }
+            make_return_signal(val)
+        },
+        StmtKind::SBreak(_, _) => {
+            make_break_signal()
+        },
+        StmtKind::SContinue(_) => {
+            make_continue_signal()
+        },
+        StmtKind::SIf(cond, then_block, else_block) => {
+            const cond_val = eval_expr(cond)
+            if i_truthy(cond_val) {
+                eval_block(then_block)
+            } else if else_block != null {
+                eval_block(else_block)
+            } else {
+                null
+            }
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            let result = null
+            while true {
+                const cond_val = eval_expr(cond)
+                if !i_truthy(cond_val) { break }
+                const r = eval_block(body)
+                if is_break(r) { break }
+                if is_continue(r) { continue }
+                if is_return(r) { return r }
+                result = r
+            }
+            result
+        },
+        StmtKind::SDoWhile(_, body, cond) => {
+            let result = null
+            while true {
+                const r = eval_block(body)
+                if is_break(r) { break }
+                if is_continue(r) { continue }
+                if is_return(r) { return r }
+                result = r
+                const cond_val = eval_expr(cond)
+                if !i_truthy(cond_val) { break }
+            }
+            result
+        },
+        StmtKind::SForLoop(_, var_expr, iter_expr, body) => {
+            const iter_val = eval_expr(iter_expr)
+            let result = null
+            // var_expr is a string (variable name) or an expression for the binding
+            const var_name = match var_expr {
+                ExprKind::EVariable(n) => n,
+                _ => {
+                    // var_expr is actually a string in the parser encoding
+                    to_string(var_expr)
+                },
+            }
+            const iter_t = typeof(iter_val)
+            if iter_t == "array" {
+                for item in iter_val {
+                    i_push_scope()
+                    i_set(var_name, item, true)
+                    const r = eval_block(body)
+                    i_pop_scope()
+                    if is_break(r) { break }
+                    if is_continue(r) { continue }
+                    if is_return(r) { return r }
+                    result = r
+                }
+            } else if iter_t == "map" {
+                const keys = iter_val.keys()
+                for k in keys {
+                    i_push_scope()
+                    i_set(var_name, k, true)
+                    const r = eval_block(body)
+                    i_pop_scope()
+                    if is_break(r) { break }
+                    if is_continue(r) { continue }
+                    if is_return(r) { return r }
+                    result = r
+                }
+            } else {
+                panic("for-in requires array or map")
+            }
+            result
+        },
+        StmtKind::SMatch(subject, arms) => {
+            const subject_val = eval_expr(subject)
+            eval_match(subject_val, arms)
+        },
+        StmtKind::SOutput(expr) => {
+            const val = eval_expr(expr)
+            println(i_display(val))
+            val
+        },
+        StmtKind::SExprStmt(expr) => {
+            eval_expr(expr)
+        },
+        StmtKind::SStructDef(name, fields, _methods) => {
+            i_structs[name] = fields
+            null
+        },
+        StmtKind::SEnumDef(name, variants, _methods) => {
+            i_enums[name] = variants
+            null
+        },
+        StmtKind::SInterfaceDef(_, _, _) => null,
+        StmtKind::SImplBlock(_, methods) => {
+            for m in methods {
+                i_functions[m.name] = {
+                    "params": m.params,
+                    "body": m.body,
+                }
+            }
+            null
+        },
+        StmtKind::SImplTrait(_, _, methods) => {
+            for m in methods {
+                i_functions[m.name] = {
+                    "params": m.params,
+                    "body": m.body,
+                }
+            }
+            null
+        },
+        StmtKind::SImport(_) => null,
+        StmtKind::SImportModule(_, _, _) => null,
+        StmtKind::STypeAlias(_, _) => null,
+        StmtKind::SDefer(_) => null,
+        StmtKind::SThrow(expr) => {
+            const val = eval_expr(expr)
+            panic(f"throw: {i_display(val)}")
+        },
+        StmtKind::STryCatch(try_block, catch_var, catch_block, _finally) => {
+            // Simplified: just eval try block (no real try-catch in the host)
+            eval_block(try_block)
+        },
+        StmtKind::STestDef(name, body) => {
+            // Store as function
+            i_functions[f"test_{name}"] = {
+                "params": [],
+                "body": body,
+            }
+            null
+        },
+        StmtKind::SModuleDef(_, _) => null,
+        StmtKind::SLetDestructure(_, _, _) => null,
+        StmtKind::STupleAssign(_, _) => null,
+        StmtKind::SSpawn(_) => null,
+        StmtKind::SIncrement(name) => {
+            const current = i_get(name)
+            const next = apply_binop(BinOp::Add, current, 1)
+            i_update(name, next)
+            null
+        },
+        StmtKind::SDecrement(name) => {
+            const current = i_get(name)
+            const next = apply_binop(BinOp::Sub, current, 1)
+            i_update(name, next)
+            null
+        },
+        _ => {
+            panic(f"unhandled statement kind")
+        },
+    }
+}
+
+// ── Field/Index Assignment Helpers ────────────────────────────────
+
+func i_field_assign(obj_expr, field, val) {
+    let obj = eval_expr(obj_expr)
+    if typeof(obj) == "map" {
+        obj[field] = val
+        match obj_expr.kind {
+            ExprKind::EVariable(name) => i_update(name, obj),
+            _ => {},
+        }
+    } else {
+        panic("cannot set field on non-map")
+    }
+}
+
+func i_index_assign(obj_expr, idx, val) {
+    let obj = eval_expr(obj_expr)
+    const obj_t = typeof(obj)
+    if obj_t == "array" {
+        obj[idx] = val
+        match obj_expr.kind {
+            ExprKind::EVariable(name) => i_update(name, obj),
+            _ => {},
+        }
+    } else if obj_t == "map" {
+        const k = if typeof(idx) == "string" { idx } else { to_string(idx) }
+        obj[k] = val
+        match obj_expr.kind {
+            ExprKind::EVariable(name) => i_update(name, obj),
+            _ => {},
+        }
+    } else {
+        panic("cannot index-assign on this type")
+    }
+}
+
+// ── Block Evaluation ─────────────────────────────────────────────
+
+func eval_block(block) {
+    i_push_scope()
+    let result = null
+    for s in block.stmts {
+        result = eval_stmt(s)
+        if is_signal(result) {
+            i_pop_scope()
+            return result
+        }
+    }
+    if block.tail_expr != null {
+        result = eval_expr(block.tail_expr)
+    }
+    i_pop_scope()
+    result
+}
+
+// ── Expression Evaluation ────────────────────────────────────────
+
+func eval_expr(expr) {
+    match expr.kind {
+        ExprKind::ELiteral(lit) => eval_literal(lit),
+        ExprKind::EVariable(name) => i_get(name),
+        ExprKind::EBinaryOp(op, left, right) => {
+            // Short-circuit for && and ||
+            match op {
+                BinOp::And => {
+                    const lv = eval_expr(left)
+                    if !i_truthy(lv) { return lv }
+                    return eval_expr(right)
+                },
+                BinOp::Or => {
+                    const lv = eval_expr(left)
+                    if i_truthy(lv) { return lv }
+                    return eval_expr(right)
+                },
+                _ => {},
+            }
+            const lv = eval_expr(left)
+            const rv = eval_expr(right)
+            apply_binop(op, lv, rv)
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const val = eval_expr(operand)
+            apply_unaryop(op, val)
+        },
+        ExprKind::ECall(name, args, _type_args) => {
+            const arg_vals = args.map(a => eval_expr(a))
+            eval_call(name, arg_vals)
+        },
+        ExprKind::EMethodCall(obj_expr, method, args, _type_args) => {
+            const obj = eval_expr(obj_expr)
+            const arg_vals = args.map(a => eval_expr(a))
+            eval_method_call(obj, method, arg_vals, obj_expr)
+        },
+        ExprKind::EPipe(left, right) => {
+            const lv = eval_expr(left)
+            // Pipe: right should be a call — inject lv as first arg
+            match right.kind {
+                ExprKind::ECall(name, args, _) => {
+                    const arg_vals = args.map(a => eval_expr(a))
+                    eval_call(name, [lv] + arg_vals)
+                },
+                ExprKind::EVariable(name) => {
+                    eval_call(name, [lv])
+                },
+                _ => {
+                    const rv = eval_expr(right)
+                    rv
+                },
+            }
+        },
+        ExprKind::EIfElse(cond, then_block, else_block) => {
+            const cond_val = eval_expr(cond)
+            if i_truthy(cond_val) {
+                eval_block(then_block)
+            } else if else_block != null {
+                eval_block(else_block)
+            } else {
+                null
+            }
+        },
+        ExprKind::EBlock(block) => {
+            eval_block(block)
+        },
+        ExprKind::EIndex(obj_expr, idx_expr) => {
+            const obj = eval_expr(obj_expr)
+            const idx = eval_expr(idx_expr)
+            eval_index(obj, idx)
+        },
+        ExprKind::EFieldAccess(obj_expr, field) => {
+            const obj = eval_expr(obj_expr)
+            eval_field_access(obj, field)
+        },
+        ExprKind::ERange(start_expr, end_expr, inclusive) => {
+            const s = eval_expr(start_expr)
+            const e = eval_expr(end_expr)
+            eval_range(s, e, inclusive)
+        },
+        ExprKind::ELambda(params, body) => {
+            // Capture the current scope for closures
+            let captured = i_new_scope()
+            for scope in i_scopes {
+                for k in scope.keys() {
+                    captured[k] = scope[k]
+                }
+            }
+            {"__lambda": true, "params": params, "body": body, "captured": captured}
+        },
+        ExprKind::EMatch(subject, arms) => {
+            const subject_val = eval_expr(subject)
+            eval_match(subject_val, arms)
+        },
+        ExprKind::EStringInterp(parts) => {
+            let result = ""
+            for part in parts {
+                match part {
+                    StringPart::LiteralPart(s) => {
+                        result = result + s
+                    },
+                    StringPart::ExprPart(expr) => {
+                        const val = eval_expr(expr)
+                        result = result + i_display(val)
+                    },
+                }
+            }
+            result
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            const lv = eval_expr(left)
+            if lv == null {
+                eval_expr(right)
+            } else {
+                lv
+            }
+        },
+        ExprKind::EOptionalChain(obj_expr, field) => {
+            const obj = eval_expr(obj_expr)
+            if obj == null { return null }
+            eval_field_access(obj, field)
+        },
+        ExprKind::ESpread(inner) => {
+            eval_expr(inner)
+        },
+        ExprKind::EEnumConstruct(enum_name, variant, args) => {
+            const arg_vals = args.map(a => eval_expr(a))
+            {"__enum": enum_name, "__variant": variant, "__fields": arg_vals}
+        },
+        ExprKind::EStructConstruct(name, field_pairs) => {
+            let result = {"__struct": name}
+            for pair in field_pairs {
+                const fname = pair[0]
+                const fval = eval_expr(pair[1])
+                result[fname] = fval
+            }
+            result
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            const vals = elems.map(e => eval_expr(e))
+            vals
+        },
+        ExprKind::ELoop(body) => {
+            let result = null
+            while true {
+                const r = eval_block(body)
+                if is_break(r) {
+                    result = signal_value(r)
+                    break
+                }
+                if is_return(r) { return r }
+                result = r
+            }
+            result
+        },
+        ExprKind::EListComp(elem_expr, var_expr, iter_expr, cond_expr) => {
+            const iter_val = eval_expr(iter_expr)
+            let result = []
+            const var_name = match var_expr.kind {
+                ExprKind::EVariable(n) => n,
+                _ => "_",
+            }
+            if typeof(iter_val) != "array" { panic("list comprehension requires array") }
+            for item in iter_val {
+                i_push_scope()
+                i_set(var_name, item, true)
+                let include = true
+                if cond_expr != null {
+                    include = i_truthy(eval_expr(cond_expr))
+                }
+                if include {
+                    result.push(eval_expr(elem_expr))
+                }
+                i_pop_scope()
+            }
+            result
+        },
+        ExprKind::EPlaceholder => null,
+        ExprKind::EAwait(inner) => eval_expr(inner),
+        ExprKind::ESpawn(inner) => eval_expr(inner),
+        ExprKind::EYield(inner) => {
+            if inner != null { eval_expr(inner) } else { null }
+        },
+        ExprKind::ETryCatch(try_expr, _catch_var, catch_expr) => {
+            eval_expr(try_expr)
+        },
+        ExprKind::ETryPropagate(inner) => eval_expr(inner),
+        ExprKind::EMapComp(_, _, _, _, _) => null,
+        _ => {
+            panic(f"unhandled expression kind")
+        },
+    }
+}
+
+// ── Literal Evaluation ───────────────────────────────────────────
+
+func eval_literal(lit) {
+    match lit {
+        Literal::IntLit(n) => n,
+        Literal::FloatLit(f) => f,
+        Literal::StringLit(s) => s,
+        Literal::BoolLit(b) => b,
+        Literal::NullLit => null,
+        Literal::ArrayLit(elements) => {
+            elements.map(e => eval_expr(e))
+        },
+        Literal::MapLit(pairs) => {
+            let result = {}
+            for pair in pairs {
+                const k = eval_expr(pair[0])
+                const v = eval_expr(pair[1])
+                const key = if typeof(k) == "string" { k } else { to_string(k) }
+                result[key] = v
+            }
+            result
+        },
+        Literal::SetLit(elements) => {
+            elements.map(e => eval_expr(e))
+        },
+    }
+}
+
+// ── Binary Operators ─────────────────────────────────────────────
+
+func apply_binop(op, left, right) {
+    match op {
+        BinOp::Add => i_add(left, right),
+        BinOp::Sub => i_sub(left, right),
+        BinOp::Mul => i_mul(left, right),
+        BinOp::Div => i_div(left, right),
+        BinOp::Mod => i_mod(left, right),
+        BinOp::Eq => left == right,
+        BinOp::NotEq => left != right,
+        BinOp::Lt => i_compare(left, right) < 0,
+        BinOp::Gt => i_compare(left, right) > 0,
+        BinOp::LtEq => i_compare(left, right) <= 0,
+        BinOp::GtEq => i_compare(left, right) >= 0,
+        BinOp::And => {
+            if i_truthy(left) { right } else { left }
+        },
+        BinOp::Or => {
+            if i_truthy(left) { left } else { right }
+        },
+        BinOp::In => {
+            const rt = typeof(right)
+            if rt == "array" { return right.contains(left) }
+            if rt == "map" {
+                if typeof(left) == "string" { return right.has(left) }
+                return false
+            }
+            if rt == "string" {
+                if typeof(left) == "string" { return right.contains(left) }
+                return false
+            }
+            false
+        },
+        BinOp::BitAnd => i_bitop("and", left, right),
+        BinOp::BitOr => i_bitop("or", left, right),
+        BinOp::BitXor => i_bitop("xor", left, right),
+        BinOp::Shl => i_bitop("shl", left, right),
+        BinOp::Shr => i_bitop("shr", left, right),
+        BinOp::AndNot => i_bitop("andnot", left, right),
+    }
+}
+
+// ── Arithmetic Helpers ───────────────────────────────────────────
+// Values are native MAGI host values (int64, float64, string, array, map),
+// NOT wrapped in DataType enum. Use typeof() for type dispatch.
+
+func i_add(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" { return left + right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) + right }
+    if lt == "float64" && rt == "int64" { return left + to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left + right }
+    if lt == "string" && rt == "string" { return left + right }
+    if lt == "string" && rt == "int64" { return left + to_string(right) }
+    if lt == "string" && rt == "float64" { return left + to_string(right) }
+    if lt == "int64" && rt == "string" { return to_string(left) + right }
+    if lt == "array" && rt == "array" { return left.concat(right) }
+    panic(f"cannot add {lt} and {rt}")
+}
+
+func i_sub(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" { return left - right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) - right }
+    if lt == "float64" && rt == "int64" { return left - to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left - right }
+    panic("cannot subtract")
+}
+
+func i_mul(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" { return left * right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) * right }
+    if lt == "float64" && rt == "int64" { return left * to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left * right }
+    panic("cannot multiply")
+}
+
+func i_div(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" {
+        if right == 0 { panic("division by zero") }
+        return left / right
+    }
+    if lt == "int64" && rt == "float64" {
+        if right == 0.0 { panic("division by zero") }
+        return to_float64(left) / right
+    }
+    if lt == "float64" && rt == "int64" {
+        if right == 0 { panic("division by zero") }
+        return left / to_float64(right)
+    }
+    if lt == "float64" && rt == "float64" {
+        if right == 0.0 { panic("division by zero") }
+        return left / right
+    }
+    panic("cannot divide")
+}
+
+func i_mod(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" { return left % right }
+    panic("cannot modulo")
+}
+
+// ── Bitwise Operations ───────────────────────────────────────────
+
+func i_bitop(op_name, left, right) {
+    if op_name == "and" { return left & right }
+    if op_name == "or" { return (left ^ right) + (left & right) }
+    if op_name == "xor" { return left ^ right }
+    if op_name == "shl" { return left << right }
+    if op_name == "shr" { return left >> right }
+    if op_name == "andnot" { return left & (right ^ -1) }
+    panic(f"unknown bitwise op: {op_name}")
+}
+
+// ── Unary Operators ──────────────────────────────────────────────
+
+func apply_unaryop(op, val) {
+    match op {
+        UnOp::Neg => {
+            const t = typeof(val)
+            if t == "int64" { return 0 - val }
+            if t == "float64" { return 0.0 - val }
+            panic("cannot negate")
+        },
+        UnOp::Not => {
+            !i_truthy(val)
+        },
+    }
+}
+
+// ── Comparison ───────────────────────────────────────────────────
+
+func i_compare(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    // Int vs Int
+    if lt == "int64" && rt == "int64" {
+        if left < right { return -1 }
+        if left > right { return 1 }
+        return 0
+    }
+    // Float vs Float
+    if lt == "float64" && rt == "float64" {
+        if left < right { return -1 }
+        if left > right { return 1 }
+        return 0
+    }
+    // Int vs Float
+    if lt == "int64" && rt == "float64" {
+        const lf = to_float64(left)
+        if lf < right { return -1 }
+        if lf > right { return 1 }
+        return 0
+    }
+    // Float vs Int
+    if lt == "float64" && rt == "int64" {
+        const rf = to_float64(right)
+        if left < rf { return -1 }
+        if left > rf { return 1 }
+        return 0
+    }
+    // String vs String
+    if lt == "string" && rt == "string" {
+        if left < right { return -1 }
+        if left > right { return 1 }
+        return 0
+    }
+    panic(f"cannot compare {lt} and {rt}")
+}
+
+// ── Truthiness ───────────────────────────────────────────────────
+
+func i_truthy(val) {
+    if val == null { return false }
+    const t = typeof(val)
+    if t == "bool" { return val }
+    if t == "int64" { return val != 0 }
+    if t == "float64" { return val != 0.0 }
+    if t == "string" { return len(val) > 0 }
+    if t == "array" { return len(val) > 0 }
+    if t == "map" { return len(val) > 0 }
+    true
+}
+
+// ── Display ──────────────────────────────────────────────────────
+
+func i_display(val) {
+    if val == null { return "null" }
+    const t = typeof(val)
+    if t == "bool" {
+        if val { return "true" } else { return "false" }
+    }
+    if t == "int64" { return to_string(val) }
+    if t == "float64" { return to_string(val) }
+    if t == "string" { return val }
+    if t == "array" {
+        const parts = val.map(x => i_display(x))
+        const joined = parts.join(", ")
+        return f"[{joined}]"
+    }
+    if t == "map" {
+        if val.has("__enum") {
+            const ename = val["__enum"]
+            const vname = val["__variant"]
+            const flds = val["__fields"]
+            if len(flds) == 0 {
+                return f"{ename}::{vname}"
+            } else {
+                const parts = flds.map(fv => i_display(fv))
+                const joined = parts.join(", ")
+                return f"{ename}::{vname}({joined})"
+            }
+        } else if val.has("__struct") {
+            const sname = val["__struct"]
+            let parts = []
+            for k in val.keys() {
+                if k != "__struct" {
+                    parts.push(f"{k}: {i_display(val[k])}")
+                }
+            }
+            const joined = parts.join(", ")
+            return f"{sname} {{ {joined} }}"
+        } else {
+            let parts = []
+            for k in val.keys() {
+                parts.push(f"{k}: {i_display(val[k])}")
+            }
+            const joined = parts.join(", ")
+            return f"{{{joined}}}"
+        }
+    }
+    to_string(val)
+}
+
+// ── Function Calls ───────────────────────────────────────────────
+
+func eval_call(name, args) {
+    // Built-in functions first
+    if name == "println" {
+        const parts = args.map(a => i_display(a))
+        println(parts.join(" "))
+        return null
+    }
+    if name == "print" {
+        const parts = args.map(a => i_display(a))
+        print(parts.join(" "))
+        return null
+    }
+    if name == "len" {
+        if len(args) != 1 { panic("len() takes 1 argument") }
+        return i_len(args[0])
+    }
+    if name == "to_string" {
+        if len(args) != 1 { panic("to_string() takes 1 argument") }
+        return i_display(args[0])
+    }
+    if name == "to_int" {
+        if len(args) != 1 { panic("to_int64() takes 1 argument") }
+        return i_to_int64(args[0])
+    }
+    if name == "to_float" {
+        if len(args) != 1 { panic("to_float64() takes 1 argument") }
+        return i_to_float64(args[0])
+    }
+    if name == "type_of" {
+        if len(args) != 1 { panic("typeof() takes 1 argument") }
+        return typeof(args[0])
+    }
+    if name == "assert" {
+        if len(args) < 1 { panic("assert() takes at least 1 argument") }
+        if !i_truthy(args[0]) {
+            if len(args) > 1 {
+                panic(f"assertion failed: {i_display(args[1])}")
+            }
+            panic("assertion failed")
+        }
+        return null
+    }
+    if name == "panic" {
+        const msg = if len(args) > 0 { i_display(args[0]) } else { "panic" }
+        panic(msg)
+    }
+    if name == "abs" {
+        if len(args) != 1 { panic("abs() takes 1 argument") }
+        const v = args[0]
+        const vt = typeof(v)
+        if vt == "int64" { return if v < 0 { 0 - v } else { v } }
+        if vt == "float64" { return if v < 0.0 { 0.0 - v } else { v } }
+        panic("abs() requires number")
+    }
+    if name == "min" {
+        if len(args) != 2 { panic("min() takes 2 arguments") }
+        return if i_compare(args[0], args[1]) <= 0 { args[0] } else { args[1] }
+    }
+    if name == "max" {
+        if len(args) != 2 { panic("max() takes 2 arguments") }
+        return if i_compare(args[0], args[1]) >= 0 { args[0] } else { args[1] }
+    }
+    if name == "range" {
+        if len(args) == 1 {
+            return eval_range(0, args[0], false)
+        }
+        if len(args) == 2 {
+            return eval_range(args[0], args[1], false)
+        }
+        panic("range() takes 1 or 2 arguments")
+    }
+    if name == "output" {
+        if len(args) == 1 {
+            const val = args[0]
+            println(i_display(val))
+            return val
+        }
+        panic("output() takes 1 argument")
+    }
+
+    // User-defined functions
+    if i_functions.has(name) {
+        const func_info = i_functions[name]
+        return call_user_func(func_info, args)
+    }
+
+    // Struct constructors
+    if i_structs.has(name) {
+        let result = {"__struct": name}
+        const fields = i_structs[name]
+        let idx = 0
+        while idx < len(fields) && idx < len(args) {
+            result[fields[idx].name] = args[idx]
+            idx = idx + 1
+        }
+        return result
+    }
+
+    // Check if name is a variable holding a lambda
+    let lambda_val = null
+    let found_lambda = false
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        const s = i_scopes[scope_idx]
+        if s.has(name) {
+            const entry = s[name]
+            lambda_val = entry["value"]
+            found_lambda = true
+            break
+        }
+        scope_idx = scope_idx - 1
+    }
+    if found_lambda && typeof(lambda_val) == "map" && lambda_val.has("__lambda") {
+        return call_lambda(lambda_val, args)
+    }
+
+    panic(f"undefined function: {name}")
+}
+
+func call_user_func(func_info, args) {
+    i_push_scope()
+    const params = func_info["params"]
+    let idx = 0
+    while idx < len(params) {
+        const p = params[idx]
+        let val = null
+        if idx < len(args) {
+            val = args[idx]
+        } else if p.default_val != null {
+            val = eval_expr(p.default_val)
+        }
+        if p.rest {
+            // Rest parameter collects remaining args
+            val = args.slice(idx, len(args))
+        }
+        i_set(p.name, val, true)
+        idx = idx + 1
+    }
+    const result = eval_block(func_info["body"])
+    i_pop_scope()
+    if is_return(result) {
+        return signal_value(result)
+    }
+    result
+}
+
+func call_lambda(lambda, args) {
+    // Restore captured scope
+    const save_scopes = i_scopes
+    let restored = []
+    restored.push(lambda["captured"])
+    i_scopes = restored
+
+    i_push_scope()
+    const params = lambda["params"]
+    let idx = 0
+    while idx < len(params) {
+        const p = params[idx]
+        let val = null
+        if idx < len(args) {
+            val = args[idx]
+        }
+        i_set(p.name, val, true)
+        idx = idx + 1
+    }
+    const result = eval_block(lambda["body"])
+    i_pop_scope()
+
+    i_scopes = save_scopes
+
+    if is_return(result) {
+        return signal_value(result)
+    }
+    result
+}
+
+// ── Method Calls ─────────────────────────────────────────────────
+
+func eval_method_call(obj, method, args, obj_expr) {
+    const ot = typeof(obj)
+
+    // Array methods
+    if ot == "array" {
+        if method == "push" {
+            if len(args) != 1 { panic("push() takes 1 argument") }
+            const new_arr = obj.append(args[0])
+            match obj_expr.kind {
+                ExprKind::EVariable(name) => i_update(name, new_arr),
+                _ => {},
+            }
+            return null
+        }
+        if method == "pop" {
+            if len(obj) == 0 { panic("pop from empty array") }
+            const val = obj[len(obj) - 1]
+            const new_arr = obj.slice(0, len(obj) - 1)
+            match obj_expr.kind {
+                ExprKind::EVariable(name) => i_update(name, new_arr),
+                _ => {},
+            }
+            return val
+        }
+        if method == "len" || method == "length" {
+            return len(obj)
+        }
+        if method == "map" {
+            if len(args) != 1 { panic("map() takes 1 argument") }
+            const fn_val = args[0]
+            return obj.map(item => {
+                if typeof(fn_val) == "map" && fn_val.has("__lambda") {
+                    call_lambda(fn_val, [item])
+                } else {
+                    item
+                }
+            })
+        }
+        if method == "filter" {
+            if len(args) != 1 { panic("filter() takes 1 argument") }
+            const fn_val = args[0]
+            return obj.filter(item => {
+                if typeof(fn_val) == "map" && fn_val.has("__lambda") {
+                    i_truthy(call_lambda(fn_val, [item]))
+                } else {
+                    i_truthy(item)
+                }
+            })
+        }
+        if method == "contains" {
+            if len(args) != 1 { panic("contains() takes 1 argument") }
+            return obj.contains(args[0])
+        }
+        if method == "join" {
+            if len(args) != 1 { panic("join() takes 1 argument") }
+            const sep = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            const parts = obj.map(x => i_display(x))
+            return parts.join(sep)
+        }
+        if method == "slice" {
+            if len(args) == 2 {
+                return obj.slice(args[0], args[1])
+            }
+            if len(args) == 1 {
+                return obj.slice(args[0], len(obj))
+            }
+            panic("slice() takes 1 or 2 arguments")
+        }
+        if method == "reverse" {
+            return obj.reverse()
+        }
+        if method == "sort" {
+            return obj.sort()
+        }
+        if method == "concat" {
+            if len(args) != 1 { panic("concat() takes 1 argument") }
+            return obj.concat(args[0])
+        }
+        if method == "append" {
+            if len(args) != 1 { panic("append() takes 1 argument") }
+            return obj.append(args[0])
+        }
+        if method == "flat" || method == "flatten" {
+            return obj.flat()
+        }
+        if method == "enumerate" {
+            let result = []
+            let i = 0
+            for item in obj {
+                result.push([i, item])
+                i = i + 1
+            }
+            return result
+        }
+        if method == "reduce" {
+            if len(args) != 2 { panic("reduce() takes 2 arguments (fn, initial)") }
+            const fn_val = args[0]
+            let acc = args[1]
+            for item in obj {
+                if typeof(fn_val) == "map" && fn_val.has("__lambda") {
+                    acc = call_lambda(fn_val, [acc, item])
+                }
+            }
+            return acc
+        }
+    }
+
+    // String methods
+    if ot == "string" {
+        if method == "len" || method == "length" { return len(obj) }
+        if method == "contains" {
+            if len(args) != 1 { panic("contains() takes 1 argument") }
+            const sub = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            return obj.contains(sub)
+        }
+        if method == "starts_with" {
+            if len(args) != 1 { panic("starts_with() takes 1 argument") }
+            const prefix = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            return obj.starts_with(prefix)
+        }
+        if method == "ends_with" {
+            if len(args) != 1 { panic("ends_with() takes 1 argument") }
+            const suffix = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            return obj.ends_with(suffix)
+        }
+        if method == "split" {
+            if len(args) != 1 { panic("split() takes 1 argument") }
+            const sep = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            return obj.split(sep)
+        }
+        if method == "trim" { return obj.trim() }
+        if method == "to_upper" || method == "upper" || method == "to_uppercase" { return obj.to_upper() }
+        if method == "to_lower" || method == "lower" || method == "to_lowercase" { return obj.to_lower() }
+        if method == "replace" {
+            if len(args) != 2 { panic("replace() takes 2 arguments") }
+            const from = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            const to_str = if typeof(args[1]) == "string" { args[1] } else { to_string(args[1]) }
+            return obj.replace(from, to_str)
+        }
+        if method == "chars" {
+            return obj.chars()
+        }
+        if method == "slice" {
+            if len(args) == 2 {
+                return obj.slice(args[0], args[1])
+            }
+            panic("slice() takes 2 arguments for strings")
+        }
+    }
+
+    // Map methods
+    if ot == "map" {
+        if method == "keys" { return obj.keys() }
+        if method == "values" { return obj.values() }
+        if method == "contains_key" || method == "has" {
+            if len(args) != 1 { panic("contains_key() takes 1 argument") }
+            const key = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            return obj.has(key)
+        }
+        if method == "len" || method == "length" { return len(obj) }
+        if method == "remove" || method == "delete" {
+            if len(args) != 1 { panic("remove() takes 1 argument") }
+            const key = if typeof(args[0]) == "string" { args[0] } else { to_string(args[0]) }
+            const new_map = obj.delete(key)
+            match obj_expr.kind {
+                ExprKind::EVariable(name) => i_update(name, new_map),
+                _ => {},
+            }
+            return null
+        }
+    }
+
+    // Check for Type.method style functions
+    const obj_type_name = typeof(obj)
+    const qualified_name = f"{obj_type_name}.{method}"
+    if i_functions.has(qualified_name) {
+        const func_info = i_functions[qualified_name]
+        return call_user_func(func_info, [obj] + args)
+    }
+
+    // Check for struct/enum method: StructName.method or EnumName.method
+    if ot == "map" {
+        if obj.has("__struct") {
+            const sname = obj["__struct"]
+            const smethod = f"{sname}.{method}"
+            if i_functions.has(smethod) {
+                const func_info = i_functions[smethod]
+                return call_user_func(func_info, [obj] + args)
+            }
+        }
+        if obj.has("__enum") {
+            const ename = obj["__enum"]
+            const emethod = f"{ename}.{method}"
+            if i_functions.has(emethod) {
+                const func_info = i_functions[emethod]
+                return call_user_func(func_info, [obj] + args)
+            }
+        }
+    }
+
+    // Try as a plain function with obj as first arg
+    if i_functions.has(method) {
+        const func_info = i_functions[method]
+        return call_user_func(func_info, [obj] + args)
+    }
+
+    panic(f"unknown method: {method} on {typeof(obj)}")
+}
+
+// ── Index Access ─────────────────────────────────────────────────
+
+func eval_index(obj, idx) {
+    const ot = typeof(obj)
+    if ot == "array" {
+        if idx < 0 {
+            const real_idx = len(obj) + idx
+            if real_idx < 0 || real_idx >= len(obj) { panic("index out of bounds") }
+            return obj[real_idx]
+        }
+        if idx >= len(obj) { panic("index out of bounds") }
+        return obj[idx]
+    }
+    if ot == "string" {
+        if idx < 0 {
+            const real_idx = len(obj) + idx
+            if real_idx < 0 || real_idx >= len(obj) { panic("index out of bounds") }
+            return obj[real_idx]
+        }
+        if idx >= len(obj) { panic("index out of bounds") }
+        return obj[idx]
+    }
+    if ot == "map" {
+        const k = if typeof(idx) == "string" { idx } else { to_string(idx) }
+        if obj.has(k) { return obj[k] }
+        return null
+    }
+    panic(f"cannot index {ot}")
+}
+
+// ── Field Access ─────────────────────────────────────────────────
+
+func eval_field_access(obj, field) {
+    const ot = typeof(obj)
+    if ot == "map" {
+        if obj.has(field) { return obj[field] }
+        if field == "length" || field == "len" { return len(obj) }
+        return null
+    }
+    if ot == "array" {
+        if field == "length" || field == "len" { return len(obj) }
+        return null
+    }
+    if ot == "string" {
+        if field == "length" || field == "len" { return len(obj) }
+        return null
+    }
+    null
+}
+
+// ── Range ────────────────────────────────────────────────────────
+
+func eval_range(start, end_val, inclusive) {
+    let s = start
+    let e = end_val
+    let result = []
+    if inclusive {
+        let i = s
+        while i <= e {
+            result.push(i)
+            i = i + 1
+        }
+    } else {
+        let i = s
+        while i < e {
+            result.push(i)
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ── Match Evaluation ─────────────────────────────────────────────
+
+func eval_match(subject, arms) {
+    for arm in arms {
+        const bindings = match_pattern(arm.pattern, subject)
+        if bindings != null {
+            i_push_scope()
+            for k in bindings.keys() {
+                if k != "__matched" {
+                    i_set(k, bindings[k], true)
+                }
+            }
+            const result = eval_expr(arm.body)
+            i_pop_scope()
+            return result
+        }
+    }
+    null
+}
+
+// Empty bindings map (cannot use {} as it equals null in MAGI)
+func i_empty_bindings() {
+    {"__matched": true}
+}
+
+func match_pattern(pattern, value) {
+    match pattern {
+        Pattern::PWildcard => {
+            return i_empty_bindings()
+        },
+        Pattern::PVariable(name) => {
+            if name == "_" { return i_empty_bindings() }
+            let bindings = i_empty_bindings()
+            bindings[name] = value
+            return bindings
+        },
+        Pattern::PLiteral(lit_expr) => {
+            const lit_val = eval_expr(lit_expr)
+            if lit_val == value {
+                return i_empty_bindings()
+            }
+            return null
+        },
+        Pattern::PEnum(ename, vname, field_pats) => {
+            if typeof(value) != "map" { return null }
+            if !value.has("__enum") { return null }
+            if value["__enum"] != ename { return null }
+            if value["__variant"] != vname { return null }
+            let bindings = i_empty_bindings()
+            const fields = value["__fields"]
+            let idx = 0
+            while idx < len(field_pats) {
+                if idx >= len(fields) { return null }
+                const sub = match_pattern(field_pats[idx], fields[idx])
+                if sub == null { return null }
+                for k in sub.keys() {
+                    bindings[k] = sub[k]
+                }
+                idx = idx + 1
+            }
+            return bindings
+        },
+        Pattern::PArray(pats) => {
+            if typeof(value) != "array" { return null }
+            let bindings = i_empty_bindings()
+            let idx = 0
+            while idx < len(pats) {
+                match pats[idx] {
+                    Pattern::PRest(name) => {
+                        const rest = value.slice(idx, len(value))
+                        if name != "_" {
+                            bindings[name] = rest
+                        }
+                        return bindings
+                    },
+                    _ => {
+                        if idx >= len(value) { return null }
+                        const sub = match_pattern(pats[idx], value[idx])
+                        if sub == null { return null }
+                        for k in sub.keys() {
+                            bindings[k] = sub[k]
+                        }
+                    },
+                }
+                idx = idx + 1
+            }
+            if len(value) != len(pats) { return null }
+            return bindings
+        },
+        Pattern::POr(pats) => {
+            for p in pats {
+                const result = match_pattern(p, value)
+                if result != null { return result }
+            }
+            return null
+        },
+        Pattern::PType(name, type_name) => {
+            const actual = typeof(value)
+            if actual == type_name || type_name == "_" {
+                let bindings = i_empty_bindings()
+                bindings[name] = value
+                return bindings
+            }
+            return null
+        },
+        Pattern::PBinding(name, inner_pat) => {
+            const result = match_pattern(inner_pat, value)
+            if result != null {
+                result[name] = value
+                return result
+            }
+            return null
+        },
+        _ => null,
+    }
+}
+
+// ── Helper Builtins ──────────────────────────────────────────────
+
+func i_len(val) {
+    const t = typeof(val)
+    if t == "array" || t == "string" || t == "map" { return len(val) }
+    panic(f"len() not supported for {t}")
+}
+
+func i_to_int64(val) {
+    const t = typeof(val)
+    if t == "int64" { return val }
+    if t == "float64" { return to_int64(val) }
+    if t == "string" { return parse_int(val) }
+    if t == "bool" { return if val { 1 } else { 0 } }
+    panic("cannot convert to int")
+}
+
+func i_to_float64(val) {
+    const t = typeof(val)
+    if t == "int64" { return to_float64(val) }
+    if t == "float64" { return val }
+    if t == "string" { return parse_float(val) }
+    panic("cannot convert to float")
+}

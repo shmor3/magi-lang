@@ -1,0 +1,90 @@
+// Tests for self/interpreter.magi
+// Run (release): cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/interpreter.magi self/tests/test_interpreter.magi > /tmp/_interp_test.magi && RUST_MIN_STACK=536870912 cargo run --release --bin magi -- run /tmp/_interp_test.magi
+//
+// Note: interpreter-on-interpreter requires release build + large stack for full suite.
+
+// ── Arithmetic ───────────────────────────────────────────────────
+
+assert(eval_source("1 + 2") == 3); println("PASS: add")
+assert(eval_source("10 - 3") == 7); println("PASS: sub")
+assert(eval_source("4 * 5") == 20); println("PASS: mul")
+assert(eval_source("20 / 4") == 5); println("PASS: div")
+assert(eval_source("17 % 5") == 2); println("PASS: mod")
+assert(eval_source("2 + 3 * 4") == 14); println("PASS: precedence")
+assert(eval_source("(2 + 3) * 4") == 20); println("PASS: parens")
+assert(eval_source("const x = -5; x") == -5); println("PASS: unary neg")
+assert(eval_source("!true") == false); println("PASS: unary not")
+
+// ── Float and Coercion ───────────────────────────────────────────
+
+assert(eval_source("1.5 + 2.5") == 4.0); println("PASS: float add")
+assert(eval_source("2 + 3.5") == 5.5); println("PASS: int+float coercion")
+
+// ── Variables ────────────────────────────────────────────────────
+
+assert(eval_source("const x = 42; x") == 42); println("PASS: const binding")
+assert(eval_source("let x = 10; x = 20; x") == 20); println("PASS: let and assign")
+assert(eval_source("const a = 10; const b = 20; a + b") == 30); println("PASS: multi vars")
+assert(eval_source("let x = 10; x += 5; x") == 15); println("PASS: compound assign")
+
+// ── Strings ──────────────────────────────────────────────────────
+
+assert(eval_source("\"hello\" + \" world\"") == "hello world"); println("PASS: string concat")
+assert(eval_source("len(\"hello\")") == 5); println("PASS: string length")
+
+// ── Boolean and Comparison ───────────────────────────────────────
+
+assert(eval_source("5 > 3") == true); println("PASS: greater than")
+assert(eval_source("42 == 42") == true); println("PASS: equality")
+assert(eval_source("true && false") == false); println("PASS: logical and")
+assert(eval_source("false || true") == true); println("PASS: logical or")
+
+// ── Functions ────────────────────────────────────────────────────
+
+assert(eval_source("func add(a, b) { a + b }; add(3, 4)") == 7); println("PASS: function call")
+
+// ── If-Else ──────────────────────────────────────────────────────
+
+assert(eval_source("if 5 > 3 { 1 } else { 0 }") == 1); println("PASS: if-else")
+
+// ── Loops ────────────────────────────────────────────────────────
+
+assert(eval_source("let x = 0; while x < 5 { x = x + 1 }; x") == 5); println("PASS: while loop")
+assert(eval_source("let s = 0; for i in [1, 2, 3] { s = s + i }; s") == 6); println("PASS: for loop")
+assert(eval_source("let x = 0; while true { x = x + 1; if x == 3 { break } }; x") == 3); println("PASS: while break")
+
+// ── Arrays ───────────────────────────────────────────────────────
+
+assert(eval_source("[10, 20, 30][1]") == 20); println("PASS: array index")
+assert(eval_source("len([1,2,3])") == 3); println("PASS: array length")
+assert(eval_source("let a = [1,2]; a.push(3); len(a)") == 3); println("PASS: array push")
+assert(eval_source("len([1,2].concat([3,4]))") == 4); println("PASS: array concat")
+
+// ── Match ────────────────────────────────────────────────────────
+
+assert(eval_source("match 2 { 1 => 10, 2 => 20, _ => 0 }") == 20); println("PASS: match literal")
+assert(eval_source("match 42 { n => n + 1 }") == 43); println("PASS: match variable")
+
+// ── Null ─────────────────────────────────────────────────────────
+
+assert(eval_source("null") == null); println("PASS: null value")
+assert(eval_source("null ?? 42") == 42); println("PASS: null coalesce")
+
+// ── Lambda ───────────────────────────────────────────────────────
+
+assert(eval_source("const add = (a, b) => a + b; add(3, 4)") == 7); println("PASS: lambda")
+
+// ── Scope ────────────────────────────────────────────────────────
+
+assert(eval_source("const x = 1; const y = { const x = 2; x + 10 }; x + y") == 13); println("PASS: block scope")
+
+// ── Builtins ─────────────────────────────────────────────────────
+
+assert(eval_source("len(range(5))") == 5); println("PASS: range")
+assert(eval_source("output(42)") == 42); println("PASS: output")
+
+// ── Iterative Function ──────────────────────────────────────────
+
+assert(eval_source("func f(n) { let r = 1; let i = 2; while i <= n { r = r * i; i = i + 1 }; r }; f(5)") == 120); println("PASS: iterative factorial")
+
+println("All 39 interpreter tests passed!")
