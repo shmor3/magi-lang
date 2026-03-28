@@ -77,6 +77,9 @@ func load_config(path string) -> (map[string]any, string) {
     config, null
 }
 
+// json.parse() returns (map[string]any, string)
+// Access fields with dot notation on the map:
+
 let config, err = load_config("config.json")
 if err {
     println(f"error: {err}")
@@ -118,7 +121,7 @@ println(f"|a| = {a.length()}")        // 5.0
 ## Interfaces
 
 ```magi
-import std.math
+import std.math    // provides math.pi
 
 interface Shape {
     func area(self) -> float
@@ -279,6 +282,43 @@ for task in tasks {
 }
 ```
 
+## Select (Channel Multiplexing)
+
+```magi
+import std.time
+
+const inbox = make_channel()
+const timer = make_channel()
+
+// In practice these would be populated by spawned tasks
+spawn (=> {
+    time.sleep(100)
+    inbox.send("hello")
+})
+
+select {
+    msg from inbox => println(f"got: {msg}"),
+    _ => println("no messages"),
+}
+```
+
+## Labeled Continue
+
+```magi
+const rows = [[1, -2, 3], [4, 5, -6], [7, 8, 9]]
+let sum = 0
+
+'outer: for row in rows {
+    for cell in row {
+        if cell < 0 { continue 'outer }
+        sum = sum + cell
+    }
+}
+
+println(f"sum (skipping rows with negatives): {sum}")
+// sum (skipping rows with negatives): 24
+```
+
 ## Generics
 
 ```magi
@@ -354,11 +394,11 @@ func test_string_length() {
     assert(len("hello") == 5)
 }
 
-#[deprecated("use parse_config instead")]
-func load_config(path string) -> (map[string]string, string) {
+#[deprecated("use load_json instead")]
+func load_text(path string) -> (string, string) {
     let text, err = fs.read(path)
     if err { return null, err }
-    json.parse(text)
+    text, null
 }
 ```
 
@@ -379,7 +419,7 @@ func Todo.display(self) -> string {
     f"[{status}] {self.title}"
 }
 
-func load_todos(path string) -> ([]map[string]string, string) {
+func load_todos(path string) -> ([]any, string) {
     let text, err = fs.read(path)
     if err { return [], null }
 
@@ -412,7 +452,7 @@ func complete_todo(todos []Todo, id int) -> []Todo {
 }
 
 // Main
-let todos = []Todo{}
+let todos = []
 
 todos = add_todo(todos, "Write MAGI spec")
 todos = add_todo(todos, "Implement syntax overhaul")

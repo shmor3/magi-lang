@@ -38,17 +38,43 @@ int32     // 32-bit signed
 uint32    // 32-bit unsigned
 uint64    // 64-bit unsigned
 float32   // 32-bit float
+any       // any type (dynamic, no type checking)
 ```
 
 ### Composite Types
 
 ```
 []int                    // array of int
+[]any                    // array of mixed types
 map[string]int           // map with string keys, int values
+map[string]any           // map with string keys, any values
 (int, string)            // tuple
 set[int]                 // set
 []byte                   // byte array
 ```
+
+### Tuple Literals
+
+```magi
+const point = (3, 4)                // tuple of (int, int)
+const pair = ("hello", 42)          // tuple of (string, int)
+const (x, y) = point                // destructure
+```
+
+Tuples use parentheses. Multi-return values are tuples.
+
+### Error Convention
+
+Fallible functions return `(T, string)` — value and error string. Error is `null` on success.
+
+```magi
+func divide(a int, b int) -> (int, string) {
+    if b == 0 { return 0, "division by zero" }
+    a / b, null
+}
+```
+
+The error type is always `string` (or `null`). Not a custom type.
 
 ### Type Aliases
 
@@ -740,6 +766,67 @@ m.contains(key)          // true if key exists
 m.remove(key)            // remove key
 m.merge(other)           // combine maps
 ```
+
+---
+
+## Standard Library Modules
+
+Each module is imported with `import std.module`. Key modules:
+
+```
+std.math     — math.sqrt(), math.sin(), math.cos(), math.pi, math.e
+std.fs       — fs.read(), fs.write(), fs.open(), fs.close(), fs.exists(), fs.list()
+std.json     — json.parse(), json.stringify()
+std.net      — net.get(), net.post(), net.listen(), net.connect()
+std.time     — time.now(), time.sleep(), time.format()
+std.crypto   — crypto.sha256(), crypto.aes_encrypt()
+std.yaml     — yaml.parse(), yaml.stringify()
+std.csv      — csv.parse(), csv.stringify()
+std.toml     — toml.parse(), toml.stringify()
+std.regex    — regex.match(), regex.test(), regex.replace()
+std.uuid     — uuid.v4(), uuid.parse()
+std.path     — path.join(), path.basename(), path.extension()
+std.rand     — rand.int(), rand.float(), rand.bool()
+std.compress — compress.gzip(), compress.gunzip()
+std.encode   — encode.base64(), encode.hex()
+std.sort     — sort.asc(), sort.desc(), sort.by()
+std.fmt      — fmt.number(), fmt.bytes()
+std.text     — text.camel(), text.snake(), text.slug()
+std.platform — platform.raw_mode(), platform.sdl_init()
+```
+
+All stdlib functions that can fail return `(value, string)` — value and error string.
+Infallible functions return a single value.
+
+---
+
+## Empty Collections
+
+```magi
+const empty_arr = []int{}            // empty typed array
+const empty_map = map[string]int{}   // empty typed map
+const empty = []                     // empty array, type inferred from context
+```
+
+---
+
+## Method vs Function
+
+Array methods like `.map()`, `.filter()`, `.reduce()` can also be called as functions in pipes:
+
+```magi
+// Method call:
+const result = arr.filter(x => x > 0)
+
+// Pipe call (equivalent):
+const result = arr |> filter(x => x > 0)
+
+// Both .length() method and len() builtin work:
+const n = arr.length()
+const n = len(arr)
+```
+
+The pipe form calls the method on the piped value. They are interchangeable.
 
 ---
 
