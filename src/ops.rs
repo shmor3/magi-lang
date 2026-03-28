@@ -7,7 +7,7 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
     use OperationType::*;
     match op {
         // Arithmetic — output depends on inputs (Null port = accepts any type)
-        Add | Subtract | Multiply | Modulo | Power | Sqrt | Negate | Abs | Min | Max | Round
+        Add | Subtract | Multiply | Modulo | Power | Sqrt | Cbrt | Hypot | Negate | Abs | Min | Max | Round
         | Floor | Ceil | Divide => ChannelType::Null,
 
         // Comparison → bool
@@ -107,7 +107,7 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         Sleep => ChannelType::Null,
 
         // Hash/Encode → string
-        HashSha256 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode => ChannelType::String,
+        HashSha256 | HashSha1 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode => ChannelType::String,
 
         // Array Higher-Order
         ArrayMap | ArrayFlatMap | ArrayScan => ChannelType::Array,
@@ -124,7 +124,6 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         // Map Higher-Order
         MapMapValues | MapFilterEntries => ChannelType::Map,
 
-        // String
         StringChars => ChannelType::Array,
 
         // Math Aggregate
@@ -144,7 +143,6 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         Gcd | Lcm => ChannelType::Int64,
         IsNan | IsInfinite | IsFinite | ApproxEq => ChannelType::Bool,
 
-        // Random
         RandomInt => ChannelType::Int64,
         RandomFloat => ChannelType::Float64,
         RandomBool => ChannelType::Bool,
@@ -154,24 +152,22 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         RandomShuffle | RandomSample => ChannelType::Array,
         RandomUuid | RandomString => ChannelType::String,
 
-        // Filesystem
         FsRead => ChannelType::String,
         FsWrite | FsAppend => ChannelType::Bool,
         FsExists | FsIsFile | FsIsDir => ChannelType::Bool,
         FsList => ChannelType::Array,
-        FsMkdir | FsRemove => ChannelType::Bool,
+        FsMkdir | FsRemove | FsChmod | FsSymlink => ChannelType::Bool,
         FsCopy => ChannelType::Int64,
         FsMove => ChannelType::Bool,
         FsSize => ChannelType::Int64,
+        FsReadlink => ChannelType::String,
 
-        // Environment
         EnvGet => ChannelType::Null,
         EnvHas => ChannelType::Bool,
         EnvKeys => ChannelType::Array,
         OsName | OsArch | CurrentDir => ChannelType::String,
         ProcessPid => ChannelType::Int64,
 
-        // Network
         HttpGet | HttpPost | HttpPut | HttpDelete | HttpPatch => ChannelType::String,
         HttpRequest | HttpHead | HttpOptions => ChannelType::Map,
         UrlParse => ChannelType::Map,
@@ -206,12 +202,10 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         HttpServerReceive => ChannelType::Map,
         HttpServerRespond | HttpServerStop => ChannelType::Null,
 
-        // Certificate
         CertGenerate | CertParse | CertInfo | CertVerify | KeyGenerate | CertSelfSigned => {
             ChannelType::Map
         }
 
-        // Path
         PathJoin | PathBasename | PathDirname | PathExtension | PathStem | PathNormalize
         | PathWithExtension | PathParent => ChannelType::String,
         PathIsAbsolute => ChannelType::Bool,
@@ -221,7 +215,7 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         YamlParse | TomlParse => ChannelType::Null,
         YamlStringify | TomlStringify => ChannelType::String,
         YamlValidate => ChannelType::Bool,
-        YamlToJson | YamlFromJson | YamlMerge => ChannelType::String,
+        YamlToJson | YamlFromJson | YamlMerge | XmlParse | XmlStringify => ChannelType::String,
 
         // CSV
         CsvParse => ChannelType::Array,
@@ -246,11 +240,9 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         HmacSha256 => ChannelType::String,
         ConstantTimeEq => ChannelType::Bool,
 
-        // Compress
-        CompressZstd | CompressLz4 => ChannelType::Bytes,
-        DecompressZstd | DecompressLz4 => ChannelType::Bytes,
+        CompressZstd | CompressLz4 | CompressGzip => ChannelType::Bytes,
+        DecompressZstd | DecompressLz4 | DecompressGzip => ChannelType::Bytes,
 
-        // Format
         FmtNumber | FmtBytes | FmtDuration | FmtHex | FmtBinary | FmtPercent => ChannelType::String,
 
         // Convert Extended
@@ -263,64 +255,79 @@ pub fn op_output_type(op: OperationType) -> ChannelType {
         TimeDiff => ChannelType::Int64,
         StartOf | EndOf => ChannelType::Int64,
 
-        // Stats
         StatsMean | StatsMedian | StatsVariance | StatsStdDev | StatsPercentile | StatsQuantile
         | StatsCovariance | StatsCorrelation => ChannelType::Float64,
         StatsMode | StatsSum => ChannelType::Null,
         StatsMinBy | StatsMaxBy => ChannelType::Null,
 
-        // Text
         TextWrap | TextDedent | TextIndent | TextPadLeft | TextPadRight | TextTruncate
         | TextSlug | TextCamelCase | TextSnakeCase | TextTitleCase => ChannelType::String,
 
-        // Encode
         HtmlEscape | HtmlUnescape | Base32Encode => ChannelType::String,
         Base32Decode => ChannelType::Bytes,
 
-        // Reflect
         ReflectTypeOf | ReflectTypeName | ReflectInspect => ChannelType::String,
         ReflectIsType => ChannelType::Bool,
         ReflectFields => ChannelType::Array,
         ReflectHasField | ReflectCallable => ChannelType::Bool,
         ReflectArity => ChannelType::Int64,
 
-        // Collections
         SetFrom => ChannelType::Array,
         SetUnion | SetIntersection | SetDifference | SetSymmetricDifference => ChannelType::Array,
         Counter | OrderedMap => ChannelType::Map,
         MostCommon => ChannelType::Array,
 
-        // Sort
         SortAsc | SortDesc | StableSort | SortReverse | SortBy | SortByKey => ChannelType::Array,
         IsSorted => ChannelType::Bool,
         BinarySearch => ChannelType::Int64,
 
-        // Subprocess
         Exec => ChannelType::Map,
         ExecStatus => ChannelType::Int64,
         ExecOutput => ChannelType::String,
 
-        // Sync
         MutexNew => ChannelType::String,
         MutexLock | MutexUnlock => ChannelType::Null,
         WaitgroupNew => ChannelType::String,
         WaitgroupDone | WaitgroupWait => ChannelType::Null,
 
-        // Concurrency
         AwaitAll => ChannelType::Array,
 
-        // Log
         LogInfo | LogWarn | LogError | LogDebug => ChannelType::Null,
 
-        // Itertools
         IterChain | IterCycle | IterRepeat | IterProduct | IterPairwise => ChannelType::Array,
 
-        // Template
         TemplateRender => ChannelType::String,
 
-        // Flag
         FlagParse => ChannelType::Map,
         FlagArgs => ChannelType::Array,
+
+        MathGamma | MathLgamma | MathErf | MathErfc | MathExpm1 | MathNextafter | MathSignbit => ChannelType::Null,
+        FsChown | FsHardlink | OsPipe => ChannelType::Null,
+        FormatFloat => ChannelType::String,
+        ParseUint => ChannelType::Null,
+        CliFix | CliClean | CliTree => ChannelType::Null,
+        // Platform — Terminal
+        RawModeEnable | RawModeDisable => ChannelType::Null,
+        ReadByte => ChannelType::Null,
+        ReadByteTimeout => ChannelType::Null,
+        // Platform — SDL2
+        SdlInit => ChannelType::Null,
+        SdlSetColor | SdlClear | SdlPresent | SdlDrawPixel | SdlDrawLine | SdlFillRect => ChannelType::Null,
+        SdlPollEvent => ChannelType::Null,
+        SdlDelay => ChannelType::Null,
+        SdlTicks => ChannelType::Null,
+        SdlDestroy => ChannelType::Null,
+        // Platform — Audio
+        AudioStreamNew => ChannelType::Null,
+        AudioWriteSamples => ChannelType::Null,
+        AudioDrain => ChannelType::Null,
+        AudioClose => ChannelType::Null,
+        // Platform — WebGPU
+        GpuInit => ChannelType::Null,
+        GpuCreateBuffer | GpuCreateShader | GpuCreatePipeline | GpuCreateTexture => ChannelType::Null,
+        GpuBeginRenderPass | GpuDraw | GpuEndRenderPass | GpuSubmit | GpuPresent => ChannelType::Null,
+        GpuWriteBuffer => ChannelType::Null,
+        GpuDestroy => ChannelType::Null,
     }
 }
 
@@ -334,7 +341,8 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         Add | Subtract | Multiply | Divide | Modulo | Power | Min | Max => {
             &[("a", Null), ("b", Null)]
         }
-        Sqrt | Negate | Abs | Round | Floor | Ceil => &[("value", Null)],
+        Sqrt | Cbrt | Negate | Abs | Round | Floor | Ceil => &[("value", Null)],
+        Hypot => &[("a", Null), ("b", Null)],
 
         // Comparison: numeric or polymorphic
         Greater | Less | GreaterEq | LessEq => &[("a", Null), ("b", Null)],
@@ -368,7 +376,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         StringJoin => &[("array", Array)],
         StringTemplate => &[("template", String), ("values", Array)],
 
-        // Control flow
         IfElse => &[("condition", Bool), ("then", Null), ("else", Null)],
         Switch => &[("value", Null), ("default", Null)],
         Coalesce => &[("a", Null), ("b", Null)],
@@ -391,7 +398,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         ParseJson => &[("input", String)],
         Default => &[("input", Null), ("fallback", Null)],
 
-        // Array ops
         ArrayGet => &[("array", Array), ("index", Null)],
         ArraySet => &[("array", Array), ("index", Null), ("value", Null)],
         ArrayPush => &[("array", Array), ("value", Null)],
@@ -409,7 +415,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         Range => &[("start", Null), ("end", Null)],
         Reduce => &[("array", Array), ("initial", Null)],
 
-        // Map ops
         MapGet => &[("map", Map), ("key", String)],
         MapSet => &[("map", Map), ("key", String), ("value", Null)],
         MapDelete => &[("map", Map), ("key", String)],
@@ -419,7 +424,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         MapFromEntries => &[("array", Array)],
         MapUpdate => &[("map", Map), ("key", String), ("value", Null)],
 
-        // Bytes ops
         BytesLength | BytesSlice | BytesTrim => &[("input", Bytes)],
         BytesConcat => &[("a", Bytes), ("b", Bytes)],
         BytesContains => &[("input", Bytes), ("search", Bytes)],
@@ -434,7 +438,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         Base64Encode => &[("input", Bytes)],
         Base64Decode => &[("input", String)],
 
-        // Error ops
         ErrorNew => &[("message", String)],
         ErrorWrap => &[("inner", Map), ("message", String)],
         ErrorUnwrap | ErrorChain => &[("error", Map)],
@@ -457,7 +460,7 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         Sleep => &[("duration", Null)],
 
         // Hash/Encode
-        HashSha256 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode | HexDecode => {
+        HashSha256 | HashSha1 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode | HexDecode => {
             &[("input", String)]
         }
         HexEncode => &[("input", Bytes)],
@@ -474,7 +477,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         // Map Higher-Order
         MapMapValues | MapFilterEntries => &[("map", Map)],
 
-        // String
         StringChars => &[("input", String)],
 
         // Math Aggregate
@@ -501,23 +503,22 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
             ("out_max", Null),
         ],
 
-        // Random
         RandomInt | RandomFloat | RandomBool | RandomBytes | RandomUuid | RandomString => &[],
         RandomRange => &[("a", Null), ("b", Null)],
         RandomChoice | RandomShuffle | RandomSample => &[("array", Array)],
 
-        // Filesystem
         FsRead | FsExists | FsList | FsMkdir | FsSize | FsIsFile | FsIsDir | FsRemove => {
             &[("path", String)]
         }
         FsWrite | FsAppend => &[("path", String), ("content", Null)],
         FsCopy | FsMove => &[("source", String), ("destination", String)],
+        FsChmod => &[("path", String), ("mode", Null)],
+        FsSymlink => &[("target", String), ("link", String)],
+        FsReadlink => &[("path", String)],
 
-        // Environment
         EnvGet | EnvHas => &[("key", String)],
         EnvKeys | OsName | OsArch | ProcessPid | CurrentDir => &[],
 
-        // Network
         HttpGet | HttpDelete | HttpHead | HttpOptions => &[("url", String)],
         HttpPost | HttpPut | HttpPatch => &[("url", String), ("body", Null)],
         HttpRequest => &[
@@ -566,13 +567,11 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         HttpServerRespond => &[("client_id", String), ("status", Null), ("body", Null)],
         HttpServerStop => &[("server_id", String)],
 
-        // Certificate
         CertGenerate | CertSelfSigned => &[("cn", String)],
         CertParse | CertInfo => &[("pem", String)],
         CertVerify => &[("pem", String)],
         KeyGenerate => &[],
 
-        // Path
         PathJoin => &[("a", String), ("b", String)],
         PathBasename | PathDirname | PathExtension | PathStem | PathIsAbsolute | PathNormalize
         | PathSplit | PathParent => &[("input", String)],
@@ -582,6 +581,7 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         YamlParse | YamlStringify | YamlValidate | YamlToJson | YamlFromJson | TomlParse
         | TomlStringify => &[("input", Null)],
         YamlMerge => &[("a", String), ("b", String)],
+        XmlParse | XmlStringify => &[("input", Null)],
 
         // CSV
         CsvParse | CsvStringify | CsvHeaders | CsvParseRows => &[("input", Null)],
@@ -601,10 +601,8 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         HmacSha256 => &[("input", String), ("key", String)],
         ConstantTimeEq => &[("a", Null), ("b", Null)],
 
-        // Compress
-        CompressZstd | DecompressZstd | CompressLz4 | DecompressLz4 => &[("input", Null)],
+        CompressZstd | DecompressZstd | CompressLz4 | DecompressLz4 | CompressGzip | DecompressGzip => &[("input", Null)],
 
-        // Format
         FmtNumber | FmtBytes | FmtDuration | FmtHex | FmtBinary | FmtPercent => {
             &[("value", Null)]
         }
@@ -620,7 +618,6 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         TimeDiff => &[("a", Null), ("b", Null)],
         StartOf | EndOf => &[("input", Null)],
 
-        // Stats
         StatsMean | StatsMedian | StatsMode | StatsVariance | StatsStdDev | StatsSum => {
             &[("array", Array)]
         }
@@ -629,60 +626,88 @@ pub fn op_input_types(op: OperationType) -> &'static [(&'static str, ChannelType
         StatsQuantile => &[("array", Array), ("quantile", Null)],
         StatsCovariance | StatsCorrelation => &[("a", Array), ("b", Array)],
 
-        // Text
         TextWrap | TextDedent | TextIndent | TextPadLeft | TextPadRight | TextTruncate
         | TextSlug | TextCamelCase | TextSnakeCase | TextTitleCase => &[("input", String)],
 
-        // Encode
         HtmlEscape | HtmlUnescape | Base32Encode | Base32Decode => &[("input", Null)],
 
-        // Reflect
         ReflectTypeOf | ReflectTypeName | ReflectFields | ReflectCallable | ReflectArity
         | ReflectInspect => &[("input", Null)],
         ReflectIsType => &[("input", Null), ("type_name", String)],
         ReflectHasField => &[("input", Null), ("field", String)],
 
-        // Collections
         SetFrom | Counter | OrderedMap => &[("array", Array)],
         SetUnion | SetIntersection | SetDifference | SetSymmetricDifference => {
             &[("a", Array), ("b", Array)]
         }
         MostCommon => &[("array", Array)],
 
-        // Sort
         SortAsc | SortDesc | StableSort | IsSorted | SortReverse | SortBy | SortByKey => {
             &[("array", Array)]
         }
         BinarySearch => &[("array", Array), ("value", Null)],
 
-        // Subprocess
         Exec | ExecStatus | ExecOutput => &[("command", String)],
 
-        // Sync
         MutexNew => &[],
         MutexLock | MutexUnlock => &[("id", String)],
         WaitgroupNew => &[("count", Null)],
         WaitgroupDone | WaitgroupWait => &[("id", String)],
 
-        // Concurrency
         AwaitAll => &[("futures", Array)],
 
-        // Log
         LogInfo | LogWarn | LogError | LogDebug => &[("message", Null)],
 
-        // Itertools
         IterChain => &[("array", Array), ("other", Array)],
         IterCycle => &[("array", Array), ("count", Null)],
         IterRepeat => &[("value", Null), ("count", Null)],
         IterProduct => &[("array", Array), ("other", Array)],
         IterPairwise => &[("array", Array)],
 
-        // Template
         TemplateRender => &[("template", String), ("data", Map)],
 
-        // Flag
         FlagParse => &[("args", Array), ("spec", Map)],
         FlagArgs => &[],
+
+        MathGamma | MathLgamma | MathErf | MathErfc | MathExpm1 | MathSignbit => &[("value", Null)],
+        MathNextafter => &[("x", Null), ("y", Null)],
+        FsChown => &[("path", String), ("uid", Null), ("gid", Null)],
+        FsHardlink => &[("src", String), ("dst", String)],
+        OsPipe => &[],
+        FormatFloat => &[("value", Null), ("format", String)],
+        ParseUint => &[("value", String), ("base", Null)],
+        CliFix | CliClean | CliTree => &[],
+        // Platform — Terminal
+        RawModeEnable | RawModeDisable => &[],
+        ReadByte => &[],
+        ReadByteTimeout => &[("deciseconds", Null)],
+        // Platform — SDL2
+        SdlInit => &[("title", String), ("width", Null), ("height", Null)],
+        SdlSetColor => &[("handle", Null), ("r", Null), ("g", Null), ("b", Null)],
+        SdlClear | SdlPresent | SdlDestroy => &[("handle", Null)],
+        SdlDrawPixel => &[("handle", Null), ("x", Null), ("y", Null)],
+        SdlDrawLine => &[("handle", Null), ("x1", Null), ("y1", Null), ("x2", Null), ("y2", Null)],
+        SdlFillRect => &[("handle", Null), ("x", Null), ("y", Null), ("w", Null), ("h", Null)],
+        SdlPollEvent => &[("handle", Null)],
+        SdlDelay => &[("ms", Null)],
+        SdlTicks => &[("handle", Null)],
+        // Platform — Audio
+        AudioStreamNew => &[("sample_rate", Null)],
+        AudioWriteSamples => &[("handle", Null), ("samples", Array)],
+        AudioDrain | AudioClose => &[("handle", Null)],
+        // Platform — WebGPU
+        GpuInit => &[("canvas", Null)],
+        GpuCreateBuffer => &[("device", Null), ("size", Null), ("usage", Null)],
+        GpuCreateShader => &[("device", Null), ("code", String)],
+        GpuCreatePipeline => &[("device", Null), ("vertex", Null), ("fragment", Null)],
+        GpuBeginRenderPass => &[("encoder", Null), ("descriptor", Null)],
+        GpuDraw => &[("pass", Null), ("vertex_count", Null)],
+        GpuEndRenderPass => &[("pass", Null)],
+        GpuSubmit => &[("device", Null), ("commands", Null)],
+        GpuPresent => &[("device", Null)],
+        GpuWriteBuffer => &[("device", Null), ("buffer", Null), ("data", Array)],
+        GpuCreateTexture => &[("device", Null), ("width", Null), ("height", Null), ("format", Null)],
+        GpuDestroy => &[("device", Null)],
     }
 }
 
@@ -697,7 +722,8 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         | BitShiftLeft | BitShiftRight | Concat => &["a", "b"],
 
         // Unary: value (arithmetic/logic)
-        Sqrt | Negate | Abs | Round | Floor | Ceil | Not | BitNot => &["value"],
+        Sqrt | Cbrt | Negate | Abs | Round | Floor | Ceil | Not | BitNot => &["value"],
+        Hypot => &["a", "b"],
 
         // Unary: input (string + type conversion)
         Substring | Length | ToUpper | ToLower | Trim | TrimStart | TrimEnd | CharAt | PadStart
@@ -717,14 +743,12 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         StringJoin => &["array"],
         StringTemplate => &["template", "values"],
 
-        // Control flow
         IfElse => &["condition", "then", "else"],
         Switch => &["value", "default"],
         Coalesce => &["a", "b"],
         TryCatch => &["input", "fallback"],
         Error => &["message"],
 
-        // Array
         ArrayGet => &["array", "index"],
         ArraySet => &["array", "index", "value"],
         ArrayPush => &["array", "value"],
@@ -740,7 +764,6 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         ArrayFromMap => &["map"],
         ArrayJoin => &["array"],
 
-        // Map
         MapGet => &["map", "key"],
         MapSet => &["map", "key", "value"],
         MapDelete => &["map", "key"],
@@ -750,7 +773,6 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         MapFromEntries => &["array"],
         MapUpdate => &["map", "key", "value"],
 
-        // Bytes
         BytesLength | BytesSlice | BytesTrim => &["input"],
         BytesConcat => &["a", "b"],
         BytesContains => &["input", "search"],
@@ -763,13 +785,11 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         BytesFromString | BytesToString => &["input"],
         Base64Encode | Base64Decode => &["input"],
 
-        // Errors
         ErrorNew => &["message"],
         ErrorWrap => &["inner", "message"],
         ErrorUnwrap | ErrorChain => &["error"],
         ErrorIs => &["error", "target"],
 
-        // Iteration
         Range => &["start", "end"],
         Reduce => &["array", "initial"],
 
@@ -791,17 +811,14 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         Sleep => &["duration"],
 
         // Hash/Encode
-        HashSha256 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode | HexDecode => &["input"],
+        HashSha256 | HashSha1 | HashBlake3 | HashMd5 | UrlEncode | UrlDecode | HexDecode => &["input"],
         HexEncode => &["input"],
 
-        // String extended
         StringFormat => &["template", "values"],
 
-        // Control Flow extended
         Assert => &["condition", "message"],
         DebugLog => &["input"],
 
-        // Type Conversion extended
         Typeof => &["input"],
         Default => &["input", "fallback"],
 
@@ -817,7 +834,6 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         // Map Higher-Order
         MapMapValues | MapFilterEntries => &["map"],
 
-        // String
         StringChars => &["input"],
 
         // Math Aggregate
@@ -836,23 +852,22 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         Lerp => &["a", "b", "t"],
         Remap => &["value", "in_min", "in_max", "out_min", "out_max"],
 
-        // Random
         RandomInt | RandomFloat | RandomBool | RandomBytes | RandomUuid | RandomString => &[],
         RandomRange => &["a", "b"],
         RandomChoice | RandomShuffle | RandomSample => &["array"],
 
-        // Filesystem
         FsRead | FsExists | FsList | FsMkdir | FsSize | FsIsFile | FsIsDir | FsRemove => {
             &["path"]
         }
         FsWrite | FsAppend => &["path", "content"],
         FsCopy | FsMove => &["source", "destination"],
+        FsChmod => &["path", "mode"],
+        FsSymlink => &["target", "link"],
+        FsReadlink => &["path"],
 
-        // Environment
         EnvGet | EnvHas => &["key"],
         EnvKeys | OsName | OsArch | ProcessPid | CurrentDir => &[],
 
-        // Network
         HttpGet | HttpDelete | HttpHead | HttpOptions => &["url"],
         HttpPost | HttpPut | HttpPatch => &["url", "body"],
         HttpRequest => &["method", "url", "body", "headers"],
@@ -889,12 +904,10 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         HttpServerRespond => &["client_id", "status", "body"],
         HttpServerStop => &["server_id"],
 
-        // Certificate
         CertGenerate | CertSelfSigned => &["cn"],
         CertParse | CertInfo | CertVerify => &["pem"],
         KeyGenerate => &[],
 
-        // Path
         PathJoin => &["a", "b"],
         PathBasename | PathDirname | PathExtension | PathStem | PathIsAbsolute | PathNormalize
         | PathSplit | PathParent => &["input"],
@@ -904,6 +917,7 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         YamlParse | YamlStringify | YamlValidate | YamlToJson | YamlFromJson | TomlParse
         | TomlStringify => &["input"],
         YamlMerge => &["a", "b"],
+        XmlParse | XmlStringify => &["input"],
 
         // CSV
         CsvParse | CsvStringify | CsvHeaders | CsvParseRows => &["input"],
@@ -921,10 +935,8 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         HmacSha256 => &["input", "key"],
         ConstantTimeEq => &["a", "b"],
 
-        // Compress
-        CompressZstd | DecompressZstd | CompressLz4 | DecompressLz4 => &["input"],
+        CompressZstd | DecompressZstd | CompressLz4 | DecompressLz4 | CompressGzip | DecompressGzip => &["input"],
 
-        // Format
         FmtNumber | FmtBytes | FmtDuration | FmtHex | FmtBinary | FmtPercent => &["value"],
 
         // Convert Extended
@@ -938,7 +950,6 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         TimeDiff => &["a", "b"],
         StartOf | EndOf => &["input"],
 
-        // Stats
         StatsMean | StatsMedian | StatsMode | StatsVariance | StatsStdDev | StatsSum => {
             &["array"]
         }
@@ -947,25 +958,21 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         StatsQuantile => &["array", "quantile"],
         StatsCovariance | StatsCorrelation => &["a", "b"],
 
-        // Text
         TextWrap | TextDedent | TextIndent | TextPadLeft | TextPadRight | TextTruncate
         | TextSlug | TextCamelCase | TextSnakeCase | TextTitleCase => &["input"],
 
         // Encode Extended
         HtmlEscape | HtmlUnescape | Base32Encode | Base32Decode => &["input"],
 
-        // Reflect
         ReflectTypeOf | ReflectTypeName | ReflectFields | ReflectCallable | ReflectArity
         | ReflectInspect => &["input"],
         ReflectIsType => &["input", "type_name"],
         ReflectHasField => &["input", "field"],
 
-        // Collections
         SetFrom | Counter | OrderedMap => &["array"],
         SetUnion | SetIntersection | SetDifference | SetSymmetricDifference => &["a", "b"],
         MostCommon => &["array"],
 
-        // Sort
         SortAsc | SortDesc | StableSort | IsSorted | SortReverse | SortBy | SortByKey => {
             &["array"]
         }
@@ -976,33 +983,65 @@ pub fn op_input_ports(op: OperationType) -> &'static [&'static str] {
         AsyncSpawn | AsyncAwait => &["input"],
         LoopGroup => &[],
 
-        // Subprocess
         Exec | ExecStatus | ExecOutput => &["command"],
 
-        // Sync
         MutexNew => &[],
         MutexLock | MutexUnlock => &["id"],
         WaitgroupNew => &["count"],
         WaitgroupDone | WaitgroupWait => &["id"],
 
-        // Concurrency
         AwaitAll => &["futures"],
 
-        // Log
         LogInfo | LogWarn | LogError | LogDebug => &["message"],
 
-        // Itertools
         IterChain | IterProduct => &["array", "other"],
         IterCycle => &["array", "count"],
         IterRepeat => &["value", "count"],
         IterPairwise => &["array"],
 
-        // Template
         TemplateRender => &["template", "data"],
 
-        // Flag
         FlagParse => &["args", "spec"],
         FlagArgs => &[],
+
+        MathGamma | MathLgamma | MathErf | MathErfc | MathExpm1 | MathSignbit => &["value"],
+        MathNextafter => &["x", "y"],
+        FsChown => &["path", "uid", "gid"],
+        FsHardlink => &["src", "dst"],
+        OsPipe => &[],
+        FormatFloat => &["value", "format"],
+        ParseUint => &["value", "base"],
+        CliFix | CliClean | CliTree => &[],
+        // Platform — Terminal
+        RawModeEnable | RawModeDisable => &[],
+        ReadByte => &[],
+        ReadByteTimeout => &["deciseconds"],
+        // Platform — SDL2
+        SdlInit => &["title", "width", "height"],
+        SdlSetColor => &["handle", "r", "g", "b"],
+        SdlClear | SdlPresent | SdlDestroy => &["handle"],
+        SdlDrawPixel => &["handle", "x", "y"],
+        SdlDrawLine => &["handle", "x1", "y1", "x2", "y2"],
+        SdlFillRect => &["handle", "x", "y", "w", "h"],
+        SdlPollEvent | SdlTicks => &["handle"],
+        SdlDelay => &["ms"],
+        // Platform — Audio
+        AudioStreamNew => &["sample_rate"],
+        AudioWriteSamples => &["handle", "samples"],
+        AudioDrain | AudioClose => &["handle"],
+        // Platform — WebGPU
+        GpuInit => &["canvas"],
+        GpuCreateBuffer => &["device", "size", "usage"],
+        GpuCreateShader => &["device", "code"],
+        GpuCreatePipeline => &["device", "vertex", "fragment"],
+        GpuBeginRenderPass => &["encoder", "descriptor"],
+        GpuDraw => &["pass", "vertex_count"],
+        GpuEndRenderPass => &["pass"],
+        GpuSubmit => &["device", "commands"],
+        GpuPresent => &["device"],
+        GpuWriteBuffer => &["device", "buffer", "data"],
+        GpuCreateTexture => &["device", "width", "height", "format"],
+        GpuDestroy => &["device"],
     }
 }
 

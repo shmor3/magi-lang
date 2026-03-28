@@ -7,9 +7,7 @@ use super::ast::Span;
 use super::SyntaxError;
 use std::fmt;
 
-// =============================================================================
 // Comment token — preserved for the formatter
-// =============================================================================
 
 /// A comment extracted during lexing, with position information.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,9 +22,6 @@ pub struct CommentToken {
     pub is_block: bool,
 }
 
-// =============================================================================
-// Token types
-// =============================================================================
 
 /// A token with its kind and source location.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +34,6 @@ pub struct Token {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
-    // Keywords
     Let,
     Mut,
     Import,
@@ -73,7 +67,6 @@ pub enum TokenKind {
     Catch,
     Finally,
     Throw,
-    // Testing
     Test,
     // Promoted keywords (enum, struct)
     Enum,
@@ -83,10 +76,20 @@ pub enum TokenKind {
     // do-while and defer
     Do,
     Defer,
+    // unsafe blocks, inline assembly, yield, static
+    Unsafe,
+    Asm,
+    Yield,
+    Static,
+    // reference, move, super, where, dyn
+    Ref,
+    Move,
+    Super,
+    Where,
+    Dyn,
     /// A reserved keyword that cannot be used as an identifier.
     Reserved,
 
-    // Literals
     IntLiteral,
     FloatLiteral,
     StringLiteral,
@@ -96,7 +99,6 @@ pub enum TokenKind {
     // Identifier (variable names, function names)
     Ident,
 
-    // Operators
     Plus,             // +
     Minus,            // -
     Star,             // *
@@ -130,7 +132,6 @@ pub enum TokenKind {
     PlusPlus,         // ++ (post-increment)
     MinusMinus,       // -- (post-decrement)
     ColonEq,          // := (short variable declaration)
-    // Bitwise operators
     Ampersand,        // &
     Caret,            // ^
     Shl,              // <<
@@ -144,7 +145,6 @@ pub enum TokenKind {
     AmpCaretEq,       // &^=
     At,               // @ (pattern binding)
 
-    // Delimiters
     LParen,     // (
     RParen,     // )
     LBracket,   // [
@@ -159,10 +159,8 @@ pub enum TokenKind {
     Underscore, // _ (standalone placeholder)
     Hash,       // # (attribute prefix)
 
-    // Labels
     Label, // 'identifier (loop label like 'outer)
 
-    // End of file
     Eof,
 }
 
@@ -207,6 +205,15 @@ impl fmt::Display for TokenKind {
             TokenKind::Trait => "trait",
             TokenKind::Do => "do",
             TokenKind::Defer => "defer",
+            TokenKind::Unsafe => "unsafe",
+            TokenKind::Asm => "asm",
+            TokenKind::Yield => "yield",
+            TokenKind::Static => "static",
+            TokenKind::Ref => "ref",
+            TokenKind::Move => "move",
+            TokenKind::Super => "super",
+            TokenKind::Where => "where",
+            TokenKind::Dyn => "dyn",
             TokenKind::Reserved => "reserved keyword",
             TokenKind::IntLiteral => "integer",
             TokenKind::FloatLiteral => "float",
@@ -278,24 +285,21 @@ impl fmt::Display for TokenKind {
     }
 }
 
-// =============================================================================
-// Reserved keywords
-// =============================================================================
 
 /// Keywords reserved for future use. Using these as identifiers is an error.
 /// Note: match, use, mod, const, type, as, pub, loop are now active keywords.
 pub const RESERVED_KEYWORDS: &[&str] = &[
-    "static", "ref", "move", "yield", "super", "where", "dyn",
+    // All previously reserved keywords are now implemented as proper language features.
 ];
 
 /// Check if a name is a reserved keyword.
+/// This includes both the RESERVED_KEYWORDS list and keywords that have their own
+/// TokenKind variants (ref, move, super, where, dyn).
 pub fn is_reserved_keyword(name: &str) -> bool {
     RESERVED_KEYWORDS.contains(&name)
+        || matches!(name, "ref" | "move" | "super" | "where" | "dyn")
 }
 
-// =============================================================================
-// Lexer
-// =============================================================================
 
 /// Tokenize source code into a vector of tokens.
 pub fn tokenize(source: &str) -> Result<Vec<Token>, SyntaxError> {
@@ -427,7 +431,6 @@ impl<'a> Lexer<'a> {
 
     fn skip_whitespace_and_comments(&mut self) -> Result<(), SyntaxError> {
         loop {
-            // Skip whitespace
             while let Some(ch) = self.peek() {
                 if ch == b' ' || ch == b'\t' || ch == b'\r' || ch == b'\n' {
                     self.advance();
@@ -436,7 +439,6 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            // Collect line comments
             // Use advance_char() so multi-byte UTF-8 in comments
             // increments col by 1 per character, not per byte.
             if self.peek() == Some(b'/') && self.peek_at(1) == Some(b'/') {
@@ -966,12 +968,27 @@ impl<'a> Lexer<'a> {
             return self.lex_number(start_line, start_col);
         }
 
+        // Char literal: 'x' or '\n' — single character between single quotes.
+        // Distinguished from labels by having a closing ' at offset 2 (or 3 for escapes).
+        if ch == b'\'' {
+            // Check for escape char literal: '\n', '\t', '\\', '\0', '\''
+            if self.peek_at(1) == Some(b'\\') && self.peek_at(3) == Some(b'\'') {
+                return self.lex_char_literal(start_line, start_col);
+            }
+            // Check for simple char literal: 'x' where peek_at(2) is closing quote
+            if self.peek_at(2) == Some(b'\'') {
+                // But only if the char at offset 1 is not a quote itself creating ''
+                if self.peek_at(1) != Some(b'\'') {
+                    return self.lex_char_literal(start_line, start_col);
+                }
+            }
+        }
+
         // Label: 'identifier (e.g. 'outer for labeled loops)
         if ch == b'\'' && self.peek_at(1).is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
             return self.lex_label(start_line, start_col);
         }
 
-        // Identifier or keyword
         if ch.is_ascii_alphabetic() || ch == b'_' {
             return self.lex_identifier(start_line, start_col);
         }
@@ -1322,7 +1339,6 @@ impl<'a> Lexer<'a> {
                 });
             }
             Some(b'\\') => {
-                // Escape sequence
                 self.advance(); // consume backslash
                 match self.advance() {
                     Some(b'n') => b'\n',
@@ -1536,7 +1552,6 @@ impl<'a> Lexer<'a> {
                 // Underscore separator: only valid between digits
                 self.advance();
             } else if ch == b'.' && !is_float {
-                // Check if next char after dot is a digit (to avoid 1.method())
                 if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
                     is_float = true;
                     self.advance(); // consume .
@@ -1690,6 +1705,15 @@ impl<'a> Lexer<'a> {
             "trait" => TokenKind::Trait,
             "do" => TokenKind::Do,
             "defer" => TokenKind::Defer,
+            "unsafe" => TokenKind::Unsafe,
+            "asm" => TokenKind::Asm,
+            "yield" => TokenKind::Yield,
+            "static" => TokenKind::Static,
+            "ref" => TokenKind::Ref,
+            "move" => TokenKind::Move,
+            "super" => TokenKind::Super,
+            "where" => TokenKind::Where,
+            "dyn" => TokenKind::Dyn,
             s if is_reserved_keyword(s) => TokenKind::Reserved,
             _ => TokenKind::Ident,
         };
@@ -1698,6 +1722,57 @@ impl<'a> Lexer<'a> {
             kind,
             span: self.span_range(start_line, start_col, self.line, self.col - 1),
             text,
+        })
+    }
+
+    /// Lex a char literal: `'x'` or `'\n'`.
+    /// The leading `'` has not been consumed yet.
+    /// Char literals desugar to their Unicode codepoint as Int64.
+    fn lex_char_literal(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        self.advance(); // consume opening '
+        let ch_val: u32 = if self.peek() == Some(b'\\') {
+            self.advance(); // consume '\'
+            match self.peek() {
+                Some(b'n') => { self.advance(); b'\n' as u32 }
+                Some(b't') => { self.advance(); b'\t' as u32 }
+                Some(b'r') => { self.advance(); b'\r' as u32 }
+                Some(b'\\') => { self.advance(); b'\\' as u32 }
+                Some(b'0') => { self.advance(); 0 }
+                Some(b'\'') => { self.advance(); b'\'' as u32 }
+                _ => {
+                    return Err(SyntaxError {
+                        line: start_line as usize,
+                        column: start_col as usize,
+                        message: "Invalid escape sequence in char literal".to_string(),
+                        code: None,
+                    });
+                }
+            }
+        } else if let Some(ch) = self.peek() {
+            self.advance(); // consume the character
+            ch as u32
+        } else {
+            return Err(SyntaxError {
+                line: start_line as usize,
+                column: start_col as usize,
+                message: "Unterminated char literal".to_string(),
+                code: None,
+            });
+        };
+        // Expect closing '
+        if self.peek() != Some(b'\'') {
+            return Err(SyntaxError {
+                line: start_line as usize,
+                column: start_col as usize,
+                message: "Unterminated char literal, expected closing '".to_string(),
+                code: None,
+            });
+        }
+        self.advance(); // consume closing '
+        Ok(Token {
+            kind: TokenKind::IntLiteral,
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+            text: ch_val.to_string(),
         })
     }
 
@@ -1730,9 +1805,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -2318,9 +2390,6 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::RBrace);
     }
 
-    // =========================================================================
-    // Unicode handling tests
-    // =========================================================================
 
     // --- Unicode in strings ---
 

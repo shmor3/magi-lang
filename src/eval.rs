@@ -4,27 +4,34 @@ use crate::types::{DataType, OperationType};
 use std::collections::HashMap;
 
 /// Error type for operation evaluation.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum EvalError {
-    #[error("Division by zero")]
     DivisionByZero,
-
-    #[error("Invalid input: {0}")]
     InvalidInput(String),
-
-    #[error("Resource limit exceeded: {0}")]
     ResourceLimit(String),
-
-    #[error("Type error: expected {expected} for '{context}', got {actual}")]
     TypeError {
         expected: String,
         actual: String,
         context: String,
     },
-
-    #[error("Arithmetic overflow: {0}")]
     Overflow(String),
 }
+
+impl std::fmt::Display for EvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvalError::DivisionByZero => write!(f, "Division by zero"),
+            EvalError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            EvalError::ResourceLimit(msg) => write!(f, "Resource limit exceeded: {}", msg),
+            EvalError::TypeError { expected, actual, context } => {
+                write!(f, "Type error: expected {} for '{}', got {}", expected, context, actual)
+            }
+            EvalError::Overflow(msg) => write!(f, "Arithmetic overflow: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for EvalError {}
 
 impl EvalError {
     /// Returns the appropriate MAGI error code for this error variant.

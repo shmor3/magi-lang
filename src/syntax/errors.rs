@@ -10,9 +10,6 @@
 
 use std::fmt;
 
-// =============================================================================
-// Error codes
-// =============================================================================
 
 /// Stable error code for MAGI diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +147,36 @@ pub enum ErrorCode {
     W236,
     /// Magic number in code
     W237,
+    /// Unused variable (let binding never referenced)
+    W238,
+    /// Unnecessary `mut` (variable never reassigned)
+    W239,
+    /// Needless `return` as last statement
+    W240,
+    /// Comparison to boolean literal (`x == true` or `x == false`)
+    W241,
+    /// Collapsible `if` (`if a { if b { ... } }` can be `if a && b { ... }`)
+    W242,
+    /// Too many function parameters
+    W243,
+    /// TODO/FIXME/HACK comment found
+    W244,
+    /// Deprecated function usage
+    W245,
+    /// Empty match expression
+    W246,
+    /// Unused import
+    W247,
+    /// Unused function
+    W248,
+    /// Single match arm (use if-let)
+    W249,
+    /// Cognitive complexity too high
+    W250,
+    /// Function body too long
+    W251,
+    /// Manual map/filter reimplementation
+    W252,
 }
 
 impl fmt::Display for ErrorCode {
@@ -216,6 +243,21 @@ impl fmt::Display for ErrorCode {
             ErrorCode::W235 => "W235",
             ErrorCode::W236 => "W236",
             ErrorCode::W237 => "W237",
+            ErrorCode::W238 => "W238",
+            ErrorCode::W239 => "W239",
+            ErrorCode::W240 => "W240",
+            ErrorCode::W241 => "W241",
+            ErrorCode::W242 => "W242",
+            ErrorCode::W243 => "W243",
+            ErrorCode::W244 => "W244",
+            ErrorCode::W245 => "W245",
+            ErrorCode::W246 => "W246",
+            ErrorCode::W247 => "W247",
+            ErrorCode::W248 => "W248",
+            ErrorCode::W249 => "W249",
+            ErrorCode::W250 => "W250",
+            ErrorCode::W251 => "W251",
+            ErrorCode::W252 => "W252",
         };
         write!(f, "{}", code)
     }
@@ -225,7 +267,6 @@ impl ErrorCode {
     /// Human-readable help text explaining the error and how to fix it.
     pub fn help(&self) -> &'static str {
         match self {
-            // Type errors
             ErrorCode::E100 => "A value of the wrong type was used where a specific type was expected. Check the types of your variables and ensure they match what the operation or function expects.",
             ErrorCode::E101 => "Conditions in `if`, `while`, `!`, and match guards must be boolean (`true`/`false`). If you have a number or string, compare it explicitly: `x != 0` or `s != \"\"`. Note: `&&` and `||` accept any value via truthiness.",
             ErrorCode::E102 => "The `for..in` loop requires an iterable (array, map, or string). Use `range(start, end)` for numeric loops, or ensure the value is iterable.",
@@ -235,20 +276,17 @@ impl ErrorCode {
             ErrorCode::E106 => "Attempted to index into an empty array literal. Ensure the array has elements before indexing.",
             ErrorCode::E107 => "Map literals cannot have duplicate keys. Remove or rename the duplicate key.",
 
-            // Name resolution
             ErrorCode::E200 => "The variable has not been declared in this scope. Declare it with `let name = value;` before using it.",
             ErrorCode::E201 => "The function has not been defined. Check spelling and ensure the function is defined before it is called.",
             ErrorCode::E202 => "The operation or method name is not recognized. Check spelling, verify the method exists on the receiver type, or use `use std::module::*` to import standard library functions.",
-            ErrorCode::E203 => "The module does not exist. Available standard library modules: math, cmp, logic, bits, str, convert, array, map, bytes, json, time, hash, io, control, rand, fs, env, net, tcp, udp, ws, sse, http_server, path, yaml, csv, toml, regex, uuid, crypto, compress, fmt, stats, text, encode, reflect, collections, sort, cert.",
+            ErrorCode::E203 => "The module does not exist. Available standard library modules: math, cmp, logic, bits, str, convert, array, map, bytes, json, time, hash, io, control, rand, fs, env, net, tcp, udp, ws, sse, http_server, path, yaml, csv, toml, regex, uuid, crypto, compress, fmt, stats, text, encode, reflect, collections, sort, cert, platform.",
 
-            // Control flow
             ErrorCode::E300 => "`break` can only be used inside a `for`, `while`, or `loop` block.",
             ErrorCode::E301 => "`continue` can only be used inside a `for`, `while`, or `loop` block.",
             ErrorCode::E302 => "`return` can only be used inside a function body (`fn` or `async fn`).",
             ErrorCode::E303 => "The placeholder `_` is only valid inside pipe expressions (`|>`).",
             ErrorCode::E304 => "Each stage of a pipe expression must be a function or operation call.",
 
-            // Runtime
             ErrorCode::E400 => "The loop has run for too many iterations (limit: 100,000,000). This usually indicates an infinite loop. Check your loop condition.",
             ErrorCode::E401 => "Function call depth exceeded the limit (512 levels). This usually indicates infinite recursion. Add a base case to your recursive function.",
             ErrorCode::E402 => "An assertion failed. The condition evaluated to `false`. Check the expected values.",
@@ -260,7 +298,6 @@ impl ErrorCode {
             ErrorCode::E408 => "This feature is not yet implemented in the current version.",
             ErrorCode::E409 => "A resource limit was exceeded (e.g. string or array grew too large). Check for unbounded growth in string concatenation, array construction, or similar operations.",
 
-            // Warnings
             ErrorCode::W100 => "This variable is declared but never used. Prefix it with `_` to suppress this warning, or remove it.",
             ErrorCode::W101 => "This import is not used anywhere in the code. Remove the unused import.",
             ErrorCode::W103 => "This function is defined but never called. Remove it if it's not needed.",
@@ -274,7 +311,6 @@ impl ErrorCode {
             ErrorCode::W113 => "All alternatives in an or-pattern must bind the same set of variable names.",
             ErrorCode::W114 => "This item is marked as #[deprecated] and may be removed in a future version. Consider using the recommended replacement.",
 
-            // Lint warnings
             ErrorCode::W200 => "Function and variable names should use snake_case. Rename `myFunc` to `my_func`.",
             ErrorCode::W201 => "Enum and struct names should use PascalCase. Rename `my_enum` to `MyEnum`.",
             ErrorCode::W202 => "Code after `return`, `break`, `continue`, or `throw` is unreachable and will never execute. Remove the dead code.",
@@ -297,13 +333,26 @@ impl ErrorCode {
             ErrorCode::W235 => "This enum has duplicate variant names. Each variant name must be unique within an enum definition.",
             ErrorCode::W236 => "A TODO or FIXME comment was found. These are reminders of incomplete work.",
             ErrorCode::W237 => "A magic number was used directly in code. Consider extracting it into a named constant for clarity.",
+            ErrorCode::W238 => "This variable is declared but never used. Prefix with `_` to silence this warning, or remove the binding.",
+            ErrorCode::W239 => "This variable is declared as `mut` but is never reassigned. Remove the `mut` keyword.",
+            ErrorCode::W240 => "Using `return` as the last statement in a function body is unnecessary. The expression alone is sufficient as an implicit return.",
+            ErrorCode::W241 => "Comparing a value to `true` or `false` is redundant. Use the value directly or negate it with `!`.",
+            ErrorCode::W242 => "Nested `if` without `else` can be collapsed into a single `if` with `&&`. For example, `if a { if b { ... } }` becomes `if a && b { ... }`.",
+            ErrorCode::W243 => "This function has too many parameters (> 7). Consider grouping parameters into a struct.",
+            ErrorCode::W244 => "A TODO/FIXME/HACK comment was found. These are reminders of incomplete work.",
+            ErrorCode::W245 => "This function or method is deprecated. Consider using an alternative.",
+            ErrorCode::W246 => "This match expression has no arms. Add match arms or a default case.",
+            ErrorCode::W247 => "This import is never used. Remove it or use a member from the imported module.",
+            ErrorCode::W248 => "This function is defined but never called. Remove it or mark it as `pub` if it's part of the public API.",
+            ErrorCode::W249 => "This match has only one arm. Consider using `if let` instead for clarity.",
+            ErrorCode::W250 => "This function has high cognitive complexity. Consider breaking it into smaller functions.",
+            ErrorCode::W251 => "This function body is very long (> 100 lines). Consider extracting logic into helper functions.",
+            ErrorCode::W252 => "This loop manually implements map/filter. Consider using `.map()` or `.filter()` instead.",
         }
     }
 }
 
-// =============================================================================
 // "Did you mean?" suggestions via Levenshtein distance
-// =============================================================================
 
 /// Suggest the closest matching name from a list of available names.
 ///
@@ -337,9 +386,6 @@ pub fn suggest_name(name: &str, available: &[&str]) -> Option<String> {
     best.map(|(suggestion, _)| format!("did you mean '{}'?", suggestion))
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -373,6 +419,11 @@ mod tests {
             ErrorCode::W214, ErrorCode::W215, ErrorCode::W216,
             ErrorCode::W229, ErrorCode::W230, ErrorCode::W231, ErrorCode::W233,
             ErrorCode::W234, ErrorCode::W235,
+            ErrorCode::W236, ErrorCode::W237, ErrorCode::W238, ErrorCode::W239,
+            ErrorCode::W240, ErrorCode::W241, ErrorCode::W242,
+            ErrorCode::W243, ErrorCode::W244, ErrorCode::W245, ErrorCode::W246,
+            ErrorCode::W247, ErrorCode::W248, ErrorCode::W249, ErrorCode::W250,
+            ErrorCode::W251, ErrorCode::W252,
         ];
         for code in codes {
             let help = code.help();

@@ -70,6 +70,29 @@ impl Version {
     pub fn satisfies(&self, requirement: &str) -> Result<bool, VersionError> {
         let req = requirement.trim();
 
+        // Wildcard
+        if req == "*" || req.is_empty() {
+            return Ok(true);
+        }
+
+        // Range: ">=1.0.0, <2.0.0"
+        if req.contains(',') {
+            for part in req.split(',') {
+                if !self.satisfies(part.trim())? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+
+        // Tilde: ~1.2.3 means >=1.2.3, <1.3.0 (patch-level changes only)
+        if let Some(rest) = req.strip_prefix('~') {
+            let base = Version::parse(rest)?;
+            let next_minor = Version::new(base.major(), base.minor() + 1, 0);
+            return Ok(self >= &base && self < &next_minor);
+        }
+
+        // Caret: ^1.2.3 means >=1.2.3, <2.0.0 (compatible changes)
         if let Some(rest) = req.strip_prefix('^') {
             let base = Version::parse(rest)?;
             Ok(self.is_compatible_with(&base) && self >= &base)
@@ -85,6 +108,9 @@ impl Version {
         } else if let Some(rest) = req.strip_prefix('<') {
             let base = Version::parse(rest)?;
             Ok(self < &base)
+        } else if let Some(rest) = req.strip_prefix("!=") {
+            let base = Version::parse(rest)?;
+            Ok(self != &base)
         } else if let Some(rest) = req.strip_prefix('=') {
             let base = Version::parse(rest)?;
             Ok(self == &base)
@@ -153,11 +179,20 @@ impl Ord for Version {
 }
 
 /// Errors related to version parsing.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum VersionError {
-    #[error("invalid version format: {0}")]
     InvalidFormat(String),
 }
+
+impl std::fmt::Display for VersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VersionError::InvalidFormat(msg) => write!(f, "invalid version format: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for VersionError {}
 
 /// Language feature flags — tracks which features are available at each version.
 #[derive(Debug, Clone)]

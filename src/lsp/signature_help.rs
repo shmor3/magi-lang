@@ -3,7 +3,7 @@
 //! Shows function parameter names and types when the cursor is inside a call.
 
 use super::analysis::{find_call_context_at_position, DocumentState};
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a signature help request.
 pub fn handle_signature_help(

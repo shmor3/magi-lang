@@ -10,7 +10,7 @@ use super::analysis::DocumentState;
 use crate::syntax::interpreter::{std_module_ops, STD_MODULE_NAMES};
 use crate::util::to_snake_case;
 use std::collections::HashMap;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a code action request.
 ///
@@ -211,7 +211,6 @@ fn find_identifier_edits_for_rename(source: &str, name: &str, new_name: &str) ->
             let abs_byte_offset = search_start + byte_offset;
             let after_pos = abs_byte_offset + name.len();
 
-            // Check word boundaries
             let before_ok = abs_byte_offset == 0
                 || !line_text[..abs_byte_offset]
                     .chars()
@@ -324,17 +323,11 @@ fn organize_imports_action(
     })
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // =========================================================================
-    // Helper utilities
-    // =========================================================================
 
     fn make_e201_diagnostic(func_name: &str, line: u32, col: u32) -> Diagnostic {
         Diagnostic {
@@ -408,9 +401,6 @@ mod tests {
         (params, uri)
     }
 
-    // =========================================================================
-    // Import suggestion tests
-    // =========================================================================
 
     #[test]
     fn test_import_suggestion_for_known_std_function() {
@@ -484,9 +474,7 @@ mod tests {
         }
     }
 
-    // =========================================================================
     // Snake case fix tests
-    // =========================================================================
 
     #[test]
     fn test_snake_case_fix_action() {
@@ -547,9 +535,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Multiple diagnostics
-    // =========================================================================
 
     #[test]
     fn test_multiple_diagnostics_produce_multiple_actions() {
@@ -581,9 +566,6 @@ mod tests {
         assert!(actions.is_empty());
     }
 
-    // =========================================================================
-    // Helper function tests
-    // =========================================================================
 
     #[test]
     fn test_extract_function_name() {
@@ -652,9 +634,6 @@ mod tests {
         assert_eq!(find_import_insert_line(source), 1);
     }
 
-    // =========================================================================
-    // Organize imports tests
-    // =========================================================================
 
     #[test]
     fn test_organize_imports_sorts_alphabetically() {

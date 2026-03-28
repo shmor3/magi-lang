@@ -4,7 +4,7 @@
 //! same variable is referenced, enabling simultaneous editing.
 
 use super::analysis::{char_col_to_utf16, find_word_at_position, is_ident_char, DocumentState};
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a linked editing range request.
 ///
@@ -45,7 +45,6 @@ fn find_identifier_ranges(source: &str, name: &str) -> Vec<Range> {
             let abs_byte_offset = search_start + byte_offset;
             let after_pos = abs_byte_offset + name.len();
 
-            // Check word boundaries
             let before_ok = abs_byte_offset == 0
                 || !line_text[..abs_byte_offset]
                     .chars()

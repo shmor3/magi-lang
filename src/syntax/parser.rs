@@ -7,9 +7,6 @@ use super::ast::*;
 use super::lexer::{is_reserved_keyword, CommentToken, Token, TokenKind};
 use super::SyntaxError;
 
-// =============================================================================
-// Parser
-// =============================================================================
 
 /// Maximum nesting depth for expressions (prevents stack overflow on pathological input).
 /// Each parenthesized sub-expression adds ~2 depth units (binary_expr + unary_expr),
@@ -111,7 +108,6 @@ impl Parser {
 
         while !self.at(&TokenKind::Eof) {
             // If we just passed a semicolon, that's a statement boundary.
-            // Check if the *previous* token was a semicolon.
             if self.tokens[self.pos.saturating_sub(1)].kind == TokenKind::Semicolon {
                 return;
             }
@@ -147,6 +143,9 @@ impl Parser {
                 | TokenKind::Throw
                 | TokenKind::Do
                 | TokenKind::Defer
+                | TokenKind::Unsafe
+                | TokenKind::Asm
+                | TokenKind::Static
                 | TokenKind::Impl
                 | TokenKind::Trait
                 | TokenKind::Output => return,
@@ -216,9 +215,6 @@ impl Parser {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    // =========================================================================
-    // Token navigation
-    // =========================================================================
 
     fn peek(&self) -> &Token {
         // tokens always contains at least the EOF token from the lexer.
@@ -319,12 +315,17 @@ impl Parser {
         if tok.kind == TokenKind::Async
             || tok.kind == TokenKind::Await
             || tok.kind == TokenKind::Spawn
+            || tok.kind == TokenKind::Ref
+            || tok.kind == TokenKind::Move
+            || tok.kind == TokenKind::Dyn
+            || tok.kind == TokenKind::Super
+            || tok.kind == TokenKind::Where
         {
             return Err(SyntaxError {
                 line: tok.span.start_line as usize,
                 column: tok.span.start_col as usize,
                 message: format!(
-                    "'{}' is a keyword and cannot be used as an identifier",
+                    "'{}' is a reserved keyword and cannot be used as an identifier",
                     tok.text
                 ),
                 code: None,
@@ -345,9 +346,6 @@ impl Parser {
         Ok(ident)
     }
 
-    // =========================================================================
-    // Type annotations
-    // =========================================================================
 
     /// Parse a type annotation (returns a TypeAnnotation).
     fn parse_type_annotation(&mut self) -> Result<TypeAnnotation, SyntaxError> {
@@ -355,9 +353,6 @@ impl Parser {
         Ok(TypeAnnotation::Simple(type_tok.text))
     }
 
-    // =========================================================================
-    // Program
-    // =========================================================================
 
     pub fn parse_program(&mut self) -> Result<Program, SyntaxError> {
         let start = self.peek().span;
@@ -383,9 +378,6 @@ impl Parser {
         })
     }
 
-    // =========================================================================
-    // Statements
-    // =========================================================================
 
     fn parse_statement(&mut self) -> Result<Statement, SyntaxError> {
         let start = self.peek().span;
@@ -413,12 +405,22 @@ impl Parser {
             TokenKind::Struct => self.parse_struct_def(start),
             TokenKind::Do => self.parse_do_while_loop(start, None),
             TokenKind::Defer => self.parse_defer_statement(start),
+            TokenKind::Unsafe => self.parse_unsafe_block(start),
+            TokenKind::Asm => self.parse_asm_expression_stmt(start),
+            TokenKind::Static => self.parse_static_def(start),
             TokenKind::Impl => self.parse_impl_block(start),
             TokenKind::Trait => self.parse_trait_def(start),
             TokenKind::Pub => {
                 // pub fn / pub mod / pub enum / pub struct / pub const
+                // Also accepts pub(crate) and pub(super) visibility qualifiers
                 let pub_span = self.peek().span;
                 self.advance(); // consume 'pub'
+                // Accept pub(crate) / pub(super) syntax — treated as pub for now
+                if self.at(&TokenKind::LParen) {
+                    self.advance(); // consume '('
+                    let _ = self.advance(); // consume crate/super
+                    self.expect(&TokenKind::RParen)?; // consume ')'
+                }
                 match self.peek_kind() {
                     TokenKind::Fn | TokenKind::Async | TokenKind::Mod
                     | TokenKind::Enum | TokenKind::Struct | TokenKind::Const
@@ -525,16 +527,69 @@ impl Parser {
         }
     }
 
-    /// Parse `#[deprecated]` attribute followed by a fn/struct/enum definition.
+    /// Parse `#[deprecated]`, `#[cfg(...)]`, or `#[ignore]` attribute.
     fn parse_attribute_and_def(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume '#'
         self.expect(&TokenKind::LBracket)?;
         let attr_tok = self.expect_identifier()?;
-        if attr_tok.text != "deprecated" {
+        let attr_name = attr_tok.text.clone();
+
+        // Handle #[cfg(condition)] — conditional compilation
+        if attr_name == "cfg" {
+            self.expect(&TokenKind::LParen)?;
+            // Parse condition: target = "value" or feature = "name" or just an ident
+            let condition_tok = self.expect_identifier()?;
+            let condition_key = condition_tok.text.clone();
+            let condition_val = if self.at(&TokenKind::Eq) {
+                self.advance(); // =
+                let val_tok = self.advance().clone();
+                val_tok.text.clone()
+            } else {
+                String::new()
+            };
+            self.expect(&TokenKind::RParen)?;
+            self.expect(&TokenKind::RBracket)?;
+
+            // Evaluate the cfg condition at parse time
+            let matches = match condition_key.as_str() {
+                "target" | "target_os" => std::env::consts::OS == condition_val,
+                "target_arch" => std::env::consts::ARCH == condition_val,
+                "unix" => cfg!(unix),
+                "windows" => cfg!(windows),
+                "debug" => cfg!(debug_assertions),
+                _ => true, // unknown conditions pass through
+            };
+
+            if !matches {
+                // Parse but discard the following statement
+                let _discarded = self.parse_statement()?;
+                return Ok(Statement {
+                    kind: StatementKind::ExprStatement(Expression {
+                        kind: ExpressionKind::Literal(Literal::Null),
+                        span: start,
+                    }),
+                    span: start,
+                    leading_comments: Vec::new(),
+                    trailing_comment: None,
+                });
+            }
+
+            return self.parse_statement();
+        }
+
+        // Handle #[ignore] — skip test
+        if attr_name == "ignore" {
+            self.expect(&TokenKind::RBracket)?;
+            // Parse the test definition but mark it (the interpreter already supports skip_test)
+            
+            return self.parse_statement();
+        }
+
+        if attr_name != "deprecated" {
             return Err(SyntaxError {
                 line: attr_tok.span.start_line as usize,
                 column: attr_tok.span.start_col as usize,
-                message: format!("Unknown attribute '{}'; only 'deprecated' is supported", attr_tok.text),
+                message: format!("Unknown attribute '{}'; supported: deprecated, cfg, ignore", attr_name),
                 code: None,
             });
         }
@@ -549,6 +604,12 @@ impl Parser {
             TokenKind::Pub => {
                 let pub_span = self.peek().span;
                 self.advance(); // consume 'pub'
+                // Accept pub(crate) / pub(super) syntax — treated as pub for now
+                if self.at(&TokenKind::LParen) {
+                    self.advance(); // consume '('
+                    let _ = self.advance(); // consume crate/super
+                    self.expect(&TokenKind::RParen)?; // consume ')'
+                }
                 let mut inner = match self.peek_kind() {
                     TokenKind::Fn => self.parse_function_def(start)?,
                     TokenKind::Async => self.parse_async_function_def(start)?,
@@ -658,7 +719,6 @@ impl Parser {
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
 
-        // Optional type annotation
         let type_annotation = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type_annotation()?)
         } else {
@@ -1170,7 +1230,6 @@ impl Parser {
 
     fn parse_return_statement(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         let keyword_tok = self.advance().clone(); // consume 'return'
-        // Optional return value
         // Only parse value if next token is on the same line as `return`
         let next_on_same_line = self.peek().span.start_line == keyword_tok.span.end_line;
         let value = if next_on_same_line && !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::RBrace) {
@@ -1353,7 +1412,6 @@ impl Parser {
         let name_tok = self.expect(&TokenKind::StringLiteral)?;
         let name = name_tok.text;
 
-        // Parse the test body block
         let body = self.parse_block()?;
         let body_span = body.span;
 
@@ -1443,6 +1501,30 @@ impl Parser {
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
 
+        // Parse optional generic type parameters: fn<T, U>(...)
+        let type_params = if self.at(&TokenKind::Lt) {
+            self.advance(); // consume '<'
+            let mut params = Vec::new();
+            loop {
+                if self.at(&TokenKind::Gt) { break; }
+                let param_tok = self.expect_identifier()?;
+                params.push(param_tok.text);
+                // Optional bound: T: Display (skip for now, just consume)
+                if self.at(&TokenKind::Colon) {
+                    self.advance();
+                    let _ = self.expect_identifier()?; // consume bound name
+                    while self.eat(&TokenKind::Plus) {
+                        let _ = self.expect_identifier()?; // additional bounds
+                    }
+                }
+                if !self.eat(&TokenKind::Comma) { break; }
+            }
+            self.expect(&TokenKind::Gt)?;
+            params
+        } else {
+            Vec::new()
+        };
+
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_function_params(&TokenKind::RParen)?;
         self.expect(&TokenKind::RParen)?;
@@ -1460,12 +1542,14 @@ impl Parser {
             span: full_span,
             kind: StatementKind::FunctionDef(FunctionDef {
                 name,
+                type_params,
                 params,
                 return_type,
                 body,
                 span: full_span,
                 is_getter: false,
                 is_setter: false,
+                where_clauses: Vec::new(),
                 deprecated: false,
             }),
             leading_comments: Vec::new(),
@@ -1504,12 +1588,14 @@ impl Parser {
             span: full_span,
             kind: StatementKind::AsyncFunctionDef(FunctionDef {
                 name,
+                type_params: Vec::new(),
                 params,
                 return_type,
                 body,
                 span: full_span,
                 is_getter: false,
                 is_setter: false,
+                where_clauses: Vec::new(),
                 deprecated: false,
             }),
             leading_comments: Vec::new(),
@@ -1544,7 +1630,7 @@ impl Parser {
                 });
             }
 
-            // Short variable declaration: name := expr (Go-style, desugars to let mut)
+            // Short variable declaration: name := expr
             if self.at(&TokenKind::ColonEq) {
                 self.advance(); // consume ':='
                 let value = self.parse_expression()?;
@@ -1726,9 +1812,6 @@ impl Parser {
         })
     }
 
-    // =========================================================================
-    // Block
-    // =========================================================================
 
     fn parse_block(&mut self) -> Result<Block, SyntaxError> {
         self.enter_depth()?;
@@ -1846,9 +1929,7 @@ impl Parser {
         })
     }
 
-    // =========================================================================
     // Expressions — Pratt / precedence climbing
-    // =========================================================================
 
     fn parse_expression(&mut self) -> Result<Expression, SyntaxError> {
         self.parse_pipe_expr()
@@ -2024,6 +2105,28 @@ impl Parser {
             });
         }
 
+        // yield expr — yield a value from a generator
+        if self.at(&TokenKind::Yield) {
+            self.advance();
+            let operand = self.parse_unary_expr()?;
+            let span = start.merge(operand.span);
+            return Ok(Expression {
+                kind: ExpressionKind::Yield(Box::new(operand)),
+                span,
+            });
+        }
+
+        // unsafe { block } as expression
+        if self.at(&TokenKind::Unsafe) {
+            self.advance();
+            let block = self.parse_block()?;
+            let span = start.merge(block.span);
+            return Ok(Expression {
+                kind: ExpressionKind::UnsafeBlock(block),
+                span,
+            });
+        }
+
         if self.at(&TokenKind::Bang) {
             self.advance();
             let operand = self.parse_unary_expr()?;
@@ -2084,10 +2187,8 @@ impl Parser {
 
         loop {
             if self.at(&TokenKind::LParen) {
-                // Function call
                 expr = self.parse_call_expr(expr)?;
             } else if self.at(&TokenKind::LBracket) {
-                // Index
                 self.advance();
                 let index = self.parse_expression()?;
                 let end = self.expect(&TokenKind::RBracket)?;
@@ -2178,7 +2279,6 @@ impl Parser {
                 self.advance();
                 let field_tok = self.expect(&TokenKind::Ident)?;
                 let span = expr.span.merge(field_tok.span);
-                // Check if this is a direct optional method call: obj?.method(args)
                 if self.at(&TokenKind::LParen) {
                     self.advance(); // consume '('
                     let (args, kwargs) = self.parse_args_and_kwargs()?;
@@ -2262,7 +2362,6 @@ impl Parser {
                 self.advance();
                 let field_tok = self.expect(&TokenKind::Ident)?;
 
-                // Check if followed by `(` — that makes it a method call
                 if self.at(&TokenKind::LParen) {
                     self.advance(); // consume '('
                     let (args, kwargs) = self.parse_args_and_kwargs()?;
@@ -2355,15 +2454,11 @@ impl Parser {
         })
     }
 
-    // =========================================================================
-    // Primary expressions
-    // =========================================================================
 
     fn parse_primary(&mut self) -> Result<Expression, SyntaxError> {
         let tok = self.peek().clone();
 
         match &tok.kind {
-            // Integer literal
             TokenKind::IntLiteral => {
                 self.advance();
                 let val: i64 = tok.text.parse().map_err(|_| SyntaxError {
@@ -2378,7 +2473,6 @@ impl Parser {
                 })
             }
 
-            // Float literal
             TokenKind::FloatLiteral => {
                 self.advance();
                 let val: f64 = tok.text.parse().map_err(|_| SyntaxError {
@@ -2393,7 +2487,6 @@ impl Parser {
                 })
             }
 
-            // String literal
             TokenKind::StringLiteral => {
                 self.advance();
                 Ok(Expression {
@@ -2402,7 +2495,6 @@ impl Parser {
                 })
             }
 
-            // Boolean true
             TokenKind::True => {
                 self.advance();
                 Ok(Expression {
@@ -2411,7 +2503,6 @@ impl Parser {
                 })
             }
 
-            // Boolean false
             TokenKind::False => {
                 self.advance();
                 Ok(Expression {
@@ -2420,7 +2511,6 @@ impl Parser {
                 })
             }
 
-            // Null
             TokenKind::Null => {
                 self.advance();
                 Ok(Expression {
@@ -2530,7 +2620,6 @@ impl Parser {
                 })
             }
 
-            // Parenthesized expression
             TokenKind::LParen => {
                 self.advance();
                 let saved_no_struct = self.no_struct_literal;
@@ -2564,13 +2653,10 @@ impl Parser {
                 }
             }
 
-            // If expression
             TokenKind::If => self.parse_if_expr(),
 
-            // Match expression
             TokenKind::Match => self.parse_match_expr(),
 
-            // Loop expression
             TokenKind::Loop => {
                 self.advance();
                 let block = self.parse_block()?;
@@ -2711,7 +2797,6 @@ impl Parser {
             });
         }
 
-        // First entry
         let key_tok = self.expect(&TokenKind::StringLiteral)?;
         self.expect(&TokenKind::Colon)?;
         let first_value = self.parse_expression()?;
@@ -3092,6 +3177,11 @@ impl Parser {
                     Ok(Pattern::Rest(None))
                 }
             }
+            TokenKind::DotDot => {
+                // `..` rest pattern in struct/map patterns
+                self.advance();
+                Ok(Pattern::Rest(None))
+            }
             TokenKind::LBracket => {
                 // Array pattern: [a, b, c]
                 self.advance();
@@ -3106,11 +3196,19 @@ impl Parser {
                 Ok(Pattern::Array(elements))
             }
             TokenKind::LBrace => {
-                // Map pattern: { key: pattern, key2: pattern2 }
+                // Map/struct pattern: { key: pattern, key2: pattern2, .. }
                 // Shorthand: { key } means { key: Variable("key") }
+                // `..` rest pattern: signals "ignore remaining fields"
                 self.advance();
                 let mut entries = Vec::new();
                 while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                    // Accept `..` as rest pattern in struct/map patterns
+                    if self.at(&TokenKind::DotDot) {
+                        self.advance(); // consume `..`
+                        // `..` must be last in the pattern
+                        self.eat(&TokenKind::Comma); // optional trailing comma
+                        break;
+                    }
                     let key_tok = self.expect_identifier()?;
                     let key = key_tok.text;
                     let pattern = if self.eat(&TokenKind::Colon) {
@@ -3552,7 +3650,6 @@ impl Parser {
     fn parse_lambda_expr(&mut self) -> Result<Expression, SyntaxError> {
         let start = self.advance().span; // consume opening '|'
 
-        // Parse parameters
         let params = self.parse_function_params(&TokenKind::Bar)?;
         self.expect(&TokenKind::Bar)?;
 
@@ -3583,9 +3680,7 @@ impl Parser {
         })
     }
 
-    // =========================================================================
     // Enum / Struct definitions
-    // =========================================================================
 
     fn parse_enum_def(&mut self, start: Span) -> Result<Statement, SyntaxError> {
         self.advance(); // consume 'enum'
@@ -3639,7 +3734,7 @@ impl Parser {
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Statement {
             span: start.merge(end.span),
-            kind: StatementKind::EnumDef { name, variants, deprecated: false },
+            kind: StatementKind::EnumDef { name, type_params: Vec::new(), variants, deprecated: false },
             leading_comments: Vec::new(),
             trailing_comment: None,
         })
@@ -3698,7 +3793,7 @@ impl Parser {
         let end = self.expect(&TokenKind::RBrace)?;
         Ok(Statement {
             span: start.merge(end.span),
-            kind: StatementKind::StructDef { name, fields, deprecated: false },
+            kind: StatementKind::StructDef { name, type_params: Vec::new(), fields, deprecated: false },
             leading_comments: Vec::new(),
             trailing_comment: None,
         })
@@ -3706,11 +3801,85 @@ impl Parser {
 
     // parse_impl_block and parse_trait_def are defined below in the Helpers section
 
-    // =========================================================================
-    // Helpers
-    // =========================================================================
 
     /// Check if current position looks like a struct literal: `Name { ident :`
+    /// `static name = value` or `static mut name = value`
+    fn parse_static_def(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume 'static'
+        let mutable = if self.at(&TokenKind::Mut) { self.advance(); true } else { false };
+        let name = self.expect_identifier()?.text;
+        let type_annotation = if self.at(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::Eq)?;
+        let value = self.parse_expression()?;
+        let span = start.merge(value.span);
+        Ok(Statement {
+            span,
+            kind: StatementKind::StaticDef { name, type_annotation, value, mutable },
+            leading_comments: Vec::new(),
+            trailing_comment: None,
+        })
+    }
+
+    /// `unsafe { body }` — an unsafe block that allows raw pointer operations
+    fn parse_unsafe_block(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume 'unsafe'
+        let block = self.parse_block()?;
+        let span = start.merge(block.span);
+        Ok(Statement {
+            span,
+            kind: StatementKind::ExprStatement(Expression {
+                kind: ExpressionKind::UnsafeBlock(block),
+                span,
+            }),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
+        })
+    }
+
+    /// `asm!(template, operands...)` — inline assembly expression as a statement
+    fn parse_asm_expression_stmt(&mut self, start: Span) -> Result<Statement, SyntaxError> {
+        self.advance(); // consume 'asm'
+        self.expect(&TokenKind::Bang)?; // !
+        self.expect(&TokenKind::LParen)?;
+        let template_tok = self.peek();
+        let template = match &template_tok.kind {
+            TokenKind::StringLiteral => {
+                let s = template_tok.text.clone();
+                self.advance();
+                s
+            }
+            _ => return Err(SyntaxError {
+                message: "expected assembly template string".into(),
+                line: template_tok.span.start_line as usize,
+                column: template_tok.span.start_col as usize,
+                code: None,
+            }),
+        };
+        let mut operands = Vec::new();
+        while self.at(&TokenKind::Comma) {
+            self.advance();
+            if self.at(&TokenKind::RParen) { break; }
+            operands.push(self.parse_expression()?);
+        }
+        let end = self.peek().span;
+        self.expect(&TokenKind::RParen)?;
+        let span = start.merge(end);
+        Ok(Statement {
+            span,
+            kind: StatementKind::ExprStatement(Expression {
+                kind: ExpressionKind::InlineAsm { template, operands },
+                span,
+            }),
+            leading_comments: Vec::new(),
+            trailing_comment: None,
+        })
+    }
+
     /// or `Name {}` (empty struct, uppercase name)
     /// or `Name { ident , ...}` / `Name { ident }` (shorthand fields)
     fn parse_impl_block(&mut self, start: Span) -> Result<Statement, SyntaxError> {
@@ -3768,7 +3937,7 @@ impl Parser {
             let return_type = if self.eat(&TokenKind::Arrow) { Some(self.parse_type_annotation()?) } else { None };
             let body = self.parse_block()?;
             let full_span = fn_start.merge(body.span);
-            methods.push(FunctionDef { name, params, return_type, body, span: full_span, is_getter, is_setter, deprecated: false });
+            methods.push(FunctionDef { name, type_params: Vec::new(), params, return_type, body, span: full_span, is_getter, is_setter, where_clauses: Vec::new(), deprecated: false });
         }
         Ok(methods)
     }
@@ -3777,6 +3946,17 @@ impl Parser {
         self.advance();
         let name_tok = self.expect_identifier()?;
         let name = name_tok.text;
+        // Parse optional supertraits: `trait A: B + C { ... }`
+        let mut supertraits = Vec::new();
+        if self.at(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+            loop {
+                let supertrait = self.expect_identifier()?;
+                supertraits.push(supertrait.text.clone());
+                if !self.at(&TokenKind::Plus) { break; }
+                self.advance(); // consume '+'
+            }
+        }
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -3800,7 +3980,7 @@ impl Parser {
             methods.push(TraitMethod { name: mn, params, return_type, span: fn_start.merge(fn_end) });
         }
         let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Statement { leading_comments: Vec::new(), trailing_comment: None, span: start.merge(end.span), kind: StatementKind::TraitDef { name, methods } })
+        Ok(Statement { leading_comments: Vec::new(), trailing_comment: None, span: start.merge(end.span), kind: StatementKind::TraitDef { name, methods, supertraits } })
     }
 
     fn is_struct_literal(&self, name: &str) -> bool {
@@ -3881,9 +4061,6 @@ impl Parser {
     }
 }
 
-// =============================================================================
-// Public entry point
-// =============================================================================
 
 /// Parse v2 source code into an AST.
 pub fn parse_v2(source: &str) -> Result<Program, SyntaxError> {
@@ -3917,9 +4094,6 @@ pub fn parse_v2_recovering(source: &str) -> (Program, Vec<SyntaxError>) {
     parser.parse_program_recovering()
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 #[allow(clippy::approx_constant)]
@@ -4528,7 +4702,6 @@ mod tests {
             r#"
 // This is a comment
 let x = 42;
-// Another comment
 let y = 10;
 "#,
         );
@@ -4574,7 +4747,6 @@ while total < 100 {
 output result;
 "#,
         );
-        // Count expected statements
         assert!(prog.statements.len() >= 12);
     }
 
@@ -4805,25 +4977,25 @@ output result;
 
     #[test]
     fn test_reserved_keyword_in_let() {
-        let err = parse_err("let static = 5;");
+        let err = parse_err("let ref = 5;");
         assert!(err.message.contains("reserved keyword"));
     }
 
     #[test]
     fn test_reserved_keyword_in_fn_name() {
-        let err = parse_err("fn static() { 42; }");
+        let err = parse_err("fn ref() { 42; }");
         assert!(err.message.contains("reserved keyword"));
     }
 
     #[test]
     fn test_reserved_keyword_in_fn_param() {
-        let err = parse_err("fn foo(yield: int64) { 42; }");
+        let err = parse_err("fn foo(dyn: int64) { 42; }");
         assert!(err.message.contains("reserved keyword"));
     }
 
     #[test]
     fn test_reserved_keyword_in_for_variable() {
-        let err = parse_err("for yield in items { 0; }");
+        let err = parse_err("for move in items { 0; }");
         assert!(err.message.contains("reserved keyword"));
     }
 
@@ -5136,9 +5308,7 @@ output result;
         }
     }
 
-    // =========================================================================
     // Error recovery tests (parse_v2_recovering)
-    // =========================================================================
 
     #[test]
     fn test_recovering_no_errors() {

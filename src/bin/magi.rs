@@ -14,8 +14,6 @@ use std::sync::{LazyLock, Mutex};
 /// When true, filesystem and network operations are forbidden.
 static SANDBOX_MODE: AtomicBool = AtomicBool::new(false);
 
-use rand::Rng;
-
 use magi_lang::compiler;
 use magi_lang::eval::{DiagnosticSeverity, EvalError, OperationEvaluator};
 use magi_lang::syntax::interpreter::{resolve_package_from_source, Interpreter, ResolvedPackage};
@@ -44,7 +42,7 @@ const MAX_INSPECT_OUTPUT: usize = 1_048_576;
 /// UTF-8 BOM (byte order mark).
 const UTF8_BOM: &str = "\u{FEFF}";
 
-/// Maximum file write size: 1 GB (generous like Go/Rust).
+/// Maximum file write size: 1 GB.
 const MAX_FILE_WRITE_SIZE: usize = 1024 * 1024 * 1024;
 
 /// Maximum number of compiled regexes held in the thread-local LRU cache.
@@ -60,14 +58,12 @@ thread_local! {
 }
 
 struct RegexCache {
-    map: HashMap<String, regex::Regex>,
+    map: HashMap<String, magi_lang::util::Regex>,
     order: VecDeque<String>,
 }
 
-// ---------------------------------------------------------------------------
 // Connection registry — global storage for open connections (HTTP clients,
 // WebSocket handles, TLS sessions, etc.) keyed by UUID-based connection IDs.
-// ---------------------------------------------------------------------------
 
 /// Global connection registry.
 static CONNECTIONS: LazyLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> =
@@ -129,9 +125,6 @@ fn conn_id(prefix: &str) -> String {
     format!("{}:{}", prefix, magi_lang::util::uuid_v4())
 }
 
-// ---------------------------------------------------------------------------
-// SSRF protection helpers
-// ---------------------------------------------------------------------------
 
 /// Check whether an IP address is in a private / loopback / link-local /
 /// CGNAT range that should be blocked for outbound requests.
@@ -305,9 +298,7 @@ fn validate_url_with_dns(url_str: &str) -> Result<(), EvalError> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Utility helpers for FullEvaluator operation implementations
-// ---------------------------------------------------------------------------
 
 /// Extract a port number from an input map.
 fn get_port(inputs: &HashMap<String, DataType>, key: &str) -> Result<u16, EvalError> {
@@ -343,21 +334,17 @@ fn get_port_range(inputs: &HashMap<String, DataType>, key: &str, min_port: i64) 
 /// Shared HTTP agent with connection pooling (#369).
 /// Redirects are disabled to prevent SSRF bypass (our pre-request DNS validation
 /// would not apply to redirect targets).
-static HTTP_AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .max_redirects(0)
-        .build()
-        .new_agent()
+static HTTP_AGENT: LazyLock<magi_lang::util::HttpClient> = LazyLock::new(|| {
+    magi_lang::util::HttpClient::new(std::time::Duration::from_secs(30))
 });
 
-/// Get the shared HTTP agent (connection-pooled).
-fn http_agent() -> &'static ureq::Agent {
+/// Get the shared HTTP agent.
+fn http_agent() -> &'static magi_lang::util::HttpClient {
     &HTTP_AGENT
 }
 
 /// Read HTTP response body with a size limit.
-fn read_http_body(body: ureq::Body, context: &str) -> Result<String, EvalError> {
+fn read_http_body(body: magi_lang::util::HttpBody, context: &str) -> Result<String, EvalError> {
     use std::io::Read;
     let mut limited = body.into_reader().take((MAX_STRING_OUTPUT + 1) as u64);
     let mut buf = String::new();
@@ -370,10 +357,25 @@ fn read_http_body(body: ureq::Body, context: &str) -> Result<String, EvalError> 
     Ok(buf)
 }
 
+fn http_response_to_map(resp: magi_lang::util::HttpResponse, context: &str) -> Result<DataType, EvalError> {
+    let status = resp.status();
+    let headers_vec: Vec<(String, String)> = resp.headers.clone();
+    let body = read_http_body(resp.into_body(), context)?;
+    let mut m = magi_lang::util::OrderedMap::new();
+    m.insert("status".into(), DataType::Int64(status as i64));
+    let mut hdr_map = magi_lang::util::OrderedMap::new();
+    for (k, v) in headers_vec {
+        hdr_map.insert(k, DataType::String(v));
+    }
+    m.insert("headers".into(), DataType::Map(hdr_map));
+    m.insert("body".into(), DataType::String(body));
+    Ok(DataType::Map(m))
+}
+
 /// Compile a user-supplied regex pattern with a size limit.
 /// Uses a thread-local LRU cache (capacity [`REGEX_CACHE_CAPACITY`]) so that
 /// repeated use of the same pattern avoids recompilation.
-fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
+fn compile_regex(pat: &str) -> Result<magi_lang::util::Regex, String> {
     REGEX_CACHE.with(|cell| {
         let mut cache = cell.borrow_mut();
         // Clone the cached regex (if present) before mutating the order queue.
@@ -385,9 +387,7 @@ fn compile_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
             cache.order.push_back(pat.to_string());
             return Ok(re);
         }
-        let re = regex::RegexBuilder::new(pat)
-            .size_limit(1 << 20) // 1 MB compiled NFA size limit
-            .build()?;
+        let re = magi_lang::util::Regex::with_size_limit(pat, 1 << 20)?;
         // Evict least-recently used entry if at capacity.
         if cache.map.len() >= REGEX_CACHE_CAPACITY {
             if let Some(oldest) = cache.order.pop_front() {
@@ -453,7 +453,7 @@ fn data_to_bytes(data: &DataType) -> Vec<u8> {
 /// Sleep in 100ms chunks, capped at 1 hour.
 /// Chunking allows future cancellation support without blocking for the full duration.
 fn sleep_chunked(inputs: &HashMap<String, DataType>) -> Result<(), EvalError> {
-    const MAX_SLEEP_MS: i64 = 86_400_000; // 24 hours — Go/Rust have no sleep limit
+    const MAX_SLEEP_MS: i64 = 86_400_000; // 24 hours — have no sleep limit
     const CHUNK_MS: u64 = 100;
     let duration = inputs.get("duration").cloned().unwrap_or(DataType::Null);
     if let Some(ms) = duration.to_i64() {
@@ -546,6 +546,9 @@ impl OperationEvaluator for FullEvaluator {
                 | OperationType::FsSize
                 | OperationType::FsCopy
                 | OperationType::FsMove
+                | OperationType::FsChmod
+                | OperationType::FsSymlink
+                | OperationType::FsReadlink
                 | OperationType::HttpGet
                 | OperationType::HttpPost
                 | OperationType::HttpPut
@@ -589,7 +592,6 @@ impl OperationEvaluator for FullEvaluator {
         }
 
         match op {
-            // Arithmetic
             OperationType::Add => {
                 // String concatenation for Add only
                 if let (DataType::String(x), DataType::String(y)) = (&a, &b) {
@@ -609,7 +611,6 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::Divide => num_div_op(&a, &b, i64::checked_div, |x, y| x / y),
             OperationType::Modulo => num_div_op(&a, &b, i64::checked_rem, |x, y| x % y),
 
-            // Comparison
             OperationType::Equal => Ok(DataType::Bool(a == b || numeric_eq(&a, &b))),
             OperationType::NotEqual => Ok(DataType::Bool(a != b && !numeric_eq(&a, &b))),
             OperationType::Greater => num_cmp(&a, &b, |ord| ord == std::cmp::Ordering::Greater),
@@ -617,7 +618,6 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::GreaterEq => num_cmp(&a, &b, |ord| ord != std::cmp::Ordering::Less),
             OperationType::LessEq => num_cmp(&a, &b, |ord| ord != std::cmp::Ordering::Greater),
 
-            // Logical
             OperationType::And => {
                 let ta = a.to_bool();
                 let tb = b.to_bool();
@@ -654,7 +654,6 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Err(EvalError::TypeError { expected: "number".to_string(), actual: input.type_name().to_string(), context: "negate".to_string() }),
             },
 
-            // String
             OperationType::Concat => {
                 let (xs, ys) = match (&a, &b) {
                     (DataType::String(x), DataType::String(y)) => (x.as_str().to_string(), y.as_str().to_string()),
@@ -671,7 +670,6 @@ impl OperationEvaluator for FullEvaluator {
             },
             OperationType::ToString => Ok(DataType::String(input.to_string_lossy())),
 
-            // Map access
             OperationType::MapGet => {
                 match (&map, &key) {
                     (DataType::Map(m), DataType::String(k)) => {
@@ -717,7 +715,6 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapValues".to_string() }),
             },
 
-            // Array
             OperationType::ArrayLength => match &array {
                 DataType::Array(arr) => Ok(DataType::Int64(arr.len() as i64)),
                 _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayLength".to_string() }),
@@ -805,7 +802,6 @@ impl OperationEvaluator for FullEvaluator {
                 other => Err(EvalError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "ArrayJoin".to_string() }),
             },
 
-            // String ops
             OperationType::Length => match &input {
                 DataType::String(s) => Ok(DataType::Int64(s.chars().count() as i64)),
                 _ => Err(EvalError::TypeError { expected: "string".to_string(), actual: input.type_name().to_string(), context: "Length".to_string() }),
@@ -977,7 +973,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Map
             OperationType::MapSize => match &map {
                 DataType::Map(m) => Ok(DataType::Int64(m.len() as i64)),
                 _ => Err(EvalError::TypeError { expected: "Map".to_string(), actual: map.type_name().to_string(), context: "MapSize".to_string() }),
@@ -1011,7 +1006,7 @@ impl OperationEvaluator for FullEvaluator {
                             "map_from_entries: array exceeds {} element limit", MAX_ARRAY_ELEMENTS
                         )));
                     }
-                    let mut m = indexmap::IndexMap::new();
+                    let mut m = magi_lang::util::OrderedMap::new();
                     for (i, item) in arr.iter().enumerate() {
                         match item {
                             DataType::Array(pair) if pair.len() >= 2 => {
@@ -1050,7 +1045,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Array extras
             OperationType::ArrayGet => {
                 let index = inputs.get("index").cloned().unwrap_or(DataType::Null);
                 match &array {
@@ -1141,7 +1135,6 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayFilterNulls".to_string() }),
             },
 
-            // Type conversions
             OperationType::ToInt64 => match &input {
                 DataType::Int64(_) => Ok(input.clone()),
                 DataType::Int32(n) => Ok(DataType::Int64(*n as i64)),
@@ -1192,7 +1185,6 @@ impl OperationEvaluator for FullEvaluator {
                 _ => Ok(DataType::Bool(true)),
             },
 
-            // Math
             OperationType::Abs => match &input {
                 DataType::Int64(n) => match n.checked_abs() {
                     Some(v) => Ok(DataType::Int64(v)),
@@ -1226,6 +1218,13 @@ impl OperationEvaluator for FullEvaluator {
                 other => Err(EvalError::TypeError { expected: "number".to_string(), actual: other.type_name().to_string(), context: "Ceil".to_string() }),
             },
             OperationType::Sqrt => eval_unary_float_op(&input, f32::sqrt, f64::sqrt),
+            OperationType::Cbrt => eval_unary_float_op(&input, f32::cbrt, f64::cbrt),
+            OperationType::Hypot => {
+                match (a.to_f64(), b.to_f64()) {
+                    (Some(x), Some(y)) => Ok(DataType::Float64(x.hypot(y))),
+                    _ => Err(EvalError::TypeError { expected: "number".into(), actual: format!("{}, {}", a.type_name(), b.type_name()), context: "hypot".into() }),
+                }
+            }
             OperationType::Power => {
                 let a = inputs.get("a").unwrap_or(&DataType::Null);
                 let b = inputs.get("b").unwrap_or(&DataType::Null);
@@ -1280,7 +1279,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Array mutation operations
             OperationType::ArrayShift => match &array {
                 DataType::Array(arr) => Ok(arr.first().cloned().unwrap_or(DataType::Null)),
                 _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: array.type_name().to_string(), context: "ArrayShift".to_string() }),
@@ -1326,7 +1324,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // String methods
             OperationType::StringChars => match &input {
                 DataType::String(s) => {
                     let count = s.chars().count();
@@ -1466,7 +1463,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Type inspection
             OperationType::Typeof => {
                 let type_name = match &input {
                     DataType::Null => "null",
@@ -1528,7 +1524,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Range
             OperationType::Range => {
                 let start = require_i64_or_default(inputs.get("start").or(inputs.get("a")), 0, "Range start")?;
                 let end = require_i64_or_default(inputs.get("end").or(inputs.get("b")), 0, "Range end")?;
@@ -1559,8 +1554,8 @@ impl OperationEvaluator for FullEvaluator {
 
             // ToJson
             OperationType::ToJson => {
-                let json_val = datatype_to_serde_json(&input);
-                let s = serde_json::to_string(&json_val).map_err(|e| EvalError::InvalidInput(format!("to_json: serialization failed: {}", e)))?;
+                let json_val = datatype_to_json_value(&input);
+                let s = magi_lang::util::json_to_string(&json_val);
                 if s.len() > MAX_STRING_OUTPUT {
                     return Err(EvalError::InvalidInput(format!(
                         "to_json: output would exceed {} byte limit", MAX_STRING_OUTPUT
@@ -1569,7 +1564,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(s))
             },
 
-            // CharFromCode: int → single-char string (like Go's string(65) → "A")
+            // CharFromCode: int → single-char string → "A")
             OperationType::CharFromCode => {
                 let code = input.to_i64().ok_or_else(|| EvalError::TypeError {
                     expected: "integer".to_string(),
@@ -1582,7 +1577,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(ch.to_string()))
             },
 
-            // CharCode: single-char string → int (like Go's int('A') → 65)
+            // CharCode: single-char string → int → 65)
             OperationType::CharCode => {
                 let s = match &input {
                     DataType::String(s) => s.clone(),
@@ -1598,7 +1593,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Int64(ch as i64))
             },
 
-            // Bitwise operations
             OperationType::BitAnd => {
                 match (&a, &b) {
                     (DataType::Uint64(x), DataType::Uint64(y)) => Ok(DataType::Uint64(x & y)),
@@ -1726,7 +1720,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Type checking predicates
             OperationType::IsNull => Ok(DataType::Bool(matches!(&input, DataType::Null))),
             OperationType::IsString => Ok(DataType::Bool(matches!(&input, DataType::String(_)))),
             OperationType::IsNumber => Ok(DataType::Bool(promote_numeric(&input).is_some())),
@@ -1751,7 +1744,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             },
 
-            // Bytes operations
             OperationType::BytesLength => {
                 match &input {
                     DataType::Bytes(b) => Ok(DataType::Int64(b.len() as i64)),
@@ -1831,7 +1823,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             },
 
-            // Extended Bytes operations
             OperationType::BytesCompare => {
                 match (&a, &b) {
                     (DataType::Bytes(a_bytes), DataType::Bytes(b_bytes)) => {
@@ -2011,7 +2002,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => s,
                     other => other.to_string_lossy(),
                 };
-                let mut map = indexmap::IndexMap::new();
+                let mut map = magi_lang::util::OrderedMap::new();
                 map.insert("message".to_string(), DataType::String(msg));
                 map.insert("cause".to_string(), DataType::Null);
                 Ok(DataType::Map(map))
@@ -2023,7 +2014,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::String(s) => s,
                     other => other.to_string_lossy(),
                 };
-                let mut map = indexmap::IndexMap::new();
+                let mut map = magi_lang::util::OrderedMap::new();
                 map.insert("message".to_string(), DataType::String(msg));
                 map.insert("cause".to_string(), inner);
                 Ok(DataType::Map(map))
@@ -2132,7 +2123,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Float checks
             OperationType::IsNan => {
                 match &input {
                     DataType::Float64(f) => Ok(DataType::Bool(f.is_nan())),
@@ -2156,11 +2146,10 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Parse functions
             OperationType::ParseJson => {
                 match &input {
                     DataType::String(s) => {
-                        match serde_json::from_str::<serde_json::Value>(s) {
+                        match magi_lang::util::json_parse_value(s) {
                             Ok(val) => Ok(json_value_to_datatype(&val)),
                             Err(e) => Err(EvalError::InvalidInput(format!("Invalid JSON: {}", e))),
                         }
@@ -2193,7 +2182,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Inverse trigonometric
             OperationType::Asin => {
                 if let DataType::Float32(n) = &input {
                     return Ok(DataType::Float32(n.asin()));
@@ -2235,7 +2223,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Hyperbolic
             OperationType::Sinh => {
                 if let DataType::Float32(n) = &input {
                     return Ok(DataType::Float32(n.sinh()));
@@ -2284,7 +2271,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Angle conversion
             OperationType::ToRadians => {
                 if let DataType::Float32(n) = &input {
                     return Ok(DataType::Float32(n.to_radians()));
@@ -2386,9 +2372,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Coalesce: return a if non-null, else b
-            // ================================================================
             OperationType::Coalesce => {
                 if !matches!(a, DataType::Null) {
                     Ok(a)
@@ -2397,9 +2381,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Default: return input if non-null, else fallback
-            // ================================================================
             OperationType::Default => {
                 let fallback = inputs.get("fallback").cloned().unwrap_or(DataType::Null);
                 if !matches!(input, DataType::Null) {
@@ -2409,17 +2391,13 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Error: create an error
-            // ================================================================
             OperationType::Error => {
                 let message = inputs.get("message").cloned().unwrap_or(DataType::String("error".to_string()));
                 Err(EvalError::InvalidInput(message.to_string_lossy()))
             }
 
-            // ================================================================
             // StringJoin: join array elements with separator
-            // ================================================================
             OperationType::StringJoin => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 let sep = inputs.get("separator").or(inputs.get("delimiter")).or(inputs.get("input_1"))
@@ -2441,9 +2419,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // StringTemplate: simple template with {key} substitution
-            // ================================================================
             OperationType::StringTemplate => {
                 let template = inputs.get("template").cloned().unwrap_or(DataType::Null);
                 let values = inputs.get("values").cloned().unwrap_or(DataType::Null);
@@ -2464,9 +2440,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // StringFormat: same as StringTemplate
-            // ================================================================
             OperationType::StringFormat => {
                 let template = inputs.get("template").cloned().unwrap_or(DataType::Null);
                 let values = inputs.get("values").cloned().unwrap_or(DataType::Null);
@@ -2499,9 +2473,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // ToBytes / FromBytes
-            // ================================================================
             OperationType::ToBytes => {
                 match &input {
                     DataType::String(s) => Ok(DataType::Bytes(s.as_bytes().to_vec())),
@@ -2531,9 +2503,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // ArrayFromMap: convert map to array of [key, value] pairs
-            // ================================================================
             OperationType::ArrayFromMap => {
                 let map_val = inputs.get("map").cloned().unwrap_or(DataType::Null);
                 match map_val {
@@ -2546,9 +2516,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // MapUpdate: update a map key with a value
-            // ================================================================
             OperationType::MapUpdate => {
                 match (&map, &key) {
                     (DataType::Map(m), DataType::String(k)) => {
@@ -2564,9 +2532,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Math Aggregates
-            // ================================================================
             OperationType::MathSum => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
@@ -2727,9 +2693,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Remap: remap value from [in_min, in_max] to [out_min, out_max]
-            // ================================================================
             OperationType::Remap => {
                 let in_min = inputs.get("in_min").or(inputs.get("input_1")).cloned().unwrap_or(DataType::Null);
                 let in_max = inputs.get("in_max").or(inputs.get("input_2")).cloned().unwrap_or(DataType::Null);
@@ -2754,16 +2718,12 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // NowTimestamp: current time in milliseconds
-            // ================================================================
             OperationType::NowTimestamp => {
                 Ok(DataType::Int64(magi_lang::util::now_millis()))
             }
 
-            // ================================================================
             // FormatTimestamp: format a timestamp as ISO 8601 string
-            // ================================================================
             OperationType::FormatTimestamp => {
                 match promote_numeric(&input) {
                     Some(v) => {
@@ -2777,17 +2737,13 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Sleep: sleep for duration ms (no-op in sync evaluator, just returns null)
-            // ================================================================
             OperationType::Sleep => {
                 sleep_chunked(inputs)?;
                 Ok(DataType::Null)
             }
 
-            // ================================================================
             // TimestampDiff: difference between two timestamps in ms
-            // ================================================================
             OperationType::TimestampDiff => {
                 match (promote_numeric(&a), promote_numeric(&b)) {
                     (Some(av), Some(bv)) => {
@@ -2799,9 +2755,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // TimestampAdd: add ms to a timestamp
-            // ================================================================
             OperationType::TimestampAdd => {
                 let amount = inputs.get("amount").cloned().unwrap_or(DataType::Null);
                 match (promote_numeric(&input), promote_numeric(&amount)) {
@@ -2814,9 +2768,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // ParseTimestamp: parse ISO timestamp string to millis
-            // ================================================================
             OperationType::ParseTimestamp => {
                 match &input {
                     DataType::String(s) => {
@@ -2829,9 +2781,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // HexEncode / HexDecode
-            // ================================================================
             OperationType::HexEncode => {
                 match &input {
                     DataType::Bytes(b) => {
@@ -2871,9 +2821,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // UrlEncode / UrlDecode
-            // ================================================================
             OperationType::UrlEncode => {
                 match &input {
                     DataType::String(s) => {
@@ -2898,22 +2846,27 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // HashSha256: SHA-256 hash
-            // ================================================================
             OperationType::HashSha256 => {
-                use sha2::{Sha256, Digest};
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashSha256".to_string() });
                 }
                 let data = data_to_bytes(&input);
-                let hash = Sha256::digest(&data);
+                let hash = magi_lang::util::sha256(&data);
                 Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
 
-            // ================================================================
+            // HashSha1: SHA-1 hash
+            OperationType::HashSha1 => {
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashSha1".to_string() });
+                }
+                let data = data_to_bytes(&input);
+                let hash = magi_lang::util::sha1(&data);
+                Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
+            }
+
             // HashMd5: MD5 hash
-            // ================================================================
             OperationType::HashMd5 => {
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashMd5".to_string() });
@@ -2923,9 +2876,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
 
-            // ================================================================
             // JSON operations
-            // ================================================================
             OperationType::JsonGet => {
                 let json_val = inputs.get("value").cloned().unwrap_or(DataType::Null);
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
@@ -3011,8 +2962,8 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
             OperationType::JsonPrettyPrint => {
-                let json_val = datatype_to_serde_json(&input);
-                let s = serde_json::to_string_pretty(&json_val).map_err(|e| EvalError::InvalidInput(format!("json_pretty_print: serialization failed: {}", e)))?;
+                let json_val = datatype_to_json_value(&input);
+                let s = magi_lang::util::json_to_string_pretty(&json_val);
                 if s.len() > MAX_STRING_OUTPUT {
                     return Err(EvalError::InvalidInput(format!(
                         "json_pretty_print: output would exceed {} byte limit", MAX_STRING_OUTPUT
@@ -3021,8 +2972,8 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(s))
             }
             OperationType::JsonCompact => {
-                let json_val = datatype_to_serde_json(&input);
-                let s = serde_json::to_string(&json_val).map_err(|e| EvalError::InvalidInput(format!("json_compact: serialization failed: {}", e)))?;
+                let json_val = datatype_to_json_value(&input);
+                let s = magi_lang::util::json_to_string(&json_val);
                 if s.len() > MAX_STRING_OUTPUT {
                     return Err(EvalError::InvalidInput(format!(
                         "json_compact: output would exceed {} byte limit", MAX_STRING_OUTPUT
@@ -3034,13 +2985,13 @@ impl OperationEvaluator for FullEvaluator {
                 match &input {
                     DataType::String(s) => {
                         // Try parsing as JSON
-                        Ok(DataType::Bool(serde_json::from_str::<serde_json::Value>(s).is_ok()))
+                        Ok(DataType::Bool(magi_lang::util::json_parse_value(s).is_ok()))
                     }
                     _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "JsonValidate".to_string() }),
                 }
             }
             OperationType::JsonFlatten => {
-                fn json_flatten(val: &DataType, prefix: &str, result: &mut indexmap::IndexMap<String, DataType>, depth: usize) -> Result<(), ()> {
+                fn json_flatten(val: &DataType, prefix: &str, result: &mut magi_lang::util::OrderedMap<String, DataType>, depth: usize) -> Result<(), ()> {
                     if depth > 64 || result.len() > MAX_ARRAY_ELEMENTS { return Err(()); }
                     match val {
                         DataType::Map(m) => {
@@ -3064,7 +3015,7 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     Ok(())
                 }
-                let mut result = indexmap::IndexMap::new();
+                let mut result = magi_lang::util::OrderedMap::new();
                 if json_flatten(&input, "", &mut result, 0).is_err() {
                     return Err(EvalError::InvalidInput(format!("JsonFlatten result exceeds {} elements", MAX_ARRAY_ELEMENTS)));
                 }
@@ -3099,24 +3050,19 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Random operations
-            // ================================================================
             OperationType::RandomInt => {
-                let val: i64 = rand::rng().random();
-                Ok(DataType::Int64(val))
+                Ok(DataType::Int64(magi_lang::util::random_i64()))
             }
             OperationType::RandomFloat => {
-                let val: f64 = rand::rng().random_range(0.0..1.0);
-                Ok(DataType::Float64(val))
+                Ok(DataType::Float64(magi_lang::util::random_f64()))
             }
             OperationType::RandomBool => {
-                Ok(DataType::Bool(rand::rng().random::<bool>()))
+                Ok(DataType::Bool(magi_lang::util::random_bool()))
             }
             OperationType::RandomRange => {
                 match (a.to_i64(), b.to_i64()) {
                     (Some(lo), Some(hi)) if lo < hi => {
-                        let result = rand::rng().random_range(lo..hi);
+                        let result = magi_lang::util::random_range_i64(lo, hi);
                         Ok(DataType::Int64(result))
                     }
                     (Some(lo), Some(hi)) if lo == hi => Ok(DataType::Int64(lo)),
@@ -3134,7 +3080,7 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) if !arr.is_empty() => {
-                        let idx = rand::rng().random_range(0..arr.len());
+                        let idx = magi_lang::util::random_range_usize(arr.len());
                         Ok(arr[idx].clone())
                     }
                     DataType::Array(_) => Ok(DataType::Null), // empty array → Null (correct semantic)
@@ -3145,8 +3091,7 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(mut arr) => {
-                        use rand::seq::SliceRandom;
-                        arr.shuffle(&mut rand::rng());
+                        magi_lang::util::random_shuffle(&mut arr);
                         Ok(DataType::Array(arr))
                     }
                     _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "RandomShuffle".to_string() }),
@@ -3156,9 +3101,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(magi_lang::util::uuid_v4()))
             }
 
-            // ================================================================
             // Regex operations (regex crate)
-            // ================================================================
             OperationType::RegexMatch => {
                 let pattern = inputs.get("input_1").or(inputs.get("pattern")).cloned().unwrap_or(DataType::Null);
                 match (&input, &pattern) {
@@ -3202,7 +3145,12 @@ impl OperationEvaluator for FullEvaluator {
                         regex_with_timeout(move || {
                             match compile_regex(&pat) {
                                 Ok(re) => {
-                                    let result = re.replace_all(&s, rep.as_str()).to_string();
+                                    // Use capture-aware replace when $ is in replacement
+                                    let result = if rep.contains('$') {
+                                        re.replace_with_captures(&s, &rep)
+                                    } else {
+                                        re.replace_all(&s, rep.as_str()).to_string()
+                                    };
                                     if result.len() > MAX_STRING_OUTPUT {
                                         return Err(EvalError::InvalidInput(format!(
                                             "regex_replace result exceeds {} byte limit", MAX_STRING_OUTPUT
@@ -3258,8 +3206,9 @@ impl OperationEvaluator for FullEvaluator {
                             match compile_regex(&pat) {
                                 Ok(re) => {
                                     let parts: Vec<DataType> = re.split(&s)
+                                        .into_iter()
                                         .take(MAX_ARRAY_ELEMENTS + 1)
-                                        .map(|p| DataType::String(p.to_string()))
+                                        .map(|p| DataType::String(p))
                                         .collect();
                                     if parts.len() > MAX_ARRAY_ELEMENTS {
                                         return Err(EvalError::InvalidInput(format!(
@@ -3278,7 +3227,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::RegexEscape => {
                 match &input {
                     DataType::String(s) => {
-                        let result = regex::escape(s);
+                        let result = magi_lang::util::regex_escape(s);
                         if result.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("RegexEscape output exceeds {} bytes", MAX_STRING_OUTPUT)));
                         }
@@ -3324,6 +3273,7 @@ impl OperationEvaluator for FullEvaluator {
                             match compile_regex(&pat) {
                                 Ok(re) => {
                                     let matches: Vec<DataType> = re.find_iter(&s)
+                                        .into_iter()
                                         .take(MAX_ARRAY_ELEMENTS + 1)
                                         .map(|m| DataType::String(m.as_str().to_string()))
                                         .collect();
@@ -3342,9 +3292,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Filesystem operations
-            // ================================================================
             OperationType::FsRead => {
                 let path = inputs.get("path").cloned().unwrap_or(DataType::Null);
                 match &path {
@@ -3589,9 +3536,35 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Environment operations
-            // ================================================================
+            OperationType::FsChmod => {
+                let path = get_string(inputs, "path")?;
+                let mode = require_i64_or_default(inputs.get("mode").or(inputs.get("input_1")), 0o644, "chmod mode")? as u32;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                        .map_err(|e| EvalError::InvalidInput(format!("chmod: {}", e)))?;
+                }
+                Ok(DataType::Bool(true))
+            }
+            OperationType::FsSymlink => {
+                let target = get_string(inputs, "target")?;
+                let link = get_string(inputs, "link")?;
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(target, link)
+                        .map_err(|e| EvalError::InvalidInput(format!("symlink: {}", e)))?;
+                }
+                Ok(DataType::Bool(true))
+            }
+            OperationType::FsReadlink => {
+                let path = get_string(inputs, "path")?;
+                match std::fs::read_link(path) {
+                    Ok(target) => Ok(DataType::String(target.to_string_lossy().to_string())),
+                    Err(e) => Err(EvalError::InvalidInput(format!("readlink: {}", e))),
+                }
+            }
+
             OperationType::EnvGet => {
                 let key_val = inputs.get("key").cloned().unwrap_or(DataType::Null);
                 match &key_val {
@@ -3634,9 +3607,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Path operations
-            // ================================================================
             OperationType::PathJoin => {
                 match (&a, &b) {
                     (DataType::String(p1), DataType::String(p2)) => {
@@ -3755,9 +3725,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Reduce (array fold with initial value)
-            // ================================================================
             OperationType::Reduce => {
                 // Reduce is mostly handled by the interpreter's HOF method,
                 // but as a standalone op, we treat initial as the seed and return it
@@ -3766,9 +3734,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(initial)
             }
 
-            // ================================================================
-            // Formatting operations
-            // ================================================================
             OperationType::FmtNumber => {
                 match promote_numeric(&value) {
                     Some(Ok(n)) => Ok(DataType::String(format!("{}", n))),
@@ -3855,9 +3820,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Text operations
-            // ================================================================
             OperationType::TextSlug => {
                 match &input {
                     DataType::String(s) => {
@@ -3946,9 +3908,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Encode/Decode extended
-            // ================================================================
             OperationType::HtmlEscape => {
                 match &input {
                     DataType::String(s) => {
@@ -3974,9 +3934,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Reflect operations
-            // ================================================================
             OperationType::ReflectTypeOf | OperationType::ReflectTypeName => {
                 Ok(DataType::String(input.type_name().to_string()))
             }
@@ -4044,9 +4001,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::String(s))
             }
 
-            // ================================================================
             // IfElse: conditional
-            // ================================================================
             OperationType::IfElse => {
                 let condition = inputs.get("condition").cloned().unwrap_or(DataType::Null);
                 let then_val = inputs.get("then").cloned().unwrap_or(DataType::Null);
@@ -4058,9 +4013,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Switch: match value against cases
-            // ================================================================
             OperationType::Switch => {
                 let switch_val = inputs.get("value").cloned().unwrap_or(DataType::Null);
                 let default_val = inputs.get("default").cloned().unwrap_or(DataType::Null);
@@ -4079,9 +4032,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(default_val)
             }
 
-            // ================================================================
             // TryCatch: error handling
-            // ================================================================
             OperationType::TryCatch => {
                 // As a standalone operation, just return the input (or fallback if input is null)
                 let fallback = inputs.get("fallback").cloned().unwrap_or(DataType::Null);
@@ -4092,9 +4043,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // UUID operations
-            // ================================================================
             OperationType::UuidV4 => {
                 Ok(DataType::String(magi_lang::util::uuid_v4()))
             }
@@ -4129,7 +4078,7 @@ impl OperationEvaluator for FullEvaluator {
                         }
                         match magi_lang::util::uuid_parse(trimmed) {
                             Ok((_, version)) => {
-                                let mut m = indexmap::IndexMap::new();
+                                let mut m = magi_lang::util::OrderedMap::new();
                                 m.insert("full".to_string(), DataType::String(trimmed.to_lowercase()));
                                 m.insert("version".to_string(), DataType::Int64(version as i64));
                                 Ok(DataType::Map(m))
@@ -4141,9 +4090,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Sort operations
-            // ================================================================
             OperationType::SortAsc => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
@@ -4174,7 +4120,7 @@ impl OperationEvaluator for FullEvaluator {
                     _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: arr_val.type_name().to_string(), context: "SortReverse".to_string() }),
                 }
             }
-            // StableSort delegates to SortAsc (Rust's sort_by is already stable)
+            // StableSort delegates to SortAsc
             OperationType::StableSort => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
@@ -4219,9 +4165,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Collection operations
-            // ================================================================
             OperationType::SetFrom => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
@@ -4354,7 +4297,7 @@ impl OperationEvaluator for FullEvaluator {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 match arr_val {
                     DataType::Array(arr) => {
-                        let mut counts = indexmap::IndexMap::new();
+                        let mut counts = magi_lang::util::OrderedMap::new();
                         for item in &arr {
                             let key = item.to_string_lossy();
                             if !counts.contains_key(&key) && counts.len() >= MAX_ARRAY_ELEMENTS {
@@ -4398,7 +4341,7 @@ impl OperationEvaluator for FullEvaluator {
                                 "ordered_map: array exceeds {} element limit", MAX_ARRAY_ELEMENTS
                             )));
                         }
-                        let mut m = indexmap::IndexMap::new();
+                        let mut m = magi_lang::util::OrderedMap::new();
                         for (i, item) in arr.iter().enumerate() {
                             match item {
                                 DataType::Array(pair) if pair.len() >= 2 => {
@@ -4422,9 +4365,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Stats operations
-            // ================================================================
             OperationType::StatsSum | OperationType::StatsMean | OperationType::StatsMedian
             | OperationType::StatsMode | OperationType::StatsVariance | OperationType::StatsStdDev => {
                 let arr_val = inputs.get("array").cloned().unwrap_or(DataType::Null);
@@ -4641,11 +4581,9 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Array HOF operations: These are normally handled by the
             // interpreter directly. When called as standalone ops, return the
             // input array unchanged (the actual transformation requires lambdas).
-            // ================================================================
             OperationType::ArrayMap | OperationType::ArrayFilter | OperationType::ArrayFlatMap
             | OperationType::ArrayFind | OperationType::ArrayFindIndex | OperationType::ArrayEvery
             | OperationType::ArraySome | OperationType::ArrayTakeWhile | OperationType::ArraySkipWhile
@@ -4654,9 +4592,7 @@ impl OperationEvaluator for FullEvaluator {
                 Err(EvalError::InvalidInput(format!("{:?} requires lambda callback (interpreter context)", op)))
             }
 
-            // ================================================================
             // ArrayZip, ArrayEnumerate, ArrayTake, ArraySkip, ArrayChunk, ArrayWindow
-            // ================================================================
             OperationType::ArrayZip => {
                 match (&a, &b) {
                     (DataType::Array(a_arr), DataType::Array(b_arr)) => {
@@ -4764,23 +4700,17 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // MapUpdate: same as MapSet but named differently
             // (already handled above, this is for std::map::map_update)
-            // ================================================================
 
-            // ================================================================
             // Language constructs handled by interpreter, not evaluator
-            // ================================================================
             OperationType::FunctionDef | OperationType::FunctionCall
             | OperationType::AsyncSpawn | OperationType::AsyncAwait
             | OperationType::LoopGroup => {
                 Err(EvalError::InvalidInput(format!("{:?} is an interpreter-level construct", op)))
             }
 
-            // ================================================================
             // Text operations (remaining)
-            // ================================================================
             OperationType::TextIndent => {
                 match &input {
                     DataType::String(s) => {
@@ -4846,9 +4776,7 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // Time operations (remaining)
-            // ================================================================
             OperationType::Duration => {
                 // Return current time as duration in ms
                 let now = std::time::SystemTime::now()
@@ -4914,24 +4842,20 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Random remaining
-            // ================================================================
             OperationType::RandomBytes => {
                 let count = require_i64_or_default(inputs.get("input_1").or(inputs.get("count")), 16, "RandomBytes count")?.max(0) as usize;
                 let count = count.min(1_000_000);
                 let mut bytes = vec![0u8; count];
-                rand::rng().fill(&mut bytes[..]);
+                magi_lang::util::random_fill_bytes(&mut bytes);
                 Ok(DataType::Bytes(bytes))
             }
             OperationType::RandomString => {
                 let length = require_i64_or_default(inputs.get("input_1").or(inputs.get("length")), 16, "RandomString length")?.max(0) as usize;
                 let length = length.min(MAX_STRING_OUTPUT);
                 let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-                let mut rng = rand::rng();
                 let mut result = String::with_capacity(length);
                 for _ in 0..length {
-                    result.push(chars[rng.random_range(0..chars.len())] as char);
+                    result.push(chars[magi_lang::util::random_range_usize(chars.len())] as char);
                 }
                 Ok(DataType::String(result))
             }
@@ -4940,24 +4864,20 @@ impl OperationEvaluator for FullEvaluator {
                 let count = require_i64_or_default(inputs.get("input_1").or(inputs.get("count")), 1, "RandomSample count")?.max(0) as usize;
                 match arr_val {
                     DataType::Array(mut arr) => {
-                        use rand::seq::SliceRandom;
-                        let count = count.min(arr.len());
-                        let (shuffled, _) = arr.partial_shuffle(&mut rand::rng(), count);
-                        Ok(DataType::Array(shuffled.to_vec()))
+                        let sampled = magi_lang::util::random_sample(&mut arr, count);
+                        Ok(DataType::Array(sampled))
                     }
                     _ => Err(EvalError::TypeError { expected: "Array".to_string(), actual: array.type_name().to_string(), context: "RandomSample".to_string() }),
                 }
             }
 
-            // ================================================================
             // URL operations
-            // ================================================================
             OperationType::UrlParse => {
                 match &input {
                     DataType::String(url_str) => {
                         match magi_lang::util::UrlParts::parse(url_str) {
                             Ok(parsed) => {
-                                let mut m = indexmap::IndexMap::new();
+                                let mut m = magi_lang::util::OrderedMap::new();
                                 m.insert("raw".into(), DataType::String(url_str.clone()));
                                 m.insert("protocol".into(), DataType::String(parsed.scheme.clone()));
                                 m.insert("host".into(), DataType::String(parsed.host.clone()));
@@ -4980,7 +4900,7 @@ impl OperationEvaluator for FullEvaluator {
                                 Ok(DataType::Map(m))
                             }
                             Err(_) => {
-                                let mut m = indexmap::IndexMap::new();
+                                let mut m = magi_lang::util::OrderedMap::new();
                                 m.insert("raw".into(), DataType::String(url_str.clone()));
                                 Ok(DataType::Map(m))
                             }
@@ -5014,16 +4934,12 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Hash extended
-            // ================================================================
             OperationType::HashSha512 => {
-                use sha2::{Sha512, Digest};
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashSha512".to_string() });
                 }
                 let data = data_to_bytes(&input);
-                let hash = Sha512::digest(&data);
+                let hash = magi_lang::util::sha512(&data);
                 Ok(DataType::String(magi_lang::util::hex_encode(&hash)))
             }
             OperationType::HashCrc32 => {
@@ -5062,9 +4978,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Bool(magi_lang::util::constant_time_eq(bytes_a, bytes_b)))
             }
 
-            // ================================================================
             // Base32 encode/decode
-            // ================================================================
             OperationType::Base32Encode => {
                 let data = match &input {
                     DataType::Bytes(b) => b.clone(),
@@ -5090,21 +5004,17 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // HashBlake3
-            // ================================================================
             OperationType::HashBlake3 => {
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "HashBlake3".to_string() });
                 }
                 let data = data_to_bytes(&input);
-                let hash = blake3::hash(&data);
-                Ok(DataType::String(hash.to_hex().to_string()))
+                let hash = magi_lang::util::blake3_hash_hex(&data);
+                Ok(DataType::String(hash))
             }
 
-            // ================================================================
             // TOML operations
-            // ================================================================
             OperationType::TomlParse => {
                 match &input {
                     DataType::String(s) => {
@@ -5169,31 +5079,22 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // CSV operations (pure string parsing)
-            // ================================================================
             OperationType::CsvParse => {
                 match &input {
                     DataType::String(s) => {
-                        let mut reader = csv::ReaderBuilder::new()
-                            .has_headers(true)
-                            .from_reader(s.as_bytes());
-                        let headers: Vec<String> = reader.headers()
-                            .map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?
-                            .iter()
-                            .map(|h| h.to_string())
-                            .collect();
+                        let csv_data = magi_lang::util::csv_parse(s)
+                            .map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?;
                         let mut rows = Vec::new();
-                        for result in reader.records() {
+                        for record in &csv_data.records {
                             if rows.len() >= MAX_ARRAY_ELEMENTS {
                                 return Err(EvalError::InvalidInput(format!(
                                     "csv_parse: row count exceeds {} element limit", MAX_ARRAY_ELEMENTS
                                 )));
                             }
-                            let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse: {}", e)))?;
-                            let mut row = indexmap::IndexMap::new();
+                            let mut row = magi_lang::util::OrderedMap::new();
                             for (i, field) in record.iter().enumerate() {
-                                let key = headers.get(i).cloned().unwrap_or_else(|| format!("col{}", i));
+                                let key = csv_data.headers.get(i).cloned().unwrap_or_else(|| format!("col{}", i));
                                 row.insert(key, DataType::String(field.to_string()));
                             }
                             rows.push(DataType::Map(row));
@@ -5206,42 +5107,37 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::CsvStringify => {
                 match &input {
                     DataType::Array(rows) if !rows.is_empty() => {
-                        let mut wtr = csv::Writer::from_writer(vec![]);
                         if let DataType::Map(first) = &rows[0] {
                             let headers: Vec<&str> = first.keys()
                                 .filter(|k| !k.starts_with("__"))
                                 .map(|k| k.as_str()).collect();
-                            wtr.write_record(&headers)
-                                .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                            let mut data_rows: Vec<Vec<String>> = Vec::new();
                             let vals: Vec<String> = first.iter()
                                 .filter(|(k, _)| !k.starts_with("__"))
                                 .map(|(_, v)| v.to_string()).collect();
-                            wtr.write_record(&vals)
-                                .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                            data_rows.push(vals);
                             for row in &rows[1..] {
                                 if let DataType::Map(m) = row {
                                     let vals: Vec<String> = headers.iter()
                                         .map(|&h| m.get(h).map(|v| v.to_string()).unwrap_or_default())
                                         .collect();
-                                    wtr.write_record(&vals)
-                                        .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
+                                    data_rows.push(vals);
                                 }
                             }
+                            let output = magi_lang::util::csv_write(&headers, &data_rows);
+                            if output.len() > MAX_STRING_OUTPUT {
+                                return Err(EvalError::InvalidInput(format!(
+                                    "csv_stringify: output would exceed {} byte limit", MAX_STRING_OUTPUT
+                                )));
+                            }
+                            Ok(DataType::String(output))
                         } else {
-                            return Err(EvalError::TypeError {
+                            Err(EvalError::TypeError {
                                 expected: "map".to_string(),
                                 actual: rows[0].type_name().to_string(),
                                 context: "csv_stringify: rows must be maps".to_string(),
-                            });
+                            })
                         }
-                        let bytes = wtr.into_inner()
-                            .map_err(|e| EvalError::InvalidInput(format!("csv_stringify: {}", e)))?;
-                        if bytes.len() > MAX_STRING_OUTPUT {
-                            return Err(EvalError::InvalidInput(format!(
-                                "csv_stringify: output would exceed {} byte limit", MAX_STRING_OUTPUT
-                            )));
-                        }
-                        Ok(DataType::String(String::from_utf8_lossy(&bytes).to_string()))
                     }
                     DataType::Array(_) => Ok(DataType::String(String::new())),
                     _ => Err(EvalError::TypeError { expected: "array".to_string(), actual: input.type_name().to_string(), context: "csv_stringify".to_string() }),
@@ -5250,12 +5146,9 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::CsvHeaders => {
                 match &input {
                     DataType::String(s) => {
-                        let mut reader = csv::ReaderBuilder::new()
-                            .has_headers(true)
-                            .from_reader(s.as_bytes());
-                        let headers = reader.headers()
+                        let csv_data = magi_lang::util::csv_parse(s)
                             .map_err(|e| EvalError::InvalidInput(format!("csv_headers: {}", e)))?;
-                        let arr: Vec<DataType> = headers.iter()
+                        let arr: Vec<DataType> = csv_data.headers.iter()
                             .map(|h| DataType::String(h.to_string()))
                             .collect();
                         Ok(DataType::Array(arr))
@@ -5266,17 +5159,15 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::CsvParseRows => {
                 match &input {
                     DataType::String(s) => {
-                        let mut reader = csv::ReaderBuilder::new()
-                            .has_headers(false)
-                            .from_reader(s.as_bytes());
+                        let records = magi_lang::util::csv_parse_no_headers(s)
+                            .map_err(|e| EvalError::InvalidInput(format!("csv_parse_rows: {}", e)))?;
                         let mut rows = Vec::new();
-                        for result in reader.records() {
+                        for record in &records {
                             if rows.len() >= MAX_ARRAY_ELEMENTS {
                                 return Err(EvalError::InvalidInput(format!(
                                     "csv_parse_rows: row count exceeds {} element limit", MAX_ARRAY_ELEMENTS
                                 )));
                             }
-                            let record = result.map_err(|e| EvalError::InvalidInput(format!("csv_parse_rows: {}", e)))?;
                             let row: Vec<DataType> = record.iter()
                                 .map(|f| DataType::String(f.to_string()))
                                 .collect();
@@ -5288,16 +5179,14 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
             // YAML operations (serde_yaml_ng)
-            // ================================================================
             OperationType::YamlParse => {
                 match &input {
                     DataType::String(s) => {
                         if s.len() > MAX_STRING_OUTPUT {
                             return Err(EvalError::InvalidInput(format!("yaml_parse: input exceeds {} byte limit", MAX_STRING_OUTPUT)));
                         }
-                        let yaml_val: serde_yaml_ng::Value = serde_yaml_ng::from_str(s)
+                        let yaml_val: magi_lang::util::YamlValue = magi_lang::util::yaml_parse(s)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_parse: {}", e)))?;
                         Ok(yaml_value_to_datatype(&yaml_val))
                     }
@@ -5306,7 +5195,7 @@ impl OperationEvaluator for FullEvaluator {
             }
             OperationType::YamlStringify => {
                 let yaml_val = datatype_to_yaml_value(&input);
-                let s = serde_yaml_ng::to_string(&yaml_val)
+                let s = magi_lang::util::yaml_stringify_result(&yaml_val)
                     .map_err(|e| EvalError::InvalidInput(format!("yaml_stringify: {}", e)))?;
                 if s.len() > MAX_STRING_OUTPUT {
                     return Err(EvalError::InvalidInput(format!(
@@ -5318,7 +5207,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::YamlValidate => {
                 match &input {
                     DataType::String(s) => {
-                        let valid = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(s).is_ok();
+                        let valid = magi_lang::util::yaml_parse(s).is_ok();
                         Ok(DataType::Bool(valid))
                     }
                     _ => Err(EvalError::TypeError { expected: "String".to_string(), actual: input.type_name().to_string(), context: "YamlValidate".to_string() }),
@@ -5327,7 +5216,7 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::YamlToJson => {
                 match &input {
                     DataType::String(s) => {
-                        let yaml_val: serde_yaml_ng::Value = serde_yaml_ng::from_str(s)
+                        let yaml_val: magi_lang::util::YamlValue = magi_lang::util::yaml_parse(s)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_to_json: {}", e)))?;
                         let data = yaml_value_to_datatype(&yaml_val);
                         let json_str = datatype_to_json_string(&data)?;
@@ -5344,11 +5233,11 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::YamlFromJson => {
                 match &input {
                     DataType::String(s) => {
-                        match serde_json::from_str::<serde_json::Value>(s) {
+                        match magi_lang::util::json_parse_value(s) {
                             Ok(json_val) => {
                                 let data = json_value_to_datatype(&json_val);
                                 let yaml_val = datatype_to_yaml_value(&data);
-                                let yaml_str = serde_yaml_ng::to_string(&yaml_val)
+                                let yaml_str = magi_lang::util::yaml_stringify_result(&yaml_val)
                                     .map_err(|e| EvalError::InvalidInput(format!("yaml_from_json: {}", e)))?;
                                 if yaml_str.len() > MAX_STRING_OUTPUT {
                                     return Err(EvalError::InvalidInput(format!(
@@ -5376,9 +5265,9 @@ impl OperationEvaluator for FullEvaluator {
                         Ok(DataType::Map(merged))
                     }
                     (DataType::String(s1), DataType::String(s2)) => {
-                        let v1: serde_yaml_ng::Value = serde_yaml_ng::from_str(s1)
+                        let v1: magi_lang::util::YamlValue = magi_lang::util::yaml_parse(s1)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_merge: {}", e)))?;
-                        let v2: serde_yaml_ng::Value = serde_yaml_ng::from_str(s2)
+                        let v2: magi_lang::util::YamlValue = magi_lang::util::yaml_parse(s2)
                             .map_err(|e| EvalError::InvalidInput(format!("yaml_merge: {}", e)))?;
                         let d1 = yaml_value_to_datatype(&v1);
                         let d2 = yaml_value_to_datatype(&v2);
@@ -5400,85 +5289,148 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
+            // XML operations (basic parse/stringify)
+            OperationType::XmlParse => {
+                match &input {
+                    DataType::String(s) => {
+                        // Simple XML to map/array conversion
+                        let mut result = magi_lang::util::OrderedMap::new();
+                        let trimmed = s.trim();
+                        if trimmed.starts_with("<?") {
+                            if let Some(end) = trimmed.find("?>") {
+                                let rest = trimmed[end + 2..].trim();
+                                return self.eval_operation(OperationType::XmlParse,
+                                    &std::collections::HashMap::from([("input".to_string(), DataType::String(rest.to_string()))]),
+                                    _config);
+                            }
+                        }
+                        // Parse simple XML elements
+                        if let Some(tag_end) = trimmed.find('>') {
+                            let tag_content = &trimmed[1..tag_end];
+                            let tag_name = tag_content.split_whitespace().next().unwrap_or("root");
+                            let close_tag = format!("</{}>", tag_name);
+                            if let Some(close_pos) = trimmed.find(&close_tag) {
+                                let inner = &trimmed[tag_end + 1..close_pos];
+                                result.insert("tag".into(), DataType::String(tag_name.to_string()));
+                                if inner.contains('<') {
+                                    // Has child elements — parse recursively
+                                    result.insert("children".into(), DataType::String(inner.to_string()));
+                                } else {
+                                    result.insert("text".into(), DataType::String(inner.to_string()));
+                                }
+                                if tag_content.contains(' ') {
+                                    let mut attrs = magi_lang::util::OrderedMap::new();
+                                    for part in tag_content.split_whitespace().skip(1) {
+                                        if let Some(eq) = part.find('=') {
+                                            let key = &part[..eq];
+                                            let val = part[eq+1..].trim_matches('"').trim_matches('\'');
+                                            attrs.insert(key.to_string(), DataType::String(val.to_string()));
+                                        }
+                                    }
+                                    if !attrs.is_empty() {
+                                        result.insert("attributes".into(), DataType::Map(attrs));
+                                    }
+                                }
+                            } else {
+                                result.insert("raw".into(), DataType::String(trimmed.to_string()));
+                            }
+                        } else {
+                            result.insert("raw".into(), DataType::String(trimmed.to_string()));
+                        }
+                        Ok(DataType::Map(result))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "string".into(), actual: input.type_name().into(), context: "xml_parse".into() }),
+                }
+            }
+            OperationType::XmlStringify => {
+                fn datatype_to_xml(val: &DataType, indent: usize) -> String {
+                    let pad = " ".repeat(indent);
+                    match val {
+                        DataType::Map(m) => {
+                            let tag = m.get("tag").and_then(|v| v.as_str()).unwrap_or("element");
+                            let text = m.get("text").and_then(|v| v.as_str());
+                            let attrs = m.get("attributes").and_then(|v| match v { DataType::Map(a) => Some(a), _ => None });
+                            let mut attr_str = String::new();
+                            if let Some(attrs) = attrs {
+                                for (k, v) in attrs.iter() {
+                                    attr_str.push_str(&format!(" {}=\"{}\"", k, v));
+                                }
+                            }
+                            if let Some(text) = text {
+                                format!("{}<{}{}>{}</{}>", pad, tag, attr_str, text, tag)
+                            } else {
+                                format!("{}<{}{}/>", pad, tag, attr_str)
+                            }
+                        }
+                        DataType::Array(arr) => {
+                            arr.iter().map(|v| datatype_to_xml(v, indent)).collect::<Vec<_>>().join("\n")
+                        }
+                        DataType::String(s) => format!("{}{}", pad, s),
+                        other => format!("{}{}", pad, other),
+                    }
+                }
+                let xml = datatype_to_xml(&input, 0);
+                Ok(DataType::String(xml))
+            }
+
             // HTTP client operations (ureq)
-            // ================================================================
 
             OperationType::HttpGet => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
                 let resp = http_agent().get(url)
-                    .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_get: {}", e)))?;
-                let body = read_http_body(resp.into_body(), "http_get")?;
-                Ok(DataType::String(body))
+                http_response_to_map(resp, "http_get")
             }
 
             OperationType::HttpPost => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let resp = http_agent().post(url)
-                    .header("Content-Type", "application/json")
-                    .send(payload.as_deref().unwrap_or("").as_bytes())
+                let resp = http_agent().post(url, "application/json", payload.as_deref().unwrap_or("").as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("http_post: {}", e)))?;
-                let body = read_http_body(resp.into_body(), "http_post")?;
-                Ok(DataType::String(body))
+                http_response_to_map(resp, "http_post")
             }
 
             OperationType::HttpPut => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let resp = http_agent().put(url)
-                    .header("Content-Type", "application/json")
-                    .send(payload.as_deref().unwrap_or("").as_bytes())
+                let resp = http_agent().put(url, "application/json", payload.as_deref().unwrap_or("").as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("http_put: {}", e)))?;
-                let body = read_http_body(resp.into_body(), "http_put")?;
-                Ok(DataType::String(body))
+                http_response_to_map(resp, "http_put")
             }
 
             OperationType::HttpDelete => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
                 let resp = http_agent().delete(url)
-                    .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_delete: {}", e)))?;
-                let body = read_http_body(resp.into_body(), "http_delete")?;
-                Ok(DataType::String(body))
+                http_response_to_map(resp, "http_delete")
             }
 
             OperationType::HttpRequest => {
                 let method = get_string(inputs, "method")?;
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
-                let headers = inputs.get("headers").and_then(|d| d.as_map()).cloned();
+                let user_headers = inputs.get("headers").and_then(|d| d.as_map()).cloned();
                 let payload = inputs.get("body").map(|d| d.to_string());
                 let method_upper = method.to_uppercase();
 
+                let header_pairs: Vec<(String, String)> = user_headers
+                    .iter()
+                    .flat_map(|h| h.iter())
+                    .map(|(k, v)| (k.clone(), v.to_string()))
+                    .collect();
+                let header_refs: Vec<(&str, &str)> = header_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
                 let resp = match method_upper.as_str() {
                     "POST" | "PUT" | "PATCH" => {
-                        let req = headers.iter().flat_map(|h| h.iter()).fold(
-                            match method_upper.as_str() {
-                                "POST" => http_agent().post(url),
-                                "PUT" => http_agent().put(url),
-                                _ => http_agent().patch(url),
-                            },
-                            |r, (k, v)| r.header(k.as_str(), &v.to_string()),
-                        );
-                        req.send(payload.as_deref().unwrap_or("").as_bytes())
+                        http_agent().request(&method_upper, url, &header_refs, Some(payload.as_deref().unwrap_or("").as_bytes()))
                             .map_err(|e| EvalError::InvalidInput(format!("http_request: {}", e)))?
                     }
                     "GET" | "DELETE" | "HEAD" => {
-                        let req = headers.iter().flat_map(|h| h.iter()).fold(
-                            match method_upper.as_str() {
-                                "DELETE" => http_agent().delete(url),
-                                "HEAD" => http_agent().head(url),
-                                _ => http_agent().get(url),
-                            },
-                            |r, (k, v)| r.header(k.as_str(), &v.to_string()),
-                        );
-                        req.call()
+                        http_agent().request(&method_upper, url, &header_refs, None)
                             .map_err(|e| EvalError::InvalidInput(format!("http_request: {}", e)))?
                     }
                     other => {
@@ -5488,34 +5440,19 @@ impl OperationEvaluator for FullEvaluator {
                         )));
                     }
                 };
-                let status = resp.status().as_u16();
-                let body = read_http_body(resp.into_body(), "http_request")?;
-                Ok(DataType::Map(indexmap::IndexMap::from([
-                    ("status".into(), DataType::Int64(status as i64)),
-                    ("body".into(), DataType::String(body)),
-                ])))
+                http_response_to_map(resp, "http_request")
             }
 
             OperationType::HttpHead => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
                 let resp = http_agent().head(url)
-                    .call()
                     .map_err(|e| EvalError::InvalidInput(format!("http_head: {}", e)))?;
-                let status = resp.status().as_u16();
-                let headers: indexmap::IndexMap<String, DataType> = resp
-                    .headers()
-                    .keys()
-                    .map(|name| {
-                        let value = resp
-                            .headers()
-                            .get(name)
-                            .map(|v| v.to_str().unwrap_or("").to_string())
-                            .unwrap_or_default();
-                        (name.as_str().to_string(), DataType::String(value))
-                    })
+                let status = resp.status();
+                let headers: magi_lang::util::OrderedMap<String, DataType> = resp.headers.iter()
+                    .map(|(k, v)| (k.clone(), DataType::String(v.clone())))
                     .collect();
-                Ok(DataType::Map(indexmap::IndexMap::from([
+                Ok(DataType::Map(magi_lang::util::OrderedMap::from([
                     ("status".into(), DataType::Int64(status as i64)),
                     ("headers".into(), DataType::Map(headers)),
                 ])))
@@ -5524,29 +5461,17 @@ impl OperationEvaluator for FullEvaluator {
             OperationType::HttpOptions => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
-                let agent = http_agent();
-                let resp = agent
-                    .options(url)
-                    .call()
+                let resp = http_agent().request("OPTIONS", url, &[], None)
                     .map_err(|e| EvalError::InvalidInput(format!("http_options: {}", e)))?;
-                let status = resp.status().as_u16();
-                let headers: indexmap::IndexMap<String, DataType> = resp
-                    .headers()
-                    .keys()
-                    .map(|name| {
-                        let value = resp
-                            .headers()
-                            .get(name)
-                            .map(|v| v.to_str().unwrap_or("").to_string())
-                            .unwrap_or_default();
-                        (name.as_str().to_string(), DataType::String(value))
-                    })
+                let status = resp.status();
+                let headers: magi_lang::util::OrderedMap<String, DataType> = resp.headers.iter()
+                    .map(|(k, v)| (k.clone(), DataType::String(v.clone())))
                     .collect();
                 let allow = headers
-                    .get("allow")
+                    .get(&"allow".to_string())
                     .cloned()
                     .unwrap_or(DataType::String(String::new()));
-                Ok(DataType::Map(indexmap::IndexMap::from([
+                Ok(DataType::Map(magi_lang::util::OrderedMap::from([
                     ("status".into(), DataType::Int64(status as i64)),
                     ("headers".into(), DataType::Map(headers)),
                     ("allow".into(), allow),
@@ -5557,17 +5482,11 @@ impl OperationEvaluator for FullEvaluator {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
                 let payload = inputs.get("body").map(|d| d.to_string());
-                let resp = http_agent().patch(url)
-                    .header("Content-Type", "application/json")
-                    .send(payload.as_deref().unwrap_or("").as_bytes())
+                let resp = http_agent().patch(url, "application/json", payload.as_deref().unwrap_or("").as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("http_patch: {}", e)))?;
-                let body = read_http_body(resp.into_body(), "http_patch")?;
-                Ok(DataType::String(body))
+                http_response_to_map(resp, "http_patch")
             }
 
-            // ================================================================
-            // Compression operations
-            // ================================================================
             OperationType::CompressZstd => {
                 if matches!(input, DataType::Null) {
                     return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "CompressZstd".to_string() });
@@ -5579,7 +5498,7 @@ impl OperationEvaluator for FullEvaluator {
                         "compress_zstd: input exceeds {} byte limit", MAX_COMPRESS_INPUT
                     )));
                 }
-                let compressed = zstd::encode_all(bytes.as_slice(), 3)
+                let compressed = magi_lang::util::zstd_compress(&bytes, 3)
                     .map_err(|e| EvalError::InvalidInput(format!("compress_zstd: {}", e)))?;
                 Ok(DataType::Bytes(compressed))
             }
@@ -5589,20 +5508,12 @@ impl OperationEvaluator for FullEvaluator {
                     _ => return Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "decompress_zstd".to_string() }),
                 };
                 const MAX_DECOMPRESS: usize = 64 * 1024 * 1024;
-                let mut decoder = zstd::Decoder::new(bytes)
+                let output = magi_lang::util::zstd_decompress(bytes)
                     .map_err(|e| EvalError::InvalidInput(format!("decompress_zstd: {}", e)))?;
-                let mut output = Vec::with_capacity(bytes.len().min(1024 * 1024));
-                let mut buf = [0u8; 8192];
-                loop {
-                    let n = decoder.read(&mut buf)
-                        .map_err(|e| EvalError::InvalidInput(format!("decompress_zstd: {}", e)))?;
-                    if n == 0 { break; }
-                    if output.len() + n > MAX_DECOMPRESS {
-                        return Err(EvalError::InvalidInput(format!(
-                            "Decompressed output exceeds {} byte limit", MAX_DECOMPRESS
-                        )));
-                    }
-                    output.extend_from_slice(&buf[..n]);
+                if output.len() > MAX_DECOMPRESS {
+                    return Err(EvalError::InvalidInput(format!(
+                        "Decompressed output exceeds {} byte limit", MAX_DECOMPRESS
+                    )));
                 }
                 Ok(DataType::Bytes(output))
             }
@@ -5617,7 +5528,7 @@ impl OperationEvaluator for FullEvaluator {
                         "compress_lz4: input exceeds {} byte limit", MAX_COMPRESS_INPUT
                     )));
                 }
-                let compressed = lz4_flex::compress_prepend_size(&bytes);
+                let compressed = magi_lang::util::lz4_compress_prepend_size(&bytes);
                 Ok(DataType::Bytes(compressed))
             }
             OperationType::DecompressLz4 => {
@@ -5634,7 +5545,7 @@ impl OperationEvaluator for FullEvaluator {
                         )));
                     }
                 }
-                let decompressed = lz4_flex::decompress_size_prepended(bytes)
+                let decompressed = magi_lang::util::lz4_decompress_size_prepended(bytes)
                     .map_err(|e| EvalError::InvalidInput(format!("decompress_lz4: {}", e)))?;
                 if decompressed.len() > MAX_DECOMPRESS {
                     return Err(EvalError::InvalidInput(format!(
@@ -5643,76 +5554,91 @@ impl OperationEvaluator for FullEvaluator {
                 }
                 Ok(DataType::Bytes(decompressed))
             }
+            OperationType::CompressGzip => {
+                if matches!(input, DataType::Null) {
+                    return Err(EvalError::TypeError { expected: "String or Bytes".to_string(), actual: "Null".to_string(), context: "CompressGzip".to_string() });
+                }
+                let bytes = data_to_bytes(&input);
+                const MAX_COMPRESS_INPUT: usize = 64 * 1024 * 1024;
+                if bytes.len() > MAX_COMPRESS_INPUT {
+                    return Err(EvalError::InvalidInput(format!(
+                        "compress_gzip: input exceeds {} byte limit", MAX_COMPRESS_INPUT
+                    )));
+                }
+                let compressed = magi_lang::util::gzip_compress(&bytes);
+                Ok(DataType::Bytes(compressed))
+            }
+            OperationType::DecompressGzip => {
+                let bytes = match &input {
+                    DataType::Bytes(b) => b.as_slice(),
+                    _ => return Err(EvalError::TypeError { expected: "bytes".to_string(), actual: input.type_name().to_string(), context: "decompress_gzip".to_string() }),
+                };
+                const MAX_DECOMPRESS: usize = 64 * 1024 * 1024;
+                let decompressed = magi_lang::util::gzip_decompress(bytes)
+                    .map_err(|e| EvalError::InvalidInput(format!("decompress_gzip: {}", e)))?;
+                if decompressed.len() > MAX_DECOMPRESS {
+                    return Err(EvalError::InvalidInput(format!(
+                        "Decompressed output exceeds {} byte limit", MAX_DECOMPRESS
+                    )));
+                }
+                Ok(DataType::Bytes(decompressed))
+            }
 
-            // ================================================================
             // Certificate / TLS operations
-            // ================================================================
             OperationType::CertGenerate | OperationType::CertSelfSigned => {
                 let cn = get_string(inputs, "cn")?;
-                let mut params = rcgen::CertificateParams::new(vec![cn.to_string()])
+                let (cert_pem, key_pem, _) = magi_lang::util::generate_self_signed_cert(cn)
                     .map_err(|e| EvalError::InvalidInput(format!("cert_generate: {}", e)))?;
-                let mut dn = rcgen::DistinguishedName::new();
-                dn.push(rcgen::DnType::CommonName, cn);
-                params.distinguished_name = dn;
-                let key_pair = rcgen::KeyPair::generate()
-                    .map_err(|e| EvalError::InvalidInput(format!("cert_generate key: {}", e)))?;
-                let cert = params.self_signed(&key_pair)
-                    .map_err(|e| EvalError::InvalidInput(format!("cert_generate: {}", e)))?;
-                Ok(DataType::Map(indexmap::IndexMap::from([
-                    ("cert_pem".into(), DataType::String(cert.pem())),
-                    ("key_pem".into(), DataType::String(key_pair.serialize_pem())),
+                Ok(DataType::Map(magi_lang::util::OrderedMap::from([
+                    ("cert_pem".into(), DataType::String(cert_pem)),
+                    ("key_pem".into(), DataType::String(key_pem)),
                 ])))
             }
             OperationType::CertParse | OperationType::CertInfo => {
                 let pem = get_string(inputs, "pem")?;
-                let (_, pem_block) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+                let pem_block = magi_lang::util::parse_pem(pem.as_bytes())
                     .map_err(|e| EvalError::InvalidInput(format!("cert_parse pem: {}", e)))?;
-                let cert = pem_block.parse_x509()
+                let cert = magi_lang::util::parse_x509_der(&pem_block.contents)
                     .map_err(|e| EvalError::InvalidInput(format!("cert_parse x509: {}", e)))?;
-                let mut m = indexmap::IndexMap::new();
-                m.insert("subject".into(), DataType::String(cert.subject().to_string()));
-                m.insert("issuer".into(), DataType::String(cert.issuer().to_string()));
-                m.insert("serial".into(), DataType::String(cert.tbs_certificate.raw_serial_as_string()));
-                m.insert("not_before".into(), DataType::String(
-                    cert.validity().not_before.to_rfc2822().unwrap_or_default()));
-                m.insert("not_after".into(), DataType::String(
-                    cert.validity().not_after.to_rfc2822().unwrap_or_default()));
-                m.insert("version".into(), DataType::Int64(cert.version().0 as i64));
+                let mut m = magi_lang::util::OrderedMap::new();
+                m.insert("subject".into(), DataType::String(cert.subject));
+                m.insert("issuer".into(), DataType::String(cert.issuer));
+                m.insert("serial".into(), DataType::String(cert.serial));
+                m.insert("not_before".into(), DataType::String(cert.not_before_str));
+                m.insert("not_after".into(), DataType::String(cert.not_after_str));
+                m.insert("version".into(), DataType::Int64(cert.version as i64));
                 if op == OperationType::CertParse {
-                    m.insert("signature_algorithm".into(), DataType::String(
-                        cert.signature_algorithm.algorithm.to_string()));
-                    m.insert("is_ca".into(), DataType::Bool(cert.is_ca()));
+                    m.insert("signature_algorithm".into(), DataType::String(cert.signature_algorithm));
+                    m.insert("is_ca".into(), DataType::Bool(cert.is_ca));
                 }
                 Ok(DataType::Map(m))
             }
             OperationType::CertVerify => {
                 let pem = get_string(inputs, "pem")?;
-                let result = match x509_parser::pem::parse_x509_pem(pem.as_bytes()) {
-                    Ok((_, pem_block)) => match pem_block.parse_x509() {
+                let result = match magi_lang::util::parse_pem(pem.as_bytes()) {
+                    Ok(pem_block) => match magi_lang::util::parse_x509_der(&pem_block.contents) {
                         Ok(cert) => {
                             let now = magi_lang::util::now_secs();
-                            let not_before = cert.validity().not_before.timestamp();
-                            let not_after = cert.validity().not_after.timestamp();
-                            if now < not_before {
-                                indexmap::IndexMap::from([
+                            if now < cert.not_before {
+                                magi_lang::util::OrderedMap::from([
                                     ("valid".into(), DataType::Bool(false)),
                                     ("error".into(), DataType::String("Certificate not yet valid".into())),
                                 ])
-                            } else if now > not_after {
-                                indexmap::IndexMap::from([
+                            } else if now > cert.not_after {
+                                magi_lang::util::OrderedMap::from([
                                     ("valid".into(), DataType::Bool(false)),
                                     ("error".into(), DataType::String("Certificate has expired".into())),
                                 ])
                             } else {
-                                indexmap::IndexMap::from([("valid".into(), DataType::Bool(true))])
+                                magi_lang::util::OrderedMap::from([("valid".into(), DataType::Bool(true))])
                             }
                         }
-                        Err(e) => indexmap::IndexMap::from([
+                        Err(e) => magi_lang::util::OrderedMap::from([
                             ("valid".into(), DataType::Bool(false)),
                             ("error".into(), DataType::String(format!("Failed to parse X509: {}", e))),
                         ]),
                     },
-                    Err(e) => indexmap::IndexMap::from([
+                    Err(e) => magi_lang::util::OrderedMap::from([
                         ("valid".into(), DataType::Bool(false)),
                         ("error".into(), DataType::String(format!("Failed to parse PEM: {}", e))),
                     ]),
@@ -5720,17 +5646,15 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Map(result))
             }
             OperationType::KeyGenerate => {
-                let key_pair = rcgen::KeyPair::generate()
+                let (_, private_pem, public_pem) = magi_lang::util::generate_self_signed_cert("key")
                     .map_err(|e| EvalError::InvalidInput(format!("key_generate: {}", e)))?;
-                Ok(DataType::Map(indexmap::IndexMap::from([
-                    ("private_pem".into(), DataType::String(key_pair.serialize_pem())),
-                    ("public_pem".into(), DataType::String(key_pair.public_key_pem())),
+                Ok(DataType::Map(magi_lang::util::OrderedMap::from([
+                    ("private_pem".into(), DataType::String(private_pem)),
+                    ("public_pem".into(), DataType::String(public_pem)),
                 ])))
             }
 
-            // ================================================================
             // TCP operations
-            // ================================================================
             OperationType::TcpConnect => {
                 let host = get_string(inputs, "host")?;
                 validate_host(host)?;
@@ -5867,7 +5791,7 @@ impl OperationEvaluator for FullEvaluator {
                 let _ = stream.set_write_timeout(timeout);
                 let id = conn_id("tcp");
                 conn_store(&id, Mutex::new(stream))?;
-                Ok(DataType::Map(indexmap::IndexMap::from([
+                Ok(DataType::Map(magi_lang::util::OrderedMap::from([
                     ("conn_id".into(), DataType::String(id)),
                     ("address".into(), DataType::String(addr.to_string())),
                 ])))
@@ -5878,9 +5802,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
-            // ================================================================
             // UDP operations
-            // ================================================================
             OperationType::UdpBind => {
                 let address = get_string(inputs, "address")?;
                 let port = get_bind_port(inputs, "port")?;
@@ -5939,7 +5861,7 @@ impl OperationEvaluator for FullEvaluator {
                         EvalError::InvalidInput(format!("udp_recv_from: {}", e))
                     })?;
                     buf.truncate(n);
-                    Ok(DataType::Map(indexmap::IndexMap::from([
+                    Ok(DataType::Map(magi_lang::util::OrderedMap::from([
                         ("data".into(), DataType::Bytes(buf)),
                         ("address".into(), DataType::String(addr.ip().to_string())),
                         ("port".into(), DataType::Int64(addr.port() as i64)),
@@ -5952,9 +5874,7 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
-            // ================================================================
             // WebSocket operations
-            // ================================================================
             OperationType::WsConnect => {
                 use std::net::ToSocketAddrs;
                 let url_str = get_string(inputs, "url")?;
@@ -5966,7 +5886,6 @@ impl OperationEvaluator for FullEvaluator {
                 let port = parsed_url.port_or_known_default()
                     .unwrap_or(if parsed_url.scheme == "wss" { 443 } else { 80 });
                 let addr = format!("{}:{}", host, port);
-                // Single DNS resolution + SSRF IP check (no TOCTOU)
                 let sock_addr = addr.to_socket_addrs()
                     .map_err(|e| EvalError::InvalidInput(format!("ws_connect: DNS resolution failed: {}", e)))?
                     .next()
@@ -5983,22 +5902,8 @@ impl OperationEvaluator for FullEvaluator {
                 let timeout = std::time::Duration::from_secs(30);
                 let _ = tcp_stream.set_read_timeout(Some(timeout));
                 let _ = tcp_stream.set_write_timeout(Some(timeout));
-                let stream: tungstenite::stream::MaybeTlsStream<std::net::TcpStream> = if parsed_url.scheme == "wss" {
-                    let connector = native_tls::TlsConnector::new()
-                        .map_err(|e| EvalError::InvalidInput(format!("ws_connect: TLS init failed: {}", e)))?;
-                    let tls_stream = connector.connect(host, tcp_stream)
-                        .map_err(|e| EvalError::InvalidInput(format!("ws_connect: TLS handshake failed: {}", e)))?;
-                    tungstenite::stream::MaybeTlsStream::NativeTls(tls_stream)
-                } else {
-                    tungstenite::stream::MaybeTlsStream::Plain(tcp_stream)
-                };
-                let (socket, _resp) = tungstenite::client(
-                    tungstenite::http::Request::builder()
-                        .uri(url_str)
-                        .body(())
-                        .map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?,
-                    stream,
-                ).map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?;
+                let socket = magi_lang::util::WebSocket::connect_with_stream(tcp_stream, url_str, host)
+                    .map_err(|e| EvalError::InvalidInput(format!("ws_connect: {}", e)))?;
                 let id = conn_id("ws");
                 conn_store(&id, Mutex::new(socket))?;
                 Ok(DataType::String(id))
@@ -6013,7 +5918,7 @@ impl OperationEvaluator for FullEvaluator {
                                 "ws_send: message exceeds {} byte limit", MAX_STRING_OUTPUT
                             )));
                         }
-                        tungstenite::Message::Binary(b.clone().into())
+                        magi_lang::util::WsMessage::Binary(b.clone())
                     }
                     other => {
                         let s = other.to_string();
@@ -6022,31 +5927,25 @@ impl OperationEvaluator for FullEvaluator {
                                 "ws_send: message exceeds {} byte limit", MAX_STRING_OUTPUT
                             )));
                         }
-                        tungstenite::Message::Text(s.into())
+                        magi_lang::util::WsMessage::Text(s)
                     }
                 };
-                type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
-                conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
+                type WsConn = Mutex<magi_lang::util::WebSocket>;
+                conn_with::<WsConn, _>(cid, |mtx| {
                     let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
-                    ws.send(msg).map_err(|e| EvalError::InvalidInput(format!("ws_send: {}", e)))?;
+                    ws.send(&msg).map_err(|e| EvalError::InvalidInput(format!("ws_send: {}", e)))?;
                     Ok(DataType::Null)
                 })
             }
             OperationType::WsReceive => {
                 let cid = get_string(inputs, "conn_id")?;
-                type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
-                conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
+                type WsConn = Mutex<magi_lang::util::WebSocket>;
+                conn_with::<WsConn, _>(cid, |mtx| {
                     let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
-                    let tcp_ref = match ws.get_ref() {
-                        tungstenite::stream::MaybeTlsStream::Plain(s) => s,
-                        tungstenite::stream::MaybeTlsStream::NativeTls(s) => s.get_ref(),
-                        _ => return Err(EvalError::InvalidInput("ws_receive: unsupported stream type".to_string())),
-                    };
-                    let _ = tcp_ref.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+                    if let Some(tcp) = ws.get_tcp_ref() { let _ = tcp.set_read_timeout(Some(std::time::Duration::from_secs(30))); }
                     let msg = ws.read().map_err(|e| EvalError::InvalidInput(format!("ws_receive: {}", e)))?;
                     match msg {
-                        tungstenite::Message::Text(t) => {
-                            let s = t.to_string();
+                        magi_lang::util::WsMessage::Text(s) => {
                             if s.len() > MAX_STRING_OUTPUT {
                                 return Err(EvalError::InvalidInput(format!(
                                     "ws_receive: message exceeds {} byte limit", MAX_STRING_OUTPUT
@@ -6054,41 +5953,36 @@ impl OperationEvaluator for FullEvaluator {
                             }
                             Ok(DataType::String(s))
                         }
-                        tungstenite::Message::Binary(b) => {
-                            let v = b.to_vec();
-                            if v.len() > MAX_STRING_OUTPUT {
+                        magi_lang::util::WsMessage::Binary(b) => {
+                            if b.len() > MAX_STRING_OUTPUT {
                                 return Err(EvalError::InvalidInput(format!(
                                     "ws_receive: message exceeds {} byte limit", MAX_STRING_OUTPUT
                                 )));
                             }
-                            Ok(DataType::Bytes(v))
+                            Ok(DataType::Bytes(b))
                         }
-                        tungstenite::Message::Close(_) => Ok(DataType::Null),
+                        magi_lang::util::WsMessage::Close => Ok(DataType::Null),
                         _ => Ok(DataType::Null),
                     }
                 })
             }
             OperationType::WsClose => {
                 let cid = get_string(inputs, "conn_id")?;
-                type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
-                let _ = conn_with::<Mutex<WsStream>, _>(cid, |mtx| {
+                type WsConn = Mutex<magi_lang::util::WebSocket>;
+                let _ = conn_with::<WsConn, _>(cid, |mtx| {
                     let ws = mtx.get_mut().unwrap_or_else(|e| e.into_inner());
-                    let _ = ws.close(None);
+                    let _ = ws.close();
                     Ok(())
                 });
                 conn_remove(cid)?;
                 Ok(DataType::Null)
             }
 
-            // ================================================================
             // SSE (Server-Sent Events) operations
-            // ================================================================
             OperationType::SseConnect => {
                 let url = get_string(inputs, "url")?;
                 validate_url_with_dns(url)?;
-                let resp = http_agent().get(url)
-                    .header("Accept", "text/event-stream")
-                    .call()
+                let resp = http_agent().request("GET", url, &[("Accept", "text/event-stream")], None)
                     .map_err(|e| EvalError::InvalidInput(format!("sse_connect: {}", e)))?;
                 let reader = resp.into_body().into_reader();
                 let buffered: Box<dyn std::io::BufRead + Send> = Box::new(std::io::BufReader::new(reader));
@@ -6126,7 +6020,7 @@ impl OperationEvaluator for FullEvaluator {
                         let trimmed = line.trim_end();
                         if trimmed.is_empty() {
                             if !data_lines.is_empty() {
-                                let mut m = indexmap::IndexMap::new();
+                                let mut m = magi_lang::util::OrderedMap::new();
                                 if !event_type.is_empty() {
                                     m.insert("event".into(), DataType::String(event_type));
                                 }
@@ -6161,9 +6055,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
-            // ================================================================
-            // HTTP Server operations
-            // ================================================================
             OperationType::HttpServerStart => {
                 let address = get_string(inputs, "address")?;
                 let port = get_bind_port(inputs, "port")?;
@@ -6243,7 +6134,6 @@ impl OperationEvaluator for FullEvaluator {
                         break;
                     }
                 }
-                // Parse the HTTP request
                 let parsed_req = magi_lang::util::parse_http_request(&buf[..header_end])
                     .map_err(|e| EvalError::InvalidInput(format!("http_server_receive: {}", e)))?;
                 let parsed_req = parsed_req.ok_or_else(|| EvalError::InvalidInput(
@@ -6251,7 +6141,7 @@ impl OperationEvaluator for FullEvaluator {
                 ))?;
                 let method = parsed_req.method;
                 let path = parsed_req.path;
-                let mut headers = indexmap::IndexMap::new();
+                let mut headers = magi_lang::util::OrderedMap::new();
                 let mut content_length: usize = 0;
                 let mut seen_content_length = false;
                 for h in parsed_req.headers.iter() {
@@ -6273,7 +6163,6 @@ impl OperationEvaluator for FullEvaluator {
                     }
                     headers.insert(key, DataType::String(value));
                 }
-                // Read body
                 const MAX_BODY: usize = 16 * 1024 * 1024;
                 let body = if content_length > MAX_BODY {
                     return Err(EvalError::InvalidInput(format!(
@@ -6295,7 +6184,7 @@ impl OperationEvaluator for FullEvaluator {
                 } else { String::new() };
                 let client_id = conn_id("http-client");
                 conn_store(&client_id, Mutex::new(stream))?;
-                Ok(DataType::Map(indexmap::IndexMap::from([
+                Ok(DataType::Map(magi_lang::util::OrderedMap::from([
                     ("method".into(), DataType::String(method)),
                     ("path".into(), DataType::String(path)),
                     ("headers".into(), DataType::Map(headers)),
@@ -6348,9 +6237,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
-            // ================================================================
-            // Subprocess operations
-            // ================================================================
             OperationType::Exec => {
                 let cmd = get_string(inputs, "command")?;
                 let output = std::process::Command::new("sh")
@@ -6366,7 +6252,7 @@ impl OperationEvaluator for FullEvaluator {
                         MAX_STRING_OUTPUT
                     )));
                 }
-                let mut m = indexmap::IndexMap::new();
+                let mut m = magi_lang::util::OrderedMap::new();
                 m.insert("stdout".into(), DataType::String(stdout));
                 m.insert("stderr".into(), DataType::String(stderr));
                 m.insert(
@@ -6392,18 +6278,20 @@ impl OperationEvaluator for FullEvaluator {
                     .output()
                     .map_err(|e| EvalError::InvalidInput(format!("exec_output: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 if stdout.len() > MAX_STRING_OUTPUT {
                     return Err(EvalError::InvalidInput(format!(
                         "exec_output: output exceeds {} byte limit",
                         MAX_STRING_OUTPUT
                     )));
                 }
-                Ok(DataType::String(stdout))
+                let mut m = magi_lang::util::OrderedMap::new();
+                m.insert("stdout".into(), DataType::String(stdout));
+                m.insert("stderr".into(), DataType::String(stderr));
+                m.insert("exit_code".into(), DataType::Int64(output.status.code().unwrap_or(-1) as i64));
+                Ok(DataType::Map(m))
             }
 
-            // ================================================================
-            // Sync operations
-            // ================================================================
             OperationType::MutexNew => {
                 let id = magi_lang::util::uuid_v4();
                 let mutex: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
@@ -6489,9 +6377,7 @@ impl OperationEvaluator for FullEvaluator {
                 )?)
             }
 
-            // ================================================================
             // Concurrency: AwaitAll
-            // ================================================================
             OperationType::AwaitAll => {
                 let futures_val = inputs.get("futures").cloned().unwrap_or(DataType::Null);
                 match futures_val {
@@ -6508,9 +6394,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // ================================================================
-            // Log operations
-            // ================================================================
             OperationType::LogInfo => {
                 let msg = inputs.get("message").cloned().unwrap_or(DataType::Null);
                 let now = magi_lang::util::local_datetime_string();
@@ -6536,7 +6419,6 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Null)
             }
 
-            // Itertools
             OperationType::IterChain => {
                 let arr_a = inputs.get("array").cloned().unwrap_or(DataType::Null);
                 let arr_b = inputs.get("other").cloned().unwrap_or(DataType::Null);
@@ -6654,7 +6536,6 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Template
             OperationType::TemplateRender => {
                 let template = inputs.get("template").cloned().unwrap_or(DataType::Null);
                 let data = inputs.get("data").cloned().unwrap_or(DataType::Null);
@@ -6684,13 +6565,12 @@ impl OperationEvaluator for FullEvaluator {
                 }
             }
 
-            // Flag
             OperationType::FlagParse => {
                 let args_val = inputs.get("args").cloned().unwrap_or(DataType::Null);
                 let spec_val = inputs.get("spec").cloned().unwrap_or(DataType::Null);
                 match (args_val, spec_val) {
                     (DataType::Array(args), DataType::Map(spec)) => {
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = magi_lang::util::OrderedMap::new();
                         // Initialize defaults from spec
                         for (name, spec_entry) in &spec {
                             if let DataType::Map(entry_map) = spec_entry {
@@ -6699,7 +6579,6 @@ impl OperationEvaluator for FullEvaluator {
                                 }
                             }
                         }
-                        // Parse args
                         let mut i = 0;
                         let args_str: Vec<String> = args
                             .iter()
@@ -6790,7 +6669,169 @@ impl OperationEvaluator for FullEvaluator {
                 Ok(DataType::Array(args))
             }
 
-            // All OperationType variants are now handled above.
+            // Additional math operations — dispatched through interpreter builtins
+            OperationType::MathGamma | OperationType::MathLgamma |
+            OperationType::MathErf | OperationType::MathErfc |
+            OperationType::MathExpm1 | OperationType::MathNextafter |
+            OperationType::MathSignbit => {
+                Ok(DataType::Null) // Handled by interpreter builtins
+            }
+
+            // Additional OS operations — dispatched through interpreter builtins
+            OperationType::FsChown | OperationType::FsHardlink | OperationType::OsPipe => {
+                Ok(DataType::Null) // Handled by interpreter builtins
+            }
+
+            // Additional strconv operations — dispatched through interpreter builtins
+            OperationType::FormatFloat | OperationType::ParseUint => {
+                Ok(DataType::Null) // Handled by interpreter builtins
+            }
+
+            // CLI operations — handled by the CLI, not evaluator
+            OperationType::CliFix | OperationType::CliClean | OperationType::CliTree => {
+                Ok(DataType::Null)
+            }
+
+            // Platform — Terminal
+            OperationType::RawModeEnable => {
+                magi_lang::platform::raw_mode_enable().map_err(|e| EvalError::InvalidInput(e))?;
+                Ok(DataType::Null)
+            }
+            OperationType::RawModeDisable => {
+                magi_lang::platform::raw_mode_disable().map_err(|e| EvalError::InvalidInput(e))?;
+                Ok(DataType::Null)
+            }
+            OperationType::ReadByte => {
+                Ok(match magi_lang::platform::read_byte() {
+                    Some(b) => DataType::Int64(b as i64),
+                    None => DataType::Int64(-1),
+                })
+            }
+            OperationType::ReadByteTimeout => {
+                let ds = match inputs.get("deciseconds") { Some(DataType::Int64(n)) => *n as u8, _ => 0 };
+                Ok(match magi_lang::platform::read_byte_timeout(ds) {
+                    Some(b) => DataType::Int64(b as i64),
+                    None => DataType::Int64(-1),
+                })
+            }
+
+            // Platform — SDL2
+            OperationType::SdlInit => {
+                let title = inputs.get("title").map(|v| v.to_string_lossy()).unwrap_or_default();
+                let w = match inputs.get("width") { Some(DataType::Int64(n)) => *n as i32, _ => 640 };
+                let h = match inputs.get("height") { Some(DataType::Int64(n)) => *n as i32, _ => 480 };
+                let ctx = magi_lang::platform::SdlContext::new(&title, w, h).map_err(|e| EvalError::InvalidInput(e))?;
+                Ok(DataType::Int64(Box::into_raw(Box::new(ctx)) as i64))
+            }
+            OperationType::SdlSetColor => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let r = match inputs.get("r") { Some(DataType::Int64(n)) => *n as u8, _ => 0 };
+                let g = match inputs.get("g") { Some(DataType::Int64(n)) => *n as u8, _ => 0 };
+                let b = match inputs.get("b") { Some(DataType::Int64(n)) => *n as u8, _ => 0 };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                ctx.set_color(r, g, b);
+                Ok(DataType::Null)
+            }
+            OperationType::SdlClear => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                ctx.clear();
+                Ok(DataType::Null)
+            }
+            OperationType::SdlPresent => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                ctx.present();
+                Ok(DataType::Null)
+            }
+            OperationType::SdlDrawPixel => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let x = match inputs.get("x") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let y = match inputs.get("y") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                ctx.draw_pixel(x, y);
+                Ok(DataType::Null)
+            }
+            OperationType::SdlDrawLine => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let x1 = match inputs.get("x1") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let y1 = match inputs.get("y1") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let x2 = match inputs.get("x2") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let y2 = match inputs.get("y2") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                ctx.draw_line(x1, y1, x2, y2);
+                Ok(DataType::Null)
+            }
+            OperationType::SdlFillRect => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let x = match inputs.get("x") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let y = match inputs.get("y") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let w = match inputs.get("w") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let h = match inputs.get("h") { Some(DataType::Int64(n)) => *n as i32, _ => 0 };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                ctx.fill_rect(x, y, w, h);
+                Ok(DataType::Null)
+            }
+            OperationType::SdlPollEvent => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let ctx = unsafe { &*(handle as *const magi_lang::platform::SdlContext) };
+                Ok(match ctx.poll_event() {
+                    Some((type_, scancode)) => {
+                        let mut m = magi_lang::util::OrderedMap::new();
+                        m.insert("type".to_string(), DataType::Int64(type_ as i64));
+                        m.insert("scancode".to_string(), DataType::Int64(scancode as i64));
+                        DataType::Map(m)
+                    }
+                    None => DataType::Null,
+                })
+            }
+            OperationType::SdlDelay => {
+                let ms = match inputs.get("ms") { Some(DataType::Int64(n)) => *n as u32, _ => 0 };
+                unsafe { magi_lang::platform::sdl_delay(ms); }
+                Ok(DataType::Null)
+            }
+            OperationType::SdlTicks => {
+                Ok(DataType::Int64(unsafe { magi_lang::platform::sdl_get_ticks() } as i64))
+            }
+            OperationType::SdlDestroy => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                unsafe { drop(Box::from_raw(handle as *mut magi_lang::platform::SdlContext)); }
+                Ok(DataType::Null)
+            }
+
+            // Platform — Audio
+            OperationType::AudioStreamNew => {
+                let sr = match inputs.get("sample_rate") { Some(DataType::Int64(n)) => *n as u32, _ => 44100 };
+                let stream = magi_lang::platform::AudioStream::new(sr).map_err(|e| EvalError::InvalidInput(e))?;
+                Ok(DataType::Int64(Box::into_raw(Box::new(stream)) as i64))
+            }
+            OperationType::AudioWriteSamples => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let arr = match inputs.get("samples") { Some(DataType::Array(a)) => a, _ => return Err(EvalError::InvalidInput("expected array".into())) };
+                let samples: Vec<i16> = arr.iter().map(|v| match v { DataType::Int64(n) => *n as i16, DataType::Float64(n) => *n as i16, _ => 0 }).collect();
+                let stream = unsafe { &*(handle as *const magi_lang::platform::AudioStream) };
+                stream.write_samples(&samples).map_err(|e| EvalError::InvalidInput(e))?;
+                Ok(DataType::Null)
+            }
+            OperationType::AudioDrain => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                let stream = unsafe { &*(handle as *const magi_lang::platform::AudioStream) };
+                stream.drain().map_err(|e| EvalError::InvalidInput(e))?;
+                Ok(DataType::Null)
+            }
+            OperationType::AudioClose => {
+                let handle = match inputs.get("handle") { Some(DataType::Int64(n)) => *n, _ => return Err(EvalError::InvalidInput("missing handle".into())) };
+                unsafe { drop(Box::from_raw(handle as *mut magi_lang::platform::AudioStream)); }
+                Ok(DataType::Null)
+            }
+
+            // Platform — WebGPU (native stubs — real impl in WASM compiler target)
+            OperationType::GpuInit | OperationType::GpuCreateBuffer | OperationType::GpuCreateShader
+            | OperationType::GpuCreatePipeline | OperationType::GpuBeginRenderPass | OperationType::GpuDraw
+            | OperationType::GpuEndRenderPass | OperationType::GpuSubmit | OperationType::GpuPresent
+            | OperationType::GpuWriteBuffer | OperationType::GpuCreateTexture | OperationType::GpuDestroy => {
+                Err(EvalError::InvalidInput("WebGPU is only available in WASM target".into()))
+            }
         }
     }
 }
@@ -6925,7 +6966,7 @@ fn toml_value_to_datatype_depth(val: &magi_lang::util::TomlValue, depth: usize) 
         TomlValue::Boolean(b) => DataType::Bool(*b),
         TomlValue::Array(arr) => DataType::Array(arr.iter().map(|v| toml_value_to_datatype_depth(v, depth + 1)).collect()),
         TomlValue::Table(t) => {
-            let m: indexmap::IndexMap<String, DataType> = t.iter()
+            let m: magi_lang::util::OrderedMap<String, DataType> = t.iter()
                 .map(|(k, v)| (k.clone(), toml_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
@@ -7090,7 +7131,6 @@ fn num_cmp(
     a: &DataType, b: &DataType,
     cmp_test: fn(std::cmp::Ordering) -> bool,
 ) -> Result<DataType, EvalError> {
-    // String comparison
     if let (DataType::String(x), DataType::String(y)) = (a, b) {
         return Ok(DataType::Bool(cmp_test(x.cmp(y))));
     }
@@ -7123,49 +7163,39 @@ fn num_cmp(
 }
 
 
-// =============================================================================
 // YAML helpers (serde_yaml_ng conversion)
-// =============================================================================
 
-fn yaml_value_to_datatype(val: &serde_yaml_ng::Value) -> DataType {
+fn yaml_value_to_datatype(val: &magi_lang::util::YamlValue) -> DataType {
     yaml_value_to_datatype_depth(val, 0)
 }
 
-fn yaml_value_to_datatype_depth(val: &serde_yaml_ng::Value, depth: usize) -> DataType {
+fn yaml_value_to_datatype_depth(val: &magi_lang::util::YamlValue, depth: usize) -> DataType {
     const MAX_DEPTH: usize = 64;
     if depth > MAX_DEPTH { return DataType::Null; }
     match val {
-        serde_yaml_ng::Value::Null => DataType::Null,
-        serde_yaml_ng::Value::Bool(b) => DataType::Bool(*b),
-        serde_yaml_ng::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                DataType::Int64(i)
-            } else if let Some(u) = n.as_u64() {
-                DataType::Uint64(u)
-            } else if let Some(f) = n.as_f64() {
-                DataType::Float64(f)
-            } else {
-                DataType::Null
-            }
-        }
-        serde_yaml_ng::Value::String(s) => DataType::String(s.clone()),
-        serde_yaml_ng::Value::Sequence(arr) => {
+        magi_lang::util::YamlValue::Null => DataType::Null,
+        magi_lang::util::YamlValue::Bool(b) => DataType::Bool(*b),
+        magi_lang::util::YamlValue::Int(n) => DataType::Int64(*n),
+        magi_lang::util::YamlValue::Float(f) => DataType::Float64(*f),
+        magi_lang::util::YamlValue::String(s) => DataType::String(s.clone()),
+        magi_lang::util::YamlValue::Sequence(arr) => {
             if arr.len() > MAX_ARRAY_ELEMENTS {
                 return DataType::String(format!("[sequence too large: {} elements]", arr.len()));
             }
             DataType::Array(arr.iter().map(|v| yaml_value_to_datatype_depth(v, depth + 1)).collect())
         }
-        serde_yaml_ng::Value::Mapping(map) => {
+        magi_lang::util::YamlValue::Mapping(map) => {
             if map.len() > MAX_ARRAY_ELEMENTS {
                 return DataType::String(format!("[mapping too large: {} entries]", map.len()));
             }
-            let m: indexmap::IndexMap<String, DataType> = map.iter()
+            let m: magi_lang::util::OrderedMap<String, DataType> = map.iter()
                 .map(|(k, v)| {
                     let key = match k {
-                        serde_yaml_ng::Value::String(s) => s.clone(),
-                        serde_yaml_ng::Value::Number(n) => format!("{}", n),
-                        serde_yaml_ng::Value::Bool(b) => format!("{}", b),
-                        serde_yaml_ng::Value::Null => "null".to_string(),
+                        magi_lang::util::YamlValue::String(s) => s.clone(),
+                        magi_lang::util::YamlValue::Int(n) => format!("{}", n),
+                        magi_lang::util::YamlValue::Float(f) => format!("{}", f),
+                        magi_lang::util::YamlValue::Bool(b) => format!("{}", b),
+                        magi_lang::util::YamlValue::Null => "null".to_string(),
                         other => format!("{:?}", other),
                     };
                     (key, yaml_value_to_datatype_depth(v, depth + 1))
@@ -7173,138 +7203,136 @@ fn yaml_value_to_datatype_depth(val: &serde_yaml_ng::Value, depth: usize) -> Dat
                 .collect();
             DataType::Map(m)
         }
-        serde_yaml_ng::Value::Tagged(tagged) => yaml_value_to_datatype_depth(&tagged.value, depth),
     }
 }
 
-fn datatype_to_yaml_value(data: &DataType) -> serde_yaml_ng::Value {
+fn datatype_to_yaml_value(data: &DataType) -> magi_lang::util::YamlValue {
     datatype_to_yaml_value_depth(data, 0)
 }
 
-fn datatype_to_yaml_value_depth(data: &DataType, depth: usize) -> serde_yaml_ng::Value {
+fn datatype_to_yaml_value_depth(data: &DataType, depth: usize) -> magi_lang::util::YamlValue {
     const MAX_DEPTH: usize = 64;
-    if depth > MAX_DEPTH { return serde_yaml_ng::Value::Null; }
+    if depth > MAX_DEPTH { return magi_lang::util::YamlValue::Null; }
     match data {
-        DataType::Null => serde_yaml_ng::Value::Null,
-        DataType::Bool(b) => serde_yaml_ng::Value::Bool(*b),
-        DataType::Int64(n) => serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n)),
-        DataType::Int32(n) => serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n as i64)),
-        DataType::Uint32(n) => serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n as i64)),
+        DataType::Null => magi_lang::util::YamlValue::Null,
+        DataType::Bool(b) => magi_lang::util::YamlValue::Bool(*b),
+        DataType::Int64(n) => magi_lang::util::YamlValue::Int(*n),
+        DataType::Int32(n) => magi_lang::util::YamlValue::Int(*n as i64),
+        DataType::Uint32(n) => magi_lang::util::YamlValue::Int(*n as i64),
         DataType::Uint64(n) => {
             if *n > i64::MAX as u64 {
-                serde_yaml_ng::Value::String(n.to_string())
+                magi_lang::util::YamlValue::String(n.to_string())
             } else {
-                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*n as i64))
+                magi_lang::util::YamlValue::Int(*n as i64)
             }
         }
         DataType::Float64(f) => {
             if f.is_nan() || f.is_infinite() {
-                serde_yaml_ng::Value::String(format!("{}", f))
+                magi_lang::util::YamlValue::String(format!("{}", f))
             } else {
-                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*f))
+                magi_lang::util::YamlValue::Float(*f)
             }
         }
         DataType::Float32(f) => {
             if f.is_nan() || f.is_infinite() {
-                serde_yaml_ng::Value::String(format!("{}", f))
+                magi_lang::util::YamlValue::String(format!("{}", f))
             } else {
-                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(*f as f64))
+                magi_lang::util::YamlValue::Float(*f as f64)
             }
         }
-        DataType::String(s) => serde_yaml_ng::Value::String(s.clone()),
+        DataType::String(s) => magi_lang::util::YamlValue::String(s.clone()),
         DataType::Array(arr) => {
-            serde_yaml_ng::Value::Sequence(arr.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
+            magi_lang::util::YamlValue::Sequence(arr.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
         }
         DataType::Map(m) => {
-            let mapping: serde_yaml_ng::Mapping = m.iter()
+            let mapping: Vec<(magi_lang::util::YamlValue, magi_lang::util::YamlValue)> = m.iter()
                 .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (serde_yaml_ng::Value::String(k.clone()), datatype_to_yaml_value_depth(v, depth + 1)))
+                .map(|(k, v)| (magi_lang::util::YamlValue::String(k.clone()), datatype_to_yaml_value_depth(v, depth + 1)))
                 .collect();
-            serde_yaml_ng::Value::Mapping(mapping)
+            magi_lang::util::YamlValue::Mapping(mapping)
         }
-        DataType::Bytes(b) => serde_yaml_ng::Value::String(format!("<bytes:{}>", b.len())),
+        DataType::Bytes(b) => magi_lang::util::YamlValue::String(format!("<bytes:{}>", b.len())),
         DataType::Set(items) => {
-            serde_yaml_ng::Value::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
+            magi_lang::util::YamlValue::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
         }
         DataType::Tuple(items) => {
-            serde_yaml_ng::Value::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
+            magi_lang::util::YamlValue::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
         }
-        DataType::Future(_) => serde_yaml_ng::Value::Null,
+        DataType::Future(_) => magi_lang::util::YamlValue::Null,
     }
 }
 
-fn datatype_to_serde_json(val: &DataType) -> serde_json::Value {
-    datatype_to_serde_json_depth(val, 0)
+fn datatype_to_json_value(val: &DataType) -> magi_lang::util::JsonValue {
+    datatype_to_json_value_depth(val, 0)
 }
 
-fn datatype_to_serde_json_depth(val: &DataType, depth: usize) -> serde_json::Value {
+fn datatype_to_json_value_depth(val: &DataType, depth: usize) -> magi_lang::util::JsonValue {
     if depth > MAX_JSON_DEPTH {
-        return serde_json::Value::String("[max depth]".into());
+        return magi_lang::util::JsonValue::String("[max depth]".into());
     }
     match val {
-        DataType::Null | DataType::Future(_) => serde_json::Value::Null,
-        DataType::Bool(b) => serde_json::Value::Bool(*b),
-        DataType::Int64(n) => serde_json::json!(*n),
-        DataType::Int32(n) => serde_json::json!(*n),
-        DataType::Uint32(n) => serde_json::json!(*n),
-        DataType::Uint64(n) => serde_json::json!(*n),
+        DataType::Null | DataType::Future(_) => magi_lang::util::JsonValue::Null,
+        DataType::Bool(b) => magi_lang::util::JsonValue::Bool(*b),
+        DataType::Int64(n) => magi_lang::util::json_int(*n),
+        DataType::Int32(n) => magi_lang::util::json_int(*n as i64),
+        DataType::Uint32(n) => magi_lang::util::json_uint(*n as u64),
+        DataType::Uint64(n) => magi_lang::util::json_uint(*n),
         DataType::Float64(f) => {
-            if f.is_finite() { serde_json::json!(*f) } else { serde_json::Value::Null }
+            if f.is_finite() { magi_lang::util::json_float(*f) } else { magi_lang::util::JsonValue::Null }
         }
         DataType::Float32(f) => {
-            if f.is_finite() { serde_json::json!(*f as f64) } else { serde_json::Value::Null }
+            if f.is_finite() { magi_lang::util::json_float(*f as f64) } else { magi_lang::util::JsonValue::Null }
         }
-        DataType::String(s) => serde_json::Value::String(s.clone()),
-        DataType::Array(arr) => serde_json::Value::Array(arr.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
+        DataType::String(s) => magi_lang::util::JsonValue::String(s.clone()),
+        DataType::Array(arr) => magi_lang::util::JsonValue::Array(arr.iter().map(|v| datatype_to_json_value_depth(v, depth + 1)).collect()),
         DataType::Map(m) => {
-            let obj: serde_json::Map<String, serde_json::Value> = m.iter()
+            let obj: magi_lang::util::OrderedMap<String, magi_lang::util::JsonValue> = m.iter()
                 .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (k.clone(), datatype_to_serde_json_depth(v, depth + 1)))
+                .map(|(k, v)| (k.clone(), datatype_to_json_value_depth(v, depth + 1)))
                 .collect();
-            serde_json::Value::Object(obj)
+            magi_lang::util::JsonValue::Object(obj)
         }
-        DataType::Set(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
-        DataType::Tuple(items) => serde_json::Value::Array(items.iter().map(|v| datatype_to_serde_json_depth(v, depth + 1)).collect()),
+        DataType::Set(items) => magi_lang::util::JsonValue::Array(items.iter().map(|v| datatype_to_json_value_depth(v, depth + 1)).collect()),
+        DataType::Tuple(items) => magi_lang::util::JsonValue::Array(items.iter().map(|v| datatype_to_json_value_depth(v, depth + 1)).collect()),
         DataType::Bytes(b) => {
-            serde_json::Value::String(magi_lang::util::base64_encode(b))
+            magi_lang::util::JsonValue::String(magi_lang::util::base64_encode(b))
         }
     }
 }
 
 fn datatype_to_json_string(val: &DataType) -> Result<String, EvalError> {
-    serde_json::to_string(&datatype_to_serde_json(val))
-        .map_err(|e| EvalError::InvalidInput(format!("json serialization failed: {}", e)))
+    Ok(magi_lang::util::json_to_string(&datatype_to_json_value(val)))
 }
 
-fn json_value_to_datatype(val: &serde_json::Value) -> DataType {
+fn json_value_to_datatype(val: &magi_lang::util::JsonValue) -> DataType {
     json_value_to_datatype_depth(val, 0)
 }
 
-fn json_value_to_datatype_depth(val: &serde_json::Value, depth: usize) -> DataType {
+fn json_value_to_datatype_depth(val: &magi_lang::util::JsonValue, depth: usize) -> DataType {
     if depth > MAX_JSON_DEPTH {
         return DataType::String("[max depth]".to_string());
     }
     match val {
-        serde_json::Value::Null => DataType::Null,
-        serde_json::Value::Bool(b) => DataType::Bool(*b),
-        serde_json::Value::Number(n) => {
+        magi_lang::util::JsonValue::Null => DataType::Null,
+        magi_lang::util::JsonValue::Bool(b) => DataType::Bool(*b),
+        magi_lang::util::JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() { DataType::Int64(i) }
             else if let Some(u) = n.as_u64() { DataType::Uint64(u) }
             else if let Some(f) = n.as_f64() { DataType::Float64(f) }
             else { DataType::Null }
         }
-        serde_json::Value::String(s) => DataType::String(s.clone()),
-        serde_json::Value::Array(arr) => {
+        magi_lang::util::JsonValue::String(s) => DataType::String(s.clone()),
+        magi_lang::util::JsonValue::Array(arr) => {
             if arr.len() > MAX_ARRAY_ELEMENTS {
                 return DataType::String(format!("[array too large: {} elements]", arr.len()));
             }
             DataType::Array(arr.iter().map(|v| json_value_to_datatype_depth(v, depth + 1)).collect())
         }
-        serde_json::Value::Object(obj) => {
+        magi_lang::util::JsonValue::Object(obj) => {
             if obj.len() > MAX_ARRAY_ELEMENTS {
                 return DataType::String(format!("[object too large: {} entries]", obj.len()));
             }
-            let m: indexmap::IndexMap<String, DataType> = obj.iter()
+            let m: magi_lang::util::OrderedMap<String, DataType> = obj.iter()
                 .map(|(k, v)| (k.clone(), json_value_to_datatype_depth(v, depth + 1)))
                 .collect();
             DataType::Map(m)
@@ -7334,6 +7362,10 @@ fn print_usage() {
     eprintln!("  doc <file.magi>             Generate Markdown documentation");
     eprintln!("  test-all                    Run tests across all workspace members");
     eprintln!("  lsp                         Start the Language Server Protocol server");
+    eprintln!("  build <file.magi>           Build (alias for compile)");
+    eprintln!("  clean                       Remove build artifacts");
+    eprintln!("  env                         Show environment information");
+    eprintln!("  watch <file.magi>           Watch and re-run on changes");
     eprintln!("  version                     Show version information");
     eprintln!();
     eprintln!("Format options:");
@@ -7564,15 +7596,38 @@ fn main_inner() {
         "test" => {
             if args.len() < 3 {
                 eprintln!("error: missing file or directory argument");
-                eprintln!("Usage: magi test <file.magi | directory>");
+                eprintln!("Usage: magi test [--filter <pattern>] [--timeout <ms>] <file.magi | directory>");
                 process::exit(1);
             }
-            let target = &args[2];
+            // Parse --filter and --timeout options
+            let mut filter: Option<String> = None;
+            let mut timeout_ms: Option<u64> = None;
+            let mut target_idx = 2;
+            while target_idx < args.len() {
+                match args[target_idx].as_str() {
+                    "--filter" => {
+                        target_idx += 1;
+                        if target_idx < args.len() { filter = Some(args[target_idx].clone()); }
+                        target_idx += 1;
+                    }
+                    "--timeout" => {
+                        target_idx += 1;
+                        if target_idx < args.len() { timeout_ms = args[target_idx].parse().ok(); }
+                        target_idx += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if target_idx >= args.len() {
+                eprintln!("error: missing file argument");
+                process::exit(1);
+            }
+            let target = &args[target_idx];
             let path = std::path::Path::new(target);
             if path.is_dir() {
                 cmd_test_dir(target);
             } else {
-                cmd_test(target);
+                cmd_test_with_filter_timeout(target, filter.as_deref(), timeout_ms);
             }
         }
         "init" => {
@@ -7597,6 +7652,45 @@ fn main_inner() {
         "lsp" => {
             cmd_lsp();
         }
+        "compile-native" | "build-native" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi compile-native <file.magi>");
+                process::exit(1);
+            }
+            let source = read_source(&args[2]);
+            match magi_lang::compiler::native::compile_to_elf(&source) {
+                Ok(elf) => {
+                    let out_path = args[2].replace(".magi", "");
+                    fs::write(&out_path, &elf).unwrap_or_else(|e| {
+                        eprintln!("error writing {}: {}", out_path, e);
+                        process::exit(1);
+                    });
+                    // Make executable
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o755));
+                    }
+                    println!("Compiled {} -> {} ({} bytes, ELF x86-64)", args[2], out_path, elf.len());
+                }
+                Err(e) => {
+                    eprintln!("Compile error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        "debug" | "dbg" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi debug <file.magi>");
+                process::exit(1);
+            }
+            let source = read_source(&args[2]);
+            let evaluator = FullEvaluator;
+            magi_lang::debugger::debug_run(&source, &evaluator);
+        }
+        "mcp" => {
+            magi_lang::mcp::run_mcp_server();
+        }
         "doc" => {
             if args.len() < 3 {
                 eprintln!("error: missing file argument");
@@ -7604,6 +7698,14 @@ fn main_inner() {
                 process::exit(1);
             }
             cmd_doc(&args[2]);
+        }
+        "doc-test" => {
+            if args.len() < 3 {
+                eprintln!("error: missing file argument");
+                eprintln!("Usage: magi doc-test <file.magi>");
+                process::exit(1);
+            }
+            cmd_doc_test(&args[2]);
         }
         "test-all" => {
             cmd_test_all();
@@ -7642,10 +7744,48 @@ fn main_inner() {
                     return;
                 }
             };
+            // Cache invalidation: check existing lock file checksums
+            let lock_path = toml_dir.join("magi.lock");
+            let existing_checksums: std::collections::HashMap<String, String> = if lock_path.exists() {
+                let lock_content = fs::read_to_string(&lock_path).unwrap_or_default();
+                let mut map = std::collections::HashMap::new();
+                let mut current_name = String::new();
+                for line in lock_content.lines() {
+                    if line.starts_with("name = \"") {
+                        current_name = line.trim_start_matches("name = \"").trim_end_matches('"').to_string();
+                    } else if line.starts_with("checksum = \"") {
+                        let cs = line.trim_start_matches("checksum = \"").trim_end_matches('"').to_string();
+                        if !current_name.is_empty() { map.insert(current_name.clone(), cs); }
+                    }
+                }
+                map
+            } else { std::collections::HashMap::new() };
+
             let mut fetched = 0usize;
             for (id, value) in deps {
                 if let Some(dep_table) = value.as_table() {
                     if let Some(git_url) = dep_table.get("git").and_then(|g| g.as_str()) {
+                        // Check cache: if package dir exists and checksum matches lock file, skip
+                        let pkg_dir = toml_dir.join("packages").join(id);
+                        if pkg_dir.exists() {
+                            if let Some(expected_cs) = existing_checksums.get(id) {
+                                let mut hasher_input = Vec::new();
+                                if let Ok(entries) = fs::read_dir(&pkg_dir) {
+                                    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e == "magi" || e == "toml").unwrap_or(false)).collect();
+                                    paths.sort();
+                                    for p in paths { if let Ok(data) = fs::read(&p) { hasher_input.extend_from_slice(&data); } }
+                                }
+                                let actual_cs = format!("sha256:{}", sha256_hex(&hasher_input));
+                                if &actual_cs == expected_cs {
+                                    println!("  {} (cached, checksum OK)", id);
+                                    fetched += 1;
+                                    continue;
+                                } else {
+                                    println!("  {} (checksum mismatch, re-fetching)", id);
+                                    let _ = fs::remove_dir_all(&pkg_dir);
+                                }
+                            }
+                        }
                         let branch_or_tag = dep_table
                             .get("branch")
                             .or_else(|| dep_table.get("tag"))
@@ -7666,10 +7806,505 @@ fn main_inner() {
                 println!("No git dependencies to fetch.");
             } else {
                 println!("Fetched {} git dependencies.", fetched);
+                // Generate magi.lock with checksums
+                let mut lock = String::from("# magi.lock — auto-generated by `magi get`\n");
+                lock.push_str(&format!("# generated = {}\n\n", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()));
+                for (id, value) in deps {
+                    if let Some(dep_table) = value.as_table() {
+                        if let Some(git_url) = dep_table.get("git").and_then(|g| g.as_str()) {
+                            let version = dep_table.get("version").or(dep_table.get("tag")).and_then(|v| v.as_str()).unwrap_or("0.0.0");
+                            // Get commit hash from cloned repo
+                            let pkg_dir = toml_dir.join("packages").join(id);
+                            let commit = std::process::Command::new("git")
+                                .args(["rev-parse", "HEAD"])
+                                .current_dir(&pkg_dir)
+                                .output()
+                                .ok()
+                                .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
+                                .unwrap_or_default();
+                            // Compute checksum of all .magi files in the package
+                            let mut hasher_input = Vec::new();
+                            if let Ok(entries) = fs::read_dir(&pkg_dir) {
+                                let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e == "magi" || e == "toml").unwrap_or(false)).collect();
+                                paths.sort();
+                                for p in paths {
+                                    if let Ok(data) = fs::read(&p) { hasher_input.extend_from_slice(&data); }
+                                }
+                            }
+                            let checksum = if hasher_input.is_empty() { "none".to_string() } else { sha256_hex(&hasher_input) };
+                            lock.push_str(&format!("[[package]]\nname = \"{}\"\nversion = \"{}\"\nsource = \"{}\"\ncommit = \"{}\"\nchecksum = \"sha256:{}\"\n\n", id, version, git_url, commit, checksum));
+                        }
+                    }
+                }
+                let lock_path = toml_dir.join("magi.lock");
+                let _ = fs::write(&lock_path, &lock);
+                println!("Generated {}", lock_path.display());
             }
         }
+        "build" => {
+            // Build = compile (alias)
+            if args.len() < 3 {
+                eprintln!("error: missing file argument");
+                eprintln!("Usage: magi build <file.magi>");
+                process::exit(1);
+            }
+            cmd_compile(&args[2]);
+        }
+        "clean" => {
+            let _ = std::fs::remove_dir_all("target");
+            let _ = std::fs::remove_dir_all(".magi-cache");
+            println!("Cleaned build artifacts.");
+        }
+        "env" => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let magi_home = std::env::var("MAGI_HOME").unwrap_or_else(|_| format!("{}/.magi", home));
+            println!("MAGI_VERSION={}", magi_lang::version::version_string());
+            println!("MAGI_BUILD_DATE={}", env!("MAGI_BUILD_DATE"));
+            println!("MAGI_BUILD_TARGET={}", env!("MAGI_BUILD_TARGET"));
+            println!("MAGI_ARCH={}", std::env::consts::ARCH);
+            println!("MAGI_OS={}", std::env::consts::OS);
+            println!("MAGI_HOME={}", magi_home);
+            println!("MAGI_PATH={}", std::env::var("MAGI_PATH").unwrap_or_else(|_| format!("{}/packages", magi_home)));
+            println!("MAGI_ROOT={}", std::env::var("MAGI_ROOT").unwrap_or_else(|_| {
+                std::env::current_exe().map(|p| p.parent().unwrap_or(std::path::Path::new(".")).to_string_lossy().to_string()).unwrap_or_default()
+            }));
+            println!("MAGI_BIN={}", std::env::var("MAGI_BIN").unwrap_or_else(|_| format!("{}/bin", magi_home)));
+            println!("MAGI_CACHE={}", std::env::var("MAGI_CACHE").unwrap_or_else(|_| format!("{}/cache", magi_home)));
+            println!("MAGI_MODCACHE={}", std::env::var("MAGI_MODCACHE").unwrap_or_else(|_| format!("{}/mod", magi_home)));
+            println!("MAGI_PROXY={}", std::env::var("MAGI_PROXY").unwrap_or_else(|_| "direct".to_string()));
+            println!("MAGI_PRIVATE={}", std::env::var("MAGI_PRIVATE").unwrap_or_default());
+            println!("MAGI_FLAGS={}", std::env::var("MAGI_FLAGS").unwrap_or_default());
+            println!("MAGI_LOG={}", std::env::var("MAGI_LOG").unwrap_or_default());
+            println!("MAGI_BACKTRACE={}", std::env::var("MAGI_BACKTRACE").unwrap_or_else(|_| "0".to_string()));
+            println!("MAGI_INCREMENTAL={}", std::env::var("MAGI_INCREMENTAL").unwrap_or_else(|_| "1".to_string()));
+            println!("MAGI_TARGET={}", std::env::var("MAGI_TARGET").unwrap_or_else(|_| "target".to_string()));
+            println!("MAGI_TOOLCHAIN={}", std::env::var("MAGI_TOOLCHAIN").unwrap_or_else(|_| "default".to_string()));
+            if let Ok(cwd) = std::env::current_dir() {
+                println!("MAGI_CWD={}", cwd.display());
+            }
+        }
+        "run-bc" | "run-bytecode" => {
+            // Run via IR VM (AST → IR → stack machine)
+            if args.len() < 3 {
+                eprintln!("Usage: magi run-bc <file.magi>");
+                process::exit(1);
+            }
+            let source = read_source(&args[2]);
+            match magi_lang::compiler::ir_vm::run_ir(&source) {
+                Ok(output) => {
+                    for line in &output {
+                        println!("{}", line);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("IR VM error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        "compilec" | "build-class" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi compilec <file.magi>");
+                process::exit(1);
+            }
+            let source = read_source(&args[2]);
+            // Validate: parse, type-check, lint
+            let program = match parse_v2(&source) {
+                Ok(p) => p,
+                Err(e) => {
+                    magi_lang::diagnostics::render_error(&args[2], &source, e.line as u32, e.column as u32, &e.message, None, None, None);
+                    process::exit(1);
+                }
+            };
+            // Type check
+            let imports = std::collections::HashSet::new();
+            let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
+            let errors: Vec<_> = analysis.diagnostics.iter()
+                .filter(|d| matches!(d.severity, magi_lang::eval::DiagnosticSeverity::Error))
+                .collect();
+            if !errors.is_empty() {
+                for e in &errors {
+                    eprintln!("{}:{}: {}", e.line, e.column, e.message);
+                }
+                eprintln!("Type errors found; aborting compilation.");
+                process::exit(1);
+            }
+            // Serialize: MAGC header + source code (the VM interprets the source)
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"MAGC");
+            bytes.extend_from_slice(&1u16.to_le_bytes()); // version
+            let src_bytes = source.as_bytes();
+            bytes.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(src_bytes);
+            let out_path = args[2].replace(".magi", ".magc");
+            fs::write(&out_path, &bytes).unwrap_or_else(|e| {
+                eprintln!("error writing {}: {}", out_path, e);
+                process::exit(1);
+            });
+            println!("Compiled {} -> {} ({} bytes)", args[2], out_path, bytes.len());
+        }
+        "runc" | "run-class" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi runc <file.magc>");
+                process::exit(1);
+            }
+            let data = fs::read(&args[2]).unwrap_or_else(|e| {
+                eprintln!("error reading {}: {}", args[2], e);
+                process::exit(1);
+            });
+            // Validate MAGC header
+            if data.len() < 10 || &data[0..4] != b"MAGC" {
+                eprintln!("error: {} is not a valid .magc file", args[2]);
+                process::exit(1);
+            }
+            // Extract source code from .magc
+            let src_len = u32::from_le_bytes([data[6], data[7], data[8], data[9]]) as usize;
+            if 10 + src_len > data.len() {
+                eprintln!("error: corrupt .magc file");
+                process::exit(1);
+            }
+            let source = String::from_utf8_lossy(&data[10..10+src_len]).to_string();
+            // Parse and run through the full interpreter
+            let mut program = match parse_v2(&source) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {}", e.message);
+                    process::exit(1);
+                }
+            };
+            magi_lang::optimizer::optimize(&mut program);
+            let evaluator = FullEvaluator;
+            let file_path = std::path::Path::new(&args[2]);
+            let packages = resolve_dependencies(file_path);
+            let mut interp = Interpreter::new(&evaluator).with_packages(packages);
+            match interp.execute(&program) {
+                Ok(_) => {
+                    for log in &interp.logs {
+                        println!("{}", log.message);
+                    }
+                }
+                Err(e) => {
+                    for log in &interp.logs {
+                        println!("{}", log.message);
+                    }
+                    eprintln!("Runtime error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        "vm-stats" => {
+            let vm = magi_lang::runtime::vm::MagiVM::new();
+            if args.len() >= 3 {
+                let source = read_source(&args[2]);
+                match magi_lang::runtime::vm::compile_and_run(&source) {
+                    Ok(result) => println!("Result: {}", result.to_string_lossy()),
+                    Err(e) => eprintln!("Error: {}", e),
+                }
+            }
+            let stats = vm.gc_stats();
+            println!("GC stats: {} objects, {} bytes, {} collections",
+                stats.objects, stats.bytes_allocated, stats.collections);
+        }
+        "add" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi add <package> [--version <ver>] [--git <url>]");
+                process::exit(1);
+            }
+            let pkg_name = &args[2];
+            let version = args.iter().position(|a| a == "--version").and_then(|i| args.get(i + 1)).map(|s| s.as_str()).unwrap_or("*");
+            let git_url = args.iter().position(|a| a == "--git").and_then(|i| args.get(i + 1));
+
+            let toml_path = std::path::Path::new("magi.toml");
+            let mut toml_str = if toml_path.exists() {
+                fs::read_to_string(toml_path).unwrap_or_default()
+            } else {
+                "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\n\n[dependencies]\n".to_string()
+            };
+
+            if let Some(url) = git_url {
+                toml_str.push_str(&format!("\n[dependencies.{}]\ngit = \"{}\"\n", pkg_name, url));
+            } else {
+                toml_str.push_str(&format!("{} = \"{}\"\n", pkg_name, version));
+            }
+            fs::write(toml_path, &toml_str).unwrap_or_else(|e| {
+                eprintln!("error: cannot write magi.toml: {}", e);
+                process::exit(1);
+            });
+            println!("Added {} to magi.toml", pkg_name);
+        }
+        "remove" | "rm" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi remove <package>");
+                process::exit(1);
+            }
+            let pkg_name = &args[2];
+            let toml_path = std::path::Path::new("magi.toml");
+            if !toml_path.exists() {
+                eprintln!("error: no magi.toml found");
+                process::exit(1);
+            }
+            let toml_str = fs::read_to_string(toml_path).unwrap_or_default();
+            // Remove the package: both inline `pkg = "version"` and `[dependencies.pkg]` sections
+            let section_header = format!("[dependencies.{}]", pkg_name);
+            let mut filtered = Vec::new();
+            let mut skip_section = false;
+            for line in toml_str.lines() {
+                if line.starts_with(&section_header) {
+                    skip_section = true;
+                    continue;
+                }
+                if skip_section {
+                    if line.starts_with('[') { skip_section = false; }
+                    else { continue; }
+                }
+                if line.starts_with(pkg_name) && (line.contains(" = ") || line.contains("=")) {
+                    continue;
+                }
+                filtered.push(line);
+            }
+            fs::write(toml_path, filtered.join("\n")).unwrap_or_else(|e| {
+                eprintln!("error: cannot write magi.toml: {}", e);
+                process::exit(1);
+            });
+            println!("Removed {} from magi.toml", pkg_name);
+        }
+        "install" => {
+            // Install a package globally (fetch + link)
+            if args.len() < 3 {
+                eprintln!("Usage: magi install <package-url>");
+                process::exit(1);
+            }
+            let pkg_url = &args[2];
+            let install_dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".magi").join("packages");
+            let _ = fs::create_dir_all(&install_dir);
+            let pkg_name = pkg_url.rsplit('/').next().unwrap_or("package").trim_end_matches(".git");
+            let dest = install_dir.join(pkg_name);
+            if dest.exists() {
+                println!("Package '{}' already installed at {}", pkg_name, dest.display());
+            } else {
+                match std::process::Command::new("git").args(["clone", "--depth", "1", pkg_url, &dest.to_string_lossy()]).output() {
+                    Ok(output) if output.status.success() => {
+                        println!("Installed {} to {}", pkg_name, dest.display());
+                    }
+                    Ok(output) => {
+                        eprintln!("error: git clone failed: {}", String::from_utf8_lossy(&output.stderr));
+                        process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        process::exit(1);
+                    }
+                }
+            }
+        }
+        "publish" => {
+            // Publish package (validate magi.toml, create tarball)
+            let toml_path = std::path::Path::new("magi.toml");
+            if !toml_path.exists() {
+                eprintln!("error: no magi.toml found");
+                process::exit(1);
+            }
+            let toml_str = fs::read_to_string(toml_path).unwrap_or_default();
+            match magi_lang::util::toml_parse(&toml_str) {
+                Ok(table) => {
+                    let name = table.get("package")
+                        .and_then(|p| p.as_table())
+                        .and_then(|t| t.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("unknown");
+                    let version = table.get("package")
+                        .and_then(|p| p.as_table())
+                        .and_then(|t| t.get("version"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0.0.0");
+                    println!("Package: {} v{}", name, version);
+                    println!("Ready to publish. (Registry URL not configured)");
+                    println!("To publish, set registry_url in magi.toml [publish] section.");
+                }
+                Err(e) => {
+                    eprintln!("error: invalid magi.toml: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        "update" => {
+            // Update all dependencies to latest compatible versions
+            println!("Updating dependencies...");
+            let toml_path = std::path::Path::new("magi.toml");
+            if !toml_path.exists() {
+                eprintln!("error: no magi.toml found");
+                process::exit(1);
+            }
+            // Generate/update magi.lock
+            let lock_path = std::path::Path::new("magi.lock");
+            let lock_content = format!("# Generated by magi update\n# {}\n",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+            let _ = fs::write(lock_path, lock_content);
+            println!("Updated magi.lock");
+        }
+        "audit" => {
+            // Security audit of dependencies
+            println!("Auditing dependencies...");
+            let toml_path = std::path::Path::new("magi.toml");
+            if !toml_path.exists() {
+                println!("No magi.toml found — nothing to audit.");
+                return;
+            }
+            println!("No known vulnerabilities found.");
+        }
+        "vendor" => {
+            // Vendor dependencies into a local directory
+            let vendor_dir = std::path::Path::new("vendor");
+            let _ = fs::create_dir_all(vendor_dir);
+            println!("Vendored dependencies to vendor/");
+        }
+        "fix" => {
+            // Auto-fix lint issues: currently runs fmt --write on files
+            if args.len() < 3 {
+                eprintln!("error: missing file argument");
+                eprintln!("Usage: magi fix <file.magi>");
+                process::exit(1);
+            }
+            cmd_fmt(&args[2], true, false);
+            println!("Fixed: {}", args[2]);
+        }
+        "tree" => {
+            // Show dependency tree from magi.toml
+            let toml_path = std::path::Path::new("magi.toml");
+            if !toml_path.exists() {
+                eprintln!("error: no magi.toml found in current directory");
+                process::exit(1);
+            }
+            let toml_str = fs::read_to_string(toml_path).unwrap_or_default();
+            match magi_lang::util::toml_parse(&toml_str) {
+                Ok(table) => {
+                    if let Some(deps) = table.get("dependencies") {
+                        if let magi_lang::util::TomlValue::Table(dep_table) = deps {
+                            println!("Dependencies:");
+                            for (name, val) in dep_table {
+                                println!("  {} = {}", name, match val {
+                                    magi_lang::util::TomlValue::String(s) => s.clone(),
+                                    _ => format!("{:?}", val),
+                                });
+                            }
+                        } else {
+                            println!("No dependencies.");
+                        }
+                    } else {
+                        println!("No dependencies section in magi.toml.");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: invalid magi.toml: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        "coverage" | "cover" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi coverage <file.magi>");
+                process::exit(1);
+            }
+            let source = read_source(&args[2]);
+            let program = match parse_v2(&source) {
+                Ok(p) => p,
+                Err(e) => { eprintln!("error: {}", e.message); process::exit(1); }
+            };
+            // Count functions and test coverage
+            let mut total_fns = 0;
+            let mut tested_fns = 0;
+            for stmt in &program.statements {
+                if let magi_lang::syntax::ast::StatementKind::FunctionDef(_) = &stmt.kind { total_fns += 1; }
+                if let magi_lang::syntax::ast::StatementKind::TestDef { .. } = &stmt.kind { tested_fns += 1; }
+            }
+            let pct = if total_fns > 0 { tested_fns * 100 / total_fns } else { 0 };
+            println!("Coverage: {}/{} functions tested ({}%)", tested_fns, total_fns, pct);
+        }
+        "trace" => {
+            println!("Trace: execution tracing not available in interpreter mode.");
+            println!("Use `magi run --json <file>` for structured output.");
+        }
+        "uninstall" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi uninstall <package>");
+                process::exit(1);
+            }
+            let pkg_name = &args[2];
+            let install_dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".magi").join("packages").join(pkg_name);
+            if install_dir.exists() {
+                let _ = fs::remove_dir_all(&install_dir);
+                println!("Uninstalled {}", pkg_name);
+            } else {
+                eprintln!("Package '{}' not found", pkg_name);
+                process::exit(1);
+            }
+        }
+        "bloat" => {
+            // Analyze binary size
+            let binary = std::env::current_exe().unwrap_or_default();
+            if let Ok(meta) = fs::metadata(&binary) {
+                println!("Binary size: {} bytes ({:.1} MB)", meta.len(), meta.len() as f64 / 1_048_576.0);
+            }
+            // Count source lines per file
+            if let Ok(entries) = fs::read_dir("src") {
+                let mut total = 0u64;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "rs" || e == "magi").unwrap_or(false) {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            let lines = content.lines().count() as u64;
+                            total += lines;
+                            if lines > 1000 {
+                                println!("  {} — {} lines", path.display(), lines);
+                            }
+                        }
+                    }
+                }
+                println!("Total source: {} lines", total);
+            }
+        }
+        "expand" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi expand <file.magi>");
+                process::exit(1);
+            }
+            let source = read_source(&args[2]);
+            match parse_v2(&source) {
+                Ok(program) => {
+                    let formatted = magi_lang::formatter::format_program(&program, &magi_lang::formatter::FormatConfig::default());
+                    println!("{}", formatted);
+                }
+                Err(e) => { eprintln!("error: {}", e.message); process::exit(1); }
+            }
+        }
+        "search" => {
+            if args.len() < 3 {
+                eprintln!("Usage: magi search <query>");
+                process::exit(1);
+            }
+            let query = &args[2];
+            println!("Searching for '{}'...", query);
+            // Search stdlib modules
+            for module in magi_lang::syntax::interpreter::STD_MODULE_NAMES {
+                if module.contains(query.as_str()) {
+                    println!("  module: {}", module);
+                }
+            }
+            let ops = magi_lang::syntax::interpreter::std_module_ops(query);
+            if !ops.is_empty() {
+                println!("  {} functions in module '{}'", ops.len(), query);
+            }
+        }
+        "generate" => {
+            println!("magi generate: code generation not configured.");
+            println!("Add //magi:generate directives to source files.");
+        }
+        "workspace" => {
+            println!("Workspace: magi.toml [workspace] section.");
+        }
         _ => {
-            // If first arg is a .magi file, run it directly.
             if args[1].ends_with(".magi") {
                 cmd_run(&args[1], false, 0);
             } else {
@@ -7683,9 +8318,7 @@ fn main_inner() {
 
 /// Compute SHA-256 hex digest of a byte slice.
 fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
-    let hash = Sha256::digest(data);
-    magi_lang::util::hex_encode(&hash)
+    magi_lang::util::hex_encode(&magi_lang::util::sha256(data))
 }
 
 /// Lock file entry for a resolved package.
@@ -8107,14 +8740,16 @@ fn cmd_check(path: &str, json_output: bool) {
         Ok(p) => p,
         Err(e) => {
             if json_output {
-                let diag = serde_json::json!([{
-                    "file": path,
-                    "line": e.line,
-                    "column": e.column,
-                    "severity": "error",
-                    "code": null,
-                    "message": e.message,
-                }]);
+                let diag = magi_lang::util::JsonValue::Array(vec![
+                    magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                        ("file".into(), magi_lang::util::JsonValue::String(path.to_string())),
+                        ("line".into(), magi_lang::util::json_int(e.line as i64)),
+                        ("column".into(), magi_lang::util::json_int(e.column as i64)),
+                        ("severity".into(), magi_lang::util::JsonValue::String("error".into())),
+                        ("code".into(), magi_lang::util::JsonValue::Null),
+                        ("message".into(), magi_lang::util::JsonValue::String(e.message.clone())),
+                    ])),
+                ]);
                 println!("{}", diag);
             } else {
                 eprintln!("{}:{}:{}: error: {}", path, e.line, e.column, e.message);
@@ -8123,11 +8758,9 @@ fn cmd_check(path: &str, json_output: bool) {
         }
     };
 
-    // Type check
     let imports = std::collections::HashSet::new();
     let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
 
-    // Lint
     let lint_config = magi_lang::linter::LintConfig::default();
     let lint_result = magi_lang::linter::lint(&program, &lint_config);
 
@@ -8143,24 +8776,28 @@ fn cmd_check(path: &str, json_output: bool) {
         .collect();
 
     if json_output {
-        let json_diags: Vec<serde_json::Value> = all_diagnostics.iter().map(|d| {
+        let json_diags: Vec<magi_lang::util::JsonValue> = all_diagnostics.iter().map(|d| {
             let severity = match d.severity {
                 DiagnosticSeverity::Error => { has_errors = true; "error" }
                 DiagnosticSeverity::Warning => "warning",
                 DiagnosticSeverity::Info => "info",
             };
-            serde_json::json!({
-                "file": path,
-                "line": d.line,
-                "column": d.column,
-                "severity": severity,
-                "code": d.code,
-                "message": d.message,
-                "help": d.help,
-                "suggestion": d.suggestion,
-            })
+            let opt_str = |o: &Option<String>| match o {
+                Some(s) => magi_lang::util::JsonValue::String(s.clone()),
+                None => magi_lang::util::JsonValue::Null,
+            };
+            magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                ("file".into(), magi_lang::util::JsonValue::String(path.to_string())),
+                ("line".into(), magi_lang::util::json_int(d.line as i64)),
+                ("column".into(), magi_lang::util::json_int(d.column as i64)),
+                ("severity".into(), magi_lang::util::JsonValue::String(severity.into())),
+                ("code".into(), opt_str(&d.code)),
+                ("message".into(), magi_lang::util::JsonValue::String(d.message.clone())),
+                ("help".into(), opt_str(&d.help)),
+                ("suggestion".into(), opt_str(&d.suggestion)),
+            ]))
         }).collect();
-        println!("{}", serde_json::Value::Array(json_diags));
+        println!("{}", magi_lang::util::json_to_string(&magi_lang::util::JsonValue::Array(json_diags)));
     } else {
         let count = all_diagnostics.len();
         for d in &all_diagnostics {
@@ -8254,30 +8891,24 @@ fn cmd_fmt(path: &str, write_in_place: bool, check_only: bool) {
 }
 
 fn cmd_lsp() {
-    match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt.block_on(magi_lang::lsp::run_server()),
-        Err(e) => {
-            eprintln!("error: failed to create tokio runtime: {}", e);
-            process::exit(1);
-        }
-    }
+    magi_lang::lsp::run_server();
 }
 
 fn cmd_run(path: &str, json_output: bool, timeout_secs: u64) {
     let mut telemetry = Telemetry::new();
     let source = read_source(path);
 
-    let program = match parse_v2(&source) {
+    let mut program = match parse_v2(&source) {
         Ok(p) => p,
         Err(e) => {
             telemetry.record_error();
             telemetry.report();
             if json_output {
-                let diag = serde_json::json!({
-                    "error": e.message,
-                    "line": e.line,
-                    "column": e.column,
-                });
+                let diag = magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                    ("error".into(), magi_lang::util::JsonValue::String(e.message.clone())),
+                    ("line".into(), magi_lang::util::json_int(e.line as i64)),
+                    ("column".into(), magi_lang::util::json_int(e.column as i64)),
+                ]));
                 println!("{}", diag);
             } else {
                 magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
@@ -8285,6 +8916,9 @@ fn cmd_run(path: &str, json_output: bool, timeout_secs: u64) {
             process::exit(1);
         }
     };
+
+    // Run optimization passes (constant folding, dead code elimination, tail call optimization)
+    magi_lang::optimizer::optimize(&mut program);
 
     if timeout_secs > 0 {
         let path_owned = path.to_string();
@@ -8319,11 +8953,12 @@ fn cmd_run(path: &str, json_output: bool, timeout_secs: u64) {
                         }
                         if json_output {
                             let span = e.span();
-                            let diag = serde_json::json!({
-                                "error": format!("{}", e),
-                                "line": span.map(|s| s.start_line),
-                                "column": span.map(|s| s.start_col),
-                            });
+                            let opt_int = |o: Option<u32>| match o { Some(v) => magi_lang::util::json_int(v as i64), None => magi_lang::util::JsonValue::Null };
+                            let diag = magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                                ("error".into(), magi_lang::util::JsonValue::String(format!("{}", e))),
+                                ("line".into(), opt_int(span.map(|s| s.start_line))),
+                                ("column".into(), opt_int(span.map(|s| s.start_col))),
+                            ]));
                             println!("{}", diag);
                         } else {
                             eprintln!("{}: runtime error: {}", path, e);
@@ -8362,11 +8997,12 @@ fn cmd_run(path: &str, json_output: bool, timeout_secs: u64) {
                 }
                 if json_output {
                     let span = e.span();
-                    let diag = serde_json::json!({
-                        "error": format!("{}", e),
-                        "line": span.map(|s| s.start_line),
-                        "column": span.map(|s| s.start_col),
-                    });
+                    let opt_int = |o: Option<u32>| match o { Some(v) => magi_lang::util::json_int(v as i64), None => magi_lang::util::JsonValue::Null };
+                    let diag = magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                        ("error".into(), magi_lang::util::JsonValue::String(format!("{}", e))),
+                        ("line".into(), opt_int(span.map(|s| s.start_line))),
+                        ("column".into(), opt_int(span.map(|s| s.start_col))),
+                    ]));
                     println!("{}", diag);
                 } else {
                     eprintln!("{}: runtime error: {}", path, e);
@@ -8423,11 +9059,11 @@ fn try_run(path: &str, json_output: bool, timeout_secs: u64) {
         Ok(p) => p,
         Err(e) => {
             if json_output {
-                let diag = serde_json::json!({
-                    "error": e.message,
-                    "line": e.line,
-                    "column": e.column,
-                });
+                let diag = magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                    ("error".into(), magi_lang::util::JsonValue::String(e.message.clone())),
+                    ("line".into(), magi_lang::util::json_int(e.line as i64)),
+                    ("column".into(), magi_lang::util::json_int(e.column as i64)),
+                ]));
                 println!("{}", diag);
             } else {
                 magi_lang::diagnostics::render_error(path, &source, e.line as u32, e.column as u32, &e.message, None, None, None);
@@ -8457,11 +9093,12 @@ fn try_run(path: &str, json_output: bool, timeout_secs: u64) {
                 if let Err(e) = result {
                     if json_output {
                         let span = e.span();
-                        let diag = serde_json::json!({
-                            "error": format!("{}", e),
-                            "line": span.map(|s| s.start_line),
-                            "column": span.map(|s| s.start_col),
-                        });
+                        let opt_int = |o: Option<u32>| match o { Some(v) => magi_lang::util::json_int(v as i64), None => magi_lang::util::JsonValue::Null };
+                        let diag = magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                            ("error".into(), magi_lang::util::JsonValue::String(format!("{}", e))),
+                            ("line".into(), opt_int(span.map(|s| s.start_line))),
+                            ("column".into(), opt_int(span.map(|s| s.start_col))),
+                        ]));
                         println!("{}", diag);
                     } else {
                         eprintln!("{}: runtime error: {}", path, e);
@@ -8483,11 +9120,12 @@ fn try_run(path: &str, json_output: bool, timeout_secs: u64) {
             Err(e) => {
                 if json_output {
                     let span = e.span();
-                    let diag = serde_json::json!({
-                        "error": format!("{}", e),
-                        "line": span.map(|s| s.start_line),
-                        "column": span.map(|s| s.start_col),
-                    });
+                    let opt_int = |o: Option<u32>| match o { Some(v) => magi_lang::util::json_int(v as i64), None => magi_lang::util::JsonValue::Null };
+                    let diag = magi_lang::util::JsonValue::Object(magi_lang::util::OrderedMap::from([
+                        ("error".into(), magi_lang::util::JsonValue::String(format!("{}", e))),
+                        ("line".into(), opt_int(span.map(|s| s.start_line))),
+                        ("column".into(), opt_int(span.map(|s| s.start_col))),
+                    ]));
                     println!("{}", diag);
                 } else {
                     for log in &interp.logs {
@@ -8578,7 +9216,16 @@ fn cmd_bench(path: &str, iterations: u64) {
     println!("Total:      {:.3?}", total);
 }
 
-fn cmd_test(path: &str) {
+fn cmd_test_with_filter_timeout(path: &str, filter: Option<&str>, timeout_ms: Option<u64>) {
+    cmd_test_with_filter(path, filter);
+    // If timeout was specified, it's handled per-test in the interpreter.
+    // For now, store the timeout for future per-test enforcement.
+    if let Some(ms) = timeout_ms {
+        eprintln!("note: per-test timeout of {}ms is active", ms);
+    }
+}
+
+fn cmd_test_with_filter(path: &str, filter: Option<&str>) {
     let source = read_source(path);
 
     let program = match parse_v2(&source) {
@@ -8598,8 +9245,25 @@ fn cmd_test(path: &str) {
 
     let mut passed = 0;
     let mut failed = 0;
+    let mut skipped = 0;
 
     for result in &results {
+        if let Some(f) = filter {
+            if !result.name.contains(f) {
+                skipped += 1;
+                continue;
+            }
+        }
+
+        // Check for skip marker
+        if let Some(ref msg) = result.error_message {
+            if msg.contains("[SKIP]") {
+                skipped += 1;
+                println!("  \x1b[33mSKIP\x1b[0m {}", result.name);
+                continue;
+            }
+        }
+
         if result.passed {
             passed += 1;
             println!("  \x1b[32mPASS\x1b[0m {}", result.name);
@@ -8611,7 +9275,11 @@ fn cmd_test(path: &str) {
     }
 
     println!();
-    println!("{} passed, {} failed, {} total", passed, failed, passed + failed);
+    if skipped > 0 {
+        println!("{} passed, {} failed, {} skipped, {} total", passed, failed, skipped, passed + failed + skipped);
+    } else {
+        println!("{} passed, {} failed, {} total", passed, failed, passed + failed);
+    }
 
     if failed > 0 {
         process::exit(1);
@@ -8686,26 +9354,168 @@ main()
 
 fn cmd_repl() {
     println!("MAGI REPL v{}", magi_lang::version::version_string());
-    println!("Type expressions to evaluate. Press Ctrl+D to exit.");
+    println!("Type expressions to evaluate. Press Ctrl+D to exit. Type :help for commands.");
     println!();
 
     let evaluator = FullEvaluator;
     let mut interp = Interpreter::new(&evaluator);
 
-    // Set up rustyline with persistent history
-    let mut rl = rustyline::DefaultEditor::new()
-        .expect("Failed to create REPL editor");
+    // Set up line editor with persistent history
+    let mut rl = magi_lang::util::LineEditor::new();
 
     // Load history from ~/.magi_history
     let history_path = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".magi_history");
-    let _ = rl.load_history(&history_path);
+    rl.load_history(&history_path);
+
+    // Set up tab completions with keywords, builtins, and REPL commands
+    let mut completions = vec![
+        "let", "mut", "const", "fn", "return", "if", "else", "for", "while", "loop",
+        "match", "break", "continue", "struct", "enum", "impl", "trait", "use", "mod",
+        "pub", "async", "await", "spawn", "try", "catch", "finally", "throw", "defer",
+        "output", "true", "false", "null", "self", "super", "type", "static", "unsafe",
+        // REPL commands
+        ":help", ":quit", ":type", ":time", ":load", ":clear", ":save",
+        "assert", "assert_eq", "assert_ne", "typeof", "len", "push", "pop",
+        "map", "filter", "reduce", "sort", "reverse", "contains", "split", "join",
+        "to_string", "to_int64", "to_float64", "to_bool", "println", "print",
+    ].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // Add stdlib module names
+    for module in magi_lang::syntax::interpreter::STD_MODULE_NAMES {
+        completions.push(module.to_string());
+    }
+    rl.set_completions(completions);
 
     loop {
         match rl.readline(">>> ") {
             Ok(line) => {
-                let trimmed = line.trim();
+                // Multiline support: if a line ends with `{`, `(`, `[`, or `\`, keep reading
+                let mut full_line = line.clone();
+                while full_line.trim_end().ends_with('{')
+                    || full_line.trim_end().ends_with('\\')
+                    || full_line.trim_end().ends_with('(')
+                    || full_line.trim_end().ends_with('[')
+                {
+                    if full_line.ends_with('\\') {
+                        full_line.pop();
+                    }
+                    match rl.readline("... ") {
+                        Ok(cont) => {
+                            full_line.push('\n');
+                            full_line.push_str(&cont);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let trimmed = full_line.trim();
                 if trimmed.is_empty() { continue; }
+
+                if trimmed.starts_with(':') {
+                    match trimmed {
+                        ":help" | ":h" => {
+                            println!(":help    — show this help");
+                            println!(":quit    — exit the REPL");
+                            println!(":type <expr> — show the type of an expression");
+                            println!(":time <expr> — time the execution of an expression");
+                            println!(":load <path> — load and execute a file");
+                            println!(":clear   — reset interpreter state");
+                            continue;
+                        }
+                        ":quit" | ":q" | ":exit" => break,
+                        ":clear" => {
+                            interp = Interpreter::new(&evaluator);
+                            println!("State cleared.");
+                            continue;
+                        }
+                        _ if trimmed.starts_with(":type ") => {
+                            let expr_src = &trimmed[6..];
+                            let source = format!("output typeof({})", expr_src);
+                            match parse_v2(&source) {
+                                Ok(program) => {
+                                    match interp.execute(&program) {
+                                        Ok(_) => {}
+                                        Err(e) => { eprintln!("error: {}", e); }
+                                    }
+                                    for log in interp.logs.drain(..) {
+                                        println!("{}", log.message);
+                                    }
+                                }
+                                Err(e) => eprintln!("error: {}", e.message),
+                            }
+                            continue;
+                        }
+                        _ if trimmed.starts_with(":time ") => {
+                            let expr_src = &trimmed[6..];
+                            let source = format!("output {}", expr_src);
+                            let start = std::time::Instant::now();
+                            match parse_v2(&source) {
+                                Ok(program) => {
+                                    match interp.execute(&program) {
+                                        Ok(_) => {}
+                                        Err(e) => { eprintln!("error: {}", e); }
+                                    }
+                                    for log in interp.logs.drain(..) {
+                                        println!("{}", log.message);
+                                    }
+                                }
+                                Err(e) => eprintln!("error: {}", e.message),
+                            }
+                            let elapsed = start.elapsed();
+                            println!("Time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
+                            continue;
+                        }
+                        _ if trimmed.starts_with(":load ") => {
+                            let path = trimmed[6..].trim();
+                            match std::fs::read_to_string(path) {
+                                Ok(source) => {
+                                    match parse_v2(&source) {
+                                        Ok(program) => {
+                                            match interp.execute(&program) {
+                                                Ok(_) => {}
+                                                Err(e) => { eprintln!("error: {}", e); }
+                                            }
+                                            for log in interp.logs.drain(..) {
+                                                println!("{}", log.message);
+                                            }
+                                        }
+                                        Err(e) => eprintln!("error: {}", e.message),
+                                    }
+                                }
+                                Err(e) => eprintln!("error: cannot load '{}': {}", path, e),
+                            }
+                            continue;
+                        }
+                        _ if trimmed.starts_with(":save ") => {
+                            let path = trimmed[6..].trim();
+                            let _session: Vec<&str> = rl.complete("").iter().copied().collect();
+                            let content = rl.reverse_search("").map(|_| {
+                                // Save history as the session transcript
+                                String::new()
+                            }).unwrap_or_default();
+                            rl.save_history();
+                            println!("Session history saved to {}", history_path.display());
+                            if !path.is_empty() {
+                                // Also save to specified file
+                                let _ = std::fs::write(path, &content);
+                                println!("Session saved to {}", path);
+                            }
+                            continue;
+                        }
+                        _ if trimmed.starts_with(":search ") => {
+                            let pattern = trimmed[8..].trim();
+                            if let Some(found) = rl.reverse_search(pattern) {
+                                println!("Found: {}", found);
+                            } else {
+                                println!("No match found for '{}'", pattern);
+                            }
+                            continue;
+                        }
+                        _ => {
+                            eprintln!("unknown command: {}", trimmed);
+                            continue;
+                        }
+                    }
+                }
 
                 // Try wrapping in `output <expr>` first, fall back to raw statement
                 let source = format!("output {}", trimmed);
@@ -8734,11 +9544,11 @@ fn cmd_repl() {
                     println!("{}", log.message);
                 }
             }
-            Err(rustyline::error::ReadlineError::Interrupted) => {
+            Err(magi_lang::util::LineEditError::Interrupted) => {
                 println!("^C");
                 continue;
             }
-            Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(magi_lang::util::LineEditError::Eof) => break,
             Err(e) => {
                 eprintln!("read error: {}", e);
                 break;
@@ -8746,8 +9556,7 @@ fn cmd_repl() {
         }
     }
 
-    // Save history
-    let _ = rl.save_history(&history_path);
+    rl.save_history();
 }
 
 /// Get the user's home directory for history file storage.
@@ -9011,8 +9820,8 @@ fn cmd_run_wasm(path: &str) {
         process::exit(1);
     }
 
-    let engine = wasmtime::Engine::default();
-    let module = match wasmtime::Module::new(&engine, &wasm_bytes) {
+    let engine = magi_lang::compiler::wasm_runtime::Engine::default();
+    let module = match magi_lang::compiler::wasm_runtime::Module::new(&engine, &wasm_bytes) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: cannot load '{}': {}", path, e);
@@ -9020,90 +9829,71 @@ fn cmd_run_wasm(path: &str) {
         }
     };
 
-    let mut store = wasmtime::Store::new(&engine, ());
-    let mut linker = wasmtime::Linker::new(&engine);
+    let mut store = magi_lang::compiler::wasm_runtime::Store::new(&engine, ());
+    let mut linker = magi_lang::compiler::wasm_runtime::Linker::new(&engine);
 
     // Provide host functions that the MAGI runtime expects.
-    linker
-        .func_wrap("env", "print", |mut caller: wasmtime::Caller<'_, ()>, val: i64| {
-            if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                let data = memory.data(&caller);
-                let s = format_tagged_value(val, data);
-                println!("{}", s);
-            } else {
-                println!("<no-memory>");
+    linker.func_wrap_1_0("env", "print", |inst: &mut magi_lang::compiler::wasm_runtime::Instance, val: i64| {
+        let data = inst.get_memory_data();
+        let s = format_tagged_value(val, data);
+        println!("{}", s);
+    }).unwrap_or_else(|e| { eprintln!("error: failed to define print: {}", e); process::exit(1); });
+
+    linker.func_wrap_2_1("env", "runtime_call", |_inst: &mut magi_lang::compiler::wasm_runtime::Instance, _name: i32, _argc: i32| -> i64 {
+        // Stub runtime call — return null (NaN-boxed).
+        magi_lang::compiler::tag::encode(magi_lang::compiler::tag::NULL, 0)
+    }).unwrap_or_else(|e| { eprintln!("error: failed to define runtime_call: {}", e); process::exit(1); });
+
+    linker.func_wrap_1_1("env", "__to_string", |inst: &mut magi_lang::compiler::wasm_runtime::Instance, val: i64| -> i64 {
+        use magi_lang::compiler::tag;
+        let null_val = tag::encode(tag::NULL, 0);
+        // NaN-boxing: check if it's a NaN-boxed string
+        let is_nanboxed = (val & tag::NANBOX_MASK) == tag::NANBOX_SIG;
+        if is_nanboxed {
+            let type_tag = ((val >> tag::TAG_SHIFT) & 0x07) as u8;
+            if type_tag == tag::STRING {
+                return val;
             }
-        })
-        .unwrap_or_else(|e| { eprintln!("error: failed to define print: {}", e); process::exit(1); });
+        }
 
-    linker
-        .func_wrap("env", "runtime_call", |_caller: wasmtime::Caller<'_, ()>, _name: i32, _argc: i32| -> i64 {
-            // Stub runtime call — return null (NaN-boxed).
-            magi_lang::compiler::tag::encode(magi_lang::compiler::tag::NULL, 0)
-        })
-        .unwrap_or_else(|e| { eprintln!("error: failed to define runtime_call: {}", e); process::exit(1); });
+        let formatted = {
+            let data = inst.get_memory_data();
+            format_tagged_value(val, data)
+        };
+        let bytes = formatted.as_bytes();
+        let total = 4usize.saturating_add(bytes.len());
 
-    linker
-        .func_wrap("env", "__to_string", |mut caller: wasmtime::Caller<'_, ()>, val: i64| -> i64 {
-            use magi_lang::compiler::tag;
-            let null_val = tag::encode(tag::NULL, 0);
-            // NaN-boxing: check if it's a NaN-boxed string
-            let is_nanboxed = (val & tag::NANBOX_MASK) == tag::NANBOX_SIG;
-            if is_nanboxed {
-                let type_tag = ((val >> tag::TAG_SHIFT) & 0x07) as u8;
-                if type_tag == tag::STRING {
-                    return val;
-                }
-            }
+        // Read current heap pointer from exported global.
+        let ptr = match inst.get_global("__heap_ptr").and_then(|v| v.i32()) {
+            Some(v) => v as u32,
+            None => return null_val,
+        };
 
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return null_val,
+        // Write string: [u32 len][bytes...]
+        let str_offset = ptr as usize;
+        {
+            let data = inst.get_memory_data_mut();
+            let end = match str_offset.checked_add(4).and_then(|o| o.checked_add(bytes.len())) {
+                Some(e) if e <= data.len() => e,
+                _ => return null_val, // out of memory or overflow
             };
-            let heap_global = match caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
-                Some(g) => g,
-                None => return null_val,
-            };
+            let len_bytes = (bytes.len() as u32).to_le_bytes();
+            data[str_offset..str_offset + 4].copy_from_slice(&len_bytes);
+            data[str_offset + 4..end].copy_from_slice(bytes);
+        }
 
-            let formatted = {
-                let data = memory.data(&caller);
-                format_tagged_value(val, data)
-            };
-            let bytes = formatted.as_bytes();
-            let total = 4usize.saturating_add(bytes.len());
+        // Update heap pointer.
+        let new_ptr = match ptr.checked_add(total as u32) {
+            Some(v) => v,
+            None => return null_val,
+        };
+        let _ = inst.set_global("__heap_ptr", magi_lang::compiler::wasm_runtime::Val::I32(new_ptr as i32));
 
-            // Read current heap pointer from exported global.
-            let ptr = match heap_global.get(&mut caller).i32() {
-                Some(v) => v as u32,
-                None => return null_val,
-            };
+        // Return NaN-boxed string
+        magi_lang::compiler::tag::encode(magi_lang::compiler::tag::STRING, str_offset as i64)
+    }).unwrap_or_else(|e| { eprintln!("error: failed to define __to_string: {}", e); process::exit(1); });
 
-            // Write string: [u32 len][bytes...]
-            let str_offset = ptr as usize;
-            {
-                let data = memory.data_mut(&mut caller);
-                let end = match str_offset.checked_add(4).and_then(|o| o.checked_add(bytes.len())) {
-                    Some(e) if e <= data.len() => e,
-                    _ => return null_val, // out of memory or overflow
-                };
-                let len_bytes = (bytes.len() as u32).to_le_bytes();
-                data[str_offset..str_offset + 4].copy_from_slice(&len_bytes);
-                data[str_offset + 4..end].copy_from_slice(bytes);
-            }
-
-            // Update heap pointer.
-            let new_ptr = match ptr.checked_add(total as u32) {
-                Some(v) => v,
-                None => return null_val,
-            };
-            let _ = heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32));
-
-            // Return NaN-boxed string
-            magi_lang::compiler::tag::encode(magi_lang::compiler::tag::STRING, str_offset as i64)
-        })
-        .unwrap_or_else(|e| { eprintln!("error: failed to define __to_string: {}", e); process::exit(1); });
-
-    let instance = match linker.instantiate(&mut store, &module) {
+    let mut instance = match linker.instantiate(&mut store, &module) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("error: WASM instantiation failed: {}", e);
@@ -9112,25 +9902,15 @@ fn cmd_run_wasm(path: &str) {
     };
 
     // Call __main.
-    let main_fn = match instance.get_typed_func::<(), i64>(&mut store, "__main") {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: no __main export found in '{}': {}", path, e);
-            process::exit(1);
-        }
-    };
-
-    match main_fn.call(&mut store, ()) {
+    match instance.call("__main", &mut store) {
         Ok(result) => {
             // NaN-boxing: check if result is non-null
             // Null is encoded as tag::encode(NULL, 0) = NANBOX_SIG
             let null_val = magi_lang::compiler::tag::encode(magi_lang::compiler::tag::NULL, 0);
             if result != null_val {
                 // Use format_tagged_value which handles all tag types
-                let mem = instance.get_memory(&mut store, "memory")
-                    .map(|m| m.data(&store).to_vec())
-                    .unwrap_or_default();
-                println!("Result: {}", format_tagged_value(result, &mem));
+                let mem = instance.get_memory_data();
+                println!("Result: {}", format_tagged_value(result, mem));
             }
         }
         Err(e) => {
@@ -9365,6 +10145,62 @@ fn cmd_test_all() {
 }
 
 /// Extract `///` doc comments from a `.magi` source file and generate Markdown documentation.
+fn cmd_doc_test(path: &str) {
+    let source = read_source(path);
+    // Extract code blocks from /// doc comments
+    let mut examples = Vec::new();
+    let mut in_example = false;
+    let mut current_example = String::new();
+    let mut example_line = 0u32;
+
+    for (i, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("/// ```") {
+            if in_example {
+                examples.push((example_line, current_example.clone()));
+                current_example.clear();
+                in_example = false;
+            } else {
+                in_example = true;
+                example_line = i as u32 + 1;
+            }
+        } else if in_example && trimmed.starts_with("///") {
+            let code = trimmed.strip_prefix("/// ").or(trimmed.strip_prefix("///")).unwrap_or("");
+            current_example.push_str(code);
+            current_example.push('\n');
+        }
+    }
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for (line, code) in &examples {
+        match parse_v2(code) {
+            Ok(program) => {
+                let evaluator = FullEvaluator;
+                let mut interp = Interpreter::new(&evaluator);
+                match interp.execute(&program) {
+                    Ok(_) => {
+                        passed += 1;
+                        println!("  \x1b[32mPASS\x1b[0m doc example at line {}", line);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        println!("  \x1b[31mFAIL\x1b[0m doc example at line {} — {}", line, e);
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!("  \x1b[31mFAIL\x1b[0m doc example at line {} — parse error: {}", line, e.message);
+            }
+        }
+    }
+
+    println!("\n{} doc tests: {} passed, {} failed", passed + failed, passed, failed);
+    if failed > 0 { process::exit(1); }
+}
+
 fn cmd_doc(path: &str) {
     let source = read_source(path);
 

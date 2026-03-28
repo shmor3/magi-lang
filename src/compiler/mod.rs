@@ -1,14 +1,21 @@
-//! MAGI compiler — compiles MAGI AST to WebAssembly.
+//! MAGI compiler — compiles MAGI AST to WebAssembly and bytecode.
 //!
 //! Architecture:
 //! 1. AST → IR (stack-based intermediate representation)
-//! 2. IR → WASM binary (via wasm-encoder)
+//! 2. IR → WASM binary (via own encoder)
+//! 3. AST → Bytecode → VM (fast interpreter)
 
 mod compile;
 mod ir;
 mod wasm;
+pub mod bytecode;
+pub mod native;
+pub mod wasm_binary;
+pub mod wasm_runtime;
+pub mod webgpu;
+pub mod ir_vm;
 
-pub use compile::Compiler;
+pub use compile::{Compiler, SourceMapping};
 pub use ir::*;
 pub use wasm::WasmCodegen;
 
@@ -23,21 +30,30 @@ pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, CompileError> {
 }
 
 /// Errors that can occur during compilation.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum CompileError {
-    #[error("compile error at {line}:{col}: {message}")]
     Error {
         line: u32,
         col: u32,
         message: String,
     },
-
-    #[error("unsupported feature: {0}")]
     Unsupported(String),
-
-    #[error("internal compiler error: {0}")]
     Internal(String),
 }
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileError::Error { line, col, message } => {
+                write!(f, "compile error at {}:{}: {}", line, col, message)
+            }
+            CompileError::Unsupported(msg) => write!(f, "unsupported feature: {}", msg),
+            CompileError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for CompileError {}
 
 impl CompileError {
     pub fn at(line: u32, col: u32, msg: impl Into<String>) -> Self {

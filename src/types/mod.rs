@@ -7,21 +7,13 @@ pub mod operations;
 
 pub use operations::*;
 
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use crate::util::{OrderedMap, JsonValue, json_int, json_uint, json_float};
 use std::collections::HashMap;
 
-// =============================================================================
 // DataType
-// =============================================================================
 
 /// Strict data type enum for type-safe plugin communication.
-///
-/// Note: The API version uses `#[serde(tag, content)]` for JSON representation.
-/// The PDK version uses default serde enum encoding. Both share the same
-/// variant set and method surface.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum DataType {
     String(String),
     Int32(i32),
@@ -33,7 +25,7 @@ pub enum DataType {
     Bool(bool),
     Bytes(Vec<u8>),
     Array(Vec<DataType>),
-    Map(IndexMap<String, DataType>),
+    Map(OrderedMap<String, DataType>),
     Set(Vec<DataType>),
     Tuple(Vec<DataType>),
     Future(Box<FutureState>),
@@ -42,7 +34,7 @@ pub enum DataType {
 }
 
 /// State of an asynchronous computation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FutureState {
     /// A pending future with a task ID referencing a spawned thread.
     Pending(String),
@@ -51,9 +43,6 @@ pub enum FutureState {
 }
 
 impl DataType {
-    // =========================================================================
-    // Strict accessors
-    // =========================================================================
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -83,16 +72,13 @@ impl DataType {
         }
     }
 
-    pub fn as_map(&self) -> Option<&IndexMap<String, DataType>> {
+    pub fn as_map(&self) -> Option<&OrderedMap<String, DataType>> {
         match self {
             DataType::Map(map) => Some(map),
             _ => None,
         }
     }
 
-    // =========================================================================
-    // Type discrimination
-    // =========================================================================
 
     pub fn is_null(&self) -> bool {
         matches!(self, DataType::Null)
@@ -122,9 +108,7 @@ impl DataType {
         }
     }
 
-    // =========================================================================
     // Map/Array/Collection operations
-    // =========================================================================
 
     pub fn get(&self, key: &str) -> Option<&DataType> {
         match self {
@@ -149,9 +133,6 @@ impl DataType {
         self.len() == 0
     }
 
-    // =========================================================================
-    // Coercion methods
-    // =========================================================================
 
     pub fn to_bool(&self) -> bool {
         match self {
@@ -250,15 +231,13 @@ impl DataType {
         }
     }
 
-    // =========================================================================
     // JSON interop
-    // =========================================================================
 
-    pub fn from_json(value: serde_json::Value) -> DataType {
+    pub fn from_json(value: JsonValue) -> DataType {
         match value {
-            serde_json::Value::Null => DataType::Null,
-            serde_json::Value::Bool(b) => DataType::Bool(b),
-            serde_json::Value::Number(n) => {
+            JsonValue::Null => DataType::Null,
+            JsonValue::Bool(b) => DataType::Bool(b),
+            JsonValue::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     DataType::Int64(i)
                 } else if let Some(u) = n.as_u64() {
@@ -267,11 +246,11 @@ impl DataType {
                     DataType::Float64(n.as_f64().unwrap_or(0.0))
                 }
             }
-            serde_json::Value::String(s) => DataType::String(s),
-            serde_json::Value::Array(arr) => {
+            JsonValue::String(s) => DataType::String(s),
+            JsonValue::Array(arr) => {
                 DataType::Array(arr.into_iter().map(DataType::from_json).collect())
             }
-            serde_json::Value::Object(obj) => DataType::Map(
+            JsonValue::Object(obj) => DataType::Map(
                 obj.into_iter()
                     .map(|(k, v)| (k, DataType::from_json(v)))
                     .collect(),
@@ -279,60 +258,68 @@ impl DataType {
         }
     }
 
-    pub fn to_json(&self) -> serde_json::Value {
+    pub fn to_json(&self) -> JsonValue {
         match self {
-            DataType::Null => serde_json::Value::Null,
-            DataType::Bool(b) => serde_json::Value::Bool(*b),
-            DataType::Int32(i) => serde_json::json!(*i),
-            DataType::Int64(i) => serde_json::json!(*i),
-            DataType::Uint32(u) => serde_json::json!(*u),
-            DataType::Uint64(u) => serde_json::json!(*u),
+            DataType::Null => JsonValue::Null,
+            DataType::Bool(b) => JsonValue::Bool(*b),
+            DataType::Int32(i) => json_int(*i as i64),
+            DataType::Int64(i) => json_int(*i),
+            DataType::Uint32(u) => json_uint(*u as u64),
+            DataType::Uint64(u) => json_uint(*u),
             DataType::Float32(f) => {
                 if f.is_finite() {
-                    serde_json::json!(*f)
+                    json_float(*f as f64)
                 } else {
-                    serde_json::Value::Null
+                    JsonValue::Null
                 }
             }
             DataType::Float64(f) => {
                 if f.is_finite() {
-                    serde_json::json!(*f)
+                    json_float(*f)
                 } else {
-                    serde_json::Value::Null
+                    JsonValue::Null
                 }
             }
-            DataType::String(s) => serde_json::Value::String(s.clone()),
-            DataType::Bytes(b) => serde_json::json!(b),
+            DataType::String(s) => JsonValue::String(s.clone()),
+            DataType::Bytes(b) => JsonValue::Array(b.iter().map(|x| json_int(*x as i64)).collect()),
             DataType::Array(arr) => {
-                serde_json::Value::Array(arr.iter().map(|v| v.to_json()).collect())
+                JsonValue::Array(arr.iter().map(|v| v.to_json()).collect())
             }
             DataType::Map(map) => {
-                let obj: serde_json::Map<String, serde_json::Value> =
+                let obj: OrderedMap<String, JsonValue> =
                     map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
-                serde_json::Value::Object(obj)
+                JsonValue::Object(obj)
             }
             DataType::Set(items) => {
-                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+                JsonValue::Array(items.iter().map(|v| v.to_json()).collect())
             }
             DataType::Tuple(items) => {
-                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+                JsonValue::Array(items.iter().map(|v| v.to_json()).collect())
             }
             DataType::Future(state) => match state.as_ref() {
-                FutureState::Pending(id) => serde_json::json!({"state": "pending", "task_id": id}),
+                FutureState::Pending(id) => {
+                    let mut obj = OrderedMap::new();
+                    obj.insert("state".to_string(), JsonValue::String("pending".to_string()));
+                    obj.insert("task_id".to_string(), JsonValue::String(id.clone()));
+                    JsonValue::Object(obj)
+                }
                 FutureState::Resolved(val) => {
-                    serde_json::json!({"state": "resolved", "value": val.to_json()})
+                    let mut obj = OrderedMap::new();
+                    obj.insert("state".to_string(), JsonValue::String("resolved".to_string()));
+                    obj.insert("value".to_string(), val.to_json());
+                    JsonValue::Object(obj)
                 }
                 FutureState::Rejected(err) => {
-                    serde_json::json!({"state": "rejected", "error": err})
+                    let mut obj = OrderedMap::new();
+                    obj.insert("state".to_string(), JsonValue::String("rejected".to_string()));
+                    obj.insert("error".to_string(), JsonValue::String(err.clone()));
+                    JsonValue::Object(obj)
                 }
             },
         }
     }
 }
 
-// =============================================================================
-// Display
-// =============================================================================
 
 impl std::fmt::Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -368,9 +355,6 @@ impl std::fmt::Display for DataType {
     }
 }
 
-// =============================================================================
-// From impls
-// =============================================================================
 
 impl From<String> for DataType {
     fn from(s: String) -> Self {
@@ -468,8 +452,8 @@ impl From<Vec<DataType>> for DataType {
     }
 }
 
-impl From<IndexMap<String, DataType>> for DataType {
-    fn from(map: IndexMap<String, DataType>) -> Self {
+impl From<OrderedMap<String, DataType>> for DataType {
+    fn from(map: OrderedMap<String, DataType>) -> Self {
         DataType::Map(map)
     }
 }
@@ -486,9 +470,7 @@ impl From<Option<DataType>> for DataType {
     }
 }
 
-// =============================================================================
 // ChannelType
-// =============================================================================
 
 /// The kind of data a channel carries.
 ///
@@ -497,8 +479,7 @@ impl From<Option<DataType>> for DataType {
 ///
 /// Aligned with `DataType` primitives — every variant corresponds to a
 /// concrete data representation, not a semantic domain concept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelType {
     /// UTF-8 text data.
     String,
@@ -680,11 +661,19 @@ mod tests {
 
     #[test]
     fn test_json_interop() {
-        let json = serde_json::json!({"x": 42, "s": "hi", "b": true});
+        let mut obj = OrderedMap::new();
+        obj.insert("x".to_string(), json_int(42));
+        obj.insert("s".to_string(), JsonValue::String("hi".into()));
+        obj.insert("b".to_string(), JsonValue::Bool(true));
+        let json = JsonValue::Object(obj);
         let dt = DataType::from_json(json);
         assert_eq!(dt.get("x").unwrap().to_i64(), Some(42));
         let back = dt.to_json();
-        assert_eq!(back["s"], "hi");
+        if let JsonValue::Object(ref o) = back {
+            assert_eq!(o.get("s"), Some(&JsonValue::String("hi".into())));
+        } else {
+            panic!("expected Object");
+        }
     }
 
     #[test]
@@ -718,20 +707,7 @@ mod tests {
         assert!(dt.is_null());
     }
 
-    #[test]
-    fn test_serialization_with_unsigned() {
-        let dt = DataType::Map(IndexMap::from([
-            ("u32".to_string(), DataType::Uint32(42)),
-            ("u64".to_string(), DataType::Uint64(999)),
-        ]));
-        let json = serde_json::to_string(&dt).unwrap();
-        let round_trip: DataType = serde_json::from_str(&json).unwrap();
-        assert_eq!(dt, round_trip);
-    }
-
-    // =========================================================================
     // ChannelType tests
-    // =========================================================================
 
     #[test]
     fn test_channel_type_as_str_and_parse() {
@@ -747,14 +723,6 @@ mod tests {
     #[test]
     fn test_channel_type_all_has_12_variants() {
         assert_eq!(ChannelType::ALL.len(), 12);
-    }
-
-    #[test]
-    fn test_channel_type_serde() {
-        let json = serde_json::to_string(&ChannelType::String).unwrap();
-        assert_eq!(json, "\"string\"");
-        let rt: ChannelType = serde_json::from_str("\"array\"").unwrap();
-        assert_eq!(rt, ChannelType::Array);
     }
 
     #[test]
@@ -854,7 +822,6 @@ mod tests {
             (&Float64, &Bytes, false),
             (&Float64, &Array, false),
             (&Float64, &Map, false),
-            // String source
             (&String, &Int32, false),
             (&String, &Int64, false),
             (&String, &Uint32, false),
@@ -865,7 +832,6 @@ mod tests {
             (&String, &Bytes, true),    // string -> bytes
             (&String, &Array, false),
             (&String, &Map, false),
-            // Bool source
             (&Bool, &String, false),
             (&Bool, &Int32, false),
             (&Bool, &Int64, false),
@@ -876,7 +842,6 @@ mod tests {
             (&Bool, &Bytes, false),
             (&Bool, &Array, false),
             (&Bool, &Map, false),
-            // Bytes source
             (&Bytes, &String, false),
             (&Bytes, &Int32, false),
             (&Bytes, &Int64, false),
@@ -887,7 +852,6 @@ mod tests {
             (&Bytes, &Bool, false),
             (&Bytes, &Array, false),
             (&Bytes, &Map, false),
-            // Array source
             (&Array, &String, false),
             (&Array, &Int32, false),
             (&Array, &Int64, false),
@@ -898,7 +862,6 @@ mod tests {
             (&Array, &Bool, false),
             (&Array, &Bytes, false),
             (&Array, &Map, false),
-            // Map source
             (&Map, &String, false),
             (&Map, &Int32, false),
             (&Map, &Int64, false),
@@ -933,9 +896,7 @@ mod tests {
             );
         }
     }
-    // =========================================================================
     // DataType::Future unit tests (Gap #5)
-    // =========================================================================
 
     #[test]
     fn test_future_type_name() {
@@ -983,7 +944,10 @@ mod tests {
     fn test_future_to_json_pending() {
         let dt = DataType::Future(Box::new(FutureState::Pending(String::new())));
         let json = dt.to_json();
-        assert_eq!(json, serde_json::json!({"state": "pending", "task_id": ""}));
+        let mut expected = OrderedMap::new();
+        expected.insert("state".to_string(), JsonValue::String("pending".into()));
+        expected.insert("task_id".to_string(), JsonValue::String("".into()));
+        assert_eq!(json, JsonValue::Object(expected));
     }
 
     #[test]
@@ -992,20 +956,20 @@ mod tests {
             "ok".into(),
         )))));
         let json = dt.to_json();
-        assert_eq!(
-            json,
-            serde_json::json!({"state": "resolved", "value": "ok"})
-        );
+        let mut expected = OrderedMap::new();
+        expected.insert("state".to_string(), JsonValue::String("resolved".into()));
+        expected.insert("value".to_string(), JsonValue::String("ok".into()));
+        assert_eq!(json, JsonValue::Object(expected));
     }
 
     #[test]
     fn test_future_to_json_rejected() {
         let dt = DataType::Future(Box::new(FutureState::Rejected("bad".into())));
         let json = dt.to_json();
-        assert_eq!(
-            json,
-            serde_json::json!({"state": "rejected", "error": "bad"})
-        );
+        let mut expected = OrderedMap::new();
+        expected.insert("state".to_string(), JsonValue::String("rejected".into()));
+        expected.insert("error".to_string(), JsonValue::String("bad".into()));
+        assert_eq!(json, JsonValue::Object(expected));
     }
 
     #[test]
@@ -1032,9 +996,7 @@ mod tests {
         assert!(!dt.is_null());
     }
 
-    // =========================================================================
     // DataType helper method tests
-    // =========================================================================
 
     #[test]
     fn test_datatype_as_str() {
@@ -1069,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_datatype_as_map() {
-        let mut map = indexmap::IndexMap::new();
+        let mut map = OrderedMap::new();
         map.insert("key".to_string(), DataType::Int64(1));
         let dt = DataType::Map(map.clone());
         assert!(dt.as_map().is_some());
@@ -1093,7 +1055,7 @@ mod tests {
 
     #[test]
     fn test_datatype_get() {
-        let mut map = indexmap::IndexMap::new();
+        let mut map = OrderedMap::new();
         map.insert("name".to_string(), DataType::String("Alice".into()));
         let dt = DataType::Map(map);
         assert_eq!(dt.get("name"), Some(&DataType::String("Alice".into())));
@@ -1109,7 +1071,7 @@ mod tests {
             2
         );
         assert_eq!(DataType::Bytes(vec![1, 2, 3]).len(), 3);
-        let mut map = indexmap::IndexMap::new();
+        let mut map = OrderedMap::new();
         map.insert("a".to_string(), DataType::Null);
         assert_eq!(DataType::Map(map).len(), 1);
         assert_eq!(DataType::String("hello".into()).len(), 5);

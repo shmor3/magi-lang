@@ -17,9 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 pub use crate::eval::DiagnosticSeverity;
 
-// =============================================================================
 // Constant expression values (for constant folding)
-// =============================================================================
 
 /// A compile-time constant value produced by constant folding.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,9 +28,6 @@ pub enum ConstLiteral {
     Bool(bool),
 }
 
-// =============================================================================
-// Public types
-// =============================================================================
 
 /// Result of AST-level type analysis.
 #[derive(Debug, Clone)]
@@ -60,9 +55,7 @@ pub struct AstDiagnostic {
     pub source_file: Option<String>,
 }
 
-// =============================================================================
 // Internal: function signature tracking
-// =============================================================================
 
 /// Tracked signature for a user-defined function.
 #[derive(Clone)]
@@ -80,9 +73,7 @@ struct FunctionSig {
     deprecated: bool,
 }
 
-// =============================================================================
 // Internal: variable tracking
-// =============================================================================
 
 /// Metadata tracked per variable binding.
 struct VarInfo {
@@ -98,9 +89,6 @@ struct VarInfo {
     def_col: u32,
 }
 
-// =============================================================================
-// Entry point
-// =============================================================================
 
 /// Type-check a parsed AST program.
 ///
@@ -129,9 +117,7 @@ pub fn check_types_with_source(
     result
 }
 
-// =============================================================================
 // TypeChecker
-// =============================================================================
 
 struct TypeChecker {
     /// Scope stack — innermost scope is last.
@@ -171,6 +157,12 @@ struct TypeChecker {
     const_literals: HashMap<String, ConstLiteral>,
     /// Known trait definitions: trait_name → list of (method_name, param_count, line, col, return_type).
     trait_defs: HashMap<String, Vec<(String, usize, u32, u32, Option<String>)>>,
+    /// Active generic type parameters in scope (from current function definition).
+    generic_params: HashSet<String>,
+    /// Generic parameter bounds: type_param_name → list of trait bound names.
+    generic_bounds: HashMap<String, Vec<String>>,
+    /// Generic function signatures: name → list of type parameter names.
+    generic_fn_params: HashMap<String, Vec<String>>,
 }
 
 impl TypeChecker {
@@ -190,6 +182,9 @@ impl TypeChecker {
             const_values: HashMap::new(),
             const_literals: HashMap::new(),
             trait_defs: HashMap::new(),
+            generic_params: HashSet::new(),
+            generic_bounds: HashMap::new(),
+            generic_fn_params: HashMap::new(),
             pipe_depth: 0,
             loop_depth: 0,
             function_depth: 0,
@@ -198,9 +193,6 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
-    // Scope management
-    // =========================================================================
 
     fn push_scope(&mut self) {
         self.env.push(HashMap::new());
@@ -253,9 +245,6 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
-    // Variable lookup
-    // =========================================================================
 
     /// Look up a variable by name, searching from innermost scope outward.
     fn lookup(&self, name: &str) -> Option<&VarInfo> {
@@ -351,9 +340,6 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
-    // Diagnostics
-    // =========================================================================
 
     fn emit_coded(
         &mut self,
@@ -376,9 +362,6 @@ impl TypeChecker {
         });
     }
 
-    // =========================================================================
-    // Type alias collection
-    // =========================================================================
 
     /// Collect type alias definitions from a list of statements.
     /// Handles both top-level and module-scoped aliases (with module:: prefix).
@@ -401,9 +384,7 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
     // Program / statement checking
-    // =========================================================================
 
     fn check_program(&mut self, program: &Program) {
         // Pass 1a: collect type aliases first (so they're available for function sigs)
@@ -419,7 +400,7 @@ impl TypeChecker {
                 let field_info: Vec<(String, Option<String>)> = fields.iter().map(|f| (f.name.clone(), f.type_annotation.as_ref().map(|t| t.to_string()))).collect();
                 self.struct_defs.insert(name.clone(), field_info);
             }
-            if let StatementKind::TraitDef { name, methods } = &stmt.kind {
+            if let StatementKind::TraitDef { name, methods, .. } = &stmt.kind {
                 let method_info: Vec<(String, usize, u32, u32, Option<String>)> = methods.iter().map(|m| {
                     (m.name.clone(), m.params.len(), m.span.start_line, m.span.start_col, m.return_type.as_ref().map(|t| t.to_string()))
                 }).collect();
@@ -447,6 +428,17 @@ impl TypeChecker {
                     .as_ref()
                     .and_then(|ta| self.resolve_type(&ta.to_string()))
                     .unwrap_or(ChannelType::Null);
+                // Check for duplicate function definitions
+                if let Some(existing) = self.function_sigs.get(&def.name) {
+                    self.emit_coded(
+                        stmt.span.start_line,
+                        stmt.span.start_col,
+                        format!("duplicate definition of function '{}' (first defined at line {})", def.name, existing.def_line),
+                        DiagnosticSeverity::Warning,
+                        super::errors::ErrorCode::W113,
+                        None,
+                    );
+                }
                 self.function_sigs.insert(
                     def.name.clone(),
                     FunctionSig {
@@ -527,18 +519,14 @@ impl TypeChecker {
 
     fn check_statement(&mut self, stmt: &Statement) {
         match &stmt.kind {
-            // -----------------------------------------------------------------
             // import "plugin-id";
-            // -----------------------------------------------------------------
             StatementKind::Import(id) => {
                 // Record import location for unused import diagnostics.
                 self.import_locations.entry(id.clone())
                     .or_insert((stmt.span.start_line, stmt.span.start_col));
             }
 
-            // -----------------------------------------------------------------
             // let name = expr;  /  let name: type = expr;
-            // -----------------------------------------------------------------
             StatementKind::Let {
                 name,
                 type_annotation,
@@ -555,9 +543,7 @@ impl TypeChecker {
                 self.define_var(name, ct, false, stmt.span.start_line, stmt.span.start_col);
             }
 
-            // -----------------------------------------------------------------
             // let mut name = expr;  /  let mut name: type = expr;
-            // -----------------------------------------------------------------
             StatementKind::LetMut {
                 name,
                 type_annotation,
@@ -580,9 +566,7 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // name = expr;
-            // -----------------------------------------------------------------
             StatementKind::Assignment { name, value } => {
                 let new_type = self.infer_expr(value);
 
@@ -642,9 +626,7 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // for item in iterable { body }
-            // -----------------------------------------------------------------
             StatementKind::ForLoop {
                 label: _,
                 pattern,
@@ -705,9 +687,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            // -----------------------------------------------------------------
             // while condition { body }
-            // -----------------------------------------------------------------
             StatementKind::WhileLoop { condition, body, .. } => {
                 let cond_type = self.infer_expr(condition);
                 if cond_type != ChannelType::Bool && cond_type != ChannelType::Null {
@@ -731,28 +711,49 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            // -----------------------------------------------------------------
             // output expr;
-            // -----------------------------------------------------------------
             StatementKind::Output(expr) => {
                 let _ = self.infer_expr(expr);
             }
 
-            // -----------------------------------------------------------------
             // expr;
-            // -----------------------------------------------------------------
             StatementKind::ExprStatement(expr) => {
                 let _ = self.infer_expr(expr);
             }
 
-            // -----------------------------------------------------------------
             // fn name(params) -> type { body }
-            // -----------------------------------------------------------------
             StatementKind::FunctionDef(def) | StatementKind::AsyncFunctionDef(def) => {
                 self.push_scope();
                 self.function_depth += 1;
                 let saved_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
+                // Track generic type parameters
+                let saved_generic_params = std::mem::take(&mut self.generic_params);
+                let saved_generic_bounds = std::mem::take(&mut self.generic_bounds);
+                if !def.type_params.is_empty() {
+                    self.generic_fn_params.insert(def.name.clone(), def.type_params.clone());
+                    for tp in &def.type_params {
+                        self.generic_params.insert(tp.clone());
+                        self.define_var(tp, ChannelType::Null, false, def.span.start_line, def.span.start_col);
+                    }
+                    // Extract bounds from where clauses
+                    for wc in &def.where_clauses {
+                        self.generic_bounds
+                            .entry(wc.type_param.clone())
+                            .or_default()
+                            .extend(wc.bounds.iter().cloned());
+                    }
+                    // Validate: warn if generic param has bounds on unknown trait
+                    let bound_warnings: Vec<_> = self.generic_bounds.iter()
+                        .flat_map(|(p, bs)| bs.iter().map(move |b| (p.clone(), b.clone())))
+                        .filter(|(_, b)| !self.trait_defs.contains_key(b) && !["Display","Debug","Clone","Copy","Send","Sync","Sized","Hash","Eq","Ord","Default","Iterator"].contains(&b.as_str()))
+                        .collect();
+                    for (param, bound) in bound_warnings {
+                        self.emit_coded(def.span.start_line, def.span.start_col,
+                            format!("generic bound '{}' on '{}' references unknown trait", bound, param),
+                            DiagnosticSeverity::Warning, super::errors::ErrorCode::W114, None);
+                    }
+                }
                 let saved_return_types = std::mem::take(&mut self.collected_return_types);
                 let resolved_return = def.return_type.as_ref()
                     .and_then(|ta| self.resolve_type(&ta.to_string()))
@@ -862,6 +863,8 @@ impl TypeChecker {
                 self.function_depth -= 1;
                 self.loop_depth = saved_loop_depth;
                 self.current_return_type = prev_return_type;
+                self.generic_params = saved_generic_params;
+                self.generic_bounds = saved_generic_bounds;
                 self.pop_scope();
             }
 
@@ -933,9 +936,7 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // let [a, b] = expr; / let {x, y} = expr;
-            // -----------------------------------------------------------------
             StatementKind::LetDestructure {
                 pattern,
                 mutable,
@@ -1047,9 +1048,7 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // name += expr; / name -= expr; etc.
-            // -----------------------------------------------------------------
             StatementKind::CompoundAssign { name, op, value } => {
                 let val_type = self.infer_expr(value);
 
@@ -1196,9 +1195,7 @@ impl TypeChecker {
                 self.infer_expr(value);
             }
 
-            // -----------------------------------------------------------------
             // try { ... } catch err { ... } finally { ... }
-            // -----------------------------------------------------------------
             StatementKind::TryCatch {
                 try_block,
                 catch_var,
@@ -1230,16 +1227,12 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // throw expr;
-            // -----------------------------------------------------------------
             StatementKind::Throw(expr) => {
                 let _ = self.infer_expr(expr);
             }
 
-            // -----------------------------------------------------------------
             // const NAME = expr;
-            // -----------------------------------------------------------------
             StatementKind::ConstDef {
                 name,
                 type_annotation,
@@ -1275,7 +1268,6 @@ impl TypeChecker {
                 if let Some(lit) = folded {
                     self.const_literals.insert(name.clone(), lit);
                 }
-                // Constants are immutable
                 self.define_var(name, ct, false, stmt.span.start_line, stmt.span.start_col);
                 // Mark as const for unused-constant diagnostics.
                 if let Some(info) = self.lookup_mut(name) {
@@ -1283,9 +1275,20 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
+            // static name = expr; / static mut name = expr;
+            StatementKind::StaticDef { name, type_annotation, value, mutable } => {
+                let inferred = self.infer_expr(value);
+                let ct = self.reconcile_annotation(
+                    type_annotation.as_ref(),
+                    inferred,
+                    stmt.span.start_line,
+                    stmt.span.start_col,
+                    name,
+                );
+                self.define_var(name, ct, *mutable, stmt.span.start_line, stmt.span.start_col);
+            }
+
             // type Name = target;
-            // -----------------------------------------------------------------
             StatementKind::TypeAlias { name, target } => {
                 // Validate the target type resolves (could be a built-in or another alias)
                 if self.resolve_type(&target.to_string()).is_none() {
@@ -1300,9 +1303,7 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // mod name { body }
-            // -----------------------------------------------------------------
             StatementKind::ModuleDef { name: _, body } => {
                 self.push_scope();
                 for s in &body.statements {
@@ -1314,9 +1315,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            // -----------------------------------------------------------------
             // use path::to::item;
-            // -----------------------------------------------------------------
             StatementKind::Use { path, alias, glob, .. } => {
                 // W208: Duplicate import detection
                 let import_key = path.join("::");
@@ -1581,9 +1580,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            // -----------------------------------------------------------------
             // (a, b) = (expr1, expr2); — tuple/swap assignment
-            // -----------------------------------------------------------------
             StatementKind::TupleAssignment { names, value } => {
                 let _ = self.infer_expr(value);
                 for name in names {
@@ -1620,7 +1617,6 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
     /// Check if match arms exhaustively cover all variants of a known enum.
     fn check_enum_exhaustive(&self, arms: &[crate::syntax::ast::MatchArm]) -> bool {
         use std::collections::HashSet;
@@ -1730,12 +1726,31 @@ impl TypeChecker {
         has_true && has_false
     }
 
-    // Block
-    // =========================================================================
 
     fn check_block(&mut self, block: &Block) {
+        let mut found_terminal = false;
         for stmt in &block.statements {
+            if found_terminal {
+                // Unreachable code after return/break/continue/throw
+                self.emit_coded(
+                    stmt.span.start_line,
+                    stmt.span.start_col,
+                    "unreachable code after return/break/continue/throw".to_string(),
+                    DiagnosticSeverity::Warning,
+                    super::errors::ErrorCode::W106,
+                    None,
+                );
+                break;
+            }
             self.check_statement(stmt);
+            // Check if this statement terminates control flow
+            match &stmt.kind {
+                StatementKind::Return(_) | StatementKind::Throw(_) => { found_terminal = true; }
+                StatementKind::Break { .. } | StatementKind::Continue { .. } => {
+                    if self.loop_depth > 0 { found_terminal = true; }
+                }
+                _ => {}
+            }
         }
         if let Some(tail) = &block.tail_expr {
             let _ = self.infer_expr(tail);
@@ -1762,15 +1777,9 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
-    // Expression type inference
-    // =========================================================================
 
     fn infer_expr(&mut self, expr: &Expression) -> ChannelType {
         match &expr.kind {
-            // -----------------------------------------------------------------
-            // Literals
-            // -----------------------------------------------------------------
             ExpressionKind::Literal(lit) => match lit {
                 Literal::Int64(_) => ChannelType::Int64,
                 Literal::Float64(_) => ChannelType::Float64,
@@ -1810,9 +1819,6 @@ impl TypeChecker {
                 }
             },
 
-            // -----------------------------------------------------------------
-            // Variable reference
-            // -----------------------------------------------------------------
             ExpressionKind::Variable(name) => {
                 // Built-in constant: None (#78)
                 if name == "None" {
@@ -1824,7 +1830,6 @@ impl TypeChecker {
                 let ct = match self.lookup(name) {
                     Some(info) => const_type.unwrap_or(info.channel_type),
                     None => {
-                        // Check if it's a known function name (first-class function reference).
                         if self.function_sigs.contains_key(name.as_str()) {
                             if let Some(sig) = self.function_sigs.get_mut(name.as_str()) {
                                 sig.used = true;
@@ -1853,9 +1858,6 @@ impl TypeChecker {
                 ct
             }
 
-            // -----------------------------------------------------------------
-            // Binary operations
-            // -----------------------------------------------------------------
             ExpressionKind::BinaryOp { op, left, right } => {
                 let left_ty = self.infer_expr(left);
                 let right_ty = self.infer_expr(right);
@@ -1863,9 +1865,6 @@ impl TypeChecker {
                 self.infer_binop(*op, left_ty, right_ty, expr.span)
             }
 
-            // -----------------------------------------------------------------
-            // Unary operations
-            // -----------------------------------------------------------------
             ExpressionKind::UnaryOp { op, operand } => {
                 // W106: Double negation or double NOT.
                 if let ExpressionKind::UnaryOp { op: inner_op, .. } = &operand.kind {
@@ -1923,9 +1922,7 @@ impl TypeChecker {
                 }
             }
 
-            // -----------------------------------------------------------------
             // Function / operation call
-            // -----------------------------------------------------------------
             ExpressionKind::Call { name, args, kwargs } => {
                 // Infer all argument types first (for side effects + diagnostics).
                 let arg_types: Vec<ChannelType> = args.iter().map(|a| self.infer_expr(a)).collect();
@@ -1951,7 +1948,6 @@ impl TypeChecker {
 
                 // Is it a user-defined function?
                 if let Some(sig) = self.function_sigs.get(name).cloned() {
-                    // Mark as used
                     if let Some(sig_mut) = self.function_sigs.get_mut(name) {
                         sig_mut.used = true;
                     }
@@ -1990,7 +1986,6 @@ impl TypeChecker {
                             None,
                         );
                     }
-                    // Check param types
                     for (i, (param_name, expected_type)) in sig.params.iter().enumerate() {
                         if let Some(&actual_type) = arg_types.get(i) {
                             if actual_type != ChannelType::Null
@@ -2177,9 +2172,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Pipe: left |> right
-            // -----------------------------------------------------------------
             ExpressionKind::Pipe { left, right } => {
                 self.infer_expr(left);
                 // The right side may contain a Placeholder that receives left_ty,
@@ -2191,9 +2184,7 @@ impl TypeChecker {
                 right_ty
             }
 
-            // -----------------------------------------------------------------
             // If/else expression
-            // -----------------------------------------------------------------
             ExpressionKind::IfElse {
                 condition,
                 then_block,
@@ -2256,14 +2247,9 @@ impl TypeChecker {
                 unified
             }
 
-            // -----------------------------------------------------------------
-            // Block expression
-            // -----------------------------------------------------------------
             ExpressionKind::Block(block) => self.infer_block(block),
 
-            // -----------------------------------------------------------------
             // Index: arr[i]
-            // -----------------------------------------------------------------
             ExpressionKind::Index { object, index } => {
                 let obj_ty = self.infer_expr(object);
                 let idx_ty = self.infer_expr(index);
@@ -2341,12 +2327,24 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Field access: obj.field
-            // -----------------------------------------------------------------
-            ExpressionKind::FieldAccess { object, field: _ } => {
+            ExpressionKind::FieldAccess { object, field } => {
                 let obj_ty = self.infer_expr(object);
-                if obj_ty != ChannelType::Map
+                // Null safety: warn on field access on potentially null value
+                if obj_ty == ChannelType::Null {
+                    // Check if it's using optional chaining (?.)
+                    let has_optional = matches!(&object.kind, ExpressionKind::OptionalChain { .. });
+                    if !has_optional {
+                        self.emit_coded(
+                            object.span.start_line,
+                            object.span.start_col,
+                            format!("field access '.{}' on potentially null value — use '?.' for safe access", field),
+                            DiagnosticSeverity::Warning,
+                            super::errors::ErrorCode::W114,
+                            None,
+                        );
+                    }
+                } else if obj_ty != ChannelType::Map
                     && obj_ty != ChannelType::String
                     && obj_ty != ChannelType::Null
                 {
@@ -2362,9 +2360,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Placeholder (_)
-            // -----------------------------------------------------------------
             ExpressionKind::Placeholder => {
                 if self.pipe_depth == 0 {
                     self.emit_coded(
@@ -2379,9 +2375,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Range expression: range(start, end)
-            // -----------------------------------------------------------------
             ExpressionKind::Range { start, end, inclusive } => {
                 let start_ty = self.infer_expr(start);
                 let end_ty = self.infer_expr(end);
@@ -2436,9 +2430,7 @@ impl TypeChecker {
                 ChannelType::Null // Future type not in ChannelType yet
             }
 
-            // -----------------------------------------------------------------
             // Method call: obj.method(args)
-            // -----------------------------------------------------------------
             ExpressionKind::MethodCall {
                 object,
                 method,
@@ -2540,9 +2532,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Lambda: |params| expr
-            // -----------------------------------------------------------------
             ExpressionKind::Lambda { params, body } => {
                 self.push_scope();
                 self.function_depth += 1;
@@ -2579,9 +2569,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Match expression: match value { pattern => body, ... }
-            // -----------------------------------------------------------------
             ExpressionKind::Match { value, arms } => {
                 let val_type = self.infer_expr(value);
 
@@ -2597,7 +2585,6 @@ impl TypeChecker {
                     return ChannelType::Null;
                 }
 
-                // Check for exhaustiveness
                 let has_catchall = arms.iter().any(|arm| {
                     if arm.guard.is_some() {
                         return false;
@@ -2630,7 +2617,6 @@ impl TypeChecker {
                 let mut arm_types = Vec::new();
                 for arm in arms {
                     self.push_scope();
-                    // Bind pattern variables
                     self.bind_pattern_vars(&arm.pattern, val_type, &arm.span);
                     if let Some(guard) = &arm.guard {
                         let guard_ty = self.infer_expr(guard);
@@ -2650,13 +2636,10 @@ impl TypeChecker {
                     self.pop_scope();
                 }
 
-                // Unify arm types
                 unify_types(&arm_types)
             }
 
-            // -----------------------------------------------------------------
             // String interpolation: f"text {expr} text"
-            // -----------------------------------------------------------------
             ExpressionKind::StringInterpolation { parts } => {
                 for part in parts {
                     if let StringPart::Expr(e) = part {
@@ -2666,9 +2649,7 @@ impl TypeChecker {
                 ChannelType::String
             }
 
-            // -----------------------------------------------------------------
             // Null coalescing: x ?? default
-            // -----------------------------------------------------------------
             ExpressionKind::NullCoalesce { left, right } => {
                 let left_ty = self.infer_expr(left);
                 let right_ty = self.infer_expr(right);
@@ -2676,9 +2657,7 @@ impl TypeChecker {
                 unify_types(&[left_ty, right_ty])
             }
 
-            // -----------------------------------------------------------------
             // Optional chaining: obj?.field
-            // -----------------------------------------------------------------
             ExpressionKind::OptionalChain { object, field } => {
                 let obj_ty = self.infer_expr(object);
                 // Empty field means this is an index-access marker (expr?[index]),
@@ -2700,9 +2679,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // Spread: ...expr
-            // -----------------------------------------------------------------
             ExpressionKind::Spread(inner) => {
                 let inner_ty = self.infer_expr(inner);
                 if inner_ty != ChannelType::Array
@@ -2721,9 +2698,7 @@ impl TypeChecker {
                 inner_ty
             }
 
-            // -----------------------------------------------------------------
             // loop { body } — infinite loop with break value
-            // -----------------------------------------------------------------
             ExpressionKind::Loop { body: block, .. } => {
                 // W104 (empty block) is handled by the linter as W206.
                 self.push_scope();
@@ -2735,9 +2710,7 @@ impl TypeChecker {
                 ChannelType::Null
             }
 
-            // -----------------------------------------------------------------
             // try { ... } catch err { ... } — expression form
-            // -----------------------------------------------------------------
             ExpressionKind::TryCatchExpr {
                 try_block,
                 catch_var,
@@ -3072,12 +3045,67 @@ impl TypeChecker {
             ExpressionKind::TryPropagate(inner) => {
                 self.infer_expr(inner)
             }
+
+            ExpressionKind::Yield(inner) => {
+                self.infer_expr(inner)
+            }
+
+            ExpressionKind::UnsafeBlock(block) => {
+                self.infer_block(block)
+            }
+
+            ExpressionKind::InlineAsm { operands, .. } => {
+                for op in operands {
+                    self.infer_expr(op);
+                }
+                ChannelType::Null
+            }
+
+            ExpressionKind::Ref(inner) => {
+                self.infer_expr(inner)
+            }
+
+            ExpressionKind::MoveClosure { params, body } => {
+                self.push_scope();
+                self.function_depth += 1;
+                let saved_loop_depth = self.loop_depth;
+                self.loop_depth = 0;
+                let prev_return_type = std::mem::replace(&mut self.current_return_type, ChannelType::Null);
+                for param in params {
+                    let ct = param
+                        .type_annotation
+                        .as_ref()
+                        .and_then(|ta| self.resolve_type(&ta.to_string()))
+                        .unwrap_or(ChannelType::Null);
+                    if let Some(default_expr) = &param.default {
+                        self.check_default_param_type(default_expr, &ct);
+                    }
+                    self.define_var(
+                        &param.name,
+                        ct,
+                        false,
+                        param.span.start_line,
+                        param.span.start_col,
+                    );
+                    if let Some(info) = self.lookup_mut(&param.name) {
+                        info.is_param = true;
+                    }
+                }
+                let _ = self.infer_expr(body);
+                self.function_depth -= 1;
+                self.loop_depth = saved_loop_depth;
+                self.current_return_type = prev_return_type;
+                self.pop_scope();
+                ChannelType::Null
+            }
+
+            ExpressionKind::DynTrait(_) => {
+                ChannelType::Null
+            }
         }
     }
 
-    // =========================================================================
     // Pattern variable binding (for match expressions)
-    // =========================================================================
 
     fn bind_pattern_vars(&mut self, pattern: &Pattern, val_type: ChannelType, span: &Span) {
         match pattern {
@@ -3267,9 +3295,7 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
     // Binary operator type inference
-    // =========================================================================
 
     fn infer_binop(
         &mut self,
@@ -3332,9 +3358,7 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
     // Binary operator literal checks
-    // =========================================================================
 
     /// Check binary operations for common mistakes involving literals.
     fn check_binop_literals(
@@ -3467,9 +3491,6 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
-    // Type alias resolution
-    // =========================================================================
 
     /// Resolve a type name, following type aliases if necessary.
     /// Returns `Some(ChannelType)` if the name is a built-in type or resolves
@@ -3479,6 +3500,9 @@ impl TypeChecker {
         if let Some(ct) = ChannelType::parse(name) {
             return Some(ct);
         }
+        if self.generic_params.contains(name) {
+            return Some(ChannelType::Null); // Generic params accept any type
+        }
         // Follow alias chain with depth limit to prevent infinite loops on cycles.
         let mut current = name;
         for _ in 0..32 {
@@ -3486,6 +3510,9 @@ impl TypeChecker {
                 Some(target) => {
                     if let Some(ct) = ChannelType::parse(target) {
                         return Some(ct);
+                    }
+                    if self.generic_params.contains(target.as_str()) {
+                        return Some(ChannelType::Null);
                     }
                     current = target;
                 }
@@ -3507,9 +3534,6 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
-    // Annotation reconciliation
-    // =========================================================================
 
     /// If a type annotation is present, parse it and check compatibility with
     /// the inferred type. Returns the definitive type (annotation wins if valid).
@@ -3568,9 +3592,6 @@ impl TypeChecker {
         ann_type
     }
 
-    // =========================================================================
-    // Constant folding
-    // =========================================================================
 
     /// Try to evaluate an expression at compile time, returning a constant
     /// literal if the expression is a literal or simple arithmetic on constants.
@@ -3594,13 +3615,11 @@ impl TypeChecker {
                 let lhs = self.try_const_fold(left)?;
                 let rhs = self.try_const_fold(right)?;
                 match (op, &lhs, &rhs) {
-                    // Integer arithmetic
                     (BinOp::Add, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Int64(a.wrapping_add(*b))),
                     (BinOp::Sub, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Int64(a.wrapping_sub(*b))),
                     (BinOp::Mul, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Int64(a.wrapping_mul(*b))),
                     (BinOp::Div, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) if *b != 0 => Some(ConstLiteral::Int64(a / b)),
                     (BinOp::Mod, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) if *b != 0 => Some(ConstLiteral::Int64(a % b)),
-                    // Float arithmetic
                     (BinOp::Add, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(a + b)),
                     (BinOp::Sub, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(a - b)),
                     (BinOp::Mul, ConstLiteral::Float64(a), ConstLiteral::Float64(b)) => Some(ConstLiteral::Float64(a * b)),
@@ -3614,12 +3633,9 @@ impl TypeChecker {
                     (BinOp::Mul, ConstLiteral::Float64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Float64(a * *b as f64)),
                     (BinOp::Div, ConstLiteral::Int64(a), ConstLiteral::Float64(b)) if *b != 0.0 => Some(ConstLiteral::Float64(*a as f64 / b)),
                     (BinOp::Div, ConstLiteral::Float64(a), ConstLiteral::Int64(b)) if *b != 0 => Some(ConstLiteral::Float64(a / *b as f64)),
-                    // String concatenation
                     (BinOp::Add, ConstLiteral::String(a), ConstLiteral::String(b)) => Some(ConstLiteral::String(format!("{}{}", a, b))),
-                    // Boolean logic
                     (BinOp::And, ConstLiteral::Bool(a), ConstLiteral::Bool(b)) => Some(ConstLiteral::Bool(*a && *b)),
                     (BinOp::Or, ConstLiteral::Bool(a), ConstLiteral::Bool(b)) => Some(ConstLiteral::Bool(*a || *b)),
-                    // Integer comparison
                     (BinOp::Eq, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a == b)),
                     (BinOp::NotEq, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a != b)),
                     (BinOp::Lt, ConstLiteral::Int64(a), ConstLiteral::Int64(b)) => Some(ConstLiteral::Bool(a < b)),
@@ -3633,9 +3649,7 @@ impl TypeChecker {
         }
     }
 
-    // =========================================================================
     // Finalize: collect unused variables/imports, build result
-    // =========================================================================
 
     fn finalize(mut self) -> AstTypeAnalysis {
         // Collect variable types from all scopes before popping.
@@ -3729,9 +3743,6 @@ impl TypeChecker {
     }
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
 
 /// Check if a `ChannelType` is a numeric type.
 fn is_numeric(ct: ChannelType) -> bool {
@@ -4024,7 +4035,6 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
             "remove" => Some("array_remove".into()),
             "shift" => Some("array_shift".into()),
             "filter_nulls" => Some("array_filter_nulls".into()),
-            // Direct methods
             "first" | "last" | "is_empty" | "sum" | "product" | "min"
             | "max" => Some("array_direct".into()),
             _ => None,
@@ -4132,7 +4142,6 @@ fn unify_types(types: &[ChannelType]) -> ChannelType {
     if non_null.iter().all(|t| *t == first) {
         first
     } else {
-        // Check if all are numeric — promote
         if non_null.iter().all(|t| is_numeric(*t)) {
             promote_numeric(&non_null)
         } else {
@@ -4179,9 +4188,6 @@ fn extract_string_literal(expr: &Expression) -> Option<String> {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -4217,9 +4223,6 @@ mod tests {
             .collect()
     }
 
-    // =========================================================================
-    // Variable type inference
-    // =========================================================================
 
     #[test]
     fn test_int_literal_type() {
@@ -4273,9 +4276,6 @@ output x;"#,
         assert!(w.iter().any(|d| d.message.contains("conflicts")));
     }
 
-    // =========================================================================
-    // Arithmetic type promotion
-    // =========================================================================
 
     #[test]
     fn test_add_int_int_produces_int() {
@@ -4307,9 +4307,7 @@ output x;"#,
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Int64));
     }
 
-    // =========================================================================
     // Comparison and logical operators
-    // =========================================================================
 
     #[test]
     fn test_comparison_returns_bool() {
@@ -4344,9 +4342,6 @@ output x;"#,
         assert!(!w.iter().any(|d| d.message.contains("should be bool")));
     }
 
-    // =========================================================================
-    // Unary operators
-    // =========================================================================
 
     #[test]
     fn test_not_returns_bool() {
@@ -4382,9 +4377,6 @@ output r;"#,
             .any(|d| d.message.contains("negation expects numeric")));
     }
 
-    // =========================================================================
-    // Mutability
-    // =========================================================================
 
     #[test]
     fn test_mut_assignment_ok() {
@@ -4414,9 +4406,7 @@ output r;"#,
         assert!(e.iter().any(|d| d.message.contains("undefined variable")));
     }
 
-    // =========================================================================
     // Use-before-define
-    // =========================================================================
 
     #[test]
     fn test_undefined_variable_error() {
@@ -4434,9 +4424,6 @@ output r;"#,
         assert!(e.is_empty());
     }
 
-    // =========================================================================
-    // Unused variables
-    // =========================================================================
 
     #[test]
     fn test_unused_variable_warns() {
@@ -4475,9 +4462,6 @@ output r;"#,
             "Variable 'x' used in nested function should not be reported as unused. Got: {:?}", w);
     }
 
-    // =========================================================================
-    // Unused imports
-    // =========================================================================
 
     #[test]
     fn test_unused_import_warns() {
@@ -4499,9 +4483,6 @@ output frame;"#,
         assert!(w.iter().all(|d| !d.message.contains("unused import")));
     }
 
-    // =========================================================================
-    // Function calls
-    // =========================================================================
 
     #[test]
     fn test_known_operation_call() {
@@ -4536,9 +4517,7 @@ output r;"#,
         assert!(w.iter().any(|d| d.message.contains("type mismatch")));
     }
 
-    // =========================================================================
     // If/else
-    // =========================================================================
 
     #[test]
     fn test_if_else_unifies_branch_types() {
@@ -4562,9 +4541,6 @@ output r;"#,
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Int64));
     }
 
-    // =========================================================================
-    // For loops
-    // =========================================================================
 
     #[test]
     fn test_for_loop_iterable_type() {
@@ -4581,9 +4557,6 @@ output r;"#,
             .any(|d| d.message.contains("iterable should be array")));
     }
 
-    // =========================================================================
-    // While loops
-    // =========================================================================
 
     #[test]
     fn test_while_loop_condition_type() {
@@ -4600,9 +4573,7 @@ output r;"#,
             .any(|d| d.message.contains("condition should be bool")));
     }
 
-    // =========================================================================
     // Index and field access
-    // =========================================================================
 
     #[test]
     fn test_array_index_ok() {
@@ -4632,9 +4603,6 @@ output r;"#,
             .any(|d| d.message.contains("index should be integer")));
     }
 
-    // =========================================================================
-    // Range
-    // =========================================================================
 
     #[test]
     fn test_range_returns_array() {
@@ -4645,9 +4613,6 @@ output r;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Scoping
-    // =========================================================================
 
     #[test]
     fn test_block_scope_isolation() {
@@ -4657,9 +4622,6 @@ output r;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Full programs
-    // =========================================================================
 
     #[test]
     fn test_full_program_no_errors() {
@@ -4712,9 +4674,6 @@ output count;
         assert_eq!(a.variable_types.get("count"), Some(&ChannelType::Int64));
     }
 
-    // =========================================================================
-    // Plugin calls
-    // =========================================================================
 
     #[test]
     fn test_plugin_call_returns_null() {
@@ -4726,9 +4685,6 @@ output frame;"#,
         assert_eq!(a.variable_types.get("frame"), Some(&ChannelType::Null));
     }
 
-    // =========================================================================
-    // Pipe expressions
-    // =========================================================================
 
     #[test]
     fn test_pipe_expression() {
@@ -4741,9 +4697,7 @@ output r;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
     // User-defined functions
-    // =========================================================================
 
     #[test]
     fn test_fn_return_type_propagates() {
@@ -4808,16 +4762,13 @@ output r;"#,
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
     }
 
-    // =========================================================================
-    // Reserved keyword warnings
-    // =========================================================================
 
     #[test]
     fn test_reserved_keyword_warning_in_define_var() {
         // Direct unit test of the type checker's define_var warning
         let imports = HashSet::new();
         let mut checker = TypeChecker::new(&imports);
-        checker.define_var("static", ChannelType::Int64, false, 1, 1);
+        checker.define_var("ref", ChannelType::Int64, false, 1, 1);
         let result = checker.finalize();
         let w = result
             .diagnostics
@@ -4856,9 +4807,7 @@ output r;"#,
         assert!(e.iter().any(|d| d.message.contains("type mismatch")));
     }
 
-    // =========================================================================
     // Linting diagnostics — errors
-    // =========================================================================
 
     #[test]
     fn test_division_by_zero_error() {
@@ -4933,9 +4882,7 @@ output r;"#,
             .any(|d| d.message.contains("unknown type annotation")));
     }
 
-    // =========================================================================
     // Linting diagnostics — warnings
-    // =========================================================================
 
     #[test]
     fn test_variable_shadowing_moved_to_linter() {
@@ -5078,9 +5025,6 @@ output r;"#,
         );
     }
 
-    // =========================================================================
-    // Return type validation
-    // =========================================================================
 
     #[test]
     fn test_fn_return_type_mismatch_is_error() {
@@ -5122,9 +5066,7 @@ output r;"#,
             .all(|d| !d.message.contains("declares return type")));
     }
 
-    // =========================================================================
     // If/else branch type mismatch warning
-    // =========================================================================
 
     #[test]
     fn test_if_else_branch_mismatch_warns() {
@@ -5142,9 +5084,7 @@ output r;"#,
         assert!(w.iter().all(|d| !d.message.contains("mismatched types")));
     }
 
-    // =========================================================================
     // Gap #4: break/continue/return outside valid context
-    // =========================================================================
 
     #[test]
     fn test_break_outside_loop_error() {
@@ -5216,9 +5156,6 @@ output r;"#,
         );
     }
 
-    // =========================================================================
-    // Destructuring
-    // =========================================================================
 
     #[test]
     fn test_array_destructure_defines_vars() {
@@ -5257,9 +5194,6 @@ output r;"#,
         assert_eq!(a.variable_types.get("rest"), Some(&ChannelType::Array));
     }
 
-    // =========================================================================
-    // Compound assignment
-    // =========================================================================
 
     #[test]
     fn test_compound_assign_mut_ok() {
@@ -5283,9 +5217,7 @@ output r;"#,
         assert!(e.iter().any(|d| d.message.contains("undefined variable")));
     }
 
-    // =========================================================================
     // Try/catch
-    // =========================================================================
 
     #[test]
     fn test_try_catch_no_errors() {
@@ -5327,9 +5259,6 @@ output result;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Const
-    // =========================================================================
 
     #[test]
     fn test_const_defines_variable() {
@@ -5375,9 +5304,6 @@ output result;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Type alias
-    // =========================================================================
 
     #[test]
     fn test_type_alias_valid() {
@@ -5395,9 +5321,6 @@ output result;"#,
             .any(|d| d.message.contains("unknown type 'nonexistent'")));
     }
 
-    // =========================================================================
-    // Module definitions
-    // =========================================================================
 
     #[test]
     fn test_module_scoping() {
@@ -5409,9 +5332,6 @@ output result;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Use statements
-    // =========================================================================
 
     #[test]
     fn test_use_known_std_module() {
@@ -5432,9 +5352,6 @@ output result;"#,
             .any(|d| d.message.contains("unknown standard library module")));
     }
 
-    // =========================================================================
-    // Method calls
-    // =========================================================================
 
     #[test]
     fn test_array_method_push() {
@@ -5468,9 +5385,6 @@ output result;"#,
         assert!(w.iter().any(|d| d.message.contains("unknown method")));
     }
 
-    // =========================================================================
-    // Lambda expressions
-    // =========================================================================
 
     #[test]
     fn test_lambda_no_errors() {
@@ -5486,9 +5400,6 @@ output result;"#,
         assert!(e.iter().any(|d| d.message.contains("division by zero")));
     }
 
-    // =========================================================================
-    // Match expressions
-    // =========================================================================
 
     #[test]
     fn test_match_unifies_arm_types() {
@@ -5589,9 +5500,6 @@ output r;"#,
         );
     }
 
-    // =========================================================================
-    // String interpolation
-    // =========================================================================
 
     #[test]
     fn test_string_interp_returns_string() {
@@ -5606,9 +5514,6 @@ output r;"#,
         assert!(e.iter().any(|d| d.message.contains("undefined variable")));
     }
 
-    // =========================================================================
-    // Null coalescing
-    // =========================================================================
 
     #[test]
     fn test_null_coalesce_returns_right_type() {
@@ -5622,9 +5527,6 @@ output r;"#,
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::String));
     }
 
-    // =========================================================================
-    // Optional chaining
-    // =========================================================================
 
     #[test]
     fn test_optional_chain_returns_null() {
@@ -5641,9 +5543,6 @@ output r;"#,
             .any(|d| d.message.contains("optional chaining requires map")));
     }
 
-    // =========================================================================
-    // Spread
-    // =========================================================================
 
     #[test]
     fn test_spread_non_array_warns() {
@@ -5654,9 +5553,6 @@ output r;"#,
             .any(|d| d.message.contains("spread requires array")));
     }
 
-    // =========================================================================
-    // Loop expression
-    // =========================================================================
 
     #[test]
     fn test_loop_empty_body_moved_to_linter() {
@@ -5677,9 +5573,7 @@ output r;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
     // Try/catch expression
-    // =========================================================================
 
     #[test]
     fn test_try_catch_expr_unifies_types() {
@@ -5702,9 +5596,6 @@ output r;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Default parameters
-    // =========================================================================
 
     #[test]
     fn test_fn_default_params_accept_fewer_args() {
@@ -5745,9 +5636,6 @@ output r;"#,
             .any(|d| d.message.contains("expects 1-2 arguments")));
     }
 
-    // =========================================================================
-    // Throw
-    // =========================================================================
 
     #[test]
     fn test_throw_type_checks_expr() {
@@ -5755,9 +5643,6 @@ output r;"#,
         assert!(errors(&a).is_empty());
     }
 
-    // =========================================================================
-    // Combined new features
-    // =========================================================================
 
     #[test]
     fn test_combined_destructure_and_match() {
@@ -5978,9 +5863,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert!(unknown.is_empty(), "Expected no E202 for known array methods, got: {:?}", unknown);
     }
 
-    // =========================================================================
     // Enum variant arity validation
-    // =========================================================================
 
     #[test]
     fn test_enum_construct_arity_ok() {
@@ -6070,9 +5953,6 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
-    // =========================================================================
-    // Struct field validation
-    // =========================================================================
 
     #[test]
     fn test_struct_construct_valid() {
@@ -6141,9 +6021,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
-    // =========================================================================
     // Module-qualified function arity
-    // =========================================================================
 
     #[test]
     fn test_module_qualified_call_arity_check() {
@@ -6155,9 +6033,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
-    // =========================================================================
     // Audit: Binary operation type inference
-    // =========================================================================
 
     #[test]
     fn test_binop_int64_plus_int64() {
@@ -6246,9 +6122,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Null));
     }
 
-    // =========================================================================
     // Audit: Unary operation type inference
-    // =========================================================================
 
     #[test]
     fn test_unary_neg_int64() {
@@ -6290,9 +6164,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
-    // =========================================================================
     // Audit: Assignment type compatibility
-    // =========================================================================
 
     #[test]
     fn test_assignment_type_annotated_compatible() {
@@ -6348,9 +6220,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
-    // =========================================================================
     // Audit: Function call type inference (multi-branch returns)
-    // =========================================================================
 
     #[test]
     fn test_fn_returns_declared_type_at_callsite() {
@@ -6422,9 +6292,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Int64));
     }
 
-    // =========================================================================
     // Audit: Match expression type inference
-    // =========================================================================
 
     #[test]
     fn test_match_unifies_same_type() {
@@ -6470,9 +6338,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert_eq!(a.variable_types.get("r"), Some(&ChannelType::Null));
     }
 
-    // =========================================================================
     // Audit: Array element types
-    // =========================================================================
 
     #[test]
     fn test_array_literal_uniform_type() {
@@ -6493,9 +6359,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert_eq!(a.variable_types.get("x"), Some(&ChannelType::Array));
     }
 
-    // =========================================================================
     // Audit: Additional edge cases
-    // =========================================================================
 
     #[test]
     fn test_if_else_numeric_promotion() {
@@ -6548,9 +6412,6 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert!(w.is_empty(), "Expected no comparison warning for cross-numeric, got: {:?}", w);
     }
 
-    // =========================================================================
-    // Type alias resolution
-    // =========================================================================
 
     #[test]
     fn test_type_alias_basic() {
@@ -6760,9 +6621,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert!(e.is_empty(), "Expected no errors for correct struct, got: {:?}", e);
     }
 
-    // =========================================================================
     // Item #329: Unused const warning
-    // =========================================================================
 
     #[test]
     fn test_unused_const_warns() {
@@ -6818,9 +6677,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         );
     }
 
-    // =========================================================================
     // Item #326: Duplicate parameter names
-    // =========================================================================
 
     /// Helper to build an AST with a function that has duplicate parameter names,
     /// bypassing the parser's own duplicate check.
@@ -6855,12 +6712,14 @@ test "reads outer" { let r = x + 1; output r; }"#,
             statements: vec![Statement::new(
                 StatementKind::FunctionDef(FunctionDef {
                     name: fn_name.to_string(),
+                    type_params: Vec::new(),
                     params,
                     return_type: None,
                     body,
                     span,
                     is_getter: false,
                     is_setter: false,
+                    where_clauses: Vec::new(),
                     deprecated: false,
                 }),
                 span,
@@ -6910,9 +6769,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
         assert_eq!(dup_errors.len(), 2, "Expected 2 duplicate param errors, got: {:?}", dup_errors);
     }
 
-    // =========================================================================
     // Item #330: Struct field type annotations validated
-    // =========================================================================
 
     #[test]
     fn test_struct_field_known_type_ok() {
@@ -7076,9 +6933,6 @@ test "reads outer" { let r = x + 1; output r; }"#,
         }
     }
 
-    // =========================================================================
-    // Trait conformance validation
-    // =========================================================================
 
     #[test]
     fn test_impl_trait_missing_method() {
@@ -7196,9 +7050,7 @@ test "reads outer" { let r = x + 1; output r; }"#,
             return_errs.iter().map(|e| &e.message).collect::<Vec<_>>());
     }
 
-    // =========================================================================
     // DoWhileLoop and CStyleFor condition type checking
-    // =========================================================================
 
     #[test]
     fn test_do_while_condition_warns_on_non_bool() {

@@ -3,7 +3,7 @@
 //! Provides function/enum/struct/variable symbols for the editor outline view.
 
 use super::analysis::{char_col_to_utf16, DocumentState};
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a document symbol request.
 /// Returns a flat list of SymbolInformation (not hierarchical DocumentSymbol)
@@ -15,7 +15,6 @@ pub fn handle_document_symbols(
 ) -> Option<DocumentSymbolResponse> {
     let mut symbols: Vec<SymbolInformation> = Vec::new();
 
-    // Functions
     for func in state.functions.values() {
         let range = make_range(&state.source, func.line, func.col, func.name.chars().count());
         #[allow(deprecated)]
@@ -84,7 +83,6 @@ pub fn handle_document_symbols(
             container_name: None,
         });
 
-        // Add fields
         for (field_name, field_type) in &st.fields {
             let field_label = if let Some(ty) = field_type {
                 format!("{}: {}", field_name, ty)
@@ -107,7 +105,6 @@ pub fn handle_document_symbols(
         }
     }
 
-    // Variables and constants
     for var in state.variables.values() {
         let kind = if var.is_type_alias {
             SymbolKind::TYPE_PARAMETER

@@ -6,7 +6,7 @@
 
 use super::analysis::DocumentState;
 use crate::syntax::ast::*;
-use tower_lsp::lsp_types::{FoldingRange, FoldingRangeKind};
+use super::types::{FoldingRange, FoldingRangeKind};
 
 /// Compute folding ranges for a document from its parsed AST.
 pub fn handle_folding_ranges(state: &DocumentState) -> Vec<FoldingRange> {
@@ -47,62 +47,53 @@ fn push_range(ranges: &mut Vec<FoldingRange>, span: &Span, kind: FoldingRangeKin
 /// Collect folding ranges from a single statement.
 fn collect_statement_folding_ranges(stmt: &Statement, ranges: &mut Vec<FoldingRange>) {
     match &stmt.kind {
-        // ---- Function definitions ----
         StatementKind::FunctionDef(func_def) | StatementKind::AsyncFunctionDef(func_def) => {
-            push_range(ranges, &func_def.span, FoldingRangeKind::Region);
+            push_range(ranges, &func_def.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(&func_def.body, ranges);
         }
 
-        // ---- Struct definitions ----
         StatementKind::StructDef { .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
         }
 
-        // ---- Enum definitions ----
         StatementKind::EnumDef { .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
         }
 
-        // ---- Module definitions ----
         StatementKind::ModuleDef { body, .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(body, ranges);
         }
 
-        // ---- For loop ----
         StatementKind::ForLoop { body, iterable, .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
             collect_expression_folding_ranges(iterable, ranges);
             collect_block_folding_ranges(body, ranges);
         }
 
-        // ---- While loop ----
         StatementKind::WhileLoop { condition, body, .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
             collect_expression_folding_ranges(condition, ranges);
             collect_block_folding_ranges(body, ranges);
         }
 
-        // ---- Do-while loop ----
         StatementKind::DoWhileLoop { body, condition, .. } | StatementKind::CStyleFor { body, condition, .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(body, ranges);
             collect_expression_folding_ranges(condition, ranges);
         }
 
-        // ---- Defer ----
         StatementKind::Defer(expr) => {
             collect_expression_folding_ranges(expr, ranges);
         }
 
-        // ---- Try/catch ----
         StatementKind::TryCatch {
             try_block,
             catch_block,
             finally_block,
             ..
         } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(try_block, ranges);
             collect_block_folding_ranges(catch_block, ranges);
             if let Some(fb) = finally_block {
@@ -110,17 +101,16 @@ fn collect_statement_folding_ranges(stmt: &Statement, ranges: &mut Vec<FoldingRa
             }
         }
 
-        // ---- Test definitions ----
         StatementKind::TestDef { body, .. } => {
-            push_range(ranges, &stmt.span, FoldingRangeKind::Region);
+            push_range(ranges, &stmt.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(body, ranges);
         }
 
-        // ---- Statements containing expressions ----
         StatementKind::Let { value, .. }
         | StatementKind::LetMut { value, .. }
         | StatementKind::Assignment { value, .. }
         | StatementKind::ConstDef { value, .. }
+        | StatementKind::StaticDef { value, .. }
         | StatementKind::CompoundAssign { value, .. } => {
             collect_expression_folding_ranges(value, ranges);
         }
@@ -161,13 +151,12 @@ fn collect_block_folding_ranges(block: &Block, ranges: &mut Vec<FoldingRange>) {
 /// Collect folding ranges from expressions that may contain foldable constructs.
 fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<FoldingRange>) {
     match &expr.kind {
-        // ---- If/else ----
         ExpressionKind::IfElse {
             condition,
             then_block,
             else_block,
         } => {
-            push_range(ranges, &expr.span, FoldingRangeKind::Region);
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
             collect_expression_folding_ranges(condition, ranges);
             collect_block_folding_ranges(then_block, ranges);
             if let Some(eb) = else_block {
@@ -175,13 +164,12 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
             }
         }
 
-        // ---- Match expression ----
         ExpressionKind::Match { value, arms } => {
-            push_range(ranges, &expr.span, FoldingRangeKind::Region);
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
             collect_expression_folding_ranges(value, ranges);
             for arm in arms {
                 // Each arm body is a Block; fold it if multiline.
-                push_range(ranges, &arm.span, FoldingRangeKind::Region);
+                push_range(ranges, &arm.span, FoldingRangeKind::REGION);
                 collect_block_folding_ranges(&arm.body, ranges);
                 if let Some(guard) = &arm.guard {
                     collect_expression_folding_ranges(guard, ranges);
@@ -189,20 +177,18 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
             }
         }
 
-        // ---- Loop expression ----
         ExpressionKind::Loop { body, .. } => {
-            push_range(ranges, &expr.span, FoldingRangeKind::Region);
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(body, ranges);
         }
 
-        // ---- Try/catch expression ----
         ExpressionKind::TryCatchExpr {
             try_block,
             catch_block,
             finally_block,
             ..
         } => {
-            push_range(ranges, &expr.span, FoldingRangeKind::Region);
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(try_block, ranges);
             collect_block_folding_ranges(catch_block, ranges);
             if let Some(fb) = finally_block {
@@ -210,19 +196,16 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
             }
         }
 
-        // ---- Block expression ----
         ExpressionKind::Block(block) => {
-            push_range(ranges, &expr.span, FoldingRangeKind::Region);
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
             collect_block_folding_ranges(block, ranges);
         }
 
-        // ---- Lambda ----
         ExpressionKind::Lambda { body, params: _, .. } => {
-            push_range(ranges, &expr.span, FoldingRangeKind::Region);
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
             collect_expression_folding_ranges(body, ranges);
         }
 
-        // ---- Recurse into sub-expressions ----
         ExpressionKind::BinaryOp { left, right, .. }
         | ExpressionKind::Pipe { left, right }
         | ExpressionKind::NullCoalesce { left, right } => {
@@ -234,8 +217,20 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
         | ExpressionKind::Await(operand)
         | ExpressionKind::Spawn(operand)
         | ExpressionKind::Spread(operand)
-        | ExpressionKind::TryPropagate(operand) => {
+        | ExpressionKind::TryPropagate(operand)
+        | ExpressionKind::Yield(operand) => {
             collect_expression_folding_ranges(operand, ranges);
+        }
+
+        ExpressionKind::UnsafeBlock(block) => {
+            push_range(ranges, &expr.span, FoldingRangeKind::REGION);
+            collect_block_folding_ranges(block, ranges);
+        }
+
+        ExpressionKind::InlineAsm { operands, .. } => {
+            for op in operands {
+                collect_expression_folding_ranges(op, ranges);
+            }
         }
 
         ExpressionKind::Call { args, .. } => {
@@ -326,10 +321,15 @@ fn collect_expression_folding_ranges(expr: &Expression, ranges: &mut Vec<Folding
             }
         }
 
+        ExpressionKind::Ref(inner) | ExpressionKind::MoveClosure { body: inner, .. } => {
+            collect_expression_folding_ranges(inner, ranges);
+        }
+
         // Leaf expressions: no foldable children.
         ExpressionKind::Literal(_)
         | ExpressionKind::Variable(_)
-        | ExpressionKind::Placeholder => {}
+        | ExpressionKind::Placeholder
+        | ExpressionKind::DynTrait(_) => {}
     }
 }
 
@@ -354,7 +354,7 @@ mod tests {
         let r = &ranges[0];
         assert_eq!(r.start_line, 0);
         assert_eq!(r.end_line, 3);
-        assert_eq!(r.kind, Some(FoldingRangeKind::Region));
+        assert_eq!(r.kind, Some(FoldingRangeKind::REGION));
     }
 
     #[test]

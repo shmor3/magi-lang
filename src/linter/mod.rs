@@ -98,7 +98,6 @@ impl<'a> LintContext<'a> {
         let diags = rules::check_dead_code_in_block(&program.statements);
         self.emit_all(diags);
 
-        // Check duplicate imports
         let diags = rules::check_duplicate_imports(&program.statements);
         self.emit_all(diags);
 
@@ -108,6 +107,14 @@ impl<'a> LintContext<'a> {
 
         // W233: deeply nested code (default max depth: 5)
         let diags = rules::check_deep_nesting(&program.statements, 5);
+        self.emit_all(diags);
+
+        // W238: unused variables at program level
+        let diags = rules::check_unused_variables(&program.statements);
+        self.emit_all(diags);
+
+        // W239: unnecessary mut at program level
+        let diags = rules::check_unnecessary_mut(&program.statements);
         self.emit_all(diags);
     }
 
@@ -191,6 +198,10 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
                     self.emit(d);
                 }
+                // W240: needless return as last statement
+                if let Some(d) = rules::check_needless_return(&fdef.body.statements, fdef.span) {
+                    self.emit(d);
+                }
                 // W211 (unused params) removed — handled by type checker as W109.
                 self.check_block(&fdef.body);
             }
@@ -207,6 +218,10 @@ impl<'a> LintContext<'a> {
                     }
                 }
                 if let Some(d) = rules::check_empty_block(&fdef.body, "function", fdef.span) {
+                    self.emit(d);
+                }
+                // W240: needless return as last statement
+                if let Some(d) = rules::check_needless_return(&fdef.body.statements, fdef.span) {
                     self.emit(d);
                 }
                 // W211 (unused params) removed — handled by type checker as W109.
@@ -341,6 +356,14 @@ impl<'a> LintContext<'a> {
         let diags = rules::check_same_scope_shadowing(&block.statements);
         self.emit_all(diags);
 
+        // W238: unused variables within this block
+        let diags = rules::check_unused_variables(&block.statements);
+        self.emit_all(diags);
+
+        // W239: unnecessary mut within this block
+        let diags = rules::check_unnecessary_mut(&block.statements);
+        self.emit_all(diags);
+
         for stmt in &block.statements {
             self.check_statement(stmt);
         }
@@ -447,6 +470,10 @@ impl<'a> LintContext<'a> {
                 if let Some(d) = rules::check_negated_if_else(condition, else_block.as_ref(), expr.span) {
                     self.emit(d);
                 }
+                // W242: collapsible if
+                if let Some(d) = rules::check_collapsible_if(then_block, else_block, expr.span) {
+                    self.emit(d);
+                }
                 self.check_expression(condition);
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
@@ -472,7 +499,6 @@ impl<'a> LintContext<'a> {
                 let diags = rules::check_empty_match_arms(arms);
                 self.emit_all(diags);
 
-                // Check exhaustiveness
                 let diags = rules::check_match_exhaustiveness(arms, &self.enum_defs, expr.span);
                 self.emit_all(diags);
             }
@@ -484,6 +510,10 @@ impl<'a> LintContext<'a> {
             }
             ExpressionKind::BinaryOp { op, left, right } => {
                 if let Some(d) = rules::check_self_comparison(op, left, right, expr.span) {
+                    self.emit(d);
+                }
+                // W241: comparison to boolean literal
+                if let Some(d) = rules::check_bool_comparison(op, left, right, expr.span) {
                     self.emit(d);
                 }
                 self.check_expression(left);
@@ -646,9 +676,6 @@ impl<'a> LintContext<'a> {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {

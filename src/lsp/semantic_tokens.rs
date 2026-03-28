@@ -4,7 +4,7 @@
 //! strings, numbers, operators, and comments.
 
 use super::analysis::DocumentState;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Token types used in semantic highlighting.
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -40,7 +40,6 @@ const TT_STRING: u32 = 4;
 const TT_NUMBER: u32 = 5;
 const TT_OPERATOR: u32 = 6;
 const TT_COMMENT: u32 = 7;
-#[allow(dead_code)]
 const TT_PARAMETER: u32 = 8;
 const TT_PROPERTY: u32 = 9;
 const TT_ENUM_MEMBER: u32 = 10;
@@ -82,13 +81,11 @@ fn tokenize_source(source: &str, state: &DocumentState) -> Vec<SemanticToken> {
         while i < chars.len() {
             let ch = chars[i];
 
-            // Skip whitespace
             if ch.is_whitespace() {
                 i += 1;
                 continue;
             }
 
-            // Line comment
             if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
                 let start = i as u32;
                 let len = (chars.len() - i) as u32;
@@ -96,7 +93,6 @@ fn tokenize_source(source: &str, state: &DocumentState) -> Vec<SemanticToken> {
                 break;
             }
 
-            // String literal
             if ch == '"' || (ch == 'f' && i + 1 < chars.len() && chars[i + 1] == '"')
                 || (ch == 'r' && i + 1 < chars.len() && chars[i + 1] == '"')
             {
@@ -142,7 +138,6 @@ fn tokenize_source(source: &str, state: &DocumentState) -> Vec<SemanticToken> {
                 continue;
             }
 
-            // Number literal
             if ch.is_ascii_digit()
                 || (ch == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
             {
@@ -164,7 +159,6 @@ fn tokenize_source(source: &str, state: &DocumentState) -> Vec<SemanticToken> {
                 continue;
             }
 
-            // Identifier or keyword
             if ch.is_alphabetic() || ch == '_' {
                 let start = i as u32;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -202,6 +196,8 @@ fn tokenize_source(source: &str, state: &DocumentState) -> Vec<SemanticToken> {
                     let mods = if var.constant { MOD_READONLY } else { 0 };
                     if var.is_type_alias {
                         raw_tokens.push((line_num, start, len, TT_TYPE, mods));
+                    } else if var.is_parameter {
+                        raw_tokens.push((line_num, start, len, TT_PARAMETER, mods));
                     } else {
                         raw_tokens.push((line_num, start, len, TT_VARIABLE, mods));
                     }

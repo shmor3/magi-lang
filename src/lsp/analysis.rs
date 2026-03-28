@@ -5,7 +5,7 @@ use crate::syntax::ast::*;
 use crate::syntax::parser::parse_v2_recovering;
 use crate::syntax::type_checker::{self, AstDiagnostic};
 use std::collections::{HashMap, HashSet};
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Extracted symbol information for a function.
 #[derive(Debug, Clone)]
@@ -25,6 +25,7 @@ pub struct VariableSymbol {
     pub mutable: bool,
     pub constant: bool,
     pub is_type_alias: bool,
+    pub is_parameter: bool,
     pub type_annotation: Option<String>,
     pub line: u32,
     pub col: u32,
@@ -270,6 +271,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: false,
                     is_type_alias: false,
+                    is_parameter: false,
                     type_annotation: type_annotation.as_ref().map(|t| t.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -283,6 +285,7 @@ fn extract_symbols_indexed(
                     mutable: true,
                     constant: false,
                     is_type_alias: false,
+                    is_parameter: false,
                     type_annotation: type_annotation.as_ref().map(|t| t.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -296,6 +299,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: true,
                     is_type_alias: false,
+                    is_parameter: false,
                     type_annotation: type_annotation.as_ref().map(|t| t.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -333,6 +337,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: false,
                     is_type_alias: true,
+                    is_parameter: false,
                     type_annotation: Some(target.to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -346,6 +351,7 @@ fn extract_symbols_indexed(
                     mutable: false,
                     constant: false,
                     is_type_alias: false,
+                    is_parameter: false,
                     type_annotation: Some("module".to_string()),
                     line: stmt.span.start_line,
                     col: name_col,
@@ -369,6 +375,7 @@ fn extract_symbols_indexed(
                         mutable: *mutable,
                         constant: false,
                         is_type_alias: false,
+                        is_parameter: false,
                         type_annotation: None,
                         line: stmt.span.start_line,
                         col: name_col,
@@ -399,6 +406,7 @@ fn extract_symbols_indexed(
                         mutable: false,
                         constant: false,
                         is_type_alias: false,
+                        is_parameter: false,
                         type_annotation: Some(format!("import({})", path.join("::"))),
                         line: stmt.span.start_line,
                         col: name_col,
@@ -620,6 +628,40 @@ pub fn find_word_at_position(source: &str, line: u32, character: u32) -> Option<
     Some(chars[start..end].iter().collect())
 }
 
+/// Find the range of the word (identifier) at a given cursor position.
+/// Returns the LSP `Range` covering the identifier, or `None` if there is no word.
+pub fn find_word_range_at_position(source: &str, line: u32, character: u32) -> Option<super::types::Range> {
+    let target_line = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = target_line.chars().collect();
+    let col = utf16_to_char_col(target_line, character) as usize;
+
+    if col > chars.len() {
+        return None;
+    }
+
+    let mut start = col;
+    while start > 0 && is_ident_char(chars[start - 1]) {
+        start -= 1;
+    }
+
+    let mut end = col;
+    while end < chars.len() && is_ident_char(chars[end]) {
+        end += 1;
+    }
+
+    if start == end {
+        return None;
+    }
+
+    let start_utf16 = char_col_to_utf16(target_line, start as u32);
+    let end_utf16 = char_col_to_utf16(target_line, end as u32);
+
+    Some(super::types::Range::new(
+        super::types::Position::new(line, start_utf16),
+        super::types::Position::new(line, end_utf16),
+    ))
+}
+
 pub fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -654,7 +696,6 @@ pub fn find_enum_variant_at_position(source: &str, line: u32, character: u32) ->
 
     let word: String = chars[start..end].iter().collect();
 
-    // Check if there's `::` before this identifier (cursor is on variant)
     if start >= 2 && chars[start - 1] == ':' && chars[start - 2] == ':' {
         // Scan backwards from `::` to find the enum name
         let enum_end = start - 2;
@@ -668,7 +709,6 @@ pub fn find_enum_variant_at_position(source: &str, line: u32, character: u32) ->
         }
     }
 
-    // Check if there's `::` after this identifier (cursor is on enum name)
     if end + 1 < chars.len() && chars[end] == ':' && chars[end + 1] == ':' {
         // Scan forwards from `::` to find the variant name
         let variant_start = end + 2;
@@ -768,7 +808,6 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
         }
     }
 
-    // Apply final limit
     let scan_start = all_chars.len().saturating_sub(SCAN_LIMIT);
     let chars = &all_chars[scan_start..];
 
@@ -801,7 +840,6 @@ pub fn find_call_context_at_position(source: &str, line: u32, character: u32) ->
             }
             continue;
         }
-        // Skip newlines
         if chars[pos] == '\n' || chars[pos] == '\r' {
             continue;
         }
@@ -862,7 +900,6 @@ pub fn find_variable_struct_type(state: &DocumentState, var_name: &str) -> Optio
                             return Some(ta_str);
                         }
                     }
-                    // Check if RHS is a struct constructor
                     if let ExpressionKind::StructConstruct { name: sname, .. } = &value.kind {
                         return Some(sname.clone());
                     }
@@ -874,9 +911,6 @@ pub fn find_variable_struct_type(state: &DocumentState, var_name: &str) -> Optio
     None
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1054,7 +1088,6 @@ mod tests {
     #[test]
     fn test_find_call_context_second_param() {
         let source = "foo(x, y)";
-        // Cursor after comma
         let result = find_call_context_at_position(source, 0, 7);
         assert_eq!(result, Some(("foo".to_string(), 1)));
     }
@@ -1074,9 +1107,7 @@ mod tests {
         assert_eq!(result, Some("Point".to_string()));
     }
 
-    // =========================================================================
     // Empty/whitespace document edge cases
-    // =========================================================================
 
     #[test]
     fn test_analyze_empty_document() {
@@ -1111,9 +1142,7 @@ mod tests {
         assert!(state.functions.is_empty());
     }
 
-    // =========================================================================
     // find_word_at_position edge cases
-    // =========================================================================
 
     #[test]
     fn test_find_word_empty_source() {
@@ -1168,9 +1197,7 @@ mod tests {
         assert_eq!(find_word_at_position(source, 1, 4), Some("y".to_string()));
     }
 
-    // =========================================================================
     // find_call_context edge cases
-    // =========================================================================
 
     #[test]
     fn test_find_call_context_nested_calls() {
@@ -1259,9 +1286,7 @@ mod tests {
         assert_eq!(result, Some(("bar".to_string(), 2)));
     }
 
-    // =========================================================================
     // find_dot_receiver edge cases
-    // =========================================================================
 
     #[test]
     fn test_find_dot_receiver_partial_method() {
@@ -1291,9 +1316,7 @@ mod tests {
         assert_eq!(find_dot_receiver_at_position("", 0, 0), None);
     }
 
-    // =========================================================================
     // find_enum_variant edge cases
-    // =========================================================================
 
     #[test]
     fn test_find_enum_variant_empty() {
@@ -1308,9 +1331,7 @@ mod tests {
         assert_eq!(find_enum_variant_at_position(source, 0, 100), Some(("Color".to_string(), "Red".to_string())));
     }
 
-    // =========================================================================
     // UTF-16 encoding edge cases
-    // =========================================================================
 
     #[test]
     fn test_char_col_to_utf16_with_bmp_chars() {
@@ -1352,9 +1373,7 @@ mod tests {
         assert_eq!(char_col_to_utf16("", 5), 0); // past end returns 0
     }
 
-    // =========================================================================
     // to_lsp_diagnostic edge cases
-    // =========================================================================
 
     #[test]
     fn test_to_lsp_diagnostic_line_0_col_0() {
@@ -1429,9 +1448,7 @@ mod tests {
         assert_eq!(lsp_d.range.start.line, 99);
     }
 
-    // =========================================================================
     // Diagnostic tags (#206)
-    // =========================================================================
 
     #[test]
     fn test_unused_variable_has_unnecessary_tag() {
@@ -1559,9 +1576,7 @@ mod tests {
         assert_eq!(lsp_d.tags, None);
     }
 
-    // =========================================================================
     // find_name_col edge cases
-    // =========================================================================
 
     #[test]
     fn test_find_name_col_nonexistent_line() {
@@ -1586,9 +1601,7 @@ mod tests {
         assert_eq!(col, 17); // "let ax = 5; let " = 16 chars, then "x" at 17
     }
 
-    // =========================================================================
     // analyze_document with various structures
-    // =========================================================================
 
     #[test]
     fn test_analyze_document_with_type_alias() {

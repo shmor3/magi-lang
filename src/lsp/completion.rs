@@ -2,7 +2,7 @@
 
 use super::analysis::{find_dot_receiver_at_position, find_variable_struct_type, is_ident_char, utf16_to_char_col, DocumentState};
 use crate::util::levenshtein;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// MAGI language keywords.
 const KEYWORDS: &[&str] = &[
@@ -303,7 +303,6 @@ pub fn handle_completion(
     if let Some(receiver) = find_dot_receiver_at_position(&state.source, pos.line, pos.character) {
         let mut items = Vec::new();
 
-        // Check if receiver is a variable with a known struct type
         if let Some(struct_name) = find_variable_struct_type(state, &receiver) {
             if let Some(st) = state.structs.get(&struct_name) {
                 for (field_name, field_type) in &st.fields {
@@ -415,7 +414,6 @@ pub fn handle_completion(
     )
     .unwrap_or_default();
 
-    // Keywords
     for kw in KEYWORDS {
         items.push(CompletionItem {
             label: kw.to_string(),
@@ -450,7 +448,6 @@ pub fn handle_completion(
         });
     }
 
-    // Builtins
     for bi in BUILTINS {
         items.push(CompletionItem {
             label: bi.to_string(),
@@ -688,7 +685,6 @@ mod tests {
     fn test_completion_dot_access_generic_methods() {
         let source = "let x = 5;\nx.";
         let (state, _) = analyze_document(source);
-        // Cursor after dot
         let params = make_completion_params(1, 2);
         let items = get_items(handle_completion(&state, &params));
         let has_to_string = items.iter().any(|i| i.label == "to_string");

@@ -5,7 +5,7 @@
 
 use super::analysis::{char_col_to_utf16, DocumentState};
 use crate::syntax::ast::*;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a document link request.
 ///

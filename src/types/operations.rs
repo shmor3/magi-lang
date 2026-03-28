@@ -3,11 +3,8 @@
 //! All graph operation types. This is the sole source of truth for operation
 //! identifiers — the PDK does not define operations (plugins don't need them).
 
-use serde::{Deserialize, Serialize};
 
-// =============================================================================
 // OperationType
-// =============================================================================
 
 /// Enumerates all visual programming operations.
 ///
@@ -17,8 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// All graph operation types. This is the sole source of truth for operation
 /// identifiers — the PDK does not define operations (plugins don't need them).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationType {
     // Arithmetic (14)
     Add,
@@ -28,6 +24,8 @@ pub enum OperationType {
     Modulo,
     Power,
     Sqrt,
+    Cbrt,
+    Hypot,
     Negate,
     Abs,
     Min,
@@ -188,8 +186,9 @@ pub enum OperationType {
     TimestampDiff,
     Sleep,
 
-    // Hash/Encode (7)
+    // Hash/Encode (8)
     HashSha256,
+    HashSha1,
     HashBlake3,
     HashMd5,
     UrlEncode,
@@ -303,7 +302,7 @@ pub enum OperationType {
     RandomUuid,
     RandomString,
 
-    // Filesystem (12)
+    // Filesystem (15)
     FsRead,
     FsWrite,
     FsAppend,
@@ -316,6 +315,9 @@ pub enum OperationType {
     FsSize,
     FsIsFile,
     FsIsDir,
+    FsChmod,
+    FsSymlink,
+    FsReadlink,
 
     // Environment (7)
     EnvGet,
@@ -398,6 +400,10 @@ pub enum OperationType {
     YamlFromJson,
     YamlMerge,
 
+    // XML (2)
+    XmlParse,
+    XmlStringify,
+
     // CSV (4)
     CsvParse,
     CsvStringify,
@@ -427,11 +433,13 @@ pub enum OperationType {
     HashCrc32,
     ConstantTimeEq,
 
-    // Compress (4)
+    // Compress (6)
     CompressZstd,
     DecompressZstd,
     CompressLz4,
     DecompressLz4,
+    CompressGzip,
+    DecompressGzip,
 
     // Format (6)
     FmtNumber,
@@ -552,6 +560,68 @@ pub enum OperationType {
     // Flag (2)
     FlagParse,
     FlagArgs,
+
+    // Additional math (7)
+    MathGamma,
+    MathLgamma,
+    MathErf,
+    MathErfc,
+    MathExpm1,
+    MathNextafter,
+    MathSignbit,
+
+    // Additional OS (3)
+    FsChown,
+    FsHardlink,
+    OsPipe,
+
+    // Additional strconv (2)
+    FormatFloat,
+    ParseUint,
+
+    // Additional CLI (3)
+    CliFix,
+    CliClean,
+    CliTree,
+
+    // Platform — Terminal (4)
+    RawModeEnable,
+    RawModeDisable,
+    ReadByte,
+    ReadByteTimeout,
+
+    // Platform — SDL2 Graphics (11)
+    SdlInit,
+    SdlSetColor,
+    SdlClear,
+    SdlPresent,
+    SdlDrawPixel,
+    SdlDrawLine,
+    SdlFillRect,
+    SdlPollEvent,
+    SdlDelay,
+    SdlTicks,
+    SdlDestroy,
+
+    // Platform — Audio (4)
+    AudioStreamNew,
+    AudioWriteSamples,
+    AudioDrain,
+    AudioClose,
+
+    // Platform — WebGPU (12)
+    GpuInit,
+    GpuCreateBuffer,
+    GpuCreateShader,
+    GpuCreatePipeline,
+    GpuBeginRenderPass,
+    GpuDraw,
+    GpuEndRenderPass,
+    GpuSubmit,
+    GpuPresent,
+    GpuWriteBuffer,
+    GpuCreateTexture,
+    GpuDestroy,
 }
 
 impl OperationType {
@@ -565,6 +635,8 @@ impl OperationType {
             OperationType::Modulo => "modulo",
             OperationType::Power => "power",
             OperationType::Sqrt => "sqrt",
+            OperationType::Cbrt => "cbrt",
+            OperationType::Hypot => "hypot",
             OperationType::Negate => "negate",
             OperationType::Abs => "abs",
             OperationType::Min => "min",
@@ -699,13 +771,13 @@ impl OperationType {
             OperationType::Sleep => "sleep",
             // Hash/Encode
             OperationType::HashSha256 => "hash_sha256",
+            OperationType::HashSha1 => "hash_sha1",
             OperationType::HashBlake3 => "hash_blake3",
             OperationType::HashMd5 => "hash_md5",
             OperationType::UrlEncode => "url_encode",
             OperationType::UrlDecode => "url_decode",
             OperationType::HexEncode => "hex_encode",
             OperationType::HexDecode => "hex_decode",
-            // String extended
             OperationType::StringReverse => "string_reverse",
             OperationType::StringRepeat => "string_repeat",
             OperationType::StringLines => "string_lines",
@@ -714,10 +786,8 @@ impl OperationType {
             OperationType::RegexExtract => "regex_extract",
             OperationType::StringCount => "string_count",
             OperationType::StringFormat => "string_format",
-            // Control Flow extended
             OperationType::Assert => "assert",
             OperationType::DebugLog => "debug_log",
-            // Type Conversion extended
             OperationType::Typeof => "typeof",
             OperationType::Default => "default",
             // Array Higher-Order
@@ -745,7 +815,6 @@ impl OperationType {
             OperationType::MapMapValues => "map_map_values",
             OperationType::MapFilterEntries => "map_filter_entries",
             OperationType::MapUpdate => "map_update",
-            // String
             OperationType::StringChars => "string_chars",
             // Math Aggregate
             OperationType::MathSum => "math_sum",
@@ -790,7 +859,6 @@ impl OperationType {
             OperationType::IsFinite => "is_finite",
             OperationType::ApproxEq => "approx_eq",
             OperationType::Remap => "remap",
-            // Random
             OperationType::RandomInt => "random_int",
             OperationType::RandomFloat => "random_float",
             OperationType::RandomBool => "random_bool",
@@ -801,7 +869,6 @@ impl OperationType {
             OperationType::RandomSample => "random_sample",
             OperationType::RandomUuid => "random_uuid",
             OperationType::RandomString => "random_string",
-            // Filesystem
             OperationType::FsRead => "fs_read",
             OperationType::FsWrite => "fs_write",
             OperationType::FsAppend => "fs_append",
@@ -814,7 +881,9 @@ impl OperationType {
             OperationType::FsSize => "fs_size",
             OperationType::FsIsFile => "fs_is_file",
             OperationType::FsIsDir => "fs_is_dir",
-            // Environment
+            OperationType::FsChmod => "fs_chmod",
+            OperationType::FsSymlink => "fs_symlink",
+            OperationType::FsReadlink => "fs_readlink",
             OperationType::EnvGet => "env_get",
             OperationType::EnvHas => "env_has",
             OperationType::EnvKeys => "env_keys",
@@ -822,7 +891,6 @@ impl OperationType {
             OperationType::OsArch => "os_arch",
             OperationType::ProcessPid => "process_pid",
             OperationType::CurrentDir => "current_dir",
-            // Network
             OperationType::HttpGet => "http_get",
             OperationType::HttpPost => "http_post",
             OperationType::HttpPut => "http_put",
@@ -860,14 +928,12 @@ impl OperationType {
             OperationType::HttpServerReceive => "http_server_receive",
             OperationType::HttpServerRespond => "http_server_respond",
             OperationType::HttpServerStop => "http_server_stop",
-            // Certificate
             OperationType::CertGenerate => "cert_generate",
             OperationType::CertParse => "cert_parse",
             OperationType::CertInfo => "cert_info",
             OperationType::CertVerify => "cert_verify",
             OperationType::KeyGenerate => "key_generate",
             OperationType::CertSelfSigned => "cert_self_signed",
-            // Path
             OperationType::PathJoin => "path_join",
             OperationType::PathBasename => "path_basename",
             OperationType::PathDirname => "path_dirname",
@@ -885,6 +951,8 @@ impl OperationType {
             OperationType::YamlToJson => "yaml_to_json",
             OperationType::YamlFromJson => "yaml_from_json",
             OperationType::YamlMerge => "yaml_merge",
+            OperationType::XmlParse => "xml_parse",
+            OperationType::XmlStringify => "xml_stringify",
             // CSV
             OperationType::CsvParse => "csv_parse",
             OperationType::CsvStringify => "csv_stringify",
@@ -909,12 +977,12 @@ impl OperationType {
             OperationType::HmacSha256 => "hmac_sha256",
             OperationType::HashCrc32 => "hash_crc32",
             OperationType::ConstantTimeEq => "constant_time_eq",
-            // Compress
             OperationType::CompressZstd => "compress_zstd",
             OperationType::DecompressZstd => "decompress_zstd",
             OperationType::CompressLz4 => "compress_lz4",
             OperationType::DecompressLz4 => "decompress_lz4",
-            // Format
+            OperationType::CompressGzip => "compress_gzip",
+            OperationType::DecompressGzip => "decompress_gzip",
             OperationType::FmtNumber => "fmt_number",
             OperationType::FmtBytes => "fmt_bytes",
             OperationType::FmtDuration => "fmt_duration",
@@ -933,7 +1001,6 @@ impl OperationType {
             OperationType::TimeDiff => "time_diff",
             OperationType::StartOf => "start_of",
             OperationType::EndOf => "end_of",
-            // Stats
             OperationType::StatsMean => "stats_mean",
             OperationType::StatsMedian => "stats_median",
             OperationType::StatsMode => "stats_mode",
@@ -946,7 +1013,6 @@ impl OperationType {
             OperationType::StatsQuantile => "stats_quantile",
             OperationType::StatsCovariance => "stats_covariance",
             OperationType::StatsCorrelation => "stats_correlation",
-            // Text
             OperationType::TextWrap => "text_wrap",
             OperationType::TextDedent => "text_dedent",
             OperationType::TextIndent => "text_indent",
@@ -962,7 +1028,6 @@ impl OperationType {
             OperationType::HtmlUnescape => "html_unescape",
             OperationType::Base32Encode => "base32_encode",
             OperationType::Base32Decode => "base32_decode",
-            // Reflect
             OperationType::ReflectTypeOf => "reflect_type_of",
             OperationType::ReflectTypeName => "reflect_type_name",
             OperationType::ReflectIsType => "reflect_is_type",
@@ -971,7 +1036,6 @@ impl OperationType {
             OperationType::ReflectCallable => "reflect_callable",
             OperationType::ReflectArity => "reflect_arity",
             OperationType::ReflectInspect => "reflect_inspect",
-            // Collections
             OperationType::SetFrom => "set_from",
             OperationType::SetUnion => "set_union",
             OperationType::SetIntersection => "set_intersection",
@@ -980,7 +1044,6 @@ impl OperationType {
             OperationType::Counter => "counter",
             OperationType::MostCommon => "most_common",
             OperationType::OrderedMap => "ordered_map",
-            // Sort
             OperationType::SortAsc => "sort_asc",
             OperationType::SortDesc => "sort_desc",
             OperationType::SortBy => "sort_by",
@@ -989,35 +1052,78 @@ impl OperationType {
             OperationType::IsSorted => "is_sorted",
             OperationType::BinarySearch => "binary_search",
             OperationType::SortReverse => "sort_reverse",
-            // Subprocess
             OperationType::Exec => "exec",
             OperationType::ExecStatus => "exec_status",
             OperationType::ExecOutput => "exec_output",
-            // Sync
             OperationType::MutexNew => "mutex_new",
             OperationType::MutexLock => "mutex_lock",
             OperationType::MutexUnlock => "mutex_unlock",
             OperationType::WaitgroupNew => "waitgroup_new",
             OperationType::WaitgroupDone => "waitgroup_done",
             OperationType::WaitgroupWait => "waitgroup_wait",
-            // Concurrency
             OperationType::AwaitAll => "await_all",
-            // Log
             OperationType::LogInfo => "log_info",
             OperationType::LogWarn => "log_warn",
             OperationType::LogError => "log_error",
             OperationType::LogDebug => "log_debug",
-            // Itertools
             OperationType::IterChain => "iter_chain",
             OperationType::IterCycle => "iter_cycle",
             OperationType::IterRepeat => "iter_repeat",
             OperationType::IterProduct => "iter_product",
             OperationType::IterPairwise => "iter_pairwise",
-            // Template
             OperationType::TemplateRender => "template_render",
-            // Flag
             OperationType::FlagParse => "flag_parse",
             OperationType::FlagArgs => "flag_args",
+            OperationType::MathGamma => "gamma",
+            OperationType::MathLgamma => "lgamma",
+            OperationType::MathErf => "erf",
+            OperationType::MathErfc => "erfc",
+            OperationType::MathExpm1 => "expm1",
+            OperationType::MathNextafter => "nextafter",
+            OperationType::MathSignbit => "signbit",
+            OperationType::FsChown => "chown",
+            OperationType::FsHardlink => "hardlink",
+            OperationType::OsPipe => "pipe",
+            OperationType::FormatFloat => "format_float",
+            OperationType::ParseUint => "parse_uint",
+            OperationType::CliFix => "cli_fix",
+            OperationType::CliClean => "cli_clean",
+            OperationType::CliTree => "cli_tree",
+            // Platform — Terminal
+            OperationType::RawModeEnable => "raw_mode_enable",
+            OperationType::RawModeDisable => "raw_mode_disable",
+            OperationType::ReadByte => "read_byte",
+            OperationType::ReadByteTimeout => "read_byte_timeout",
+            // Platform — SDL2
+            OperationType::SdlInit => "sdl_init",
+            OperationType::SdlSetColor => "sdl_set_color",
+            OperationType::SdlClear => "sdl_clear",
+            OperationType::SdlPresent => "sdl_present",
+            OperationType::SdlDrawPixel => "sdl_draw_pixel",
+            OperationType::SdlDrawLine => "sdl_draw_line",
+            OperationType::SdlFillRect => "sdl_fill_rect",
+            OperationType::SdlPollEvent => "sdl_poll_event",
+            OperationType::SdlDelay => "sdl_delay",
+            OperationType::SdlTicks => "sdl_ticks",
+            OperationType::SdlDestroy => "sdl_destroy",
+            // Platform — Audio
+            OperationType::AudioStreamNew => "audio_stream_new",
+            OperationType::AudioWriteSamples => "audio_write_samples",
+            OperationType::AudioDrain => "audio_drain",
+            OperationType::AudioClose => "audio_close",
+            // Platform — WebGPU
+            OperationType::GpuInit => "gpu_init",
+            OperationType::GpuCreateBuffer => "gpu_create_buffer",
+            OperationType::GpuCreateShader => "gpu_create_shader",
+            OperationType::GpuCreatePipeline => "gpu_create_pipeline",
+            OperationType::GpuBeginRenderPass => "gpu_begin_render_pass",
+            OperationType::GpuDraw => "gpu_draw",
+            OperationType::GpuEndRenderPass => "gpu_end_render_pass",
+            OperationType::GpuSubmit => "gpu_submit",
+            OperationType::GpuPresent => "gpu_present",
+            OperationType::GpuWriteBuffer => "gpu_write_buffer",
+            OperationType::GpuCreateTexture => "gpu_create_texture",
+            OperationType::GpuDestroy => "gpu_destroy",
         }
     }
 
@@ -1031,6 +1137,8 @@ impl OperationType {
             "modulo" => Some(OperationType::Modulo),
             "power" => Some(OperationType::Power),
             "sqrt" => Some(OperationType::Sqrt),
+            "cbrt" => Some(OperationType::Cbrt),
+            "hypot" => Some(OperationType::Hypot),
             "negate" => Some(OperationType::Negate),
             "abs" => Some(OperationType::Abs),
             "min" => Some(OperationType::Min),
@@ -1165,13 +1273,13 @@ impl OperationType {
             "sleep" => Some(OperationType::Sleep),
             // Hash/Encode
             "hash_sha256" => Some(OperationType::HashSha256),
+            "hash_sha1" => Some(OperationType::HashSha1),
             "hash_blake3" => Some(OperationType::HashBlake3),
             "hash_md5" => Some(OperationType::HashMd5),
             "url_encode" => Some(OperationType::UrlEncode),
             "url_decode" => Some(OperationType::UrlDecode),
             "hex_encode" => Some(OperationType::HexEncode),
             "hex_decode" => Some(OperationType::HexDecode),
-            // String extended
             "string_reverse" => Some(OperationType::StringReverse),
             "string_repeat" => Some(OperationType::StringRepeat),
             "string_lines" => Some(OperationType::StringLines),
@@ -1180,10 +1288,8 @@ impl OperationType {
             "regex_extract" => Some(OperationType::RegexExtract),
             "string_count" => Some(OperationType::StringCount),
             "string_format" => Some(OperationType::StringFormat),
-            // Control Flow extended
             "assert" => Some(OperationType::Assert),
             "debug_log" => Some(OperationType::DebugLog),
-            // Type Conversion extended
             "typeof" => Some(OperationType::Typeof),
             "default" => Some(OperationType::Default),
             // Array Higher-Order
@@ -1211,7 +1317,6 @@ impl OperationType {
             "map_map_values" => Some(OperationType::MapMapValues),
             "map_filter_entries" => Some(OperationType::MapFilterEntries),
             "map_update" => Some(OperationType::MapUpdate),
-            // String
             "string_chars" => Some(OperationType::StringChars),
             // Math Aggregate
             "math_sum" => Some(OperationType::MathSum),
@@ -1256,7 +1361,6 @@ impl OperationType {
             "is_finite" => Some(OperationType::IsFinite),
             "approx_eq" => Some(OperationType::ApproxEq),
             "remap" => Some(OperationType::Remap),
-            // Random
             "random_int" => Some(OperationType::RandomInt),
             "random_float" => Some(OperationType::RandomFloat),
             "random_bool" => Some(OperationType::RandomBool),
@@ -1267,7 +1371,6 @@ impl OperationType {
             "random_sample" => Some(OperationType::RandomSample),
             "random_uuid" => Some(OperationType::RandomUuid),
             "random_string" => Some(OperationType::RandomString),
-            // Filesystem
             "fs_read" => Some(OperationType::FsRead),
             "fs_write" => Some(OperationType::FsWrite),
             "fs_append" => Some(OperationType::FsAppend),
@@ -1280,7 +1383,9 @@ impl OperationType {
             "fs_size" => Some(OperationType::FsSize),
             "fs_is_file" => Some(OperationType::FsIsFile),
             "fs_is_dir" => Some(OperationType::FsIsDir),
-            // Environment
+            "fs_chmod" => Some(OperationType::FsChmod),
+            "fs_symlink" => Some(OperationType::FsSymlink),
+            "fs_readlink" => Some(OperationType::FsReadlink),
             "env_get" => Some(OperationType::EnvGet),
             "env_has" => Some(OperationType::EnvHas),
             "env_keys" => Some(OperationType::EnvKeys),
@@ -1288,7 +1393,6 @@ impl OperationType {
             "os_arch" => Some(OperationType::OsArch),
             "process_pid" => Some(OperationType::ProcessPid),
             "current_dir" => Some(OperationType::CurrentDir),
-            // Network
             "http_get" => Some(OperationType::HttpGet),
             "http_post" => Some(OperationType::HttpPost),
             "http_put" => Some(OperationType::HttpPut),
@@ -1326,14 +1430,12 @@ impl OperationType {
             "http_server_receive" => Some(OperationType::HttpServerReceive),
             "http_server_respond" => Some(OperationType::HttpServerRespond),
             "http_server_stop" => Some(OperationType::HttpServerStop),
-            // Certificate
             "cert_generate" => Some(OperationType::CertGenerate),
             "cert_parse" => Some(OperationType::CertParse),
             "cert_info" => Some(OperationType::CertInfo),
             "cert_verify" => Some(OperationType::CertVerify),
             "key_generate" => Some(OperationType::KeyGenerate),
             "cert_self_signed" => Some(OperationType::CertSelfSigned),
-            // Path
             "path_join" => Some(OperationType::PathJoin),
             "path_basename" => Some(OperationType::PathBasename),
             "path_dirname" => Some(OperationType::PathDirname),
@@ -1351,6 +1453,8 @@ impl OperationType {
             "yaml_to_json" => Some(OperationType::YamlToJson),
             "yaml_from_json" => Some(OperationType::YamlFromJson),
             "yaml_merge" => Some(OperationType::YamlMerge),
+            "xml_parse" => Some(OperationType::XmlParse),
+            "xml_stringify" => Some(OperationType::XmlStringify),
             // CSV
             "csv_parse" => Some(OperationType::CsvParse),
             "csv_stringify" => Some(OperationType::CsvStringify),
@@ -1375,12 +1479,12 @@ impl OperationType {
             "hmac_sha256" => Some(OperationType::HmacSha256),
             "hash_crc32" => Some(OperationType::HashCrc32),
             "constant_time_eq" => Some(OperationType::ConstantTimeEq),
-            // Compress
             "compress_zstd" => Some(OperationType::CompressZstd),
             "decompress_zstd" => Some(OperationType::DecompressZstd),
             "compress_lz4" => Some(OperationType::CompressLz4),
             "decompress_lz4" => Some(OperationType::DecompressLz4),
-            // Format
+            "compress_gzip" => Some(OperationType::CompressGzip),
+            "decompress_gzip" => Some(OperationType::DecompressGzip),
             "fmt_number" => Some(OperationType::FmtNumber),
             "fmt_bytes" => Some(OperationType::FmtBytes),
             "fmt_duration" => Some(OperationType::FmtDuration),
@@ -1399,7 +1503,6 @@ impl OperationType {
             "time_diff" => Some(OperationType::TimeDiff),
             "start_of" => Some(OperationType::StartOf),
             "end_of" => Some(OperationType::EndOf),
-            // Stats
             "stats_mean" => Some(OperationType::StatsMean),
             "stats_median" => Some(OperationType::StatsMedian),
             "stats_mode" => Some(OperationType::StatsMode),
@@ -1412,7 +1515,6 @@ impl OperationType {
             "stats_quantile" => Some(OperationType::StatsQuantile),
             "stats_covariance" => Some(OperationType::StatsCovariance),
             "stats_correlation" => Some(OperationType::StatsCorrelation),
-            // Text
             "text_wrap" => Some(OperationType::TextWrap),
             "text_dedent" => Some(OperationType::TextDedent),
             "text_indent" => Some(OperationType::TextIndent),
@@ -1428,7 +1530,6 @@ impl OperationType {
             "html_unescape" => Some(OperationType::HtmlUnescape),
             "base32_encode" => Some(OperationType::Base32Encode),
             "base32_decode" => Some(OperationType::Base32Decode),
-            // Reflect
             "reflect_type_of" => Some(OperationType::ReflectTypeOf),
             "reflect_type_name" => Some(OperationType::ReflectTypeName),
             "reflect_is_type" => Some(OperationType::ReflectIsType),
@@ -1437,7 +1538,6 @@ impl OperationType {
             "reflect_callable" => Some(OperationType::ReflectCallable),
             "reflect_arity" => Some(OperationType::ReflectArity),
             "reflect_inspect" => Some(OperationType::ReflectInspect),
-            // Collections
             "set_from" => Some(OperationType::SetFrom),
             "set_union" => Some(OperationType::SetUnion),
             "set_intersection" => Some(OperationType::SetIntersection),
@@ -1446,7 +1546,6 @@ impl OperationType {
             "counter" => Some(OperationType::Counter),
             "most_common" => Some(OperationType::MostCommon),
             "ordered_map" => Some(OperationType::OrderedMap),
-            // Sort
             "sort_asc" => Some(OperationType::SortAsc),
             "sort_desc" => Some(OperationType::SortDesc),
             "sort_by" => Some(OperationType::SortBy),
@@ -1455,35 +1554,78 @@ impl OperationType {
             "is_sorted" => Some(OperationType::IsSorted),
             "binary_search" => Some(OperationType::BinarySearch),
             "sort_reverse" => Some(OperationType::SortReverse),
-            // Subprocess
             "exec" => Some(OperationType::Exec),
             "exec_status" => Some(OperationType::ExecStatus),
             "exec_output" => Some(OperationType::ExecOutput),
-            // Sync
             "mutex_new" => Some(OperationType::MutexNew),
             "mutex_lock" => Some(OperationType::MutexLock),
             "mutex_unlock" => Some(OperationType::MutexUnlock),
             "waitgroup_new" => Some(OperationType::WaitgroupNew),
             "waitgroup_done" => Some(OperationType::WaitgroupDone),
             "waitgroup_wait" => Some(OperationType::WaitgroupWait),
-            // Concurrency
             "await_all" => Some(OperationType::AwaitAll),
-            // Log
             "log_info" => Some(OperationType::LogInfo),
             "log_warn" => Some(OperationType::LogWarn),
             "log_error" => Some(OperationType::LogError),
             "log_debug" => Some(OperationType::LogDebug),
-            // Itertools
             "iter_chain" => Some(OperationType::IterChain),
             "iter_cycle" => Some(OperationType::IterCycle),
             "iter_repeat" => Some(OperationType::IterRepeat),
             "iter_product" => Some(OperationType::IterProduct),
             "iter_pairwise" => Some(OperationType::IterPairwise),
-            // Template
             "template_render" => Some(OperationType::TemplateRender),
-            // Flag
             "flag_parse" => Some(OperationType::FlagParse),
             "flag_args" => Some(OperationType::FlagArgs),
+            "gamma" => Some(OperationType::MathGamma),
+            "lgamma" => Some(OperationType::MathLgamma),
+            "erf" => Some(OperationType::MathErf),
+            "erfc" => Some(OperationType::MathErfc),
+            "expm1" => Some(OperationType::MathExpm1),
+            "nextafter" => Some(OperationType::MathNextafter),
+            "signbit" => Some(OperationType::MathSignbit),
+            "chown" => Some(OperationType::FsChown),
+            "hardlink" => Some(OperationType::FsHardlink),
+            "pipe" => Some(OperationType::OsPipe),
+            "format_float" => Some(OperationType::FormatFloat),
+            "parse_uint" => Some(OperationType::ParseUint),
+            "cli_fix" => Some(OperationType::CliFix),
+            "cli_clean" => Some(OperationType::CliClean),
+            "cli_tree" => Some(OperationType::CliTree),
+            // Platform — Terminal
+            "raw_mode_enable" => Some(OperationType::RawModeEnable),
+            "raw_mode_disable" => Some(OperationType::RawModeDisable),
+            "read_byte" => Some(OperationType::ReadByte),
+            "read_byte_timeout" => Some(OperationType::ReadByteTimeout),
+            // Platform — SDL2
+            "sdl_init" => Some(OperationType::SdlInit),
+            "sdl_set_color" => Some(OperationType::SdlSetColor),
+            "sdl_clear" => Some(OperationType::SdlClear),
+            "sdl_present" => Some(OperationType::SdlPresent),
+            "sdl_draw_pixel" => Some(OperationType::SdlDrawPixel),
+            "sdl_draw_line" => Some(OperationType::SdlDrawLine),
+            "sdl_fill_rect" => Some(OperationType::SdlFillRect),
+            "sdl_poll_event" => Some(OperationType::SdlPollEvent),
+            "sdl_delay" => Some(OperationType::SdlDelay),
+            "sdl_ticks" => Some(OperationType::SdlTicks),
+            "sdl_destroy" => Some(OperationType::SdlDestroy),
+            // Platform — Audio
+            "audio_stream_new" => Some(OperationType::AudioStreamNew),
+            "audio_write_samples" => Some(OperationType::AudioWriteSamples),
+            "audio_drain" => Some(OperationType::AudioDrain),
+            "audio_close" => Some(OperationType::AudioClose),
+            // Platform — WebGPU
+            "gpu_init" => Some(OperationType::GpuInit),
+            "gpu_create_buffer" => Some(OperationType::GpuCreateBuffer),
+            "gpu_create_shader" => Some(OperationType::GpuCreateShader),
+            "gpu_create_pipeline" => Some(OperationType::GpuCreatePipeline),
+            "gpu_begin_render_pass" => Some(OperationType::GpuBeginRenderPass),
+            "gpu_draw" => Some(OperationType::GpuDraw),
+            "gpu_end_render_pass" => Some(OperationType::GpuEndRenderPass),
+            "gpu_submit" => Some(OperationType::GpuSubmit),
+            "gpu_present" => Some(OperationType::GpuPresent),
+            "gpu_write_buffer" => Some(OperationType::GpuWriteBuffer),
+            "gpu_create_texture" => Some(OperationType::GpuCreateTexture),
+            "gpu_destroy" => Some(OperationType::GpuDestroy),
             _ => None,
         }
     }
@@ -1497,6 +1639,8 @@ impl OperationType {
         OperationType::Modulo,
         OperationType::Power,
         OperationType::Sqrt,
+        OperationType::Cbrt,
+        OperationType::Hypot,
         OperationType::Negate,
         OperationType::Abs,
         OperationType::Min,
@@ -1627,8 +1771,9 @@ impl OperationType {
         OperationType::TimestampAdd,
         OperationType::TimestampDiff,
         OperationType::Sleep,
-        // Hash/Encode (7)
+        // Hash/Encode (8)
         OperationType::HashSha256,
+        OperationType::HashSha1,
         OperationType::HashBlake3,
         OperationType::HashMd5,
         OperationType::UrlEncode,
@@ -1731,7 +1876,7 @@ impl OperationType {
         OperationType::RandomSample,
         OperationType::RandomUuid,
         OperationType::RandomString,
-        // Filesystem (12)
+        // Filesystem (15)
         OperationType::FsRead,
         OperationType::FsWrite,
         OperationType::FsAppend,
@@ -1744,6 +1889,9 @@ impl OperationType {
         OperationType::FsSize,
         OperationType::FsIsFile,
         OperationType::FsIsDir,
+        OperationType::FsChmod,
+        OperationType::FsSymlink,
+        OperationType::FsReadlink,
         // Environment (7)
         OperationType::EnvGet,
         OperationType::EnvHas,
@@ -1815,6 +1963,8 @@ impl OperationType {
         OperationType::YamlToJson,
         OperationType::YamlFromJson,
         OperationType::YamlMerge,
+        OperationType::XmlParse,
+        OperationType::XmlStringify,
         // CSV (4)
         OperationType::CsvParse,
         OperationType::CsvStringify,
@@ -1839,11 +1989,13 @@ impl OperationType {
         OperationType::HmacSha256,
         OperationType::HashCrc32,
         OperationType::ConstantTimeEq,
-        // Compress (4)
+        // Compress (6)
         OperationType::CompressZstd,
         OperationType::DecompressZstd,
         OperationType::CompressLz4,
         OperationType::DecompressLz4,
+        OperationType::CompressGzip,
+        OperationType::DecompressGzip,
         // Format (6)
         OperationType::FmtNumber,
         OperationType::FmtBytes,
@@ -1948,6 +2100,60 @@ impl OperationType {
         // Flag (2)
         OperationType::FlagParse,
         OperationType::FlagArgs,
+        // Additional math (7)
+        OperationType::MathGamma,
+        OperationType::MathLgamma,
+        OperationType::MathErf,
+        OperationType::MathErfc,
+        OperationType::MathExpm1,
+        OperationType::MathNextafter,
+        OperationType::MathSignbit,
+        // Additional OS (3)
+        OperationType::FsChown,
+        OperationType::FsHardlink,
+        OperationType::OsPipe,
+        // Additional strconv (2)
+        OperationType::FormatFloat,
+        OperationType::ParseUint,
+        // Additional CLI (3)
+        OperationType::CliFix,
+        OperationType::CliClean,
+        OperationType::CliTree,
+        // Platform — Terminal (4)
+        OperationType::RawModeEnable,
+        OperationType::RawModeDisable,
+        OperationType::ReadByte,
+        OperationType::ReadByteTimeout,
+        // Platform — SDL2 (11)
+        OperationType::SdlInit,
+        OperationType::SdlSetColor,
+        OperationType::SdlClear,
+        OperationType::SdlPresent,
+        OperationType::SdlDrawPixel,
+        OperationType::SdlDrawLine,
+        OperationType::SdlFillRect,
+        OperationType::SdlPollEvent,
+        OperationType::SdlDelay,
+        OperationType::SdlTicks,
+        OperationType::SdlDestroy,
+        // Platform — Audio (4)
+        OperationType::AudioStreamNew,
+        OperationType::AudioWriteSamples,
+        OperationType::AudioDrain,
+        OperationType::AudioClose,
+        // Platform — WebGPU (12)
+        OperationType::GpuInit,
+        OperationType::GpuCreateBuffer,
+        OperationType::GpuCreateShader,
+        OperationType::GpuCreatePipeline,
+        OperationType::GpuBeginRenderPass,
+        OperationType::GpuDraw,
+        OperationType::GpuEndRenderPass,
+        OperationType::GpuSubmit,
+        OperationType::GpuPresent,
+        OperationType::GpuWriteBuffer,
+        OperationType::GpuCreateTexture,
+        OperationType::GpuDestroy,
     ];
 }
 
@@ -1963,7 +2169,7 @@ mod tests {
 
     #[test]
     fn test_operation_type_all_count() {
-        assert_eq!(OperationType::ALL.len(), 412);
+        assert_eq!(OperationType::ALL.len(), 468);
     }
 
     #[test]
@@ -1989,12 +2195,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_operation_type_serde() {
-        for op in OperationType::ALL {
-            let json = serde_json::to_string(op).unwrap();
-            let rt: OperationType = serde_json::from_str(&json).unwrap();
-            assert_eq!(*op, rt);
-        }
-    }
 }

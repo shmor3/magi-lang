@@ -3,7 +3,7 @@
 //! Shows type annotations for variable bindings.
 
 use super::analysis::DocumentState;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle an inlay hints request for a given range of the document.
 pub fn handle_inlay_hints(state: &DocumentState, range: &Range) -> Vec<InlayHint> {

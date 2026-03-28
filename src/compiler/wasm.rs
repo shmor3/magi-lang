@@ -2,11 +2,12 @@
 //!
 //! Uses the `wasm-encoder` crate to produce valid `.wasm` modules.
 
-use wasm_encoder::{
+use super::wasm_binary::{
     CodeSection, DataSection, ElementSection, Elements, ExportKind, ExportSection,
-    FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction as WasmInst,
+    FunctionSection, GlobalSection, GlobalType, ImportSection, Inst as WasmInst,
     MemorySection, MemoryType, Module, NameMap, NameSection, TableSection, TableType,
-    TypeSection, ValType as WasmValType,
+    TypeSection, ValType as WasmValType, BlockType, MemArg, ConstExpr, EntityType,
+    Function as WasmFunction, RefType,
 };
 
 use std::collections::HashMap;
@@ -81,16 +82,16 @@ impl WasmCodegen {
         // ── Import section ───────────────────────────────────
         let mut imports = ImportSection::new();
         // Import host functions.
-        imports.import("env", "print", wasm_encoder::EntityType::Function(print_type_idx));
+        imports.import("env", "print", EntityType::Function(print_type_idx));
         imports.import(
             "env",
             "runtime_call",
-            wasm_encoder::EntityType::Function(runtime_call_type_idx),
+            EntityType::Function(runtime_call_type_idx),
         );
         imports.import(
             "env",
             "__to_string",
-            wasm_encoder::EntityType::Function(to_string_type_idx),
+            EntityType::Function(to_string_type_idx),
         );
         let num_imports = 3u32;
         module.section(&imports);
@@ -105,7 +106,7 @@ impl WasmCodegen {
         // ── Table section (for indirect calls) ───────────────
         let mut tables = TableSection::new();
         tables.table(TableType {
-            element_type: wasm_encoder::RefType::FUNCREF,
+            element_type: RefType::FUNCREF,
             minimum: ir.functions.len() as u64,
             maximum: Some(ir.functions.len() as u64),
             shared: false,
@@ -133,7 +134,7 @@ impl WasmCodegen {
                 mutable: true,
                 shared: false,
             },
-            &wasm_encoder::ConstExpr::i32_const({
+            &ConstExpr::i32_const({
                 let offset = self.string_data_offset;
                 let size = self.calc_string_data_size(ir);
                 (offset.saturating_add(size)) as i32
@@ -163,7 +164,7 @@ impl WasmCodegen {
             .collect();
         elements.active(
             Some(0),
-            &wasm_encoder::ConstExpr::i32_const(0),
+            &ConstExpr::i32_const(0),
             Elements::Functions(func_indices.into()),
         );
         module.section(&elements);
@@ -186,8 +187,7 @@ impl WasmCodegen {
             buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(bytes);
             data.active(
-                0,
-                &wasm_encoder::ConstExpr::i32_const(offset as i32),
+                &ConstExpr::i32_const(offset as i32),
                 buf.iter().copied(),
             );
             offset = offset.saturating_add(4u32.saturating_add(bytes.len() as u32));
@@ -223,118 +223,9 @@ impl WasmCodegen {
     /// When the feature is disabled, falls back to structural checks only
     /// (magic number, version, section ordering).
     fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), CompileError> {
-        #[cfg(feature = "wasm-validate")]
-        {
-            let mut validator = wasmparser::Validator::new();
-            validator.validate_all(bytes).map_err(|e| {
-                CompileError::Internal(format!("WASM validation failed: {e}"))
-            })?;
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "wasm-validate"))]
-        {
-            Self::validate_wasm_bytes_structural(bytes)
-        }
-    }
-
-    /// Structural-only WASM validation (magic number, version, section order).
-    ///
-    /// Used as a fallback when `wasm-validate` feature is disabled.
-    #[cfg(not(feature = "wasm-validate"))]
-    fn validate_wasm_bytes_structural(bytes: &[u8]) -> Result<(), CompileError> {
-        const WASM_MAGIC: &[u8; 4] = b"\0asm";
-        const WASM_VERSION: &[u8; 4] = &[1, 0, 0, 0];
-
-        if bytes.len() < 8 {
-            return Err(CompileError::Internal(format!(
-                "generated WASM binary too small ({} bytes, minimum 8)",
-                bytes.len()
-            )));
-        }
-        if &bytes[0..4] != WASM_MAGIC {
-            return Err(CompileError::Internal(
-                "generated WASM binary has invalid magic number (expected \\0asm)".to_string(),
-            ));
-        }
-        if &bytes[4..8] != WASM_VERSION {
-            return Err(CompileError::Internal(format!(
-                "generated WASM binary has unsupported version {:?} (expected [1, 0, 0, 0])",
-                &bytes[4..8]
-            )));
-        }
-
-        // Walk the section headers to verify structural integrity.
-        // Each section is: 1-byte section id, LEB128 size, then `size` bytes of payload.
-        let mut offset = 8;
-        let mut prev_section_id: Option<u8> = None;
-        while offset < bytes.len() {
-            if offset + 1 > bytes.len() {
-                return Err(CompileError::Internal(format!(
-                    "WASM binary truncated at offset {offset} (expected section header)"
-                )));
-            }
-            let section_id = bytes[offset];
-            offset += 1;
-
-            // Section IDs must be 0..=12 (custom=0, type=1, ..., data_count=12).
-            if section_id > 12 {
-                return Err(CompileError::Internal(format!(
-                    "WASM binary contains invalid section id {section_id} at offset {}",
-                    offset - 1
-                )));
-            }
-
-            // Non-custom sections (id > 0) must appear in ascending order.
-            if section_id != 0 {
-                if let Some(prev) = prev_section_id {
-                    if prev != 0 && section_id <= prev {
-                        return Err(CompileError::Internal(format!(
-                            "WASM sections out of order: section {section_id} after section {prev}"
-                        )));
-                    }
-                }
-                prev_section_id = Some(section_id);
-            }
-
-            // Decode LEB128 section size.
-            let (size, leb_len) = Self::decode_leb128(&bytes[offset..])?;
-            offset += leb_len;
-
-            // Verify the section payload doesn't exceed the binary.
-            if offset + size as usize > bytes.len() {
-                return Err(CompileError::Internal(format!(
-                    "WASM section {section_id} claims size {size} but only {} bytes remain",
-                    bytes.len() - offset
-                )));
-            }
-            offset += size as usize;
-        }
-
-        Ok(())
-    }
-
-    /// Decode an unsigned LEB128 value from a byte slice.
-    /// Returns `(value, bytes_consumed)`.
-    #[cfg(not(feature = "wasm-validate"))]
-    fn decode_leb128(bytes: &[u8]) -> Result<(u32, usize), CompileError> {
-        let mut result: u32 = 0;
-        let mut shift: u32 = 0;
-        for (i, &byte) in bytes.iter().enumerate() {
-            if shift >= 35 {
-                return Err(CompileError::Internal(
-                    "WASM LEB128 value too large for u32".to_string(),
-                ));
-            }
-            result |= ((byte & 0x7F) as u32) << shift;
-            shift += 7;
-            if byte & 0x80 == 0 {
-                return Ok((result, i + 1));
-            }
-        }
-        Err(CompileError::Internal(
-            "WASM binary truncated in LEB128 encoding".to_string(),
-        ))
+        crate::util::validate_wasm(bytes).map_err(|e| {
+            CompileError::Internal(format!("WASM validation failed: {e}"))
+        })
     }
 
     fn calc_string_data_size(&self, ir: &IrModule) -> u32 {
@@ -394,7 +285,7 @@ impl WasmCodegen {
         func: &IrFunction,
         ir: &IrModule,
         num_imports: u32,
-    ) -> Result<wasm_encoder::Function, CompileError> {
+    ) -> Result<WasmFunction, CompileError> {
         let temp_count = Self::count_temp_locals_needed(func, ir);
         let temp_base = func.locals.len() as u32;
 
@@ -403,7 +294,7 @@ impl WasmCodegen {
             locals.push((temp_count, WasmValType::I64));
         }
 
-        let mut f = wasm_encoder::Function::new(locals);
+        let mut f = WasmFunction::new(locals);
 
         // Get string data offsets.
         let string_offsets = self.calc_string_offsets(ir);
@@ -451,18 +342,18 @@ impl WasmCodegen {
     /// Emit a heap bounds check after an inline allocation (GlobalSet(0)).
     /// If heap_ptr exceeds current memory, grows memory by 1MB.
     /// Traps (Unreachable) if growth fails.
-    fn emit_heap_bounds_check(f: &mut wasm_encoder::Function) {
+    fn emit_heap_bounds_check(f: &mut WasmFunction) {
         f.instruction(&WasmInst::GlobalGet(0));
         f.instruction(&WasmInst::MemorySize(0));
         f.instruction(&WasmInst::I32Const(16)); // pages → bytes: <<16
         f.instruction(&WasmInst::I32Shl);
         f.instruction(&WasmInst::I32GtU);
-        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+        f.instruction(&WasmInst::If(BlockType::Empty));
         f.instruction(&WasmInst::I32Const(16)); // grow by 1MB (16 pages)
         f.instruction(&WasmInst::MemoryGrow(0));
         f.instruction(&WasmInst::I32Const(-1_i32));
         f.instruction(&WasmInst::I32Eq);
-        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+        f.instruction(&WasmInst::If(BlockType::Empty));
         f.instruction(&WasmInst::Unreachable); // out of memory
         f.instruction(&WasmInst::End);
         f.instruction(&WasmInst::End);
@@ -472,14 +363,14 @@ impl WasmCodegen {
     ///
     /// If the value is a raw f64 (not NaN-boxed), reinterpret its bits as f64.
     /// If the value is a NaN-boxed integer, sign-extend from 48 bits and convert to f64.
-    fn emit_to_f64(f: &mut wasm_encoder::Function, src: u32) {
+    fn emit_to_f64(f: &mut WasmFunction, src: u32) {
         // Check: is_nanboxed = (val & NANBOX_MASK) == NANBOX_SIG
         f.instruction(&WasmInst::LocalGet(src));
         f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
         f.instruction(&WasmInst::I64And);
         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
         f.instruction(&WasmInst::I64Eq);
-        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::F64)));
+        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::F64)));
         // NaN-boxed: untag as i64 (sign-extend from 48 bits) and convert to f64
         f.instruction(&WasmInst::LocalGet(src));
         f.instruction(&WasmInst::I64Const(16));
@@ -498,7 +389,7 @@ impl WasmCodegen {
     ///
     /// Reinterprets f64 bits to i64. If the result collides with the NaN-box tag
     /// space (negative quiet NaN), replaces it with canonical NaN.
-    fn emit_tag_f64_result(f: &mut wasm_encoder::Function, tmp: u32) {
+    fn emit_tag_f64_result(f: &mut WasmFunction, tmp: u32) {
         f.instruction(&WasmInst::I64ReinterpretF64);
         f.instruction(&WasmInst::LocalTee(tmp));
         // Check if the f64 bits collide with NaN-box tag space
@@ -506,7 +397,7 @@ impl WasmCodegen {
         f.instruction(&WasmInst::I64And);
         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
         f.instruction(&WasmInst::I64Eq);
-        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
         // Collides with tag space: replace with canonical NaN
         f.instruction(&WasmInst::I64Const(tag::CANON_NAN));
         f.instruction(&WasmInst::Else);
@@ -517,7 +408,7 @@ impl WasmCodegen {
 
     /// Emit instructions to check if either of two locals holds a raw f64 (not NaN-boxed).
     /// Pushes an i32 boolean onto the stack: 1 if either is f64, 0 if both are NaN-boxed.
-    fn emit_either_is_f64(f: &mut wasm_encoder::Function, t0: u32, t1: u32) {
+    fn emit_either_is_f64(f: &mut WasmFunction, t0: u32, t1: u32) {
         // left_is_f64 = (t0 & NANBOX_MASK) != NANBOX_SIG
         f.instruction(&WasmInst::LocalGet(t0));
         f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
@@ -536,7 +427,7 @@ impl WasmCodegen {
 
     fn emit_instruction(
         &self,
-        f: &mut wasm_encoder::Function,
+        f: &mut WasmFunction,
         inst: &Instruction,
         ir: &IrModule,
         num_imports: u32,
@@ -719,7 +610,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                 // Tagged path: falsy if payload == 0
                 f.instruction(&WasmInst::LocalGet(t));
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
@@ -767,7 +658,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                 // Collides with tag space → replace with canonical NaN
                 f.instruction(&WasmInst::I64Const(tag::CANON_NAN));
                 f.instruction(&WasmInst::Else);
@@ -804,18 +695,14 @@ impl WasmCodegen {
             }
             Instruction::GetTag => {
                 // NaN-boxing tag extraction using `select`:
-                //
                 // Stack input: [tagged_value]
                 // Stack output: [tag_as_nanboxed_i64]
-                //
                 // Algorithm:
                 //   is_nanboxed = (val & NANBOX_MASK) == NANBOX_SIG
                 //   if is_nanboxed: tag = (val >> 48) & 0x07
                 //   else: tag = F64 (sentinel = 8)
-                //
                 // We use WASM `select` which takes (val_true, val_false, condition) and returns
                 // val_true if condition != 0, val_false otherwise.
-                //
                 // Since we need the value twice (once for nanbox check, once for tag extraction),
                 // we need a temp local. We'll use the approach of duplicating via local.tee.
                 // GetTag is always used by the compiler, which always has at least one temp available.
@@ -852,10 +739,10 @@ impl WasmCodegen {
 
             // ── Control flow ─────────────────────────────
             Instruction::Block => {
-                f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::Block(BlockType::Empty));
             }
             Instruction::Loop => {
-                f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::Loop(BlockType::Empty));
             }
             Instruction::End => {
                 f.instruction(&WasmInst::End);
@@ -869,7 +756,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                 // Tagged: truthy if payload != 0
                 f.instruction(&WasmInst::LocalGet(t));
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
@@ -884,7 +771,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(0));
                 f.instruction(&WasmInst::I64Ne);
                 f.instruction(&WasmInst::End);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(
+                f.instruction(&WasmInst::If(BlockType::Result(
                     WasmValType::I64,
                 )));
             }
@@ -897,7 +784,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                 // Tagged: truthy if payload != 0
                 f.instruction(&WasmInst::LocalGet(t));
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
@@ -912,7 +799,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(0));
                 f.instruction(&WasmInst::I64Ne);
                 f.instruction(&WasmInst::End);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::If(BlockType::Empty));
             }
             Instruction::Else => {
                 f.instruction(&WasmInst::Else);
@@ -929,7 +816,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                 // Tagged: truthy if payload != 0
                 f.instruction(&WasmInst::LocalGet(t));
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
@@ -948,10 +835,10 @@ impl WasmCodegen {
             }
             Instruction::BrTable(targets, default) => {
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::BrTable(
-                    targets.to_vec().into(),
-                    *default,
-                ));
+                f.instruction(&WasmInst::BrTable {
+                    targets: targets.to_vec(),
+                    default: *default,
+                });
             }
             Instruction::Return => {
                 f.instruction(&WasmInst::Return);
@@ -985,8 +872,8 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::CallIndirect {
-                    type_index: type_idx,
-                    table_index: 0,
+                    type_idx,
+                    table_idx: 0,
                 });
             }
 
@@ -1008,12 +895,12 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Const(16)); // pages → bytes: <<16
                 f.instruction(&WasmInst::I32Shl);
                 f.instruction(&WasmInst::I32GtU);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::If(BlockType::Empty));
                 f.instruction(&WasmInst::I32Const(16)); // grow by 1MB
                 f.instruction(&WasmInst::MemoryGrow(0));
                 f.instruction(&WasmInst::I32Const(-1_i32));
                 f.instruction(&WasmInst::I32Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::If(BlockType::Empty));
                 f.instruction(&WasmInst::Unreachable); // out of memory
                 f.instruction(&WasmInst::End);
                 f.instruction(&WasmInst::End);
@@ -1023,7 +910,7 @@ impl WasmCodegen {
             }
             Instruction::MemLoadI64 => {
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg {
+                f.instruction(&WasmInst::I64Load(MemArg {
                     offset: 0,
                     align: 3, // 8-byte alignment
                     memory_index: 0,
@@ -1039,7 +926,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::LocalSet(temp_base)); // save value
                 f.instruction(&WasmInst::I32WrapI64);          // convert addr to i32
                 f.instruction(&WasmInst::LocalGet(temp_base)); // restore value
-                f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg {
+                f.instruction(&WasmInst::I64Store(MemArg {
                     offset: 0,
                     align: 3,
                     memory_index: 0,
@@ -1047,7 +934,7 @@ impl WasmCodegen {
             }
             Instruction::MemLoadF64 => {
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::F64Load(wasm_encoder::MemArg {
+                f.instruction(&WasmInst::F64Load(MemArg {
                     offset: 0,
                     align: 3,
                     memory_index: 0,
@@ -1058,7 +945,7 @@ impl WasmCodegen {
             }
             Instruction::MemLoadI32 => {
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg {
+                f.instruction(&WasmInst::I32Load(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: 0,
@@ -1088,12 +975,11 @@ impl WasmCodegen {
                     f.instruction(&WasmInst::LocalTee(t0)); // t0 = base_ptr as i64
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(0)); // length
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(0)); // capacity
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
-                    // Tag as array
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::ARRAY as i64) << tag::TAG_SHIFT)));
                     f.instruction(&WasmInst::I64Or);
@@ -1122,11 +1008,11 @@ impl WasmCodegen {
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(count as i32));
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(count as i32));
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
                     // Elements are on the stack in order: bottom=elem0, top=elem(count-1)
                     // Pop from top (last element first).
@@ -1138,7 +1024,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(8i32.saturating_add((i as i32).saturating_mul(8))));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                     }
 
                     // Tag as array and push
@@ -1151,7 +1037,6 @@ impl WasmCodegen {
                 // Stack: [array, index]
                 let t0 = temp_base;     // index (untagged)
                 let t1 = temp_base + 1; // array ptr (untagged)
-                // Untag index
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::LocalSet(t0));
@@ -1164,9 +1049,9 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32LtU);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                 // In bounds: load element at ptr + 8 + index*8
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
@@ -1177,7 +1062,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                 f.instruction(&WasmInst::Else);
                 // Out of bounds: return null
                 f.instruction(&WasmInst::I64Const(tag::encode(tag::NULL, 0)));
@@ -1195,7 +1080,6 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(16));
                 f.instruction(&WasmInst::I64ShrS);
                 f.instruction(&WasmInst::LocalSet(t1)); // save index as i64
-                // Untag array
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::LocalSet(t2)); // save array ptr
@@ -1205,15 +1089,14 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::I32Const(0));
                 f.instruction(&WasmInst::I32LtS);
-                // Load length
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32GeU); // index >= length (unsigned)
                 f.instruction(&WasmInst::I32Or); // index < 0 || index >= length
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::If(BlockType::Empty));
                 // Out of bounds: skip the store, just push array back unchanged
                 f.instruction(&WasmInst::Else);
                 // In bounds: compute address and store
@@ -1226,9 +1109,8 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::I32Add);
-                // Store value
                 f.instruction(&WasmInst::LocalGet(t0));
-                f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                 f.instruction(&WasmInst::End);
 
                 // Push array ref back (re-tagged)
@@ -1241,7 +1123,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I64ExtendI32U);
                 // Tag as i64
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
@@ -1263,11 +1145,11 @@ impl WasmCodegen {
                     f.instruction(&WasmInst::LocalTee(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(0));
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(0));
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::MAP as i64) << tag::TAG_SHIFT)));
                     f.instruction(&WasmInst::I64Or);
@@ -1289,31 +1171,29 @@ impl WasmCodegen {
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(count as i32));
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                     f.instruction(&WasmInst::LocalGet(t0));
                     f.instruction(&WasmInst::I32WrapI64);
                     f.instruction(&WasmInst::I32Const(count as i32));
-                    f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                    f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
                     // Stack has pairs: bottom=[key0,val0], top=[key(n-1),val(n-1)]
                     // Pop in reverse: top pair first.
                     for i in (0..count).rev() {
-                        // Pop value
                         f.instruction(&WasmInst::LocalSet(t1));
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(8i32.saturating_add((i as i32).saturating_mul(16)).saturating_add(8)));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                        // Pop key
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalSet(t1));
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(8i32.saturating_add((i as i32).saturating_mul(16))));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                     }
 
                     f.instruction(&WasmInst::LocalGet(t0));
@@ -1338,16 +1218,16 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::LocalSet(t2)); // counter = 0
 
                 // block $done
-                f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::Block(BlockType::Empty));
                 // loop $search
-                f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::Loop(BlockType::Empty));
 
                 // if counter >= count, break
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32GeU);
                 f.instruction(&WasmInst::BrIf(1)); // break to $done
 
@@ -1361,12 +1241,12 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Const(16));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                 // Compare with search key
                 f.instruction(&WasmInst::LocalGet(t0));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::If(BlockType::Empty));
                 // Found: save value to t0 (overwrite key, we don't need it anymore)
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
@@ -1379,12 +1259,11 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                 f.instruction(&WasmInst::LocalSet(t0)); // save found value
                 f.instruction(&WasmInst::Br(2)); // break to $done
                 f.instruction(&WasmInst::End); // end if
 
-                // Increment counter
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I64Const(1));
                 f.instruction(&WasmInst::I64Add);
@@ -1402,9 +1281,9 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32LtU);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                 f.instruction(&WasmInst::LocalGet(t0)); // found value
                 f.instruction(&WasmInst::Else);
                 f.instruction(&WasmInst::I64Const(tag::encode(tag::NULL, 0))); // NaN-boxed null
@@ -1428,19 +1307,18 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::LocalSet(t3)); // counter
 
                 // Search for existing key
-                f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $outer
-                f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $found
-                f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty)); // $loop
+                f.instruction(&WasmInst::Block(BlockType::Empty)); // $outer
+                f.instruction(&WasmInst::Block(BlockType::Empty)); // $found
+                f.instruction(&WasmInst::Loop(BlockType::Empty)); // $loop
 
                 f.instruction(&WasmInst::LocalGet(t3));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32GeU);
                 f.instruction(&WasmInst::BrIf(1)); // not found → $found block end
 
-                // Compare key
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::I32Const(8));
@@ -1450,10 +1328,10 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Const(16));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                f.instruction(&WasmInst::If(BlockType::Empty));
                 // Update value in place
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
@@ -1467,7 +1345,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t0));
-                f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                 // Save tagged map ref to t0 (value already stored to memory)
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::MAP as i64) << tag::TAG_SHIFT)));
@@ -1488,7 +1366,7 @@ impl WasmCodegen {
                 // Not found: allocate new map with count+1, copy old, append new entry
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Const(1));
                 f.instruction(&WasmInst::I32Add);
 
@@ -1505,25 +1383,23 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::GlobalSet(0));
                 Self::emit_heap_bounds_check(f);
 
-                // Store new count
                 f.instruction(&WasmInst::LocalGet(t3));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Const(1));
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::LocalGet(t3));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Const(1));
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
-                // Copy old entries
                 f.instruction(&WasmInst::LocalGet(t3));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::I32Const(8));
@@ -1534,40 +1410,38 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Const(16));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
 
-                // Store new key
                 f.instruction(&WasmInst::LocalGet(t3));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Const(16));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t1));
-                f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
-                // Store new value
                 f.instruction(&WasmInst::LocalGet(t3));
                 f.instruction(&WasmInst::I32WrapI64);
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t2));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Const(16));
                 f.instruction(&WasmInst::I32Mul);
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::I32Const(8));
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t0));
-                f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                 // Save tagged new map ref to t0
                 f.instruction(&WasmInst::LocalGet(t3));
@@ -1597,7 +1471,6 @@ impl WasmCodegen {
                 // str2_len = i32.load(str2_ptr)
                 // total = str1_len + str2_len
                 // Allocate 4 + total bytes
-                // Store total length
                 // Copy str1 bytes: memory.copy(new_ptr+4, str1_ptr+4, str1_len)
                 // Copy str2 bytes: memory.copy(new_ptr+4+str1_len, str2_ptr+4, str2_len)
 
@@ -1606,7 +1479,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 // stack: [str1_len:i32]
 
                 // Get str2_len
@@ -1614,7 +1487,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 // stack: [str1_len, str2_len]
 
                 f.instruction(&WasmInst::I32Add);
@@ -1658,7 +1531,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 // stack: [str1_ptr:i32, str1_len:i32]
 
                 // Save str1_ptr to t1 (reuse as i64)
@@ -1685,11 +1558,11 @@ impl WasmCodegen {
                 // Load str1_len
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 // Load str2_len
                 f.instruction(&WasmInst::LocalGet(t0));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 // stack: [str1_len:i32, str2_len:i32]
                 f.instruction(&WasmInst::I32Add);
                 // stack: [total_len:i32]
@@ -1716,12 +1589,12 @@ impl WasmCodegen {
                 // Recompute total_len
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::LocalGet(t0));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Add);
-                f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
 
                 // Copy str1 bytes: memory.copy(dst=new_ptr+4, src=str1_ptr+4, len=str1_len)
                 f.instruction(&WasmInst::LocalGet(t2));
@@ -1734,7 +1607,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Add); // src
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 })); // len
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 })); // len
                 f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
 
                 // Copy str2 bytes: memory.copy(dst=new_ptr+4+str1_len, src=str2_ptr+4, len=str2_len)
@@ -1744,7 +1617,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Add);
                 f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I32Add); // dst = new_ptr+4+str1_len
                 f.instruction(&WasmInst::LocalGet(t0));
                 f.instruction(&WasmInst::I32WrapI64);
@@ -1752,7 +1625,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I32Add); // src
                 f.instruction(&WasmInst::LocalGet(t0));
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 })); // len
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 })); // len
                 f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
 
                 // Tag result as string
@@ -1765,7 +1638,7 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                 f.instruction(&WasmInst::I64And);
                 f.instruction(&WasmInst::I32WrapI64);
-                f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                 f.instruction(&WasmInst::I64ExtendI32U);
                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
                 f.instruction(&WasmInst::I64Or);
@@ -1784,7 +1657,6 @@ impl WasmCodegen {
                 match (fn_name, *arg_count) {
                     ("array_push", 2) => {
                         // Stack: [array, element]
-                        // Create new array with old elements + new element at end.
                         let t0 = temp_base;     // element
                         let t1 = temp_base + 1; // old array ptr
                         let t2 = temp_base + 2; // new array ptr / loop counter
@@ -1794,10 +1666,9 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::LocalSet(t1)); // save old array ptr
 
-                        // Load old length
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         // stack: [old_len:i32]
 
                         // Allocate new array: 8 + (old_len+1)*8
@@ -1824,7 +1695,7 @@ impl WasmCodegen {
                         // Reload old_len+1
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
                         // stack: [new_len:i32]
@@ -1842,20 +1713,20 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
 
                         // Store capacity (same as length)
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
                         // Copy old elements via memory.copy
                         // dst = new_ptr + 8, src = old_ptr + 8, len = old_len * 8
@@ -1871,7 +1742,7 @@ impl WasmCodegen {
 
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul); // len in bytes
 
@@ -1884,12 +1755,12 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add); // addr = new_ptr+8+old_len*8
                         f.instruction(&WasmInst::LocalGet(t0)); // element
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // Push tagged new array
                         f.instruction(&WasmInst::LocalGet(t2));
@@ -1907,7 +1778,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                         f.instruction(&WasmInst::I64Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
 
                         // NaN-boxed: extract tag safely
                         f.instruction(&WasmInst::LocalGet(t0));
@@ -1920,18 +1791,16 @@ impl WasmCodegen {
                         // if tag == ARRAY
                         f.instruction(&WasmInst::I32Const(tag::ARRAY as i32));
                         f.instruction(&WasmInst::I32Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
-                        // Array length
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I64ExtendI32U);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
                         f.instruction(&WasmInst::Else);
-                        // Check string
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
                         f.instruction(&WasmInst::I64ShrU);
@@ -1940,18 +1809,16 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(tag::STRING as i32));
                         f.instruction(&WasmInst::I32Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
-                        // String length
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I64ExtendI32U);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
                         f.instruction(&WasmInst::Else);
-                        // Check map
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
                         f.instruction(&WasmInst::I64ShrU);
@@ -1960,12 +1827,12 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(tag::MAP as i32));
                         f.instruction(&WasmInst::I32Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I64ExtendI32U);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
@@ -2003,7 +1870,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                         f.instruction(&WasmInst::I64Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                         // NaN-boxed: extract tag
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
@@ -2043,7 +1910,7 @@ impl WasmCodegen {
                         for (ci, (tag_val, str_idx)) in tag_checks.iter().enumerate() {
                             f.instruction(&WasmInst::I32Const(*tag_val as i32));
                             f.instruction(&WasmInst::I32Eq);
-                            f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                            f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                             if let Some(idx) = type_str_indices[*str_idx] {
                                 let offset = string_offsets[idx];
                                 f.instruction(&WasmInst::I64Const((tag::NANBOX_SIG | ((tag::STRING as i64) << tag::TAG_SHIFT)) | (offset as i64)));
@@ -2058,7 +1925,7 @@ impl WasmCodegen {
                                 f.instruction(&WasmInst::I64And);
                                 f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                                 f.instruction(&WasmInst::I64Eq);
-                                f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                                 f.instruction(&WasmInst::LocalGet(t0));
                                 f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
                                 f.instruction(&WasmInst::I64ShrU);
@@ -2096,14 +1963,14 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(0));
                         f.instruction(&WasmInst::LocalSet(t2)); // counter = 0
 
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty));
-                        f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::Block(BlockType::Empty));
+                        f.instruction(&WasmInst::Loop(BlockType::Empty));
 
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32GeU);
                         f.instruction(&WasmInst::BrIf(1));
 
@@ -2116,11 +1983,11 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(16));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
                         // Found: save value to t0
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
@@ -2133,7 +2000,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalSet(t0));
                         f.instruction(&WasmInst::Br(2)); // break to $done
                         f.instruction(&WasmInst::End);
@@ -2152,9 +2019,9 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32LtU);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::Else);
                         f.instruction(&WasmInst::I64Const(tag::encode(tag::NULL, 0))); // NaN-boxed null
@@ -2177,19 +2044,18 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalSet(t3)); // counter
 
                         // Search for existing key
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $outer
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $found
-                        f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty)); // $loop
+                        f.instruction(&WasmInst::Block(BlockType::Empty)); // $outer
+                        f.instruction(&WasmInst::Block(BlockType::Empty)); // $found
+                        f.instruction(&WasmInst::Loop(BlockType::Empty)); // $loop
 
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32GeU);
                         f.instruction(&WasmInst::BrIf(1)); // not found → $found block end
 
-                        // Compare key
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(8));
@@ -2199,10 +2065,10 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(16));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
                         // Update value in place
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
@@ -2216,7 +2082,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t0));
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         // Save tagged map ref to t0 (value already stored to memory)
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::MAP as i64) << tag::TAG_SHIFT)));
@@ -2235,10 +2101,9 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::End); // end $found block
 
                         // Not found: allocate new map with count+1, copy old, append new entry
-                        // Load old count
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         // stack: [old_count:i32]
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
@@ -2259,24 +2124,22 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::GlobalSet(0));
                         Self::emit_heap_bounds_check(f);
 
-                        // Store new count
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
-                        // Store capacity
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
                         // Copy old entries: memory.copy(new+8, old+8, old_count*16)
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2289,7 +2152,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(16));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
@@ -2301,12 +2164,12 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(16));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1)); // key
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // Store new value at new+8+old_count*16+8
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2315,14 +2178,14 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(16));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t0)); // value
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // Save tagged new map ref to t0
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2339,7 +2202,6 @@ impl WasmCodegen {
                         // Stack: [tagged_array_of_pairs]
                         // Input: array of [key, value] pairs
                         // Output: map with those key-value entries
-                        //
                         // Memory layouts:
                         //   Array: [i32 len][i32 cap][i64 elem0][i64 elem1]...
                         //   Map:   [i32 count][i32 cap][i64 key0][i64 val0][i64 key1][i64 val1]...
@@ -2358,7 +2220,7 @@ impl WasmCodegen {
                         // Read array length → t2
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I64ExtendI32U);
                         f.instruction(&WasmInst::LocalSet(t2)); // count
 
@@ -2379,27 +2241,26 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::GlobalSet(0));
                         Self::emit_heap_bounds_check(f);
 
-                        // Store map count
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
 
                         // Store map capacity = count
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
                         // Initialize loop index = 0
                         f.instruction(&WasmInst::I64Const(0));
                         f.instruction(&WasmInst::LocalSet(t3));
 
                         // Loop: for i in 0..count
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $break
-                        f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));   // $continue
+                        f.instruction(&WasmInst::Block(BlockType::Empty)); // $break
+                        f.instruction(&WasmInst::Loop(BlockType::Empty));   // $continue
 
                         // if i >= count, break
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2418,7 +2279,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         // Untag pair to get raw pointer
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
@@ -2440,9 +2301,8 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(8)); // skip pair header
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                        // Store key
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // Read value = pair[1] = mem[pair_ptr + 16]
                         // Store into map: map_ptr + 8 + i*16 + 8
@@ -2462,9 +2322,8 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(16)); // skip pair header + key
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                        // Store value
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // i++
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2512,7 +2371,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I64Const(0));
                         f.instruction(&WasmInst::I64Ne);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(1));
                         f.instruction(&WasmInst::I64Add);
@@ -2528,7 +2387,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalTee(t3)); // t3 = count as i64
                         f.instruction(&WasmInst::I64Const(0));
                         f.instruction(&WasmInst::I64LtS);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
                         f.instruction(&WasmInst::I64Const(0));
                         f.instruction(&WasmInst::LocalSet(t3));
                         f.instruction(&WasmInst::End);
@@ -2538,7 +2397,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I64Const(134_217_728)); // 2^27
                         f.instruction(&WasmInst::I64GtS);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
                         f.instruction(&WasmInst::I64Const(134_217_728));
                         f.instruction(&WasmInst::LocalSet(t3));
                         f.instruction(&WasmInst::End);
@@ -2564,12 +2423,12 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t3));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
                         // Fill array: for i in 0..count, store tagged(start + i)
                         // Save clamped count to t1 before repurposing t3 as loop index.
@@ -2580,8 +2439,8 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(0));
                         f.instruction(&WasmInst::LocalSet(t3)); // i = 0
 
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty));
-                        f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::Block(BlockType::Empty));
+                        f.instruction(&WasmInst::Loop(BlockType::Empty));
 
                         // if i >= count, break
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2607,7 +2466,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And); // mask to 48 bits
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // i++
                         f.instruction(&WasmInst::LocalGet(t3));
@@ -2634,15 +2493,13 @@ impl WasmCodegen {
                         let t_key = temp_base + 4; // key element
                         let t_tmp = temp_base + 5; // temp for swapping
 
-                        // Untag array pointer
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::LocalSet(t_tmp)); // save old ptr (untagged i64)
 
-                        // Load length
                         f.instruction(&WasmInst::LocalGet(t_tmp));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I64ExtendI32U);
                         f.instruction(&WasmInst::LocalSet(t_len));
 
@@ -2681,8 +2538,8 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(1));
                         f.instruction(&WasmInst::LocalSet(t_i));
 
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $outer_break
-                        f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));  // $outer_loop
+                        f.instruction(&WasmInst::Block(BlockType::Empty)); // $outer_break
+                        f.instruction(&WasmInst::Loop(BlockType::Empty));  // $outer_loop
 
                         // if i >= len, break
                         f.instruction(&WasmInst::LocalGet(t_i));
@@ -2700,7 +2557,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalSet(t_key));
 
                         // j = i - 1
@@ -2710,8 +2567,8 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalSet(t_j));
 
                         // Inner loop: while j >= 0 && arr[j] > key
-                        f.instruction(&WasmInst::Block(wasm_encoder::BlockType::Empty)); // $inner_break
-                        f.instruction(&WasmInst::Loop(wasm_encoder::BlockType::Empty));  // $inner_loop
+                        f.instruction(&WasmInst::Block(BlockType::Empty)); // $inner_break
+                        f.instruction(&WasmInst::Loop(BlockType::Empty));  // $inner_loop
 
                         // if j < 0 (j is unsigned, so check j > len which means wraparound)
                         f.instruction(&WasmInst::LocalGet(t_j));
@@ -2729,7 +2586,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I64Load(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalSet(t_tmp)); // arr[j]
 
                         // Compare: untag(arr[j]) > untag(key)?
@@ -2762,7 +2619,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t_tmp)); // arr[j] value
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // j = j - 1
                         f.instruction(&WasmInst::LocalGet(t_j));
@@ -2787,7 +2644,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t_key));
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
 
                         // i = i + 1
                         f.instruction(&WasmInst::LocalGet(t_i));
@@ -2824,7 +2681,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                         f.instruction(&WasmInst::I64Eq);
                         // Stack: [is_nanboxed: i32]
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                         // NaN-boxed: now safe to extract tag
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
@@ -2838,7 +2695,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(0)); // raw f64 is not a string
                         f.instruction(&WasmInst::End);
                         // Stack: [is_string: i32]
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
 
                         // String concat path: convert right to string if not already
                         // Check if right is a NaN-boxed string (must verify NaN-boxing first)
@@ -2847,7 +2704,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
                         f.instruction(&WasmInst::I64Eq);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I32)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
                         f.instruction(&WasmInst::I64ShrU);
@@ -2860,7 +2717,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Const(1)); // raw f64 is not a string
                         f.instruction(&WasmInst::End);
                         // Stack: [is_not_string: i32]
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Empty));
+                        f.instruction(&WasmInst::If(BlockType::Empty));
                         // Right is not a string — convert via __to_string host call
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::Call(2)); // __to_string import index
@@ -2868,20 +2725,18 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::End);
 
                         // Now both t0 and t1 are strings
-                        // Get str1 len
                         f.instruction(&WasmInst::LocalGet(t0));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
                         // stack: [str1_ptr:i32]
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         // stack: [str1_len:i32]
-                        // Get str2 len
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         // stack: [str1_len, str2_len]
                         f.instruction(&WasmInst::I32Add);
                         // stack: [total_len]
@@ -2901,7 +2756,6 @@ impl WasmCodegen {
                         // Bounds check: grow memory if needed
                         Self::emit_heap_bounds_check(f);
 
-                        // Store total length
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         // Recompute total_len
@@ -2909,14 +2763,14 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
 
                         // Copy str1 bytes: dst=new_ptr+4, src=str1_ptr+4, len=str1_len
                         f.instruction(&WasmInst::LocalGet(t2));
@@ -2933,7 +2787,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
 
                         // Copy str2 bytes: dst=new_ptr+4+str1_len, src=str2_ptr+4, len=str2_len
@@ -2945,7 +2799,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
@@ -2957,7 +2811,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
 
                         // Tag result as string
@@ -2969,7 +2823,7 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::Else);
                         // Numeric add path with int/float dispatch
                         Self::emit_either_is_f64(f, t0, t1);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                         // Float path: convert both to f64, add, tag result
                         Self::emit_to_f64(f, t0);
                         Self::emit_to_f64(f, t1);
@@ -2996,7 +2850,6 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::LocalSet(t2));
                         f.instruction(&WasmInst::End); // close string/numeric dispatch
 
-                        // Push result
                         f.instruction(&WasmInst::LocalGet(t2));
                     }
                     ("__sub", 2) | ("__mul", 2) | ("__div", 2) | ("__mod", 2) => {
@@ -3010,7 +2863,7 @@ impl WasmCodegen {
 
                         // Check if either operand is a raw f64
                         Self::emit_either_is_f64(f, t0, t1);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
 
                         // ── Float path ──
                         // Convert both operands to f64 (handling int→f64 promotion)
@@ -3060,7 +2913,6 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64ShrS);
                         f.instruction(&WasmInst::LocalSet(t0));
 
-                        // Untag right
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64Shl);
@@ -3072,7 +2924,7 @@ impl WasmCodegen {
                             // Guard: if right == 0, return tagged null
                             f.instruction(&WasmInst::LocalGet(t1));
                             f.instruction(&WasmInst::I64Eqz);
-                            f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                            f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
                             f.instruction(&WasmInst::I64Const(tag::encode(tag::NULL, 0)));
                             f.instruction(&WasmInst::Else);
                         }
@@ -3119,7 +2971,7 @@ impl WasmCodegen {
 
                         // Check if either operand is a raw f64
                         Self::emit_either_is_f64(f, t0, t1);
-                        f.instruction(&WasmInst::If(wasm_encoder::BlockType::Result(WasmValType::I64)));
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
 
                         // ── Float path ──
                         Self::emit_to_f64(f, t0);
@@ -3144,13 +2996,11 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Shl);
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64ShrS);
-                        // Untag right
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64Shl);
                         f.instruction(&WasmInst::I64Const(16));
                         f.instruction(&WasmInst::I64ShrS);
-                        // Signed comparison
                         match fn_name {
                             "__gt" => f.instruction(&WasmInst::I64GtS),
                             "__lt" => f.instruction(&WasmInst::I64LtS),
@@ -3178,10 +3028,9 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64And);
                         f.instruction(&WasmInst::LocalSet(t1)); // save old array ptr
 
-                        // Load old length
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         // Allocate: 8 + (old_len+1)*8
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
@@ -3200,25 +3049,22 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::GlobalSet(0));
                         Self::emit_heap_bounds_check(f);
 
-                        // Store new length
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
-                        // Store capacity
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(1));
                         f.instruction(&WasmInst::I32Add);
-                        f.instruction(&WasmInst::I32Store(wasm_encoder::MemArg { offset: 4, align: 2, memory_index: 0 }));
-                        // Copy old elements
+                        f.instruction(&WasmInst::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(8));
@@ -3229,23 +3075,22 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::MemoryCopy { src_mem: 0, dst_mem: 0 });
-                        // Store new element
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I32WrapI64);
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t1));
                         f.instruction(&WasmInst::I32WrapI64);
-                        f.instruction(&WasmInst::I32Load(wasm_encoder::MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
                         f.instruction(&WasmInst::I32Const(8));
                         f.instruction(&WasmInst::I32Mul);
                         f.instruction(&WasmInst::I32Add);
                         f.instruction(&WasmInst::LocalGet(t0));
-                        f.instruction(&WasmInst::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64Store(MemArg { offset: 0, align: 3, memory_index: 0 }));
                         // Push tagged new array
                         f.instruction(&WasmInst::LocalGet(t2));
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::ARRAY as i64) << tag::TAG_SHIFT)));
@@ -3466,14 +3311,12 @@ mod tests {
     }
 
     // ── WASM validation tests ────────────────────────────────────────
-    //
     // These tests compile MAGI programs to WASM and then validate the
     // produced binary using wasmparser::Validator, catching invalid WASM
     // structure (type mismatches, stack underflows, malformed sections, etc).
 
     fn validate_wasm(wasm: &[u8]) {
-        let mut validator = wasmparser::Validator::new();
-        validator.validate_all(wasm)
+        crate::util::validate_wasm(wasm)
             .expect("produced WASM failed validation");
     }
 
@@ -4455,7 +4298,6 @@ mod tests {
     }
 
     // ── End-to-end compile → run tests ──────────────────────────────
-    //
     // These tests compile MAGI source to WASM, then execute it using
     // wasmtime and verify the actual output values. This exercises the
     // full pipeline: parse → IR → WASM binary → instantiate → run.
@@ -4587,96 +4429,71 @@ mod tests {
 
     /// Compile and execute a MAGI program, returning the result.
     fn compile_and_run(src: &str) -> WasmTestResult {
+        use crate::compiler::wasm_runtime::{Engine, Module, Store, Linker, Val};
+
         let wasm_bytes = compile_to_wasm(src).expect("compilation failed");
 
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
             .expect("failed to load WASM module");
 
         let printed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let printed_clone = Arc::clone(&printed);
 
-        let mut store = wasmtime::Store::new(&engine, ());
-        let mut linker = wasmtime::Linker::new(&engine);
+        let mut store = Store::new(&engine, ());
+        let mut linker = Linker::new(&engine);
 
         // print host function — captures output
-        linker.func_wrap("env", "print", move |mut caller: wasmtime::Caller<'_, ()>, val: i64| {
-            let s = if let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                let data = memory.data(&caller);
-                format_tagged(val, data)
-            } else {
-                "<no-memory>".to_string()
-            };
+        linker.func_wrap_1_0("env", "print", move |inst: &mut crate::compiler::wasm_runtime::Instance, val: i64| {
+            let data = inst.get_memory_data();
+            let s = format_tagged(val, data);
             printed_clone.lock().unwrap().push(s);
         }).expect("failed to define print");
 
         // runtime_call stub — returns null (NaN-boxed)
-        linker.func_wrap("env", "runtime_call", |_caller: wasmtime::Caller<'_, ()>, _name: i32, _argc: i32| -> i64 {
+        linker.func_wrap_2_1("env", "runtime_call", |_inst: &mut crate::compiler::wasm_runtime::Instance, _name: i32, _argc: i32| -> i64 {
             tag::encode(tag::NULL, 0)
         }).expect("failed to define runtime_call");
 
         // __to_string stub — converts tagged values to string
-        linker.func_wrap("env", "__to_string", |mut caller: wasmtime::Caller<'_, ()>, val: i64| -> i64 {
-            // If already a NaN-boxed string, return as-is
+        linker.func_wrap_1_1("env", "__to_string", |inst: &mut crate::compiler::wasm_runtime::Instance, val: i64| -> i64 {
             let is_nanboxed = (val & tag::NANBOX_MASK) == tag::NANBOX_SIG;
             let type_tag = if is_nanboxed { ((val >> tag::TAG_SHIFT) & 0x07) as u8 } else { tag::F64 };
             if type_tag == tag::STRING { return val; }
 
             let null_val = tag::encode(tag::NULL, 0);
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return null_val,
-            };
-            let heap_global = match caller.get_export("__heap_ptr").and_then(|e| e.into_global()) {
-                Some(g) => g,
-                None => return null_val,
-            };
-
             let formatted = {
-                let data = memory.data(&caller);
+                let data = inst.get_memory_data();
                 format_tagged(val, data)
             };
             let bytes = formatted.as_bytes();
             let total = 4 + bytes.len();
 
-            let ptr = match heap_global.get(&mut caller).i32() {
-                Some(v) => v as u32,
+            let ptr = match inst.get_global("__heap_ptr") {
+                Some(v) => v.i32().unwrap_or(0) as u32,
                 None => return null_val,
             };
-
             let str_offset = ptr as usize;
             {
-                let data = memory.data_mut(&mut caller);
-                if str_offset + 4 + bytes.len() > data.len() {
-                    return null_val;
-                }
-                let len_bytes = (bytes.len() as u32).to_le_bytes();
-                data[str_offset..str_offset + 4].copy_from_slice(&len_bytes);
+                let data = inst.get_memory_data_mut();
+                if str_offset + 4 + bytes.len() > data.len() { return null_val; }
+                data[str_offset..str_offset + 4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
                 data[str_offset + 4..str_offset + 4 + bytes.len()].copy_from_slice(bytes);
             }
-
             let new_ptr = match ptr.checked_add(total as u32) {
-                Some(v) => v,
-                None => return null_val,
+                Some(v) => v, None => return null_val,
             };
-            let _ = heap_global.set(&mut caller, wasmtime::Val::I32(new_ptr as i32));
-
+            let _ = inst.set_global("__heap_ptr", Val::I32(new_ptr as i32));
             tag::encode(tag::STRING, str_offset as i64)
         }).expect("failed to define __to_string");
 
-        let instance = linker.instantiate(&mut store, &module)
+        let mut instance = linker.instantiate(&mut store, &module)
             .expect("WASM instantiation failed");
 
-        let main_fn = instance.get_typed_func::<(), i64>(&mut store, "__main")
-            .expect("no __main export found");
-
-        let result = main_fn.call(&mut store, ())
+        let result = instance.call("__main", &mut store)
             .expect("WASM execution failed");
 
-        let mem = instance.get_memory(&mut store, "memory")
-            .map(|m| m.data(&store).to_vec())
-            .unwrap_or_default();
-
+        let mem = instance.get_memory_data().to_vec();
         let printed_output = printed.lock().unwrap().clone();
         WasmTestResult {
             main_result: result,
@@ -4701,7 +4518,6 @@ mod tests {
     }
 
     // ── E2E: Integer output ────────────────────────────────────────
-    //
     // Note: __main always returns null because ExprStatement drops the
     // value and the function ends with PushNull+Return. Use `output`
     // to observe values through the print host function.
@@ -5255,7 +5071,6 @@ mod tests {
     }
 
     // ── E2E: Float precision ─────────────────────────────────────
-    //
     // NaN-boxing stores f64 values as raw IEEE 754 bits (no tagging).
     // Only non-float values use NaN payloads. This preserves full f64
     // precision for all float values including negatives and large exponents.
@@ -5552,7 +5367,6 @@ mod tests {
     }
 
     // ── format_tagged unit tests ────────────────────────────────────
-    //
     // Test the tag decoding logic directly without running WASM.
     // Uses NaN-boxing: tag::encode(tag, payload) for non-float values,
     // raw f64 bits for float values.

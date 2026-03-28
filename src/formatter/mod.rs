@@ -75,7 +75,6 @@ impl Default for FormatConfig {
 pub fn format_program(program: &Program, config: &FormatConfig) -> String {
     let mut f = Formatter::new(config);
     f.fmt_program(program);
-    // Ensure trailing newline
     let output = f.output.trim_end().to_string();
     if output.is_empty() {
         String::new()
@@ -169,7 +168,6 @@ impl<'a> Formatter<'a> {
                 self.newline();
             }
 
-            // Emit leading comments
             self.fmt_leading_comments(&stmt.leading_comments);
 
             self.fmt_statement_body(stmt);
@@ -361,8 +359,12 @@ impl<'a> Formatter<'a> {
                 self.dedent();
                 self.write("}");
             }
-            StatementKind::TraitDef { name, methods } => {
-                self.write(&format!("trait {} ", name));
+            StatementKind::TraitDef { name, methods, supertraits } => {
+                if supertraits.is_empty() {
+                    self.write(&format!("trait {} ", name));
+                } else {
+                    self.write(&format!("trait {}: {} ", name, supertraits.join(" + ")));
+                }
                 self.write("{");
                 self.newline();
                 self.indent();
@@ -573,6 +575,21 @@ impl<'a> Formatter<'a> {
             StatementKind::Decrement { name } => {
                 self.write(name);
                 self.write("--;");
+            }
+            StatementKind::StaticDef { name, type_annotation, value, mutable } => {
+                if *mutable {
+                    self.write("static mut ");
+                } else {
+                    self.write("static ");
+                }
+                self.write(name);
+                if let Some(ty) = type_annotation {
+                    self.write(": ");
+                    self.write(&ty.to_string());
+                }
+                self.write(" = ");
+                self.fmt_expression(value);
+                self.write(";");
             }
         }
     }
@@ -1168,6 +1185,43 @@ impl<'a> Formatter<'a> {
                 self.fmt_expression_prec(inner, 8); // Very high precedence for postfix ?
                 self.write("?");
             }
+            ExpressionKind::Yield(inner) => {
+                self.write("yield ");
+                self.fmt_expression(inner);
+            }
+            ExpressionKind::UnsafeBlock(block) => {
+                self.write("unsafe ");
+                self.fmt_block(block);
+            }
+            ExpressionKind::InlineAsm { template, operands } => {
+                self.write(&format!("asm!(\"{}\"", escape_string_contents(template)));
+                for op in operands {
+                    self.write(", ");
+                    self.fmt_expression(op);
+                }
+                self.write(")");
+            }
+            ExpressionKind::Ref(inner) => {
+                self.write("ref ");
+                self.fmt_expression(inner);
+            }
+            ExpressionKind::MoveClosure { params, body } => {
+                self.write("move |");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.write(&p.name);
+                    if let Some(ty) = &p.type_annotation {
+                        self.write(&format!(": {}", ty));
+                    }
+                }
+                self.write("| ");
+                self.fmt_expression(body);
+            }
+            ExpressionKind::DynTrait(name) => {
+                self.write(&format!("dyn {}", name));
+            }
         }
     }
 
@@ -1226,7 +1280,6 @@ impl<'a> Formatter<'a> {
             Literal::Bool(b) => self.write(if *b { "true" } else { "false" }),
             Literal::Null => self.write("null"),
             Literal::Array(elems) => {
-                // Estimate inline length
                 let inline_len: usize = elems.iter().map(|e| self.expr_len(e) + 2).sum();
                 if inline_len < self.config.max_width / 2 || elems.is_empty() {
                     self.write("[");
@@ -1478,9 +1531,6 @@ impl<'a> Formatter<'a> {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1691,15 +1741,11 @@ for n in 1..=10 {
         assert_idempotent(source);
     }
 
-    // =====================================================================
     // Comprehensive idempotency test suite
-    //
     // For every test case, we verify:
     //   format(parse(source)) can be re-parsed, AND
     //   format(parse(format(parse(source)))) == format(parse(source))
-    //
     // This is the core idempotency invariant for the formatter.
-    // =====================================================================
 
     /// Helper: assert that a batch of labeled test cases are all idempotent.
     /// Collects all failures before panicking so you see everything at once.
@@ -1745,23 +1791,18 @@ for n in 1..=10 {
         }
     }
 
-    // -----------------------------------------------------------------
     // Edge case: empty program
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_empty_program() {
         let result = format_source("");
         assert_eq!(result, "", "empty program should produce empty string");
-        // Second pass
         let program2 = parse_v2(&result).expect("parse empty");
         let result2 = format_program(&program2, &FormatConfig::default());
         assert_eq!(result, result2);
     }
 
-    // -----------------------------------------------------------------
     // Edge case: program with only comments (comments are lost)
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_comments_only() {
@@ -1773,9 +1814,7 @@ for n in 1..=10 {
         assert_eq!(result, result2);
     }
 
-    // -----------------------------------------------------------------
     // Edge case: very long lines
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_very_long_line() {
@@ -1785,9 +1824,7 @@ for n in 1..=10 {
         assert_idempotent(&source);
     }
 
-    // -----------------------------------------------------------------
     // Edge case: deeply nested expressions
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_deeply_nested() {
@@ -1795,29 +1832,21 @@ for n in 1..=10 {
         let source = "if a { if b { if c { if d { if e { 1 } else { 2 } } else { 3 } } else { 4 } } else { 5 } }";
         assert_idempotent(source);
 
-        // Nested binary ops
         let source = "let x = ((((a + b) * c) - d) / e) % f;";
         assert_idempotent(source);
 
-        // Nested method chains
         let source = "let x = a.b().c().d().e().f();";
         assert_idempotent(source);
 
-        // Nested blocks
         let source = "let x = { let a = { let b = { let c = 1; c }; b }; a };";
         assert_idempotent(source);
     }
 
-    // -----------------------------------------------------------------
-    // All statement types
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_all_statement_types() {
         assert_batch_idempotent(&[
-            // Import
             ("import", "import \"plugin\";"),
-            // Let
             ("let", "let x = 5;"),
             ("let_typed", "let x: int64 = 42;"),
             // LetMut
@@ -1830,7 +1859,6 @@ for n in 1..=10 {
             // LetDestructure (map)
             ("let_destr_map", "let {x, y} = point;"),
             ("let_destr_map_alias", "let {x: ax, y: ay} = point;"),
-            // Assignment
             ("assign", "x = 42;"),
             // CompoundAssign
             ("compound_add", "x += 1;"),
@@ -1845,7 +1873,6 @@ for n in 1..=10 {
             ("for_with_body", "for x in 0..10 {\n    output x;\n}"),
             // WhileLoop
             ("while", "while x < 10 {\n    x += 1;\n}"),
-            // Output
             ("output", "output 42;"),
             // ExprStatement
             ("expr_stmt_call", "foo();"),
@@ -1863,19 +1890,15 @@ for n in 1..=10 {
             ("fn_multiline", "fn f(x) {\n    let y = x + 1;\n    y * 2\n}"),
             // AsyncFunctionDef
             ("async_fn", "async fn fetch() { 42 }"),
-            // Break
             ("break", "loop {\n    break;\n}"),
             ("break_val", "loop {\n    break 42;\n}"),
-            // Continue
             ("continue", "for x in items {\n    continue;\n}"),
-            // Return
             ("return", "fn f() { return; }"),
             ("return_val", "fn f() { return 42; }"),
             // TryCatch (statement)
             ("try_catch", "try {\n    risky();\n} catch e {\n    handle(e);\n}"),
             ("try_catch_no_var", "try {\n    risky();\n} catch {\n    handle();\n}"),
             ("try_catch_finally", "try {\n    risky();\n} catch e {\n    handle(e);\n} finally {\n    cleanup();\n}"),
-            // Throw
             ("throw", "throw \"error\";"),
             // ConstDef
             ("const", "const PI = 3.14;"),
@@ -1884,7 +1907,6 @@ for n in 1..=10 {
             ("type_alias", "type Num = int64;"),
             // ModuleDef
             ("module", "mod math {\n    fn add(a, b) { a + b }\n}"),
-            // Use
             ("use_simple", "use std::io;"),
             ("use_glob", "use std::io::*;"),
             ("use_alias", "use std::io as sio;"),
@@ -1898,9 +1920,6 @@ for n in 1..=10 {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // All expression types
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_all_expression_types() {
@@ -1932,7 +1951,6 @@ for n in 1..=10 {
             ("array", "let a = [1, 2, 3];"),
             // Literal: Map
             ("map", r#"let m = {"a": 1, "b": 2};"#),
-            // Variable
             ("var", "let x = y;"),
             // BinaryOp (all operators)
             ("add", "let x = a + b;"),
@@ -1951,7 +1969,6 @@ for n in 1..=10 {
             // UnaryOp
             ("neg", "let x = -y;"),
             ("not", "let x = !y;"),
-            // Call
             ("call", "foo();"),
             ("call_args", "foo(1, 2, 3);"),
             ("call_kwargs", "let x = f(1, name=2);"),
@@ -1960,36 +1977,27 @@ for n in 1..=10 {
             ("method", "let x = arr.push(5);"),
             ("method_chain", "let x = arr.map(|x| x * 2).filter(|x| x > 3);"),
             ("method_kwargs", "let x = obj.f(1, name=2);"),
-            // Pipe
             ("pipe", "let x = a\n    |> b(_);"),
             ("pipe_chain", "let x = a\n    |> b(_)\n    |> c(_);"),
             // IfElse
             ("if_only", "if true { 1 }"),
             ("if_else", "if true { 1 } else { 2 }"),
             ("if_else_if", "if a { 1 } else if b { 2 } else { 3 }"),
-            // Block
             ("block", "{\n    let a = 1;\n    a + 2\n}"),
-            // Index
             ("index", "let x = arr[0];"),
             // FieldAccess
             ("field", "let x = obj.field;"),
-            // Placeholder
             ("placeholder_in_pipe", "let x = a\n    |> f(_);"),
-            // Range
             ("range", "let r = 0..10;"),
             ("range_inclusive", "let r = 0..=10;"),
-            // Await
             ("await", "let x = await fetch();"),
-            // Spawn
             ("spawn", "let x = spawn task();"),
-            // Lambda
             ("lambda", "let f = |x| x * 2;"),
             ("lambda_typed", "let f = |x: int64| x * 2;"),
             ("lambda_default", "let f = |x, y = 10| x + y;"),
             ("lambda_no_params", "let f = || 42;"),
             ("lambda_block", "let f = |x| {\n    let y = x + 1;\n    y * 2\n};"),
             ("lambda_nested", "let f = |x| (|y| x + y);"),
-            // Match
             ("match", "match x {\n    1 => true,\n    _ => false\n}"),
             ("match_guard", "match x {\n    n if n > 0 => true,\n    _ => false\n}"),
             ("match_or", "match x {\n    1 | 2 | 3 => true,\n    _ => false\n}"),
@@ -2010,9 +2018,7 @@ for n in 1..=10 {
             ("opt_chain", "let x = obj?.field;"),
             ("opt_chain_method", "let x = obj?.method();"),
             ("opt_chain_index", "let x = arr?[0];"),
-            // Spread
             ("spread", "let arr = [...other, 1, 2];"),
-            // Loop
             ("loop", "loop {\n    break 42;\n}"),
             // TryCatchExpr
             ("try_catch_expr", "let x = try { risky() } catch e { 0 };"),
@@ -2033,9 +2039,6 @@ for n in 1..=10 {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Precedence and parenthesization
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_precedence() {
@@ -2050,7 +2053,6 @@ for n in 1..=10 {
             ("left_assoc_add", "let x = 1 + 2 + 3;"),
             ("left_assoc_mul", "let x = 1 * 2 * 3;"),
             ("left_assoc_sub", "let x = 1 - 2 - 3;"),
-            // Mixed precedence
             ("mixed_1", "let x = a + b * c - d / e;"),
             ("mixed_2", "let x = a == b && c != d;"),
             ("mixed_3", "let x = a > b && c <= d;"),
@@ -2084,9 +2086,7 @@ for n in 1..=10 {
         assert_idempotent(source);
     }
 
-    // -----------------------------------------------------------------
     // Whitespace and blank lines
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_blank_lines() {
@@ -2097,16 +2097,12 @@ for n in 1..=10 {
             ("const_fn", "const X = 1;\n\nfn f() { X }"),
             // Blank line between enum and struct
             ("enum_struct", "enum A {\n    X\n}\n\nstruct B {\n    y: int64\n}"),
-            // Let then fn
             ("let_fn", "let x = 1;\n\nfn f() { x }"),
-            // Multiple fns
             ("three_fns", "fn a() { 1 }\n\nfn b() { 2 }\n\nfn c() { 3 }"),
         ]);
     }
 
-    // -----------------------------------------------------------------
     // Multiline formatting (arrays, maps, structs that exceed width)
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_multiline_formatting() {
@@ -2118,23 +2114,16 @@ for n in 1..=10 {
         ]);
     }
 
-    // -----------------------------------------------------------------
     // NaN and Infinity (special float formatting)
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_special_floats() {
         // NaN: formatted as 0.0 / 0.0 (a binary expression, not a literal)
         assert_idempotent("let x = 0.0 / 0.0;");
-        // Positive infinity
         assert_idempotent("let x = 1.0 / 0.0;");
-        // Negative infinity
         assert_idempotent("let x = -1.0 / 0.0;");
     }
 
-    // -----------------------------------------------------------------
-    // Complete realistic program
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_idempotent_realistic_program() {
@@ -2222,9 +2211,7 @@ fn main() {
         assert_idempotent(source);
     }
 
-    // -----------------------------------------------------------------
     // Kwargs formatting (regression test for `:` vs `=` bug)
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_kwargs_use_equals_sign() {
@@ -2237,7 +2224,6 @@ fn main() {
         );
         assert_idempotent(source);
 
-        // Method call kwargs
         let source2 = r#"let x = obj.f(1, mode="fast");"#;
         let formatted2 = format_source(source2);
         assert!(
@@ -2248,9 +2234,7 @@ fn main() {
         assert_idempotent(source2);
     }
 
-    // -----------------------------------------------------------------
     // Blank lines between definitions inside blocks
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_blank_lines_in_module_body() {
@@ -2289,9 +2273,7 @@ fn main() {
         assert_idempotent(&result);
     }
 
-    // -----------------------------------------------------------------
     // Edge cases: empty/single/nested arrays
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_empty_array() {
@@ -2314,9 +2296,7 @@ fn main() {
         assert_idempotent("let a = [[1, 2], [3, 4]];");
     }
 
-    // -----------------------------------------------------------------
     // TryPropagate
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_try_propagate_formatting() {
@@ -2328,9 +2308,6 @@ fn main() {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Inclusive ranges
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_inclusive_range_formatting() {
@@ -2341,9 +2318,7 @@ fn main() {
         ]);
     }
 
-    // -----------------------------------------------------------------
     // Default and rest parameters
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_default_and_rest_params() {
@@ -2357,9 +2332,6 @@ fn main() {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Async function definitions
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_async_fn_formatting() {
@@ -2370,9 +2342,6 @@ fn main() {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Test definitions
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_test_def_formatting() {
@@ -2382,9 +2351,7 @@ fn main() {
         ]);
     }
 
-    // -----------------------------------------------------------------
     // Module definitions with complex bodies
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_module_def_formatting() {
@@ -2400,9 +2367,6 @@ mod math {
         assert_idempotent(source);
     }
 
-    // -----------------------------------------------------------------
-    // Keyword arguments
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_kwargs_formatting() {
@@ -2414,9 +2378,6 @@ mod math {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Spread operator
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_spread_formatting() {
@@ -2426,9 +2387,6 @@ mod math {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Comprehensions with destructuring
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_comprehension_destructure() {
@@ -2438,9 +2396,7 @@ mod math {
         ]);
     }
 
-    // -----------------------------------------------------------------
     // Enum/struct construction edge cases
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_enum_struct_construct() {
@@ -2454,9 +2410,6 @@ mod math {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Loop expression
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_loop_expression() {
@@ -2467,9 +2420,7 @@ mod math {
         ]);
     }
 
-    // -----------------------------------------------------------------
     // Await and spawn in various positions
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_await_spawn_positions() {
@@ -2481,9 +2432,6 @@ mod math {
         ]);
     }
 
-    // -----------------------------------------------------------------
-    // Comment preservation tests
-    // -----------------------------------------------------------------
 
     #[test]
     fn test_comment_leading_line_comment() {

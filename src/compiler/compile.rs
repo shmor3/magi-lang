@@ -25,6 +25,21 @@ pub struct Compiler {
     block_depth: u32,
     /// Deferred expressions collected from `defer` statements, emitted before returns.
     deferred_exprs: Vec<Expression>,
+    /// Source map: maps WASM instruction index → source line:col.
+    pub source_map: Vec<SourceMapping>,
+}
+
+/// A single source map entry mapping a compiled instruction to source location.
+#[derive(Debug, Clone)]
+pub struct SourceMapping {
+    /// Function name.
+    pub function: String,
+    /// Instruction offset within the function.
+    pub offset: u32,
+    /// Source line (1-based).
+    pub line: u32,
+    /// Source column (1-based).
+    pub column: u32,
 }
 
 /// Builder for a function being compiled.
@@ -113,7 +128,31 @@ impl Compiler {
             loop_stack: Vec::new(),
             block_depth: 0,
             deferred_exprs: Vec::new(),
+            source_map: Vec::new(),
         }
+    }
+
+    /// Record a source mapping for the current instruction position.
+    fn record_source_mapping(&mut self, span: Span) {
+        if let Some(func) = &self.current_fn {
+            self.source_map.push(SourceMapping {
+                function: func.name.clone(),
+                offset: func.instructions.len() as u32,
+                line: span.start_line,
+                column: span.start_col,
+            });
+        }
+    }
+
+    /// Generate a source map JSON string.
+    pub fn generate_source_map_json(&self, source_file: &str) -> String {
+        let mut entries = Vec::new();
+        for m in &self.source_map {
+            entries.push(format!("{{\"fn\":\"{}\",\"offset\":{},\"line\":{},\"col\":{}}}",
+                m.function, m.offset, m.line, m.column));
+        }
+        format!("{{\"version\":3,\"file\":\"{}\",\"mappings\":[{}]}}",
+            source_file, entries.join(","))
     }
 
     /// Compile a MAGI program into an IR module.
@@ -452,6 +491,7 @@ impl Compiler {
     }
 
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        self.record_source_mapping(stmt.span);
         match &stmt.kind {
             StatementKind::Let { name, value, .. } => {
                 self.compile_expr(value)?;
@@ -812,7 +852,6 @@ impl Compiler {
             }
 
             StatementKind::CStyleFor { init, condition, update, body } => {
-                // Compile init statement
                 self.compile_statement(init)?;
                 // Compile as a while loop: while (condition) { body; update }
                 self.emit(Instruction::Block); // break target
@@ -820,12 +859,10 @@ impl Compiler {
                 self.emit(Instruction::Loop);  // continue target
                 let continue_depth = self.block_depth;
                 self.loop_stack.push(LoopContext { break_depth, continue_depth });
-                // Check condition
                 self.compile_expr(condition)?;
                 self.emit(Instruction::BoolNot);
                 let cond_break_offset = self.block_depth.saturating_sub(break_depth);
                 self.emit(Instruction::BrIf(cond_break_offset));
-                // Body
                 self.fb()?.push_scope();
                 self.compile_statements(&body.statements)?;
                 if let Some(tail) = &body.tail_expr {
@@ -833,9 +870,7 @@ impl Compiler {
                     self.emit(Instruction::Drop);
                 }
                 self.fb()?.pop_scope();
-                // Update
                 self.compile_statement(update)?;
-                // Loop back
                 let continue_offset = self.block_depth.saturating_sub(continue_depth);
                 self.emit(Instruction::Br(continue_offset));
                 self.emit(Instruction::End); // Loop
@@ -892,6 +927,13 @@ impl Compiler {
                         &format!("undefined variable in decrement: {}", name),
                     ));
                 }
+            }
+
+            StatementKind::StaticDef { name, value, .. } => {
+                // Treat like const/let — compile the value and bind it.
+                self.compile_expr(value)?;
+                let idx = self.define_local(name, ValType::Tagged, true)?;
+                self.emit(Instruction::LocalSet(idx));
             }
         }
         Ok(())
@@ -1363,6 +1405,42 @@ impl Compiler {
                 self.emit(Instruction::Else);
                 self.emit(Instruction::LocalGet(temp));
                 self.emit(Instruction::End);
+            }
+
+            ExpressionKind::Yield(inner) => {
+                // In WASM, yield just evaluates the inner expression.
+                self.compile_expr(inner)?;
+            }
+
+            ExpressionKind::UnsafeBlock(block) => {
+                // Unsafe blocks compile as normal blocks in WASM.
+                self.compile_block(block)?;
+            }
+
+            ExpressionKind::InlineAsm { .. } => {
+                // Inline assembly is runtime-only; emit null in WASM.
+                self.emit(Instruction::PushNull);
+            }
+
+            ExpressionKind::Ref(inner) => {
+                // Ref is a runtime concept; compile as the inner expression.
+                self.compile_expr(inner)?;
+            }
+
+            ExpressionKind::MoveClosure { params, body } => {
+                // Move closures compile like regular lambdas.
+                self.compile_expr(&Expression {
+                    kind: ExpressionKind::Lambda {
+                        params: params.clone(),
+                        body: body.clone(),
+                    },
+                    span: expr.span,
+                })?;
+            }
+
+            ExpressionKind::DynTrait(_) => {
+                // dyn Trait is a type-level construct; emit null in WASM.
+                self.emit(Instruction::PushNull);
             }
         }
         Ok(())
@@ -3223,9 +3301,7 @@ mod tests {
         assert!(map_set_count >= 2, "nested field assignment should use at least 2 MapSet ops, got {}", map_set_count);
     }
 
-    // =========================================================================
     // WASM compiler: new feature compilation tests
-    // =========================================================================
 
     #[test]
     fn test_compile_do_while_loop() {

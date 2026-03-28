@@ -8947,7 +8947,7 @@ fn test_module_enum_direct_access() {
         }
         output Color::Red;
     "#), DataType::Map({
-        let mut m = indexmap::IndexMap::new();
+        let mut m = magi_lang::util::OrderedMap::new();
         m.insert("__enum".to_string(), DataType::String("Color".to_string()));
         m.insert("__variant".to_string(), DataType::String("Red".to_string()));
         m.insert("__data".to_string(), DataType::Array(vec![]));
@@ -10908,7 +10908,7 @@ fn test_e2e_csv_filter_and_aggregate() {
         let count = len(high_scorers);
         output {"total": total, "count": count};
     "#), DataType::Map({
-        let mut m = indexmap::IndexMap::new();
+        let mut m = magi_lang::util::OrderedMap::new();
         m.insert("total".to_string(), DataType::Int64(272));
         m.insert("count".to_string(), DataType::Int64(3));
         m
@@ -11367,7 +11367,7 @@ fn test_e2e_error_handling_validation() {
         output [r1, r2, r3, r4];
     "#), DataType::Array(vec![
         DataType::Map({
-            let mut m = indexmap::IndexMap::new();
+            let mut m = magi_lang::util::OrderedMap::new();
             m.insert("name".to_string(), DataType::String("Alice".to_string()));
             m.insert("age".to_string(), DataType::Int64(30));
             m
@@ -11375,7 +11375,7 @@ fn test_e2e_error_handling_validation() {
         DataType::String("error: age cannot be negative".to_string()),
         DataType::String("error: name cannot be empty".to_string()),
         DataType::Map({
-            let mut m = indexmap::IndexMap::new();
+            let mut m = magi_lang::util::OrderedMap::new();
             m.insert("name".to_string(), DataType::String("Eve".to_string()));
             m.insert("age".to_string(), DataType::Int64(99));
             m
@@ -13270,7 +13270,7 @@ fn test_use_glob_imports_module_enums() {
         use colors::*;
         output make_green();
     "#), DataType::Map({
-        let mut m = indexmap::IndexMap::new();
+        let mut m = magi_lang::util::OrderedMap::new();
         m.insert("__enum".to_string(), DataType::String("Color".to_string()));
         m.insert("__variant".to_string(), DataType::String("Green".to_string()));
         m.insert("__data".to_string(), DataType::Array(vec![]));
@@ -13303,7 +13303,7 @@ fn test_use_enum_by_name() {
         use shapes::Shape;
         output Shape::Circle();
     "#), DataType::Map({
-        let mut m = indexmap::IndexMap::new();
+        let mut m = magi_lang::util::OrderedMap::new();
         m.insert("__enum".to_string(), DataType::String("Shape".to_string()));
         m.insert("__variant".to_string(), DataType::String("Circle".to_string()));
         m.insert("__data".to_string(), DataType::Array(vec![]));
@@ -13335,7 +13335,7 @@ fn test_use_enum_with_alias() {
         use colors::Color as Hue;
         output Hue::Blue();
     "#), DataType::Map({
-        let mut m = indexmap::IndexMap::new();
+        let mut m = magi_lang::util::OrderedMap::new();
         m.insert("__enum".to_string(), DataType::String("Hue".to_string()));
         m.insert("__variant".to_string(), DataType::String("Blue".to_string()));
         m.insert("__data".to_string(), DataType::Array(vec![]));
@@ -13415,7 +13415,7 @@ fn test_nested_module_enum_via_use() {
         use outer::inner::make_ok;
         output make_ok();
     "#), DataType::Map({
-        let mut m = indexmap::IndexMap::new();
+        let mut m = magi_lang::util::OrderedMap::new();
         m.insert("__enum".to_string(), DataType::String("Status".to_string()));
         m.insert("__variant".to_string(), DataType::String("Ok".to_string()));
         m.insert("__data".to_string(), DataType::Array(vec![]));
@@ -20765,4 +20765,276 @@ fn test_use_unknown_remote_dep_produces_error() {
     // since use doesn't actually bring real functions into scope in the checker.
     let has_e201 = warnings.iter().any(|w| w == "E201");
     assert!(has_e201, "calling a function from an unresolved remote dep should produce E201, got: {:?}", warnings);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// v1 Feature Depth: New collection/string/result methods
+// ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_array_windows() {
+    let result = run_eval_unique("output([1, 2, 3, 4, 5].windows(3))", "windows_test");
+    assert!(result.contains("[1, 2, 3]") && result.contains("[3, 4, 5]"));
+}
+
+#[test]
+fn test_array_nth() {
+    let result = run_eval_unique("output([10, 20, 30].nth(1))", "nth_test");
+    assert!(result.contains("20"));
+}
+
+#[test]
+fn test_array_nth_out_of_bounds() {
+    let result = run_eval_unique("output([10, 20, 30].nth(5))", "nth_oob_test");
+    assert!(result.contains("null"));
+}
+
+#[test]
+fn test_array_inspect() {
+    let result = run_eval_unique(r#"
+        let mut count = 0
+        let arr = [1, 2, 3].inspect(|x| { count += 1 })
+        output(arr.len())
+        output(count)
+    "#, "inspect_test");
+    assert!(result.contains("3"));
+}
+
+#[test]
+fn test_array_zip_longest() {
+    let result = run_eval_unique("output([1, 2, 3].zip_longest([10, 20]))", "zip_longest_test");
+    // Should produce 3 tuples, last one has null
+    assert!(result.contains("1") && result.contains("10"));
+}
+
+#[test]
+fn test_string_split_once() {
+    let result = run_eval_unique(r#"
+        let parts = "hello=world=foo".split_once("=")
+        output(parts)
+    "#, "split_once_test");
+    assert!(result.contains("hello") && result.contains("world=foo"));
+}
+
+#[test]
+fn test_string_split_once_no_match() {
+    let result = run_eval_unique(r#"output("hello".split_once("="))"#, "split_once_nomatch");
+    assert!(result.contains("null"));
+}
+
+#[test]
+fn test_string_char_code_at() {
+    let result = run_eval_unique(r#"output("ABC".char_code_at(0))"#, "char_code_at_test");
+    assert!(result.contains("65")); // 'A' = 65
+}
+
+#[test]
+fn test_result_map_ok() {
+    let result = run_eval_unique(r#"
+        let r = Ok(5)
+        let mapped = map_ok(r, |x| x * 2)
+        output(mapped.ok)
+    "#, "map_ok_test");
+    assert!(result.contains("10"));
+}
+
+#[test]
+fn test_result_unwrap_or_else() {
+    let result = run_eval_unique(r#"
+        let r = Err("bad")
+        let v = unwrap_or_else(r, |e| f"recovered from {e}")
+        output(v)
+    "#, "unwrap_or_else_test");
+    assert!(result.contains("recovered from bad"));
+}
+
+#[test]
+fn test_math_cbrt() {
+    let result = run_eval_unique("output(27.0.cbrt())", "cbrt_test");
+    assert!(result.contains("3"));
+}
+
+#[test]
+fn test_math_hypot() {
+    let result = run_eval_unique("output(3.0.hypot(4.0))", "hypot_test");
+    assert!(result.contains("5"));
+}
+
+// ────────────────────────────────────────────────────────────────────
+// unsafe blocks and pointer operations
+// ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_unsafe_ptr_new_read() {
+    let result = run_eval_unique(r#"
+        let val = unsafe {
+            let ptr = ptr_new(42)
+            ptr_read(ptr)
+        }
+        output(val)
+    "#, "unsafe_ptr_test");
+    assert!(result.contains("42"));
+}
+
+#[test]
+fn test_unsafe_ptr_write() {
+    let result = run_eval_unique(r#"
+        let val = unsafe {
+            let ptr = ptr_new(10)
+            ptr_write(ptr, 99)
+            ptr_read(ptr)
+        }
+        output(val)
+    "#, "unsafe_write_test");
+    assert!(result.contains("99"));
+}
+
+#[test]
+fn test_unsafe_sizeof() {
+    let result = run_eval_unique(r#"
+        let s = unsafe { sizeof("hello") }
+        output(s)
+    "#, "unsafe_sizeof_test");
+    assert!(result.contains("5"));
+}
+
+#[test]
+fn test_unsafe_transmute() {
+    let result = run_eval_unique(r#"
+        let bytes = unsafe { transmute("hello", "bytes") }
+        output(typeof(bytes))
+    "#, "unsafe_transmute_test");
+    assert!(result.contains("bytes"));
+}
+
+#[test]
+fn test_unsafe_required() {
+    // ptr_new outside unsafe should error
+    let result = run_eval_unique(r#"
+        let ptr = ptr_new(42)
+    "#, "unsafe_required_test");
+    assert!(result.contains("error") || result.contains("unsafe"));
+}
+
+#[test]
+fn test_static_def() {
+    let result = run_eval_unique(r#"
+        static MAX_SIZE = 1024
+        output(MAX_SIZE)
+    "#, "static_def_test");
+    assert!(result.contains("1024"));
+}
+
+#[test]
+fn test_static_mut_def() {
+    let result = run_eval_unique(r#"
+        static mut counter = 0
+        counter = counter + 1
+        output(counter)
+    "#, "static_mut_test");
+    assert!(result.contains("1"));
+}
+
+#[test]
+fn test_asm_expression() {
+    let result = run_eval_unique(r#"
+        let info = asm!("nop")
+        output(info.template)
+    "#, "asm_test");
+    assert!(result.contains("nop"));
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Extended features: fold, collect, atomics, waitgroup, XML
+// ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_array_fold() {
+    let result = run_eval_unique("output([1, 2, 3, 4].fold(0, |acc, x| acc + x))", "fold_test");
+    assert!(result.contains("10"));
+}
+
+#[test]
+fn test_array_collect() {
+    let result = run_eval_unique("output([1, 2, 3].map(|x| x * 2).collect().len())", "collect_test");
+    assert!(result.contains("3"));
+}
+
+#[test]
+fn test_atomic_ops() {
+    let result = run_eval_unique(r#"
+        use std::concurrent::*
+        let a = atomic_new(0)
+        atomic_store(a, 42)
+        output(atomic_load(a))
+    "#, "atomic_test");
+    assert!(result.contains("42"));
+}
+
+#[test]
+fn test_atomic_add() {
+    let result = run_eval_unique(r#"
+        use std::concurrent::*
+        let a = atomic_new(10)
+        let old = atomic_add(a, 5)
+        output(old)
+        output(atomic_load(a))
+    "#, "atomic_add_test");
+    assert!(result.contains("10") && result.contains("15"));
+}
+
+#[test]
+fn test_atomic_cas() {
+    let result = run_eval_unique(r#"
+        use std::concurrent::*
+        let a = atomic_new(10)
+        let ok = atomic_cas(a, 10, 20)
+        output(ok)
+        output(atomic_load(a))
+    "#, "atomic_cas_test");
+    assert!(result.contains("true") && result.contains("20"));
+}
+
+#[test]
+fn test_wait_group() {
+    let result = run_eval_unique(r#"
+        use std::concurrent::*
+        let wg = wait_group_new()
+        wait_group_add(wg, 1)
+        wait_group_done(wg)
+        wait_group_wait(wg)
+        output("done")
+    "#, "wg_test");
+    assert!(result.contains("done"));
+}
+
+#[test]
+fn test_xml_parse() {
+    let result = run_eval_unique(r#"
+        let xml = xml_parse("<greeting>hello</greeting>")
+        output(xml.tag)
+        output(xml.text)
+    "#, "xml_parse_test");
+    assert!(result.contains("greeting") && result.contains("hello"));
+}
+
+#[test]
+fn test_xml_stringify() {
+    let result = run_eval_unique(r#"
+        let data = { "tag": "item", "text": "hello" }
+        output(xml_stringify(data))
+    "#, "xml_stringify_test");
+    assert!(result.contains("<item>hello</item>"));
+}
+
+#[test]
+fn test_yield_keyword() {
+    // yield in current context behaves like return
+    let result = run_eval_unique(r#"
+        fn gen() {
+            yield 42
+        }
+        output(gen())
+    "#, "yield_test");
+    assert!(result.contains("42"));
 }

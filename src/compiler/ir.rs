@@ -3,7 +3,6 @@
 //! The IR is a sequence of instructions that operate on an implicit value stack,
 //! mapping naturally to WebAssembly's stack machine model.
 
-use serde::{Deserialize, Serialize};
 
 /// A compiled MAGI module ready for WASM code generation.
 #[derive(Debug, Clone)]
@@ -85,7 +84,7 @@ pub struct IrGlobal {
 }
 
 /// Value types in the IR (maps to WASM value types + tagged union at runtime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValType {
     /// 64-bit integer (also used for booleans, null sentinel).
     I64,

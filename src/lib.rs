@@ -1,8 +1,8 @@
 //! # MAGI Programming Language
 //!
-//! MAGI is a hybrid compiled/interpreted programming language with Rust-inspired
-//! syntax, dynamic typing, and first-class support for both tree-walking
-//! interpretation and WASM compilation.
+//! MAGI is a general-purpose compiled programming language with multiple
+//! compilation targets: native (x86-64 ELF), WASM, bytecode VM, runtime
+//! classfiles (.magc), and tree-walking interpretation.
 //!
 //! ## Architecture
 //!
@@ -14,7 +14,8 @@
 //!     → Optimizer (optimizer)
 //!     → Type Checker (syntax::type_checker)
 //!     → Linter (linter)
-//!     → Interpreter (syntax::interpreter) OR Compiler (compiler) → WASM
+//!     → Interpreter (syntax::interpreter)
+//!     → Compiler (compiler) → WASM / Native ELF / Bytecode VM
 //!     → Formatter (formatter)
 //!     → LSP Server (lsp)
 //! ```
@@ -54,7 +55,19 @@ pub mod syntax;
 pub mod telemetry;
 /// Data types, channel types, and operation type enums.
 pub mod types;
+/// TLS support via OpenSSL FFI.
+pub mod tls;
 /// Own implementations replacing external crates.
 pub mod util;
+/// Step-through debugger.
+pub mod debugger;
+/// Package registry.
+pub mod registry;
+/// MCP (Model Context Protocol) server.
+pub mod mcp;
+/// Runtime: bytecode classfiles, VM, GC, classloader.
+pub mod runtime;
 /// Semantic versioning and feature tracking.
 pub mod version;
+/// Platform FFI — termios, SDL2, and PulseAudio bindings.
+pub mod platform;

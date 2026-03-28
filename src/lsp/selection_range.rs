@@ -5,7 +5,7 @@
 
 use super::analysis::DocumentState;
 use crate::syntax::ast::*;
-use tower_lsp::lsp_types::{Position, Range, SelectionRange};
+use super::types::{Position, Range, SelectionRange};
 
 /// Handle a selection range request for the given cursor positions.
 ///

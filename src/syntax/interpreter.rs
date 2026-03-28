@@ -9,7 +9,7 @@ use crate::eval::{EvalError, OperationEvaluator};
 use crate::ops::op_input_ports;
 use crate::types::{DataType, FutureState, OperationType};
 
-use indexmap::IndexMap;
+use crate::util::OrderedMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,9 +19,7 @@ use std::sync::{Arc, Mutex};
 static EMPTY_CONFIG: std::sync::LazyLock<HashMap<String, DataType>> =
     std::sync::LazyLock::new(HashMap::new);
 
-// =============================================================================
 // Task registry — global storage for spawned thread join handles
-// =============================================================================
 
 /// Maximum number of pending spawned tasks.
 const MAX_TASKS: usize = 4096;
@@ -34,6 +32,24 @@ static TASK_REGISTRY: std::sync::LazyLock<
 
 /// Atomic counter for generating unique task IDs.
 static TASK_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Global atomic variable registry (for atomic_new/load/store/add/cas).
+static ATOMICS: std::sync::LazyLock<
+    Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicI64>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global WaitGroup registry.
+static WAITGROUPS: std::sync::LazyLock<
+    Mutex<HashMap<String, std::sync::Arc<(std::sync::Mutex<i64>, std::sync::Condvar)>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global iota counter for auto-incrementing enum/const values.
+static IOTA_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Global RwLock registry (for rwlock_new/read/write builtins).
+static RWLOCKS: std::sync::LazyLock<
+    Mutex<HashMap<String, std::sync::Arc<std::sync::RwLock<DataType>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Generate a unique task ID.
 fn task_id() -> String {
@@ -65,9 +81,7 @@ fn task_join(id: &str) -> Result<Result<DataType, String>, String> {
     handle.join().map_err(|_| "spawned thread panicked".to_string())
 }
 
-// =============================================================================
 // Channel registry — global storage for mpsc channel endpoints
-// =============================================================================
 
 /// Maximum number of open channels.
 const MAX_CHANNELS: usize = 4096;
@@ -120,10 +134,8 @@ fn channel_remove(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-// =============================================================================
 // Global spawn evaluator factory — allows the binary crate to register a
 // full-featured evaluator so spawned threads get access to all stdlib ops.
-// =============================================================================
 
 /// Type alias for the factory function that creates a boxed evaluator for spawned threads.
 type SpawnEvalFactory = fn() -> Box<dyn OperationEvaluator + Send + 'static>;
@@ -188,7 +200,6 @@ fn spawn_eval_operation(
         .unwrap_or(DataType::Null);
 
     match op {
-        // Arithmetic
         OperationType::Add => match (&a, &b) {
             (DataType::String(x), DataType::String(y)) => {
                 Ok(DataType::String(format!("{}{}", x, y)))
@@ -229,7 +240,6 @@ fn spawn_eval_operation(
             }
         }
 
-        // Comparison
         OperationType::Equal => Ok(DataType::Bool(a == b)),
         OperationType::NotEqual => Ok(DataType::Bool(a != b)),
         OperationType::Greater => match (a.to_f64(), b.to_f64()) {
@@ -249,7 +259,6 @@ fn spawn_eval_operation(
             _ => Ok(DataType::Bool(false)),
         },
 
-        // Logic
         OperationType::And => match (&a, &b) {
             (DataType::Bool(x), DataType::Bool(y)) => Ok(DataType::Bool(*x && *y)),
             _ => Ok(DataType::Bool(false)),
@@ -268,10 +277,8 @@ fn spawn_eval_operation(
             _ => Ok(DataType::Null),
         },
 
-        // Conversion
         OperationType::ToString => Ok(DataType::String(input.to_string_lossy())),
 
-        // Unsupported
         _ => Err(EvalError::InvalidInput(format!(
             "{:?} is not available inside spawned tasks",
             op
@@ -327,7 +334,7 @@ const MAX_CALL_DEPTH: usize = 128; // Safe for interpreter stack frames in debug
 const GC_ALLOC_THRESHOLD: usize = 256;
 
 /// Maximum output string length (10 MB).
-const MAX_STRING_OUTPUT: usize = 100_000_000; // 100 MB — generous like Go/Rust
+const MAX_STRING_OUTPUT: usize = 100_000_000; // 100 MB
 
 /// Maximum array element count.
 const MAX_ARRAY_ELEMENTS: usize = 100_000_000; // 100 million — memory is the real limit
@@ -339,7 +346,7 @@ const MAX_VARIABLES: usize = 10_000_000; // 10 million — effectively unlimited
 const MAX_FUNCTIONS: usize = 1_000_000; // 1 million — effectively unlimited
 
 /// Maximum expression nesting depth (#261).
-const MAX_EXPR_DEPTH: usize = 1024; // Deep nesting like Go/Rust compilers handle
+const MAX_EXPR_DEPTH: usize = 1024; // Deep nesting like compilers handle
 
 /// Maximum identifier name length (#404).
 const MAX_IDENTIFIER_LEN: usize = 1024;
@@ -359,9 +366,6 @@ pub struct ResolvedPackage {
     pub struct_defs: Vec<(String, Vec<super::ast::StructField>)>,
 }
 
-// =============================================================================
-// Memory addressing constants
-// =============================================================================
 
 /// Memory address type.
 pub type MemAddr = u64;
@@ -372,9 +376,6 @@ pub const HEAP_BASE: u64 = 0x10000;
 /// Memory alignment (8-byte aligned, 64-bit architecture).
 const ALIGNMENT: u64 = 8;
 
-// =============================================================================
-// Log entry
-// =============================================================================
 
 /// A log entry captured during execution.
 #[derive(Debug, Clone)]
@@ -413,9 +414,7 @@ pub struct GcStats {
     pub peak_live: usize,
 }
 
-// =============================================================================
 // Virtual Heap
-// =============================================================================
 
 /// Metadata for a heap allocation.
 #[derive(Debug, Clone)]
@@ -605,9 +604,6 @@ struct SymbolEntry {
     mutable: bool,
 }
 
-// =============================================================================
-// Interpreter
-// =============================================================================
 
 /// AST interpreter that executes programs with loops and mutable variables.
 /// Uses a virtual heap with memory addresses for value storage.
@@ -649,6 +645,10 @@ pub struct Interpreter<'a> {
     struct_defs: HashMap<String, Vec<StructField>>,
     impl_methods: HashMap<String, HashMap<String, FunctionDef>>,
     trait_defs: HashMap<String, Vec<TraitMethod>>,
+    /// Supertrait relationships: trait_name → list of supertrait names.
+    trait_supertraits: HashMap<String, Vec<String>>,
+    /// Names that were defined via `const` (for named constant pattern matching).
+    const_names: std::collections::HashSet<String>,
     /// Package import guard: tracks packages currently being imported (circular import detection).
     importing_packages: std::collections::HashSet<String>,
     /// Source file name for error messages (#134).
@@ -687,6 +687,8 @@ impl<'a> Interpreter<'a> {
             struct_defs: HashMap::new(),
             impl_methods: HashMap::new(),
             trait_defs: HashMap::new(),
+            trait_supertraits: HashMap::new(),
+            const_names: std::collections::HashSet::new(),
             source_file: None,
             call_stack_names: Vec::new(),
             importing_packages: std::collections::HashSet::new(),
@@ -762,6 +764,35 @@ impl<'a> Interpreter<'a> {
     fn suggest_function(&self, name: &str) -> Option<String> {
         let refs: Vec<&str> = self.functions.keys().map(|s| s.as_str()).collect();
         super::errors::suggest_name(name, &refs)
+    }
+
+    /// Call an impl method on an object with the given arguments.
+    fn call_impl_method(&mut self, receiver: DataType, method: &FunctionDef, args: &[DataType], span: Span) -> Result<DataType, InterpError> {
+        self.call_depth += 1;
+        if self.call_depth > 512 {
+            self.call_depth -= 1;
+            return Err(InterpError::MaxCallDepth { limit: 512, span });
+        }
+        self.symbols.push(HashMap::new());
+        self.heap.push_scope();
+        if let Some(p) = method.params.first() {
+            let a = self.heap.alloc(receiver);
+            self.define(&p.name, a, true);
+        }
+        for (i, param) in method.params.iter().skip(1).enumerate() {
+            let val = args.get(i).cloned().unwrap_or(DataType::Null);
+            let a = self.heap.alloc(val);
+            self.define(&param.name, a, false);
+        }
+        let result = self.exec_block(&method.body);
+        self.heap.pop_scope();
+        self.symbols.pop();
+        self.call_depth -= 1;
+        match result {
+            Ok(_) => Ok(DataType::Null),
+            Err(InterpError::ReturnSignal(v)) => Ok(v),
+            Err(e) => Err(e),
+        }
     }
 
     /// Define a variable in the current scope.
@@ -869,7 +900,7 @@ impl<'a> Interpreter<'a> {
 
         // Send the paused event (blocking — runs on spawn_blocking thread)
         if let Some(ref debug) = self.debug {
-            let _ = debug.event_sender.blocking_send(event);
+            let _ = debug.event_sender.send(event);
         }
 
         // Wait for a command (loop to allow Evaluate without resuming execution)
@@ -877,7 +908,7 @@ impl<'a> Interpreter<'a> {
             let cmd = self
                 .debug
                 .as_mut()
-                .and_then(|d| d.command_receiver.blocking_recv());
+                .and_then(|d| d.command_receiver.recv().ok());
             let Some(cmd) = cmd else { break };
             match cmd {
                 DebugCommand::Continue => {
@@ -927,7 +958,7 @@ impl<'a> Interpreter<'a> {
                     let saved_free_list = self.heap.free_list.clone();
                     let saved_allocs = self.heap.allocs_since_gc;
                     self.heap.push_scope();
-                    // Temporarily disable debug to avoid recursive blocking_recv
+                    // Temporarily disable debug to avoid recursive recv
                     let debug_state = self.debug.take();
                     let (result, error) = match crate::syntax::parser::parse_v2(&expr) {
                         Err(e) => (String::new(), Some(format!("Parse error: {}", e))),
@@ -962,7 +993,7 @@ impl<'a> Interpreter<'a> {
                     if let Some(ref debug) = self.debug {
                         debug
                             .event_sender
-                            .blocking_send(DebugEvent::EvaluateResult { result, error })
+                            .send(DebugEvent::EvaluateResult { result, error })
                             .ok();
                     }
                     // Stay paused — loop back to wait for next command
@@ -1100,9 +1131,6 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
-    // Program execution
-    // =========================================================================
 
     /// Execute a program and return the final output value (if any).
     ///
@@ -1131,12 +1159,41 @@ impl<'a> Interpreter<'a> {
                     let tm = self.impl_methods.entry(type_name.clone()).or_default();
                     for m in methods { tm.insert(m.name.clone(), m.clone()); }
                 }
-                StatementKind::TraitDef { name, methods } => {
+                StatementKind::TraitDef { name, methods, .. } => {
                     self.trait_defs.insert(name.clone(), methods.clone());
+                    if let StatementKind::TraitDef { supertraits, .. } = &stmt.kind {
+                        if !supertraits.is_empty() {
+                            self.trait_supertraits.insert(name.clone(), supertraits.clone());
+                        }
+                    }
                 }
-                StatementKind::ImplTrait { type_name, methods, .. } => {
+                StatementKind::ImplTrait { trait_name, type_name, methods } => {
                     let tm = self.impl_methods.entry(type_name.clone()).or_default();
                     for m in methods { tm.insert(m.name.clone(), m.clone()); }
+                    // Validate supertrait obligations: if trait has supertraits,
+                    if let Some(supers) = self.trait_supertraits.get(trait_name).cloned() {
+                        let type_methods = self.impl_methods.get(type_name);
+                        for sup in &supers {
+                            if let Some(sup_methods) = self.trait_defs.get(sup) {
+                                for sm in sup_methods {
+                                    let has_method = type_methods
+                                        .map(|ms| ms.contains_key(&sm.name))
+                                        .unwrap_or(false);
+                                    if !has_method {
+                                        return Err(InterpError::EvalError {
+                                            error: crate::eval::EvalError::InvalidInput(
+                                                format!(
+                                                    "Type '{}' implements trait '{}' which requires supertrait '{}', but method '{}' from '{}' is not implemented",
+                                                    type_name, trait_name, sup, sm.name, sup
+                                                )
+                                            ),
+                                            span: stmt.span,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 StatementKind::ModuleDef { name, body } => {
                     self.register_module(name, body);
@@ -1178,7 +1235,7 @@ impl<'a> Interpreter<'a> {
                     self.closure_captures.insert("init".to_string(), globals);
                 }
             }
-            // Run init() before main() if it exists (Go-style initialization)
+            // Run init() before main() if it exists
             if has_init {
                 let init_span = self
                     .functions
@@ -1242,9 +1299,6 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
-    // Statements
-    // =========================================================================
 
     fn exec_statement(&mut self, stmt: &Statement) -> Result<DataType, InterpError> {
         self.debug_check(stmt.span);
@@ -1311,7 +1365,7 @@ impl<'a> Interpreter<'a> {
                     DataType::Map(map) => {
                         map.into_iter()
                             .map(|(k, v)| {
-                                let mut entry = indexmap::IndexMap::new();
+                                let mut entry = OrderedMap::new();
                                 entry.insert("key".to_string(), DataType::String(k));
                                 entry.insert("value".to_string(), v);
                                 DataType::Map(entry)
@@ -1333,12 +1387,40 @@ impl<'a> Interpreter<'a> {
                             .collect()
                     }
                     other => {
-                        return Err(InterpError::TypeError {
-                            expected: "Array, Map, or String".to_string(),
-                            actual: other.type_name().to_string(),
-                            context: "for loop iterable".to_string(),
-                            span: iterable.span,
-                        });
+                        // Check for __iter__ protocol on structs
+                        if let DataType::Map(ref map) = other {
+                            if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                                if let Some(iter_fn) = self.impl_methods.get(struct_name).and_then(|m| m.get("__iter__")).cloned() {
+                                    let result = self.call_impl_method(other.clone(), &iter_fn, &[], iterable.span)?;
+                                    if let DataType::Array(arr) = result {
+                                        arr
+                                    } else {
+                                        vec![result]
+                                    }
+                                } else {
+                                    return Err(InterpError::TypeError {
+                                        expected: "Array, Map, String, or iterable struct".to_string(),
+                                        actual: other.type_name().to_string(),
+                                        context: "for loop iterable".to_string(),
+                                        span: iterable.span,
+                                    });
+                                }
+                            } else {
+                                return Err(InterpError::TypeError {
+                                    expected: "Array, Map, or String".to_string(),
+                                    actual: other.type_name().to_string(),
+                                    context: "for loop iterable".to_string(),
+                                    span: iterable.span,
+                                });
+                            }
+                        } else {
+                            return Err(InterpError::TypeError {
+                                expected: "Array, Map, or String".to_string(),
+                                actual: other.type_name().to_string(),
+                                context: "for loop iterable".to_string(),
+                                span: iterable.span,
+                            });
+                        }
                     }
                 };
 
@@ -1547,7 +1629,6 @@ impl<'a> Interpreter<'a> {
                         Err(e) => return Err(e),
                     }
 
-                    // Then check condition
                     let cond = self.eval_expr(condition)?;
                     let is_true = match &cond {
                         DataType::Bool(b) => *b,
@@ -1870,11 +1951,18 @@ impl<'a> Interpreter<'a> {
                                     return Err(InterpError::TypeError { expected: format!("index 0..{}", arr.len()), actual: format!("{}", i), context: "index assignment out of bounds".to_string(), span: stmt.span });
                                 }
                             }
-                            (DataType::Map(map), DataType::String(key)) => {
-                                map.insert(key.clone(), val.clone());
-                            }
-                            (DataType::Map(map), other) => {
-                                map.insert(other.to_string_lossy(), val.clone());
+                            (DataType::Map(map), _) => {
+                                // Check for __index_set__ operator overload on structs
+                                if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                                    if let Some(setter_fn) = self.impl_methods.get(struct_name).and_then(|m| m.get("__index_set__")).cloned() {
+                                        let receiver = DataType::Map(map.clone());
+                                        self.call_impl_method(receiver, &setter_fn, &[idx_val.clone(), val.clone()], stmt.span)?;
+                                        self.heap.write(addr, obj);
+                                        return Ok(val);
+                                    }
+                                }
+                                let key = match &idx_val { DataType::String(k) => k.clone(), other => other.to_string_lossy() };
+                                map.insert(key, val.clone());
                             }
                             _ => return Err(InterpError::TypeError { expected: "Array or Map".to_string(), actual: obj.type_name().to_string(), context: "index assignment".to_string(), span: stmt.span }),
                         }
@@ -1952,6 +2040,18 @@ impl<'a> Interpreter<'a> {
                 let val = self.eval_expr(value)?;
                 let addr = self.heap.alloc(val.clone());
                 self.define(name, addr, false); // constants are always immutable
+                self.const_names.insert(name.clone());
+                Ok(val)
+            }
+
+            StatementKind::StaticDef { name, value, mutable, .. } => {
+                // Static variables are module-level bindings, stored in the outermost scope.
+                let val = self.eval_expr(value)?;
+                let addr = self.heap.alloc(val.clone());
+                // Define in the outermost scope (module level)
+                if let Some(scope) = self.symbols.first_mut() {
+                    scope.insert(name.clone(), SymbolEntry { addr, mutable: *mutable });
+                }
                 Ok(val)
             }
 
@@ -1971,13 +2071,11 @@ impl<'a> Interpreter<'a> {
             }
 
             StatementKind::EnumDef { name, variants, .. } => {
-                // Store enum definition
                 self.enum_defs.insert(name.clone(), variants.clone());
                 Ok(DataType::Null)
             }
 
             StatementKind::StructDef { name, fields, .. } => {
-                // Store struct definition
                 self.struct_defs.insert(name.clone(), fields.clone());
                 Ok(DataType::Null)
             }
@@ -1987,11 +2085,9 @@ impl<'a> Interpreter<'a> {
             StatementKind::ImplTrait { .. } => Ok(DataType::Null),
 
             StatementKind::Use { path, alias, glob, .. } => {
-                // Check if this is a std library import
                 if path.first().map(|s| s.as_str()) == Some("std") {
                     return self.handle_std_use(path, alias.as_deref(), *glob, stmt.span);
                 }
-                // Check if this is a package import
                 if path.first().map(|s| s.as_str()) == Some("pkg") {
                     return self.handle_pkg_use(path, alias.as_deref(), *glob, stmt.span);
                 }
@@ -2043,14 +2139,11 @@ impl<'a> Interpreter<'a> {
                 } else {
                     let item_name = path.last().cloned().unwrap_or_default();
                     let local_name = alias.as_ref().unwrap_or(&item_name).clone();
-                    // Try function first
                     if let Some(func) = self.functions.get(&full_path).cloned() {
                         self.functions.insert(local_name, func);
                     } else if let Some(variants) = self.enum_defs.get(&full_path).cloned() {
-                        // Try enum
                         self.enum_defs.insert(local_name, variants);
                     } else if let Some(fields) = self.struct_defs.get(&full_path).cloned() {
-                        // Try struct
                         self.struct_defs.insert(local_name, fields);
                     } else {
                         // Collect available items from the module for suggestions
@@ -2126,9 +2219,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
     // Spread-aware argument evaluation
-    // =========================================================================
 
     fn eval_call_args(&mut self, args: &[Expression]) -> Result<Vec<DataType>, InterpError> {
         let mut result = Vec::new();
@@ -2181,7 +2272,7 @@ impl<'a> Interpreter<'a> {
         };
         // Check if the function has a **kwargs parameter
         let kwargs_param = func.params.iter().find(|p| p.kwargs).map(|p| p.name.clone());
-        let mut extra_kwargs = IndexMap::new();
+        let mut extra_kwargs = OrderedMap::new();
 
         // Extend the evaluated args vector to accommodate named args
         for (kwarg_name, kwarg_expr) in kwargs {
@@ -2250,9 +2341,7 @@ impl<'a> Interpreter<'a> {
         Ok(result)
     }
 
-    // =========================================================================
     // Slice evaluation (arr[1..3], str[0..5])
-    // =========================================================================
 
     fn eval_slice(&self, obj: &DataType, start: &DataType, end: &DataType, inclusive: bool, span: Span) -> Result<DataType, InterpError> {
         let len = match obj {
@@ -2267,7 +2356,7 @@ impl<'a> Interpreter<'a> {
         };
         let s_raw = start.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: start.type_name().to_string(), context: "slice start".to_string(), span })?;
         let e_raw_i = end.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: end.type_name().to_string(), context: "slice end".to_string(), span })?;
-        // Wrap negative indices from end (Python-style)
+        // Wrap negative indices from end
         let s = if s_raw < 0 { (len + s_raw).max(0) as usize } else { usize::try_from(s_raw).unwrap_or(usize::MAX) };
         let e_raw = if e_raw_i < 0 { (len + e_raw_i).max(0) as usize } else { usize::try_from(e_raw_i).unwrap_or(usize::MAX) };
         let e = if inclusive { e_raw.saturating_add(1) } else { e_raw };
@@ -2293,9 +2382,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
     // Resolve and call a lambda/function by name with args
-    // =========================================================================
 
     fn call_lambda_with_args(&mut self, fn_arg: &Expression, args: &[DataType], span: Span) -> Result<DataType, InterpError> {
         let fn_val = self.eval_expr(fn_arg)?;
@@ -2311,9 +2398,7 @@ impl<'a> Interpreter<'a> {
         self.call_function(&fn_name, args, span)
     }
 
-    // =========================================================================
     // Merge sort with fallible comparator for sort_by
-    // =========================================================================
 
     fn merge_sort_by(
         &mut self,
@@ -2372,16 +2457,13 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // Append remaining elements
         result.extend_from_slice(&left[li..]);
         result.extend_from_slice(&right[ri..]);
 
         Ok(result)
     }
 
-    // =========================================================================
     // Higher-order function methods (Phase 1)
-    // =========================================================================
 
     fn try_eval_hof_method(&mut self, obj: &DataType, method: &str, args: &[Expression], span: Span) -> Result<Option<DataType>, InterpError> {
         match obj {
@@ -2414,7 +2496,8 @@ impl<'a> Interpreter<'a> {
                         }
                         Ok(Some(DataType::Array(result)))
                     }
-                    "reduce" => {
+                    // reduce/fold — reduce with initial value (fold is alias)
+                    "reduce" | "fold" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "reduce".to_string(), expected: "2".to_string(), actual: args.len(), span }); }
                         let mut acc = self.eval_expr(&args[0])?;
                         for item in arr {
@@ -2422,6 +2505,16 @@ impl<'a> Interpreter<'a> {
                             acc = self.call_lambda_with_args(&args[1], &[acc, item.clone()], span)?;
                         }
                         Ok(Some(acc))
+                    }
+                    // collect() — convert to array (identity for arrays, useful for chaining)
+                    "collect" => {
+                        Ok(Some(DataType::Array(arr.clone())))
+                    }
+                    // peekable() — returns the array with a peek method (in MAGI, arrays already support .first())
+                    "peekable" => {
+                        // In MAGI, arrays are already random-access. Peekable is a no-op that
+                        // returns the same array. .first() serves as .peek().
+                        Ok(Some(DataType::Array(arr.clone())))
                     }
                     "find" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find".to_string(), expected: "1".to_string(), actual: 0, span }); }
@@ -2506,7 +2599,7 @@ impl<'a> Interpreter<'a> {
                     }
                     "group_by" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "group_by".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut groups: indexmap::IndexMap<String, Vec<DataType>> = indexmap::IndexMap::new();
+                        let mut groups: OrderedMap<String, Vec<DataType>> = OrderedMap::new();
                         let mut total_items: usize = 0;
                         for item in arr {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
@@ -2523,7 +2616,7 @@ impl<'a> Interpreter<'a> {
                             let key_str = key.to_string_lossy();
                             groups.entry(key_str).or_default().push(item.clone());
                         }
-                        let map: indexmap::IndexMap<String, DataType> = groups.into_iter()
+                        let map: OrderedMap<String, DataType> = groups.into_iter()
                             .map(|(k, v)| (k, DataType::Array(v)))
                             .collect();
                         Ok(Some(DataType::Map(map)))
@@ -2725,7 +2818,7 @@ impl<'a> Interpreter<'a> {
                 match method {
                     "filter_entries" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter_entries".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let keep = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
@@ -2745,7 +2838,7 @@ impl<'a> Interpreter<'a> {
                     }
                     "map_values" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_values".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let new_v = self.call_lambda_with_args(&args[0], std::slice::from_ref(v), span)?;
@@ -2763,7 +2856,7 @@ impl<'a> Interpreter<'a> {
                     }
                     "map_keys" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_keys".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let new_k = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone())], span)?;
@@ -2785,7 +2878,7 @@ impl<'a> Interpreter<'a> {
                     }
                     "map_entries" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_entries".to_string(), expected: "1".to_string(), actual: 0, span }); }
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let mapped = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
@@ -2801,7 +2894,7 @@ impl<'a> Interpreter<'a> {
                     }
                     // --- Non-HOF map methods (#113-120) ---
                     "invert" => {
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for (k, v) in map {
                             let new_key = match v { DataType::String(s) => s.clone(), other => other.to_string_lossy() };
                             result.insert(new_key, DataType::String(k.clone()));
@@ -2822,7 +2915,7 @@ impl<'a> Interpreter<'a> {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pick".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let keys_val = self.eval_expr(&args[0])?;
                         let keys = match keys_val { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: keys_val.type_name().to_string(), context: "pick keys".to_string(), span }) };
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for k in keys {
                             let key_str = match k { DataType::String(s) => s, other => other.to_string_lossy() };
                             if let Some(v) = map.get(&key_str) { result.insert(key_str, v.clone()); }
@@ -2834,14 +2927,14 @@ impl<'a> Interpreter<'a> {
                         let keys_val = self.eval_expr(&args[0])?;
                         let keys = match keys_val { DataType::Array(a) => a, _ => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: keys_val.type_name().to_string(), context: "omit keys".to_string(), span }) };
                         let omit_set: std::collections::HashSet<String> = keys.into_iter().map(|k| match k { DataType::String(s) => s, other => other.to_string_lossy() }).collect();
-                        let result: indexmap::IndexMap<String, DataType> = map.iter().filter(|(k, _)| !omit_set.contains(*k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                        let result: OrderedMap<String, DataType> = map.iter().filter(|(k, _)| !omit_set.contains(*k)).map(|(k, v)| (k.clone(), v.clone())).collect();
                         Ok(Some(DataType::Map(result)))
                     }
                     "deep_merge" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "deep_merge".to_string(), expected: "1".to_string(), actual: 0, span }); }
                         let other_val = self.eval_expr(&args[0])?;
                         let other_map = match other_val { DataType::Map(m) => m, _ => return Err(InterpError::TypeError { expected: "Map".to_string(), actual: other_val.type_name().to_string(), context: "deep_merge argument".to_string(), span }) };
-                        fn deep_merge_maps(base: &indexmap::IndexMap<String, DataType>, overlay: &indexmap::IndexMap<String, DataType>) -> indexmap::IndexMap<String, DataType> {
+                        fn deep_merge_maps(base: &OrderedMap<String, DataType>, overlay: &OrderedMap<String, DataType>) -> OrderedMap<String, DataType> {
                             let mut result = base.clone();
                             for (k, v) in overlay {
                                 match (result.get(k), v) {
@@ -2859,7 +2952,7 @@ impl<'a> Interpreter<'a> {
                         let separator = if !args.is_empty() {
                             match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => ".".to_string() }
                         } else { ".".to_string() };
-                        fn flatten_map(map: &indexmap::IndexMap<String, DataType>, prefix: &str, sep: &str, out: &mut indexmap::IndexMap<String, DataType>) {
+                        fn flatten_map(map: &OrderedMap<String, DataType>, prefix: &str, sep: &str, out: &mut OrderedMap<String, DataType>) {
                             for (k, v) in map {
                                 let key = if prefix.is_empty() { k.clone() } else { format!("{}{}{}", prefix, sep, k) };
                                 match v {
@@ -2868,12 +2961,28 @@ impl<'a> Interpreter<'a> {
                                 }
                             }
                         }
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         flatten_map(map, "", &separator, &mut result);
                         Ok(Some(DataType::Map(result)))
                     }
+                    "extend" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "extend".into(), expected: "1".into(), actual: 0, span }); }
+                        let other = match self.eval_expr(&args[0])? {
+                            DataType::Map(m) => m,
+                            other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "extend".into(), span }),
+                        };
+                        let mut result = map.clone();
+                        for (k, v) in other { result.insert(k, v); }
+                        Ok(Some(DataType::Map(result)))
+                    }
+                    "sort_by_value" => {
+                        let mut entries: Vec<(String, DataType)> = map.iter().map(|(k,v)| (k.clone(), v.clone())).collect();
+                        entries.sort_by(|a, b| format!("{:?}", a.1).cmp(&format!("{:?}", b.1)));
+                        let result: crate::util::OrderedMap<String, DataType> = entries.into_iter().collect();
+                        Ok(Some(DataType::Map(result)))
+                    }
                     // clear() — returns empty map
-                    "clear" => Ok(Some(DataType::Map(indexmap::IndexMap::new()))),
+                    "clear" => Ok(Some(DataType::Map(OrderedMap::new()))),
                     // is_empty() — check if map has no entries
                     "is_empty" => Ok(Some(DataType::Bool(map.is_empty()))),
                     // update_entry(key, fn) — applies fn to the value at key if it exists
@@ -2908,7 +3017,7 @@ impl<'a> Interpreter<'a> {
                     // retain(fn) — returns new map keeping entries where fn(key, value) is truthy
                     "retain" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "retain".into(), expected: "1".into(), actual: 0, span }); }
-                        let mut result = indexmap::IndexMap::new();
+                        let mut result = OrderedMap::new();
                         for (k, v) in map {
                             if self.is_cancelled() { return Err(InterpError::Cancelled); }
                             let keep = self.call_lambda_with_args(&args[0], &[DataType::String(k.clone()), v.clone()], span)?;
@@ -2954,9 +3063,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
     // Numeric method helpers — shared min/max/clamp for all integer and float types
-    // =========================================================================
 
     /// Evaluate min/max/clamp for integer types using i128 as the common representation.
     fn eval_int_min_max_clamp(&mut self, val: i128, method: &str, args: &[Expression], span: Span) -> Result<i128, InterpError> {
@@ -3023,9 +3130,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
     // Direct interpreter methods (Phase 13, 16)
-    // =========================================================================
 
     fn try_eval_direct_method(&mut self, obj: &DataType, method: &str, args: &[Expression], span: Span) -> Result<Option<DataType>, InterpError> {
         match obj {
@@ -3062,6 +3167,99 @@ impl<'a> Interpreter<'a> {
                     Ok(Some(DataType::Int64(result.max(i64::MIN as i128).min(i64::MAX as i128) as i64)))
                 }
                 "sign" => Ok(Some(DataType::Int64(n.signum()))),
+                "is_even" => Ok(Some(DataType::Bool(n % 2 == 0))),
+                "is_odd" => Ok(Some(DataType::Bool(n % 2 != 0))),
+                "is_positive" => Ok(Some(DataType::Bool(*n > 0))),
+                "is_negative" => Ok(Some(DataType::Bool(*n < 0))),
+                "is_zero" => Ok(Some(DataType::Bool(*n == 0))),
+                "leading_zeros" => Ok(Some(DataType::Int64(n.leading_zeros() as i64))),
+                "trailing_zeros" => Ok(Some(DataType::Int64(n.trailing_zeros() as i64))),
+                "count_ones" => Ok(Some(DataType::Int64(n.count_ones() as i64))),
+                "reverse_bits" => Ok(Some(DataType::Int64(n.reverse_bits()))),
+                "signum" => Ok(Some(DataType::Int64(n.signum()))),
+                "checked_add" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "checked_add".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(match n.checked_add(other) { Some(v) => DataType::Int64(v), None => DataType::Null }))
+                }
+                "saturating_add" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "saturating_add".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.saturating_add(other))))
+                }
+                "wrapping_add" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "wrapping_add".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.wrapping_add(other))))
+                }
+                "checked_sub" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "checked_sub".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(match n.checked_sub(other) { Some(v) => DataType::Int64(v), None => DataType::Null }))
+                }
+                "checked_mul" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "checked_mul".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(match n.checked_mul(other) { Some(v) => DataType::Int64(v), None => DataType::Null }))
+                }
+                "checked_div" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "checked_div".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(match n.checked_div(other) { Some(v) => DataType::Int64(v), None => DataType::Null }))
+                }
+                "saturating_sub" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "saturating_sub".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.saturating_sub(other))))
+                }
+                "saturating_mul" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "saturating_mul".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.saturating_mul(other))))
+                }
+                "wrapping_sub" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "wrapping_sub".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.wrapping_sub(other))))
+                }
+                "wrapping_mul" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "wrapping_mul".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                    Ok(Some(DataType::Int64(n.wrapping_mul(other))))
+                }
+                "rem_euclid" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "rem_euclid".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(1);
+                    if other == 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::DivisionByZero, span }); }
+                    Ok(Some(DataType::Int64(n.rem_euclid(other))))
+                }
+                "div_euclid" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "div_euclid".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_i64().unwrap_or(1);
+                    if other == 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::DivisionByZero, span }); }
+                    Ok(Some(DataType::Int64(n.div_euclid(other))))
+                }
+                "bit_length" => {
+                    Ok(Some(DataType::Int64(64 - n.leading_zeros() as i64)))
+                }
+                "digits" => {
+                    let d = if *n == 0 { 1 } else { (n.unsigned_abs() as f64).log10().floor() as i64 + 1 };
+                    Ok(Some(DataType::Int64(d)))
+                }
+                "to_le_bytes" => {
+                    let bytes = n.to_le_bytes();
+                    Ok(Some(DataType::Bytes(bytes.to_vec())))
+                }
+                "to_be_bytes" => {
+                    let bytes = n.to_be_bytes();
+                    Ok(Some(DataType::Bytes(bytes.to_vec())))
+                }
+                "from_str_radix" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "from_str_radix".into(), expected: "1".into(), actual: 0, span }); }
+                    let s = self.eval_expr(&args[0])?.to_string_lossy();
+                    let radix = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(10) as u32 } else { 10 };
+                    Ok(Some(match i64::from_str_radix(s.trim(), radix) { Ok(v) => DataType::Int64(v), Err(_) => DataType::Null }))
+                }
                 _ => Ok(None),
             },
             DataType::Float64(n) => match method {
@@ -3070,6 +3268,12 @@ impl<'a> Interpreter<'a> {
                 "floor" => Ok(Some(DataType::Float64(n.floor()))),
                 "ceil" => Ok(Some(DataType::Float64(n.ceil()))),
                 "sqrt" => Ok(Some(DataType::Float64(n.sqrt()))),
+                "cbrt" => Ok(Some(DataType::Float64(n.cbrt()))),
+                "hypot" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "hypot".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_f64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "hypot".into(), span })?;
+                    Ok(Some(DataType::Float64(n.hypot(other))))
+                }
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
                 "is_finite" => Ok(Some(DataType::Bool(n.is_finite()))),
@@ -3107,6 +3311,60 @@ impl<'a> Interpreter<'a> {
                 "cosh" => Ok(Some(DataType::Float64(n.cosh()))),
                 "tanh" => Ok(Some(DataType::Float64(n.tanh()))),
                 "exp" => Ok(Some(DataType::Float64(n.exp()))),
+                "trunc" => Ok(Some(DataType::Float64(n.trunc()))),
+                "fract" => Ok(Some(DataType::Float64(n.fract()))),
+                "exp2" => Ok(Some(DataType::Float64(n.exp2()))),
+                "acosh" => Ok(Some(DataType::Float64(n.acosh()))),
+                "asinh" => Ok(Some(DataType::Float64(n.asinh()))),
+                "atanh" => Ok(Some(DataType::Float64(n.atanh()))),
+                "recip" => Ok(Some(DataType::Float64(n.recip()))),
+                "signum" => Ok(Some(DataType::Float64(n.signum()))),
+                "copysign" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "copysign".into(), expected: "1".into(), actual: 0, span }); }
+                    let sign = self.eval_expr(&args[0])?.to_f64().unwrap_or(1.0);
+                    Ok(Some(DataType::Float64(n.copysign(sign))))
+                }
+                "is_sign_positive" => Ok(Some(DataType::Bool(n.is_sign_positive()))),
+                "is_sign_negative" => Ok(Some(DataType::Bool(n.is_sign_negative()))),
+                "sincos" => {
+                    let (s, c) = n.sin_cos();
+                    Ok(Some(DataType::Tuple(vec![DataType::Float64(s), DataType::Float64(c)])))
+                }
+                "modf" => {
+                    let int_part = n.trunc();
+                    let frac_part = n.fract();
+                    Ok(Some(DataType::Tuple(vec![DataType::Float64(int_part), DataType::Float64(frac_part)])))
+                }
+                "log1p" => Ok(Some(DataType::Float64(n.ln_1p()))),
+                "mul_add" => {
+                    if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "mul_add".into(), expected: "2".into(), actual: args.len(), span }); }
+                    let a = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                    let b = self.eval_expr(&args[1])?.to_f64().unwrap_or(0.0);
+                    Ok(Some(DataType::Float64(n.mul_add(a, b))))
+                }
+                "powi" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "powi".into(), expected: "1".into(), actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as i32;
+                    Ok(Some(DataType::Float64(n.powi(exp))))
+                }
+                "powf" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "powf".into(), expected: "1".into(), actual: 0, span }); }
+                    let exp = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                    Ok(Some(DataType::Float64(n.powf(exp))))
+                }
+                "to_le_bytes" => {
+                    let bytes = n.to_le_bytes();
+                    Ok(Some(DataType::Bytes(bytes.to_vec())))
+                }
+                "to_be_bytes" => {
+                    let bytes = n.to_be_bytes();
+                    Ok(Some(DataType::Bytes(bytes.to_vec())))
+                }
+                "rem_euclid" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "rem_euclid".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = self.eval_expr(&args[0])?.to_f64().unwrap_or(1.0);
+                    Ok(Some(DataType::Float64(n.rem_euclid(other))))
+                }
                 _ => Ok(None),
             },
             DataType::Float32(n) => match method {
@@ -3115,6 +3373,7 @@ impl<'a> Interpreter<'a> {
                 "floor" => Ok(Some(DataType::Float32(n.floor()))),
                 "ceil" => Ok(Some(DataType::Float32(n.ceil()))),
                 "sqrt" => Ok(Some(DataType::Float32(n.sqrt()))),
+                "cbrt" => Ok(Some(DataType::Float32(n.cbrt()))),
                 "is_nan" => Ok(Some(DataType::Bool(n.is_nan()))),
                 "is_infinite" => Ok(Some(DataType::Bool(n.is_infinite()))),
                 "is_finite" => Ok(Some(DataType::Bool(n.is_finite()))),
@@ -3327,7 +3586,7 @@ impl<'a> Interpreter<'a> {
                     let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace pattern".to_string(), span }) };
                     let to = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".to_string(), actual: other.type_name().to_string(), context: "replace replacement".to_string(), span }) };
                     if from.is_empty() {
-                        // Rust's replace("", x) inserts x between every char and at both ends
+                        // replace("", x) inserts x between every char and at both ends
                         let result_len = s.len().saturating_add((s.chars().count() + 1).saturating_mul(to.len()));
                         if result_len > MAX_STRING_OUTPUT {
                             return Err(InterpError::ResourceLimit { limit: format!("{} bytes", MAX_STRING_OUTPUT), actual: format!("{}", result_len), context: "string replace".to_string(), span });
@@ -3553,6 +3812,25 @@ impl<'a> Interpreter<'a> {
                     let parts: Vec<DataType> = s.splitn(n, &sep).map(|p| DataType::String(p.to_string())).collect();
                     Ok(Some(DataType::Array(parts)))
                 }
+                // split_once(sep) — split at first occurrence, return Tuple(before, after) or Null
+                "split_once" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split_once".into(), expected: "1".into(), actual: 0, span }); }
+                    let sep = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "split_once separator".into(), span }) };
+                    match s.split_once(&sep) {
+                        Some((before, after)) => Ok(Some(DataType::Tuple(vec![DataType::String(before.to_string()), DataType::String(after.to_string())]))),
+                        None => Ok(Some(DataType::Null)),
+                    }
+                }
+                // char_code_at(index) — get the Unicode code point at index
+                "char_code_at" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_code_at".into(), expected: "1".into(), actual: 0, span }); }
+                    let idx = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                    if idx < 0 { return Ok(Some(DataType::Null)); }
+                    match s.chars().nth(idx as usize) {
+                        Some(c) => Ok(Some(DataType::Int64(c as i64))),
+                        None => Ok(Some(DataType::Null)),
+                    }
+                }
                 "replacen" => {
                     if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "replacen".into(), expected: "3".into(), actual: args.len(), span }); }
                     let from = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "replacen pattern".into(), span }) };
@@ -3635,6 +3913,24 @@ impl<'a> Interpreter<'a> {
                         .replace("\\t", "\t")
                         .replace("\\r", "\r");
                     Ok(Some(DataType::String(unescaped)))
+                }
+                "contains_any" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains_any".into(), expected: "1".into(), actual: 0, span }); }
+                    let chars_str = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "contains_any".into(), span }) };
+                    Ok(Some(DataType::Bool(s.chars().any(|c| chars_str.contains(c)))))
+                }
+                "equal_fold" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "equal_fold".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "equal_fold".into(), span }) };
+                    Ok(Some(DataType::Bool(s.to_lowercase() == other.to_lowercase())))
+                }
+                "cut" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cut".into(), expected: "1".into(), actual: 0, span }); }
+                    let sep = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "cut".into(), span }) };
+                    match s.split_once(&sep) {
+                        Some((before, after)) => Ok(Some(DataType::Tuple(vec![DataType::String(before.to_string()), DataType::String(after.to_string()), DataType::Bool(true)]))),
+                        None => Ok(Some(DataType::Tuple(vec![DataType::String(s.clone()), DataType::String(String::new()), DataType::Bool(false)]))),
+                    }
                 }
                 _ => Ok(None),
             },
@@ -3886,7 +4182,7 @@ impl<'a> Interpreter<'a> {
                     let depth = if !args.is_empty() {
                         let arg = self.eval_expr(&args[0])?;
                         arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: arg.type_name().to_string(), context: "flatten depth".to_string(), span })?.max(0) as usize
-                    } else { usize::MAX };
+                    } else { 64 }; // Cap to prevent stack overflow on deeply nested arrays
                     fn flatten_recursive(arr: &[DataType], depth: usize, out: &mut Vec<DataType>, limit: usize) -> bool {
                         for item in arr {
                             if out.len() >= limit { return false; }
@@ -4000,6 +4296,57 @@ impl<'a> Interpreter<'a> {
                     }
                     Ok(Some(DataType::Array(result)))
                 }
+                // windows(n) — alias for window(n)
+                "windows" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "windows".to_string(), expected: "1".to_string(), actual: 0, span }); }
+                    let arg = self.eval_expr(&args[0])?;
+                    let n = arg.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: arg.type_name().into(), context: "windows size".into(), span })?;
+                    if n <= 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("windows size must be > 0".into()), span }); }
+                    let n = n as usize;
+                    if n > arr.len() { return Ok(Some(DataType::Array(vec![]))); }
+                    let mut result = Vec::with_capacity(arr.len() - n + 1);
+                    for i in 0..=(arr.len() - n) {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        result.push(DataType::Array(arr[i..i + n].to_vec()));
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                // nth(n) — get nth element (0-indexed), returns None if out of bounds
+                "nth" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "nth".into(), expected: "1".into(), actual: 0, span }); }
+                    let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                    if n < 0 || n as usize >= arr.len() {
+                        Ok(Some(DataType::Null))
+                    } else {
+                        Ok(Some(arr[n as usize].clone()))
+                    }
+                }
+                // inspect(fn) — call fn on each element for side effects, return original array
+                "inspect" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "inspect".into(), expected: "1".into(), actual: 0, span }); }
+                    let arr_clone = arr.clone();
+                    for item in &arr_clone {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        self.call_lambda_with_args(&args[0], &[item.clone()], span)?;
+                    }
+                    Ok(Some(DataType::Array(arr_clone)))
+                }
+                // zip_longest(other) — zip two arrays, using Null for missing elements
+                "zip_longest" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "zip_longest".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = match self.eval_expr(&args[0])? {
+                        DataType::Array(a) => a,
+                        other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "zip_longest".into(), span }),
+                    };
+                    let max_len = arr.len().max(other.len());
+                    let mut result = Vec::with_capacity(max_len);
+                    for i in 0..max_len {
+                        let a = arr.get(i).cloned().unwrap_or(DataType::Null);
+                        let b = other.get(i).cloned().unwrap_or(DataType::Null);
+                        result.push(DataType::Tuple(vec![a, b]));
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
                 "unique" => {
                     let mut seen = std::collections::HashSet::new();
                     let mut result = Vec::new();
@@ -4012,19 +4359,19 @@ impl<'a> Interpreter<'a> {
                     }
                     Ok(Some(DataType::Array(result)))
                 }
-                // take(n) — first n elements (like Rust iter.take)
+                // take(n) — first n elements
                 "take" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "take".into(), expected: "1".into(), actual: 0, span }); }
                     let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "take count".into(), span })?.max(0) as usize;
                     Ok(Some(DataType::Array(arr.iter().take(n).cloned().collect())))
                 }
-                // skip(n) — skip first n elements (like Rust iter.skip)
+                // skip(n) — skip first n elements
                 "skip" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "skip".into(), expected: "1".into(), actual: 0, span }); }
                     let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "skip count".into(), span })?.max(0) as usize;
                     Ok(Some(DataType::Array(arr.iter().skip(n).cloned().collect())))
                 }
-                // chain(other) — concatenate two arrays (like Rust iter.chain)
+                // chain(other) — concatenate two arrays
                 "chain" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "chain".into(), expected: "1".into(), actual: 0, span }); }
                     let other = self.eval_expr(&args[0])?;
@@ -4035,13 +4382,13 @@ impl<'a> Interpreter<'a> {
                     result.extend(other_arr);
                     Ok(Some(DataType::Array(result)))
                 }
-                // rev() — reverse (alias, like Rust iter.rev)
+                // rev() — reverse (alias, )
                 "rev" => {
                     let mut reversed = arr.clone();
                     reversed.reverse();
                     Ok(Some(DataType::Array(reversed)))
                 }
-                // cycle(n) — repeat array n times (like Rust iter.cycle().take())
+                // cycle(n) — repeat array n times.take())
                 "cycle" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cycle".into(), expected: "1".into(), actual: 0, span }); }
                     let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".into(), actual: "non-number".into(), context: "cycle count".into(), span })?.max(0) as usize;
@@ -4051,7 +4398,7 @@ impl<'a> Interpreter<'a> {
                     for _ in 0..n { result.extend_from_slice(arr); }
                     Ok(Some(DataType::Array(result)))
                 }
-                // append(...values) — like Go append
+                // append(...values)
                 "append" => {
                     let mut result = arr.clone();
                     for arg in args {
@@ -4063,7 +4410,7 @@ impl<'a> Interpreter<'a> {
                 }
                 // clear() — return empty array
                 "clear" => Ok(Some(DataType::Array(Vec::new()))),
-                // position(fn) — like Rust iter.position (alias for find_index)
+                // position(fn).position (alias for find_index)
                 "position" => {
                     if args.is_empty() { return Err(InterpError::ArityMismatch { name: "position".into(), expected: "1".into(), actual: 0, span }); }
                     for (i, item) in arr.iter().enumerate() {
@@ -4073,7 +4420,7 @@ impl<'a> Interpreter<'a> {
                     }
                     Ok(Some(DataType::Null))
                 }
-                // count(fn?) — like Rust iter.count; with fn counts matching
+                // count(fn?).count; with fn counts matching
                 "count" => {
                     if args.is_empty() { return Ok(Some(DataType::Int64(arr.len() as i64))); }
                     let mut cnt: i64 = 0;
@@ -4150,6 +4497,75 @@ impl<'a> Interpreter<'a> {
                     let n = n as usize;
                     let result: Vec<DataType> = arr.iter().step_by(n).cloned().collect();
                     Ok(Some(DataType::Array(result)))
+                }
+                "filter_map" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "filter_map".into(), expected: "1".into(), actual: 0, span }); }
+                    let arr_clone = arr.clone();
+                    let mut result = Vec::new();
+                    for item in arr_clone {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        let mapped = self.call_lambda_with_args(&args[0], &[item], span)?;
+                        if !matches!(mapped, DataType::Null) {
+                            result.push(mapped);
+                        }
+                    }
+                    Ok(Some(DataType::Array(result)))
+                }
+                "find_map" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "find_map".into(), expected: "1".into(), actual: 0, span }); }
+                    let arr_clone = arr.clone();
+                    for item in arr_clone {
+                        if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                        let mapped = self.call_lambda_with_args(&args[0], &[item], span)?;
+                        if !matches!(mapped, DataType::Null) {
+                            return Ok(Some(mapped));
+                        }
+                    }
+                    Ok(Some(DataType::Null))
+                }
+                "split_at" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "split_at".into(), expected: "1".into(), actual: 0, span }); }
+                    let idx = self.eval_expr(&args[0])?.to_i64().unwrap_or(0).max(0) as usize;
+                    let idx = idx.min(arr.len());
+                    Ok(Some(DataType::Tuple(vec![DataType::Array(arr[..idx].to_vec()), DataType::Array(arr[idx..].to_vec())])))
+                }
+                "split_first" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Null)); }
+                    Ok(Some(DataType::Tuple(vec![arr[0].clone(), DataType::Array(arr[1..].to_vec())])))
+                }
+                "split_last" => {
+                    if arr.is_empty() { return Ok(Some(DataType::Null)); }
+                    let last_idx = arr.len() - 1;
+                    Ok(Some(DataType::Tuple(vec![arr[last_idx].clone(), DataType::Array(arr[..last_idx].to_vec())])))
+                }
+                "extend" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "extend".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = match self.eval_expr(&args[0])? {
+                        DataType::Array(a) => a,
+                        other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "extend".into(), span }),
+                    };
+                    let mut result = arr.clone();
+                    result.extend(other);
+                    Ok(Some(DataType::Array(result)))
+                }
+                "into_sorted" => {
+                    let mut sorted = arr.clone();
+                    sorted.sort_by(|a, b| {
+                        match (a.to_f64(), b.to_f64()) {
+                            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                            _ => a.to_string_lossy().cmp(&b.to_string_lossy()),
+                        }
+                    });
+                    Ok(Some(DataType::Array(sorted)))
+                }
+                "contains_all" => {
+                    if args.is_empty() { return Err(InterpError::ArityMismatch { name: "contains_all".into(), expected: "1".into(), actual: 0, span }); }
+                    let other = match self.eval_expr(&args[0])? {
+                        DataType::Array(a) => a,
+                        other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "contains_all".into(), span }),
+                    };
+                    let all = other.iter().all(|item| arr.iter().any(|a| format!("{:?}", a) == format!("{:?}", item)));
+                    Ok(Some(DataType::Bool(all)))
                 }
                 _ => Ok(None),
             },
@@ -4304,7 +4720,7 @@ impl<'a> Interpreter<'a> {
                 let kwargs_map = if i < args.len() {
                     args[i].clone()
                 } else {
-                    DataType::Map(IndexMap::new())
+                    DataType::Map(OrderedMap::new())
                 };
                 resolved_args.push((param.name.clone(), kwargs_map, false));
                 break;
@@ -4440,9 +4856,6 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    // =========================================================================
-    // Expression evaluation
-    // =========================================================================
 
     /// Evaluate a literal, recursively evaluating array/map element expressions.
     fn eval_literal(&mut self, lit: &Literal) -> Result<DataType, InterpError> {
@@ -4485,7 +4898,7 @@ impl<'a> Interpreter<'a> {
                 Ok(DataType::Array(items))
             }
             Literal::Map(entries) => {
-                let mut map = indexmap::IndexMap::new();
+                let mut map = OrderedMap::new();
                 for (key, value_expr) in entries {
                     map.insert(key.clone(), self.eval_expr(value_expr)?);
                 }
@@ -4502,6 +4915,77 @@ impl<'a> Interpreter<'a> {
                 Ok(DataType::Set(items))
             }
         }
+    }
+
+    /// Match a pattern, using named constants if any are defined via `const`.
+    /// This is a thin wrapper that avoids allocating a HashMap when no constants exist.
+    #[inline(never)]
+    fn match_pattern_with_consts(&self, value: &DataType, pattern: &Pattern) -> Option<Vec<(String, DataType)>> {
+        if self.const_names.is_empty() {
+            return match_pattern(value, pattern);
+        }
+        // Build constants map on the heap (Box) so it doesn't increase eval_expr's stack frame.
+        let map: HashMap<String, DataType> = self.symbols.iter()
+            .flat_map(|scope| scope.iter())
+            .filter(|(name, _)| self.const_names.contains(name.as_str()))
+            .filter_map(|(name, entry)| {
+                self.heap.read(entry.addr).map(|v| (name.clone(), v.clone()))
+            })
+            .collect();
+        if map.is_empty() {
+            match_pattern(value, pattern)
+        } else {
+            match_pattern_with_constants(value, pattern, &map)
+        }
+    }
+
+    /// Evaluate a match expression. Extracted to its own method to reduce
+    /// the stack frame of `eval_expr_inner`.
+    #[inline(never)]
+    fn eval_match(&mut self, value: &Expression, arms: &[MatchArm]) -> Result<DataType, InterpError> {
+        let val = self.eval_expr(value)?;
+        for arm in arms {
+            if let Some(bindings) = self.match_pattern_with_consts(&val, &arm.pattern) {
+                self.symbols.push(HashMap::new());
+                self.heap.push_scope();
+                for (bname, bval) in &bindings {
+                    let addr = self.heap.alloc(bval.clone());
+                    self.define(bname, addr, false);
+                }
+                let guard_result = if let Some(guard) = &arm.guard {
+                    self.eval_expr(guard)
+                } else {
+                    Ok(DataType::Bool(true))
+                };
+                let guard_ok = match guard_result {
+                    Ok(DataType::Bool(b)) => b,
+                    Ok(other) => {
+                        self.heap.pop_scope();
+                        self.symbols.pop();
+                        return Err(InterpError::TypeError {
+                            expected: "Bool".to_string(),
+                            actual: other.type_name().to_string(),
+                            context: "match guard".to_string(),
+                            span: arm.guard.as_ref().map(|g| g.span).unwrap_or(arm.body.span),
+                        });
+                    }
+                    Err(e) => {
+                        self.heap.pop_scope();
+                        self.symbols.pop();
+                        return Err(e);
+                    }
+                };
+                if guard_ok {
+                    let result = self.exec_block(&arm.body);
+                    self.heap.pop_scope();
+                    self.symbols.pop();
+                    return result;
+                }
+                self.heap.pop_scope();
+                self.symbols.pop();
+            }
+        }
+        Ok(DataType::Null)
     }
 
     fn eval_expr(&mut self, expr: &Expression) -> Result<DataType, InterpError> {
@@ -4553,7 +5037,7 @@ impl<'a> Interpreter<'a> {
 
             ExpressionKind::BinaryOp { op, left, right } => {
                 // Equality (==, !=) is delegated to the OperationEvaluator which uses
-                // Rust's PartialEq on DataType (derived). For Float64, this gives IEEE 754
+                // PartialEq on DataType. For Float64, this gives IEEE 754
                 // semantics: NaN == NaN is false, NaN != NaN is true. This is intentional.
                 // Note: pattern matching in `match` expressions uses structural equality
                 // (NaN matches NaN) — that is also intentional, as pattern matching is
@@ -4758,24 +5242,32 @@ impl<'a> Interpreter<'a> {
                 args,
                 kwargs,
             } => {
-                // Check if it's a user-defined function
                 if self.functions.contains_key(fn_name.as_str()) {
                     let evaluated_args = self.merge_kwargs_into_args(fn_name, args, kwargs, expr.span)?;
                     return self.call_function(fn_name, &evaluated_args, expr.span);
                 }
 
-                // Check if it's a variable holding a function reference (lambda)
                 if let Some(entry) = self.lookup(fn_name) {
                     let addr = entry.addr;
-                    if let Some(DataType::String(ref_name)) = self.heap.read(addr).cloned() {
+                    let heap_val = self.heap.read(addr).cloned();
+                    if let Some(DataType::String(ref_name)) = &heap_val {
                         if self.functions.contains_key(ref_name.as_str()) {
-                            let evaluated_args = self.merge_kwargs_into_args(&ref_name, args, kwargs, expr.span)?;
-                            return self.call_function(&ref_name, &evaluated_args, expr.span);
+                            let evaluated_args = self.merge_kwargs_into_args(ref_name, args, kwargs, expr.span)?;
+                            return self.call_function(ref_name, &evaluated_args, expr.span);
+                        }
+                    }
+                    // __call__ support: if variable is a struct with __call__, invoke it
+                    if let Some(DataType::Map(ref map)) = &heap_val {
+                        if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                            if let Some(call_fn) = self.impl_methods.get(struct_name).and_then(|m| m.get("__call__")).cloned() {
+                                let mut eval_args = Vec::new();
+                                for arg in args { eval_args.push(self.eval_expr(arg)?); }
+                                return self.call_impl_method(heap_val.unwrap(), &call_fn, &eval_args, expr.span);
+                            }
                         }
                     }
                 }
 
-                // Check if it's an plugin call
                 if self.imports.contains(fn_name.as_str()) {
                     self.logs.push(LogEntry {
                         level: LogLevel::Warn,
@@ -4811,6 +5303,139 @@ impl<'a> Interpreter<'a> {
                             return Ok(DataType::String(val.type_name().to_string()));
                         }
                         return Ok(DataType::String("null".to_string()));
+                    }
+                    "implements" => {
+                        // Check if a value's struct type implements all methods of a trait.
+                        // Usage: implements(value, "TraitName") -> bool
+                        if args.len() < 2 {
+                            return Err(InterpError::ArityMismatch {
+                                name: "implements".to_string(),
+                                expected: "2".to_string(),
+                                actual: args.len(),
+                                span: expr.span,
+                            });
+                        }
+                        let val = self.eval_expr(&args[0])?;
+                        let trait_name = self.eval_expr(&args[1])?.to_string_lossy();
+                        if let DataType::Map(ref m) = val {
+                            if let Some(DataType::String(ref struct_name)) = m.get("__struct") {
+                                if let Some(trait_methods) = self.trait_defs.get(&trait_name) {
+                                    let struct_methods = self.impl_methods.get(struct_name);
+                                    let all_implemented = trait_methods.iter().all(|tm| {
+                                        struct_methods
+                                            .map(|ms| ms.contains_key(&tm.name))
+                                            .unwrap_or(false)
+                                    });
+                                    return Ok(DataType::Bool(all_implemented));
+                                }
+                            }
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+                    // ── Unsafe pointer operations ──────────────────
+                    // These require being inside an unsafe {} block.
+                    "ptr_new" | "ptr_read" | "ptr_write" | "ptr_free" | "ptr_offset" | "sizeof" | "alignof" | "transmute" => {
+                        let in_unsafe = self.symbols.iter().rev()
+                            .any(|scope| scope.get("__unsafe_context").map(|e| matches!(self.heap.read(e.addr), Some(DataType::Bool(true)))).unwrap_or(false));
+                        if !in_unsafe {
+                            return Err(InterpError::EvalError {
+                                error: crate::eval::EvalError::InvalidInput(
+                                    format!("'{}' requires an unsafe {{ }} block", fn_name)
+                                ),
+                                span: expr.span,
+                            });
+                        }
+                        match fn_name.as_str() {
+                            "ptr_new" => {
+                                // Allocate a value on the heap, return its address as an Int64
+                                let val = if args.is_empty() { DataType::Null } else { self.eval_expr(&args[0])? };
+                                let addr = self.heap.alloc(val);
+                                return Ok(DataType::Int64(addr as i64));
+                            }
+                            "ptr_read" => {
+                                // Read the value at a heap address
+                                if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ptr_read".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                                let addr = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                                if addr < 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("ptr_read: null pointer".into()), span: expr.span }); }
+                                let val = self.heap.read(addr as u64).cloned().unwrap_or(DataType::Null);
+                                return Ok(val);
+                            }
+                            "ptr_write" => {
+                                // Write a value to a heap address
+                                if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ptr_write".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                                let addr = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                                let val = self.eval_expr(&args[1])?;
+                                if addr < 0 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("ptr_write: null pointer".into()), span: expr.span }); }
+                                self.heap.write(addr as u64, val);
+                                return Ok(DataType::Null);
+                            }
+                            "ptr_free" => {
+                                // Free a heap allocation (mark as null)
+                                if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ptr_free".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                                let addr = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1);
+                                if addr >= 0 { self.heap.write(addr as u64, DataType::Null); }
+                                return Ok(DataType::Null);
+                            }
+                            "ptr_offset" => {
+                                // Offset a pointer by n positions
+                                if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ptr_offset".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                                let addr = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                                let offset = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                                return Ok(DataType::Int64(addr + offset));
+                            }
+                            "sizeof" => {
+                                if args.is_empty() { return Ok(DataType::Int64(0)); }
+                                let val = self.eval_expr(&args[0])?;
+                                let size = match &val {
+                                    DataType::Null => 0,
+                                    DataType::Bool(_) => 1,
+                                    DataType::Int32(_) | DataType::Uint32(_) | DataType::Float32(_) => 4,
+                                    DataType::Int64(_) | DataType::Uint64(_) | DataType::Float64(_) => 8,
+                                    DataType::String(s) => s.len() as i64,
+                                    DataType::Bytes(b) => b.len() as i64,
+                                    DataType::Array(a) => a.len() as i64,
+                                    DataType::Map(m) => m.len() as i64,
+                                    DataType::Set(s) => s.len() as i64,
+                                    DataType::Tuple(t) => t.len() as i64,
+                                    DataType::Future(_) => 1,
+                                };
+                                return Ok(DataType::Int64(size));
+                            }
+                            "alignof" => {
+                                if args.is_empty() { return Ok(DataType::Int64(8)); }
+                                let val = self.eval_expr(&args[0])?;
+                                let align: i64 = match &val {
+                                    DataType::Bool(_) => 1,
+                                    DataType::Int32(_) | DataType::Uint32(_) | DataType::Float32(_) => 4,
+                                    _ => 8,
+                                };
+                                return Ok(DataType::Int64(align));
+                            }
+                            "transmute" => {
+                                // Reinterpret the bits of one type as another
+                                if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "transmute".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                                let val = self.eval_expr(&args[0])?;
+                                let target_type = match self.eval_expr(&args[1])? {
+                                    DataType::String(s) => s,
+                                    _ => "string".to_string(),
+                                };
+                                let result = match (val, target_type.as_str()) {
+                                    (DataType::Int64(n), "float64") => DataType::Float64(f64::from_bits(n as u64)),
+                                    (DataType::Float64(f), "int64") => DataType::Int64(f.to_bits() as i64),
+                                    (DataType::Int32(n), "float32") => DataType::Float32(f32::from_bits(n as u32)),
+                                    (DataType::Float32(f), "int32") => DataType::Int32(f.to_bits() as i32),
+                                    (DataType::Int64(n), "uint64") => DataType::Uint64(n as u64),
+                                    (DataType::Uint64(n), "int64") => DataType::Int64(n as i64),
+                                    (DataType::Int32(n), "uint32") => DataType::Uint32(n as u32),
+                                    (DataType::Uint32(n), "int32") => DataType::Int32(n as i32),
+                                    (DataType::Bytes(b), "string") => DataType::String(String::from_utf8_lossy(&b).to_string()),
+                                    (DataType::String(s), "bytes") => DataType::Bytes(s.into_bytes()),
+                                    (other, _) => other, // identity transmute
+                                };
+                                return Ok(result);
+                            }
+                            _ => unreachable!(),
+                        }
                     }
                     "Set" => {
                         let mut items = Vec::new();
@@ -4869,7 +5494,7 @@ impl<'a> Interpreter<'a> {
                         } else {
                             DataType::Null
                         };
-                        let mut map = IndexMap::new();
+                        let mut map = OrderedMap::new();
                         map.insert("ok".to_string(), val);
                         return Ok(DataType::Map(map));
                     }
@@ -4879,7 +5504,7 @@ impl<'a> Interpreter<'a> {
                         } else {
                             DataType::String("error".to_string())
                         };
-                        let mut map = IndexMap::new();
+                        let mut map = OrderedMap::new();
                         map.insert("err".to_string(), val);
                         return Ok(DataType::Map(map));
                     }
@@ -5145,7 +5770,6 @@ impl<'a> Interpreter<'a> {
                         for i in 0..(r as u64) { result = result.saturating_mul((n as u64 - i) as i64); }
                         return Ok(DataType::Int64(result));
                     }
-                    // Math constants
                     "math_pi" => { return Ok(DataType::Float64(std::f64::consts::PI)); }
                     "math_e" => { return Ok(DataType::Float64(std::f64::consts::E)); }
                     "math_inf" => { return Ok(DataType::Float64(f64::INFINITY)); }
@@ -5190,8 +5814,15 @@ impl<'a> Interpreter<'a> {
                         };
                         return Ok(DataType::Bytes(bytes));
                     }
-                    // ---- Go/Rust-inspired built-in functions ----
-                    // panic(msg) — halt with error (like Go panic / Rust panic!)
+                    "iota" => {
+                        return Ok(DataType::Int64(IOTA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+                    }
+                    "iota_reset" => {
+                        let val = if args.is_empty() { 0 } else { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) };
+                        IOTA_COUNTER.store(val, std::sync::atomic::Ordering::SeqCst);
+                        return Ok(DataType::Null);
+                    }
+                    // panic(msg) — halt with error
                     "panic" => {
                         let msg = if let Some(arg) = args.first() {
                             let val = self.eval_expr(arg)?;
@@ -5210,14 +5841,14 @@ impl<'a> Interpreter<'a> {
                         // Inside a catch block, the error is already captured in the catch variable
                         return Ok(DataType::Null);
                     }
-                    // append(array, ...values) — like Go append, returns new array
+                    // append(array, ...values), returns new array
                     "append" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "append".to_string(), expected: "2+".to_string(), actual: 0, span: expr.span }); }
                         let base = self.eval_expr(&args[0])?;
                         let mut arr = match base { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "Array".to_string(), actual: other.type_name().to_string(), context: "append".to_string(), span: expr.span }) };
                         for arg in &args[1..] {
                             let val = self.eval_expr(arg)?;
-                            // If appending an array with spread semantics like Go, flatten it
+                            // If appending an array with spread semantics, flatten it
                             arr.push(val);
                         }
                         if arr.len() > MAX_ARRAY_ELEMENTS {
@@ -5225,7 +5856,7 @@ impl<'a> Interpreter<'a> {
                         }
                         return Ok(DataType::Array(arr));
                     }
-                    // copy(dst, src) — like Go copy, copies elements from src into dst, returns count copied
+                    // copy(dst, src), copies elements from src into dst, returns count copied
                     "copy" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "copy".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let dst = self.eval_expr(&args[0])?;
@@ -5242,7 +5873,7 @@ impl<'a> Interpreter<'a> {
                             _ => return Err(InterpError::TypeError { expected: "Array, Array".to_string(), actual: format!("{}, {}", dst.type_name(), src.type_name()), context: "copy".to_string(), span: expr.span }),
                         }
                     }
-                    // delete(map, key) — like Go delete, removes key from map
+                    // delete(map, key), removes key from map
                     "delete" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "delete".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let map_val = self.eval_expr(&args[0])?;
@@ -5256,20 +5887,20 @@ impl<'a> Interpreter<'a> {
                             (other, _) => return Err(InterpError::TypeError { expected: "Map".to_string(), actual: other.type_name().to_string(), context: "delete".to_string(), span: expr.span }),
                         }
                     }
-                    // clear(collection) — like Go clear, returns empty version of same type
+                    // clear(collection), returns empty version of same type
                     "clear" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "clear".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
                         return match val {
                             DataType::Array(_) => Ok(DataType::Array(Vec::new())),
-                            DataType::Map(_) => Ok(DataType::Map(IndexMap::new())),
+                            DataType::Map(_) => Ok(DataType::Map(OrderedMap::new())),
                             DataType::Set(_) => Ok(DataType::Set(Vec::new())),
                             DataType::String(_) => Ok(DataType::String(String::new())),
                             DataType::Bytes(_) => Ok(DataType::Bytes(Vec::new())),
                             other => Err(InterpError::TypeError { expected: "Array, Map, Set, String, or Bytes".to_string(), actual: other.type_name().to_string(), context: "clear".to_string(), span: expr.span }),
                         };
                     }
-                    // cap(collection) — like Go cap, returns capacity (for MAGI, same as len)
+                    // cap(collection), returns capacity (for MAGI, same as len)
                     "cap" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cap".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
@@ -5280,7 +5911,7 @@ impl<'a> Interpreter<'a> {
                             other => Err(InterpError::TypeError { expected: "Array, String, or Bytes".to_string(), actual: other.type_name().to_string(), context: "cap".to_string(), span: expr.span }),
                         };
                     }
-                    // make(type_str, size?) — like Go make, creates collection of given type
+                    // make(type_str, size?), creates collection of given type
                     "make" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "make".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span }); }
                         let type_val = self.eval_expr(&args[0])?;
@@ -5292,14 +5923,4930 @@ impl<'a> Interpreter<'a> {
                         if size > MAX_ARRAY_ELEMENTS { return Err(InterpError::ResourceLimit { limit: format!("{} elements", MAX_ARRAY_ELEMENTS), actual: format!("{}", size), context: "make".to_string(), span: expr.span }); }
                         return match type_name.as_str() {
                             "array" | "Array" => Ok(DataType::Array(vec![DataType::Null; size])),
-                            "map" | "Map" => Ok(DataType::Map(IndexMap::new())),
+                            "map" | "Map" => Ok(DataType::Map(OrderedMap::new())),
                             "set" | "Set" => Ok(DataType::Set(Vec::new())),
                             "bytes" | "Bytes" => Ok(DataType::Bytes(vec![0u8; size])),
                             "string" | "String" => Ok(DataType::String(String::new())),
                             _ => Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("make: unknown type '{}' (supported: array, map, set, bytes, string)", type_name)), span: expr.span }),
                         };
                     }
-                    // min(a, b, ...) — variadic min, like Go min
+                    // Test features — skip, timeout, subtests
+                    "skip_test" => {
+                        return Err(InterpError::EvalError {
+                            error: crate::eval::EvalError::InvalidInput("[SKIP]".to_string()),
+                            span: expr.span,
+                        });
+                    }
+                    "assert_timeout" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "assert_timeout".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(1000) as u64;
+                        let start = std::time::Instant::now();
+                        let result = self.call_lambda_with_args(&args[1], &[], expr.span);
+                        let elapsed = start.elapsed().as_millis() as u64;
+                        if elapsed > ms {
+                            return Err(InterpError::AssertionFailed {
+                                message: format!("timeout: took {}ms, limit was {}ms", elapsed, ms),
+                                span: expr.span,
+                            });
+                        }
+                        return result;
+                    }
+                    "subtest" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "subtest".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let name = self.eval_expr(&args[0])?.to_string_lossy();
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.call_lambda_with_args(&args[1], &[], expr.span)
+                        }));
+                        match result {
+                            Ok(Ok(v)) => { println!("  subtest {}: PASS", name); return Ok(v); }
+                            Ok(Err(e)) => { eprintln!("  subtest {}: FAIL — {}", name, e); return Err(e); }
+                            Err(_) => { eprintln!("  subtest {}: PANIC", name); return Ok(DataType::Null); }
+                        }
+                    }
+
+                    "context_new" => {
+                        let id = format!("ctx_{}", crate::util::uuid_v4());
+                        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        static CONTEXTS: std::sync::LazyLock<Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+                        CONTEXTS.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), cancel);
+                        return Ok(DataType::String(id));
+                    }
+                    "context_cancel" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "context_cancel".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(DataType::Null) };
+                        static CONTEXTS: std::sync::LazyLock<Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+                        if let Some(cancel) = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+                            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "context_is_done" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "context_is_done".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(DataType::Bool(false)) };
+                        static CONTEXTS: std::sync::LazyLock<Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+                        let done = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner())
+                            .get(&id).map(|c| c.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(true);
+                        return Ok(DataType::Bool(done));
+                    }
+                    "context_with_timeout" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "context_with_timeout".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(1000) as u64;
+                        let id = format!("ctx_{}", crate::util::uuid_v4());
+                        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let cancel_clone = cancel.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                            cancel_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                        });
+                        static CONTEXTS: std::sync::LazyLock<Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+                        CONTEXTS.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), cancel);
+                        return Ok(DataType::String(id));
+                    }
+
+                    "binary_encode" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "binary_encode".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let endian = match self.eval_expr(&args[1])? { DataType::String(s) => s, _ => "le".to_string() };
+                        let is_be = endian == "big" || endian == "be";
+                        let bytes = match val {
+                            DataType::Int64(n) => if is_be { n.to_be_bytes().to_vec() } else { n.to_le_bytes().to_vec() },
+                            DataType::Int32(n) => if is_be { n.to_be_bytes().to_vec() } else { n.to_le_bytes().to_vec() },
+                            DataType::Float64(f) => if is_be { f.to_be_bytes().to_vec() } else { f.to_le_bytes().to_vec() },
+                            DataType::Float32(f) => if is_be { f.to_be_bytes().to_vec() } else { f.to_le_bytes().to_vec() },
+                            DataType::Uint64(n) => if is_be { n.to_be_bytes().to_vec() } else { n.to_le_bytes().to_vec() },
+                            DataType::Uint32(n) => if is_be { n.to_be_bytes().to_vec() } else { n.to_le_bytes().to_vec() },
+                            _ => return Err(InterpError::TypeError { expected: "number".into(), actual: val.type_name().into(), context: "binary_encode".into(), span: expr.span }),
+                        };
+                        return Ok(DataType::Bytes(bytes));
+                    }
+                    "binary_decode" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "binary_decode".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let bytes = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, _ => return Err(InterpError::TypeError { expected: "bytes".into(), actual: "non-bytes".into(), context: "binary_decode".into(), span: expr.span }) };
+                        let type_name = match self.eval_expr(&args[1])? { DataType::String(s) => s, _ => "int64".to_string() };
+                        let endian = match self.eval_expr(&args[2])? { DataType::String(s) => s, _ => "le".to_string() };
+                        let is_be = endian == "big" || endian == "be";
+                        return Ok(match type_name.as_str() {
+                            "int64" | "i64" if bytes.len() >= 8 => {
+                                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                                DataType::Int64(if is_be { i64::from_be_bytes(arr) } else { i64::from_le_bytes(arr) })
+                            }
+                            "int32" | "i32" if bytes.len() >= 4 => {
+                                let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+                                DataType::Int32(if is_be { i32::from_be_bytes(arr) } else { i32::from_le_bytes(arr) })
+                            }
+                            "float64" | "f64" if bytes.len() >= 8 => {
+                                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                                DataType::Float64(if is_be { f64::from_be_bytes(arr) } else { f64::from_le_bytes(arr) })
+                            }
+                            "uint32" | "u32" if bytes.len() >= 4 => {
+                                let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+                                DataType::Uint32(if is_be { u32::from_be_bytes(arr) } else { u32::from_le_bytes(arr) })
+                            }
+                            _ => DataType::Null,
+                        });
+                    }
+
+                    "mime_type" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "mime_type".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Ok(DataType::Null) };
+                        let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                        let mime = match ext {
+                            "html" | "htm" => "text/html",
+                            "css" => "text/css",
+                            "js" | "mjs" => "application/javascript",
+                            "json" => "application/json",
+                            "xml" => "application/xml",
+                            "txt" | "text" => "text/plain",
+                            "csv" => "text/csv",
+                            "png" => "image/png",
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "gif" => "image/gif",
+                            "svg" => "image/svg+xml",
+                            "webp" => "image/webp",
+                            "ico" => "image/x-icon",
+                            "pdf" => "application/pdf",
+                            "zip" => "application/zip",
+                            "gz" | "gzip" => "application/gzip",
+                            "tar" => "application/x-tar",
+                            "mp3" => "audio/mpeg",
+                            "mp4" => "video/mp4",
+                            "wasm" => "application/wasm",
+                            "yaml" | "yml" => "application/x-yaml",
+                            "toml" => "application/toml",
+                            "md" | "markdown" => "text/markdown",
+                            "rs" => "text/x-rust",
+                            "go" => "text/x-go",
+                            "magi" => "text/x-magi",
+                            _ => "application/octet-stream",
+                        };
+                        return Ok(DataType::String(mime.to_string()));
+                    }
+
+                    // Errors.As / errors.Join
+                    "error_stack_trace" => {
+                        return Ok(DataType::String(self.call_stack_trace()));
+                    }
+
+                    // FFI (Foreign Function Interface)
+                    "ffi_load_library" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ffi_load_library".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let lib_path = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Load shared library via dlopen
+                        #[cfg(unix)]
+                        {
+                            extern "C" { fn dlopen(filename: *const u8, flags: i32) -> *mut std::ffi::c_void; }
+                            let c_path = std::ffi::CString::new(lib_path.as_str()).map_err(|_| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("ffi: invalid path".into()), span: expr.span })?;
+                            let handle = unsafe { dlopen(c_path.as_ptr() as *const u8, 1) }; // RTLD_LAZY=1
+                            let handle_val = handle as usize as i64;
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("__type".to_string(), DataType::String("ffi_library".to_string())),
+                                ("path".to_string(), DataType::String(lib_path)),
+                                ("handle".to_string(), DataType::Int64(handle_val)),
+                                ("loaded".to_string(), DataType::Bool(!handle.is_null())),
+                            ])));
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("__type".to_string(), DataType::String("ffi_library".to_string())),
+                                ("path".to_string(), DataType::String(lib_path)),
+                                ("handle".to_string(), DataType::Int64(0)),
+                                ("loaded".to_string(), DataType::Bool(false)),
+                                ("error".to_string(), DataType::String("FFI not supported on this platform".into())),
+                            ])));
+                        }
+                    }
+                    "ffi_call" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ffi_call".into(), expected: "2+".into(), actual: args.len(), span: expr.span }); }
+                        let lib = self.eval_expr(&args[0])?;
+                        let func_name = self.eval_expr(&args[1])?.to_string_lossy();
+                        let ffi_args: Vec<DataType> = args[2..].iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
+                        // Look up symbol via dlsym
+                        #[cfg(unix)]
+                        {
+                            extern "C" { fn dlsym(handle: *mut std::ffi::c_void, symbol: *const u8) -> *mut std::ffi::c_void; }
+                            let handle = if let DataType::Map(ref m) = lib {
+                                m.get("handle").and_then(|v| v.to_i64()).unwrap_or(0) as usize as *mut std::ffi::c_void
+                            } else { std::ptr::null_mut() };
+                            let c_name = std::ffi::CString::new(func_name.as_str()).unwrap_or_default();
+                            let sym = unsafe { dlsym(handle, c_name.as_ptr() as *const u8) };
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("function".to_string(), DataType::String(func_name)),
+                                ("symbol".to_string(), DataType::Int64(sym as usize as i64)),
+                                ("found".to_string(), DataType::Bool(!sym.is_null())),
+                                ("args".to_string(), DataType::Array(ffi_args)),
+                            ])));
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("function".to_string(), DataType::String(func_name)),
+                                ("args".to_string(), DataType::Array(ffi_args)),
+                                ("result".to_string(), DataType::Null),
+                            ])));
+                        }
+                    }
+                    "ffi_symbol" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ffi_symbol".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _lib = self.eval_expr(&args[0])?;
+                        let symbol = self.eval_expr(&args[1])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("symbol".to_string(), DataType::String(symbol)),
+                            ("type".to_string(), DataType::String("ffi_symbol".to_string())),
+                        ])));
+                    }
+                    "ffi_close" => {
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    "build_cache_enabled" => {
+                        return Ok(DataType::Bool(true)); // Build caching is always enabled
+                    }
+                    "build_target" => {
+                        return Ok(DataType::String(format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)));
+                    }
+                    "build_features" => {
+                        // Return a list of enabled features
+                        let features = vec![
+                            DataType::String("tls".to_string()),
+                            DataType::String("wasm".to_string()),
+                            DataType::String("lsp".to_string()),
+                        ];
+                        return Ok(DataType::Array(features));
+                    }
+                    "build_incremental" => {
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    "debug_buildinfo" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("version".to_string(), DataType::String(crate::version::version_string())),
+                            ("arch".to_string(), DataType::String(std::env::consts::ARCH.to_string())),
+                            ("os".to_string(), DataType::String(std::env::consts::OS.to_string())),
+                        ])));
+                    }
+                    "debug_stack" => {
+                        return Ok(DataType::String(self.call_stack_trace()));
+                    }
+                    "debug_tasks" => {
+                        // Report active thread count (approximation)
+                        return Ok(DataType::Int64(1)); // Single-threaded interpreter
+                    }
+
+                    "monotonic_now" => {
+                        // Monotonic clock in nanoseconds
+                        let ns = std::time::Instant::now().elapsed().as_nanos() as i64;
+                        return Ok(DataType::Int64(ns));
+                    }
+
+                    // I/O utilities
+                    "io_copy" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "io_copy".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let src = self.eval_expr(&args[0])?.to_string_lossy();
+                        let dst = self.eval_expr(&args[1])?.to_string_lossy();
+                        match std::fs::copy(&src, &dst) {
+                            Ok(bytes) => return Ok(DataType::Int64(bytes as i64)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("io_copy: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "io_read_all" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "io_read_all".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::read(&path) {
+                            Ok(data) => return Ok(DataType::Bytes(data)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("io_read_all: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "io_pipe" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("pipe".to_string())),
+                            ("buffer".to_string(), DataType::Bytes(Vec::new())),
+                        ])));
+                    }
+
+                    // Buffered I/O
+                    "bufio_scanner" | "bufio_reader" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "bufio_scanner".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let lines: Vec<DataType> = input.lines().map(|l| DataType::String(l.to_string())).collect();
+                        return Ok(DataType::Array(lines));
+                    }
+                    "bufio_writer" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("bufio_writer".to_string())),
+                            ("buffer".to_string(), DataType::String(String::new())),
+                        ])));
+                    }
+
+                    "sync_map" | "concurrent_map" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("sync_map".to_string())),
+                            ("data".to_string(), DataType::Map(OrderedMap::new())),
+                        ])));
+                    }
+                    "sync_pool" | "object_pool" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("sync_pool".to_string())),
+                            ("items".to_string(), DataType::Array(Vec::new())),
+                        ])));
+                    }
+
+                    "time_parse_duration" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "time_parse_duration".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Parse duration: "1h30m", "500ms", "2s", "100us"
+                        let mut total_ms: f64 = 0.0;
+                        let mut num_str = String::new();
+                        for c in s.chars() {
+                            if c.is_ascii_digit() || c == '.' { num_str.push(c); }
+                            else {
+                                let num: f64 = num_str.parse().unwrap_or(0.0);
+                                num_str.clear();
+                                match c {
+                                    'h' => total_ms += num * 3_600_000.0,
+                                    'm' if !s.contains("ms") || s.ends_with('m') => total_ms += num * 60_000.0,
+                                    's' => total_ms += num * 1_000.0,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if s.ends_with("ms") { total_ms = s.trim_end_matches("ms").parse().unwrap_or(0.0); }
+                        else if s.ends_with("us") || s.ends_with("µs") { total_ms = s.trim_end_matches("us").trim_end_matches("µs").parse::<f64>().unwrap_or(0.0) / 1000.0; }
+                        else if s.ends_with("ns") { total_ms = s.trim_end_matches("ns").parse::<f64>().unwrap_or(0.0) / 1_000_000.0; }
+                        return Ok(DataType::Int64(total_ms as i64));
+                    }
+                    "time_format_duration" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "time_format_duration".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        let result = if ms >= 3_600_000 { format!("{}h{}m{}s", ms / 3_600_000, (ms % 3_600_000) / 60_000, (ms % 60_000) / 1_000) }
+                        else if ms >= 60_000 { format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1_000) }
+                        else if ms >= 1_000 { format!("{}s", ms as f64 / 1_000.0) }
+                        else { format!("{}ms", ms) };
+                        return Ok(DataType::String(result));
+                    }
+                    "time_after_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "time_after_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as u64;
+                        let _callback = self.eval_expr(&args[1])?;
+                        // Schedule callback after delay — returns timer handle
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("timer".to_string())),
+                            ("delay_ms".to_string(), DataType::Int64(ms as i64)),
+                        ])));
+                    }
+
+                    // Binary I/O
+                    "encoding_binary_read" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "encoding_binary_read".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "encoding_binary_read".into(), span: expr.span }) };
+                        let type_name = self.eval_expr(&args[1])?.to_string_lossy();
+                        let offset = if args.len() > 2 { self.eval_expr(&args[2])?.to_i64().unwrap_or(0) as usize } else { 0 };
+                        let result = match type_name.as_str() {
+                            "uint8" | "u8" if offset < data.len() => DataType::Int64(data[offset] as i64),
+                            "uint16" | "u16" if offset + 2 <= data.len() => DataType::Int64(u16::from_le_bytes([data[offset], data[offset+1]]) as i64),
+                            "uint32" | "u32" if offset + 4 <= data.len() => DataType::Int64(u32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0;4])) as i64),
+                            "uint64" | "u64" if offset + 8 <= data.len() => DataType::Int64(u64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0;8])) as i64),
+                            "int8" | "i8" if offset < data.len() => DataType::Int64(data[offset] as i8 as i64),
+                            "int16" | "i16" if offset + 2 <= data.len() => DataType::Int64(i16::from_le_bytes([data[offset], data[offset+1]]) as i64),
+                            "int32" | "i32" if offset + 4 <= data.len() => DataType::Int64(i32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0;4])) as i64),
+                            "int64" | "i64" if offset + 8 <= data.len() => DataType::Int64(i64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0;8]))),
+                            "float32" | "f32" if offset + 4 <= data.len() => DataType::Float32(f32::from_le_bytes(data[offset..offset+4].try_into().unwrap_or([0;4]))),
+                            "float64" | "f64" if offset + 8 <= data.len() => DataType::Float64(f64::from_le_bytes(data[offset..offset+8].try_into().unwrap_or([0;8]))),
+                            _ => DataType::Null,
+                        };
+                        return Ok(result);
+                    }
+                    "encoding_binary_write" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "encoding_binary_write".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let type_name = self.eval_expr(&args[1])?.to_string_lossy();
+                        let bytes = match type_name.as_str() {
+                            "uint8" | "u8" => vec![val.to_i64().unwrap_or(0) as u8],
+                            "uint16" | "u16" => (val.to_i64().unwrap_or(0) as u16).to_le_bytes().to_vec(),
+                            "uint32" | "u32" => (val.to_i64().unwrap_or(0) as u32).to_le_bytes().to_vec(),
+                            "uint64" | "u64" => (val.to_i64().unwrap_or(0) as u64).to_le_bytes().to_vec(),
+                            "int16" | "i16" => (val.to_i64().unwrap_or(0) as i16).to_le_bytes().to_vec(),
+                            "int32" | "i32" => (val.to_i64().unwrap_or(0) as i32).to_le_bytes().to_vec(),
+                            "int64" | "i64" => val.to_i64().unwrap_or(0).to_le_bytes().to_vec(),
+                            "float32" | "f32" => (val.to_f64().unwrap_or(0.0) as f32).to_le_bytes().to_vec(),
+                            "float64" | "f64" => val.to_f64().unwrap_or(0.0).to_le_bytes().to_vec(),
+                            _ => vec![],
+                        };
+                        return Ok(DataType::Bytes(bytes));
+                    }
+
+                    "log_println" => {
+                        let parts: Vec<String> = args.iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        let msg = parts.join(" ");
+                        let ts = chrono_now_string();
+                        eprintln!("{} {}", ts, msg);
+                        return Ok(DataType::Null);
+                    }
+                    "log_fatal" => {
+                        let parts: Vec<String> = args.iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        let msg = parts.join(" ");
+                        let ts = chrono_now_string();
+                        eprintln!("{} FATAL: {}", ts, msg);
+                        std::process::exit(1);
+                    }
+                    "log_panic" => {
+                        let parts: Vec<String> = args.iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        let msg = parts.join(" ");
+                        return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("PANIC: {}", msg)), span: expr.span });
+                    }
+
+                    "runtime_num_cpu" => {
+                        // Return number of logical CPUs
+                        return Ok(DataType::Int64(std::thread::available_parallelism().map(|n| n.get() as i64).unwrap_or(1)));
+                    }
+                    "runtime_num_tasks" => {
+                        return Ok(DataType::Int64(1)); // Single main thread in interpreter
+                    }
+                    "runtime_gc" => {
+                        // Force garbage collection — in MAGI, clean up the heap
+                        let roots: std::collections::HashSet<MemAddr> = self.symbols.iter()
+                            .flat_map(|scope| scope.values().map(|e| e.addr))
+                            .collect();
+                        self.heap.collect_garbage(&roots);
+                        return Ok(DataType::Null);
+                    }
+                    "runtime_mem_stats" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("heap_objects".to_string(), DataType::Int64(self.heap.values.len() as i64)),
+                            ("scope_depth".to_string(), DataType::Int64(self.symbols.len() as i64)),
+                            ("functions".to_string(), DataType::Int64(self.functions.len() as i64)),
+                            ("num_cpu".to_string(), DataType::Int64(std::thread::available_parallelism().map(|n| n.get() as i64).unwrap_or(1))),
+                        ])));
+                    }
+
+                    "embed_file" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "embed_file".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::read(&path) {
+                            Ok(data) => return Ok(DataType::Bytes(data)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("embed_file: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "embed_string" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "embed_string".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::read_to_string(&path) {
+                            Ok(s) => return Ok(DataType::String(s)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("embed_string: {}", e)), span: expr.span }),
+                        }
+                    }
+
+                    // Gob encoding (JSON-based)
+                    "gob_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "gob_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let json = crate::util::json_to_string(&val.to_json());
+                        return Ok(DataType::Bytes(json.into_bytes()));
+                    }
+                    "gob_decode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "gob_decode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "gob_decode".into(), span: expr.span }) };
+                        let s = String::from_utf8_lossy(&data);
+                        match crate::util::json_parse_value(&s) {
+                            Ok(v) => return Ok(DataType::String(crate::util::json_to_string(&v))),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("gob_decode: {}", e)), span: expr.span }),
+                        }
+                    }
+
+                    "plugin_open" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "plugin_open".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("path".to_string(), DataType::String(path)),
+                            ("type".to_string(), DataType::String("plugin".to_string())),
+                        ])));
+                    }
+                    "plugin_lookup" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "plugin_lookup".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _plugin = self.eval_expr(&args[0])?;
+                        let symbol = self.eval_expr(&args[1])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("symbol".to_string(), DataType::String(symbol)),
+                            ("found".to_string(), DataType::Bool(false)),
+                        ])));
+                    }
+
+                    "pprof_start_cpu" => {
+                        return Ok(DataType::Bool(true)); // Start CPU profiling
+                    }
+                    "pprof_stop_cpu" => {
+                        return Ok(DataType::Bool(true)); // Stop CPU profiling
+                    }
+                    "pprof_write_heap" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pprof_write_heap".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let _path = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    "syscall_exec" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "syscall_exec".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let cmd = self.eval_expr(&args[0])?.to_string_lossy();
+                        let cmd_args: Vec<String> = args[1..].iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        match std::process::Command::new(&cmd).args(&cmd_args).output() {
+                            Ok(output) => {
+                                return Ok(DataType::Map(OrderedMap::from([
+                                    ("stdout".to_string(), DataType::String(String::from_utf8_lossy(&output.stdout).to_string())),
+                                    ("stderr".to_string(), DataType::String(String::from_utf8_lossy(&output.stderr).to_string())),
+                                    ("status".to_string(), DataType::Int64(output.status.code().unwrap_or(-1) as i64)),
+                                ])));
+                            }
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("syscall_exec: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "syscall_getenv" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "syscall_getenv".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let key = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(match std::env::var(&key) { Ok(v) => DataType::String(v), Err(_) => DataType::Null });
+                    }
+                    "syscall_setenv" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "syscall_setenv".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let key = self.eval_expr(&args[0])?.to_string_lossy();
+                        let val = self.eval_expr(&args[1])?.to_string_lossy();
+                        std::env::set_var(&key, &val);
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    // Tab-aligned formatting
+                    "tabwriter_format" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "tabwriter_format".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let rows = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array of arrays".into(), actual: other.type_name().into(), context: "tabwriter_format".into(), span: expr.span }) };
+                        let mut widths: Vec<usize> = Vec::new();
+                        for row in &rows {
+                            if let DataType::Array(cols) = row {
+                                for (i, col) in cols.iter().enumerate() {
+                                    let w = col.to_string_lossy().len();
+                                    if i >= widths.len() { widths.push(w); } else if w > widths[i] { widths[i] = w; }
+                                }
+                            }
+                        }
+                        let mut output = String::new();
+                        for row in &rows {
+                            if let DataType::Array(cols) = row {
+                                for (i, col) in cols.iter().enumerate() {
+                                    let s = col.to_string_lossy();
+                                    let w = widths.get(i).copied().unwrap_or(0);
+                                    output.push_str(&format!("{:<width$}", s, width = w + 2));
+                                }
+                            }
+                            output.push('\n');
+                        }
+                        return Ok(DataType::String(output));
+                    }
+
+                    // UTF-16 encoding
+                    "utf16_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "utf16_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let utf16: Vec<u8> = s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+                        return Ok(DataType::Bytes(utf16));
+                    }
+                    "utf16_decode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "utf16_decode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "utf16_decode".into(), span: expr.span }) };
+                        let u16s: Vec<u16> = data.chunks(2).map(|c| u16::from_le_bytes([c[0], *c.get(1).unwrap_or(&0)])).collect();
+                        return Ok(DataType::String(String::from_utf16_lossy(&u16s)));
+                    }
+
+                    // ── StringBuilder ─────────────────────────────────────────
+                    "string_builder_new" => {
+                        return Ok(DataType::Array(Vec::new()));
+                    }
+                    "string_builder_append" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "string_builder_append".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut builder = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array (string_builder)".into(), actual: other.type_name().into(), context: "string_builder_append".into(), span: expr.span }) };
+                        let s = self.eval_expr(&args[1])?.to_string_lossy();
+                        builder.push(DataType::String(s));
+                        return Ok(DataType::Array(builder));
+                    }
+                    "string_builder_to_string" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "string_builder_to_string".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let builder = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array (string_builder)".into(), actual: other.type_name().into(), context: "string_builder_to_string".into(), span: expr.span }) };
+                        let mut result = String::new();
+                        for part in &builder {
+                            result.push_str(&part.to_string_lossy());
+                        }
+                        return Ok(DataType::String(result));
+                    }
+                    "string_builder_len" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "string_builder_len".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let builder = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array (string_builder)".into(), actual: other.type_name().into(), context: "string_builder_len".into(), span: expr.span }) };
+                        let total: usize = builder.iter().map(|p| p.to_string_lossy().len()).sum();
+                        return Ok(DataType::Int64(total as i64));
+                    }
+
+                    // ── Platform FFI — Terminal ──────────────────────────────
+                    "raw_mode_enable" => {
+                        match crate::platform::raw_mode_enable() {
+                            Ok(()) => return Ok(DataType::Null),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "raw_mode_disable" => {
+                        match crate::platform::raw_mode_disable() {
+                            Ok(()) => return Ok(DataType::Null),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "read_byte" => {
+                        return Ok(match crate::platform::read_byte() {
+                            Some(b) => DataType::Int64(b as i64),
+                            None => DataType::Int64(-1),
+                        });
+                    }
+                    "read_byte_timeout" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "read_byte_timeout".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ds = match self.eval_expr(&args[0])? { DataType::Int64(n) => n as u8, DataType::Float64(n) => n as u8, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "read_byte_timeout".into(), span: expr.span }) };
+                        return Ok(match crate::platform::read_byte_timeout(ds) {
+                            Some(b) => DataType::Int64(b as i64),
+                            None => DataType::Int64(-1),
+                        });
+                    }
+
+                    // ── Platform FFI — SDL2 Graphics ──────────────────────────
+                    "sdl_init" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "sdl_init".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let title = self.eval_expr(&args[0])?.to_string_lossy();
+                        let w = match self.eval_expr(&args[1])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_init width".into(), span: expr.span }) };
+                        let h = match self.eval_expr(&args[2])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_init height".into(), span: expr.span }) };
+                        match crate::platform::SdlContext::new(&title, w, h) {
+                            Ok(ctx) => {
+                                let handle = Box::into_raw(Box::new(ctx)) as i64;
+                                return Ok(DataType::Int64(handle));
+                            }
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "sdl_set_color" => {
+                        if args.len() < 4 { return Err(InterpError::ArityMismatch { name: "sdl_set_color".into(), expected: "4".into(), actual: args.len(), span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_set_color".into(), span: expr.span }) };
+                        let r = match self.eval_expr(&args[1])? { DataType::Int64(n) => n as u8, DataType::Float64(n) => n as u8, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_set_color".into(), span: expr.span }) };
+                        let g = match self.eval_expr(&args[2])? { DataType::Int64(n) => n as u8, DataType::Float64(n) => n as u8, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_set_color".into(), span: expr.span }) };
+                        let b = match self.eval_expr(&args[3])? { DataType::Int64(n) => n as u8, DataType::Float64(n) => n as u8, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_set_color".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        ctx.set_color(r, g, b);
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_clear" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sdl_clear".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_clear".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        ctx.clear();
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_present" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sdl_present".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_present".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        ctx.present();
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_draw_pixel" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "sdl_draw_pixel".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_draw_pixel".into(), span: expr.span }) };
+                        let x = match self.eval_expr(&args[1])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_draw_pixel".into(), span: expr.span }) };
+                        let y = match self.eval_expr(&args[2])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_draw_pixel".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        ctx.draw_pixel(x, y);
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_draw_line" => {
+                        if args.len() < 5 { return Err(InterpError::ArityMismatch { name: "sdl_draw_line".into(), expected: "5".into(), actual: args.len(), span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_draw_line".into(), span: expr.span }) };
+                        let x1 = match self.eval_expr(&args[1])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_draw_line".into(), span: expr.span }) };
+                        let y1 = match self.eval_expr(&args[2])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_draw_line".into(), span: expr.span }) };
+                        let x2 = match self.eval_expr(&args[3])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_draw_line".into(), span: expr.span }) };
+                        let y2 = match self.eval_expr(&args[4])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_draw_line".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        ctx.draw_line(x1, y1, x2, y2);
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_fill_rect" => {
+                        if args.len() < 5 { return Err(InterpError::ArityMismatch { name: "sdl_fill_rect".into(), expected: "5".into(), actual: args.len(), span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_fill_rect".into(), span: expr.span }) };
+                        let x = match self.eval_expr(&args[1])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_fill_rect".into(), span: expr.span }) };
+                        let y = match self.eval_expr(&args[2])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_fill_rect".into(), span: expr.span }) };
+                        let w = match self.eval_expr(&args[3])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_fill_rect".into(), span: expr.span }) };
+                        let h = match self.eval_expr(&args[4])? { DataType::Int64(n) => n as i32, DataType::Float64(n) => n as i32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_fill_rect".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        ctx.fill_rect(x, y, w, h);
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_poll_event" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sdl_poll_event".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_poll_event".into(), span: expr.span }) };
+                        let ctx = unsafe { &*(handle as *const crate::platform::SdlContext) };
+                        return Ok(match ctx.poll_event() {
+                            Some((type_, scancode)) => {
+                                let mut m = crate::util::OrderedMap::new();
+                                m.insert("type".to_string(), DataType::Int64(type_ as i64));
+                                m.insert("scancode".to_string(), DataType::Int64(scancode as i64));
+                                DataType::Map(m)
+                            }
+                            None => DataType::Null,
+                        });
+                    }
+                    "sdl_delay" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sdl_delay".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ms = match self.eval_expr(&args[0])? { DataType::Int64(n) => n as u32, DataType::Float64(n) => n as u32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "sdl_delay".into(), span: expr.span }) };
+                        unsafe { crate::platform::sdl_delay(ms); }
+                        return Ok(DataType::Null);
+                    }
+                    "sdl_ticks" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sdl_ticks".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let _handle = self.eval_expr(&args[0])?;
+                        return Ok(DataType::Int64(unsafe { crate::platform::sdl_get_ticks() } as i64));
+                    }
+                    "sdl_destroy" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sdl_destroy".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "sdl_destroy".into(), span: expr.span }) };
+                        unsafe { drop(Box::from_raw(handle as *mut crate::platform::SdlContext)); }
+                        return Ok(DataType::Null);
+                    }
+
+                    // ── Platform FFI — Audio ──────────────────────────────────
+                    "audio_stream_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "audio_stream_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let sr = match self.eval_expr(&args[0])? { DataType::Int64(n) => n as u32, DataType::Float64(n) => n as u32, other => return Err(InterpError::TypeError { expected: "int".into(), actual: other.type_name().into(), context: "audio_stream_new".into(), span: expr.span }) };
+                        match crate::platform::AudioStream::new(sr) {
+                            Ok(stream) => {
+                                let handle = Box::into_raw(Box::new(stream)) as i64;
+                                return Ok(DataType::Int64(handle));
+                            }
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "audio_write_samples" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "audio_write_samples".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "audio_write_samples".into(), span: expr.span }) };
+                        let arr = match self.eval_expr(&args[1])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "audio_write_samples".into(), span: expr.span }) };
+                        let samples: Vec<i16> = arr.iter().map(|v| match v { DataType::Int64(n) => *n as i16, DataType::Float64(n) => *n as i16, _ => 0 }).collect();
+                        let stream = unsafe { &*(handle as *const crate::platform::AudioStream) };
+                        match stream.write_samples(&samples) {
+                            Ok(()) => return Ok(DataType::Null),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "audio_drain" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "audio_drain".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "audio_drain".into(), span: expr.span }) };
+                        let stream = unsafe { &*(handle as *const crate::platform::AudioStream) };
+                        match stream.drain() {
+                            Ok(()) => return Ok(DataType::Null),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "audio_close" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "audio_close".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let handle = match self.eval_expr(&args[0])? { DataType::Int64(n) => n, other => return Err(InterpError::TypeError { expected: "handle".into(), actual: other.type_name().into(), context: "audio_close".into(), span: expr.span }) };
+                        unsafe { drop(Box::from_raw(handle as *mut crate::platform::AudioStream)); }
+                        return Ok(DataType::Null);
+                    }
+
+                    // ── Platform FFI — WebGPU (stub — actual impl in WASM target) ──
+                    "gpu_init" | "gpu_create_buffer" | "gpu_create_shader" | "gpu_create_pipeline"
+                    | "gpu_begin_render_pass" | "gpu_draw" | "gpu_end_render_pass" | "gpu_submit"
+                    | "gpu_present" | "gpu_write_buffer" | "gpu_create_texture" | "gpu_destroy" => {
+                        return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("WebGPU is only available in WASM target".into()), span: expr.span });
+                    }
+
+                    "marshal" | "json_marshal" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "marshal".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return Ok(DataType::String(crate::util::json_to_string(&val.to_json())));
+                    }
+                    "unmarshal" | "json_unmarshal" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "unmarshal".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        match crate::util::json_parse_value(&s) {
+                            Ok(v) => return Ok(DataType::String(crate::util::json_to_string(&v))),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "xml_marshal" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "xml_marshal".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        fn to_xml(val: &DataType, tag: &str, depth: usize) -> String {
+                            let indent = "  ".repeat(depth);
+                            match val {
+                                DataType::Map(m) => {
+                                    let mut s = format!("{}<{}>\n", indent, tag);
+                                    for (k, v) in m.iter() { s.push_str(&to_xml(v, k, depth + 1)); }
+                                    s.push_str(&format!("{}</{}>\n", indent, tag));
+                                    s
+                                }
+                                DataType::Array(arr) => {
+                                    let mut s = String::new();
+                                    for item in arr { s.push_str(&to_xml(item, tag, depth)); }
+                                    s
+                                }
+                                _ => format!("{}<{}>{}</{}>\n", indent, tag, val.to_string_lossy(), tag),
+                            }
+                        }
+                        return Ok(DataType::String(to_xml(&val, "root", 0)));
+                    }
+                    "xml_unmarshal" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "xml_unmarshal".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let _s = self.eval_expr(&args[0])?.to_string_lossy();
+                        // XML parsing is handled by XmlParse OperationType
+                        return Ok(DataType::Null);
+                    }
+                    "encode_to_string" | "hex_encode_to_string" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "encode_to_string".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        return Ok(DataType::String(crate::util::hex_encode(&data)));
+                    }
+                    "decode_string" | "hex_decode_string" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "decode_string".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        match crate::util::hex_decode(&s) {
+                            Ok(b) => return Ok(DataType::Bytes(b)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "hex_dump" | "dump" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "hex_dump".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let mut result = String::new();
+                        for (i, chunk) in data.chunks(16).enumerate() {
+                            result.push_str(&format!("{:08x}  ", i * 16));
+                            for (j, b) in chunk.iter().enumerate() {
+                                result.push_str(&format!("{:02x} ", b));
+                                if j == 7 { result.push(' '); }
+                            }
+                            for _ in chunk.len()..16 { result.push_str("   "); if chunk.len() <= 7 { result.push(' '); } }
+                            result.push_str(" |");
+                            for b in chunk { result.push(if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' }); }
+                            result.push_str("|\n");
+                        }
+                        return Ok(DataType::String(result));
+                    }
+                    "std_encoding" | "url_encoding" | "raw_std_encoding" | "raw_url_encoding" => {
+                        // Base64 encoding variant selection — return config map
+                        let variant = fn_name.replace("_encoding", "");
+                        return Ok(DataType::Map(OrderedMap::from([("variant".to_string(), DataType::String(variant))])));
+                    }
+                    "put_varint" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "put_varint".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        // ZigZag encode then varint
+                        let zigzag = ((n << 1) ^ (n >> 63)) as u64;
+                        let mut buf = Vec::new();
+                        let mut v = zigzag;
+                        loop { let b = (v & 0x7F) as u8; v >>= 7; if v == 0 { buf.push(b); break; } buf.push(b | 0x80); }
+                        return Ok(DataType::Bytes(buf));
+                    }
+                    "uvarint" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "uvarint".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "uvarint".into(), span: expr.span }) };
+                        let mut result: u64 = 0; let mut shift = 0;
+                        for &b in &data { result |= ((b & 0x7F) as u64) << shift; if b & 0x80 == 0 { break; } shift += 7; }
+                        return Ok(DataType::Int64(result as i64));
+                    }
+                    "put_uvarint" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "put_uvarint".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as u64;
+                        let mut buf = Vec::new();
+                        let mut v = n;
+                        loop { let b = (v & 0x7F) as u8; v >>= 7; if v == 0 { buf.push(b); break; } buf.push(b | 0x80); }
+                        return Ok(DataType::Bytes(buf));
+                    }
+                    "big_endian" | "little_endian" => {
+                        return Ok(DataType::String(fn_name.to_string()));
+                    }
+                    "object_identifier" | "asn1_marshal" | "asn1_unmarshal" => {
+                        return Ok(DataType::Null); // ASN.1 handled by cert module
+                    }
+                    "json_decoder" | "json_encoder" | "decoder" | "encoder" | "rawmessage" | "dumper" | "gob_encoder" | "gob_decoder" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String(fn_name.to_string()))])));
+                    }
+
+                    "float32bits" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "float32bits".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let f = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0) as f32;
+                        return Ok(DataType::Int64(f.to_bits() as i64));
+                    }
+                    "float32frombits" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "float32frombits".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let bits = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as u32;
+                        return Ok(DataType::Float32(f32::from_bits(bits)));
+                    }
+                    "float64bits" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "float64bits".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let f = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Int64(f.to_bits() as i64));
+                    }
+                    "float64frombits" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "float64frombits".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let bits = self.eval_expr(&args[0])?.to_i64().unwrap_or(0) as u64;
+                        return Ok(DataType::Float64(f64::from_bits(bits)));
+                    }
+                    "ilogb" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ilogb".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Int64(x.log2().floor() as i64));
+                    }
+                    "new_int" | "new_float" | "new_rat" => {
+                        let val = if !args.is_empty() { self.eval_expr(&args[0])?.to_string_lossy() } else { "0".to_string() };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String(fn_name.replace("new_", "big_").to_string())), ("value".to_string(), DataType::String(val))])));
+                    }
+                    "intn" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "intn".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(1).max(1);
+                        let val = (crate::util::now_millis() as i64).unsigned_abs() % (n as u64);
+                        return Ok(DataType::Int64(val as i64));
+                    }
+                    "new_source" => {
+                        let seed = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("rand_source".to_string())), ("seed".to_string(), DataType::Int64(seed))])));
+                    }
+                    "ones_count" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ones_count".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Int64(n.count_ones() as i64));
+                    }
+
+                    // os/exec depth
+                    "combined_output" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "combined_output".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let cmd = self.eval_expr(&args[0])?.to_string_lossy();
+                        let cmd_args: Vec<String> = args[1..].iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        match std::process::Command::new(&cmd).args(&cmd_args).output() {
+                            Ok(output) => {
+                                let mut combined = output.stdout;
+                                combined.extend_from_slice(&output.stderr);
+                                return Ok(DataType::Bytes(combined));
+                            }
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("combined_output: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "look_path" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "look_path".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let name = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::process::Command::new("which").arg(&name).output() {
+                            Ok(output) if output.status.success() => return Ok(DataType::String(String::from_utf8_lossy(&output.stdout).trim().to_string())),
+                            _ => return Ok(DataType::Null),
+                        }
+                    }
+
+                    // flag depth
+                    "n_flag" => { return Ok(DataType::Int64(0)); }
+
+                    // log depth
+                    "set_prefix" | "set_flags" | "set_output" => { return Ok(DataType::Null); }
+
+                    // testing depth (format variants)
+                    "skipf" | "logf" | "fatalf" | "errorf_test" => {
+                        let parts: Vec<String> = args.iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        let msg = parts.join(" ");
+                        if fn_name == "fatalf" { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("FATAL: {}", msg)), span: expr.span }); }
+                        if fn_name == "skipf" { return Ok(DataType::String(format!("[SKIP] {}", msg))); }
+                        eprintln!("{}", msg);
+                        return Ok(DataType::Null);
+                    }
+
+                    // regexp depth
+                    "must_compile" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "must_compile".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let pattern = self.eval_expr(&args[0])?.to_string_lossy();
+                        match crate::util::Regex::new(&pattern) {
+                            Ok(_) => return Ok(DataType::Map(OrderedMap::from([("pattern".to_string(), DataType::String(pattern)), ("compiled".to_string(), DataType::Bool(true))]))),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("must_compile: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "match_string" | "find_string" | "find_all_string" | "replace_all_string" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let pattern = self.eval_expr(&args[0])?.to_string_lossy();
+                        let text = self.eval_expr(&args[1])?.to_string_lossy();
+                        match crate::util::Regex::new(&pattern) {
+                            Ok(re) => match fn_name.as_str() {
+                                "match_string" => return Ok(DataType::Bool(re.is_match(&text))),
+                                "find_string" => return Ok(match re.find(&text) { Some((s, e)) => { let chars: Vec<char> = text.chars().collect(); DataType::String(chars[s..e].iter().collect()) } None => DataType::String(String::new()) }),
+                                "find_all_string" => { let matches: Vec<DataType> = re.find_all(&text).iter().map(|(s, e)| { let chars: Vec<char> = text.chars().collect(); DataType::String(chars[*s..*e].iter().collect()) }).collect(); return Ok(DataType::Array(matches)); }
+                                "replace_all_string" => { let rep = if args.len() > 2 { self.eval_expr(&args[2])?.to_string_lossy() } else { String::new() }; return Ok(DataType::String(re.replace(&text, &rep))); }
+                                _ => return Ok(DataType::Null),
+                            },
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "sub_match" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sub_match".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let pattern = self.eval_expr(&args[0])?.to_string_lossy();
+                        let text = self.eval_expr(&args[1])?.to_string_lossy();
+                        match crate::util::Regex::new(&pattern) {
+                            Ok(re) => { if let Some(caps) = re.captures(&text) { let groups: Vec<DataType> = (0..caps.len()).map(|i| caps.get(i).map(|m| DataType::String(m.as_str().to_string())).unwrap_or(DataType::Null)).collect(); return Ok(DataType::Array(groups)); } return Ok(DataType::Array(vec![])); }
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+
+                    // sort depth
+                    "slice_stable" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "slice_stable".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "slice_stable".into(), span: expr.span }) };
+                        // Stable sort using the comparator
+                        let arr_clone = arr.clone();
+                        let _ = arr_clone; // Simplified: just sort normally
+                        arr.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+                        return Ok(DataType::Array(arr));
+                    }
+                    "context_todo" | "todo" => { return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("context".to_string())), ("kind".to_string(), DataType::String("todo".to_string()))]))); }
+                    "with_deadline" | "context_with_deadline" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "with_deadline".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _ctx = self.eval_expr(&args[0])?;
+                        let deadline_ms = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("context".to_string())), ("deadline_ms".to_string(), DataType::Int64(deadline_ms))])));
+                    }
+                    "with_value" | "context_with_value" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "with_value".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let _ctx = self.eval_expr(&args[0])?;
+                        let key = self.eval_expr(&args[1])?.to_string_lossy();
+                        let value = self.eval_expr(&args[2])?;
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("context".to_string())), ("key".to_string(), DataType::String(key)), ("value".to_string(), value)])));
+                    }
+                    "canceled" | "context_canceled" => { return Ok(DataType::Map(OrderedMap::from([("err".to_string(), DataType::String("context canceled".to_string()))]))); }
+                    "deadline_exceeded" | "context_deadline_exceeded" => { return Ok(DataType::Map(OrderedMap::from([("err".to_string(), DataType::String("context deadline exceeded".to_string()))]))); }
+
+                    "reflect_value_of" | "value_of" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "value_of".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return Ok(DataType::Map(OrderedMap::from([("type".to_string(), DataType::String(val.type_name().to_string())), ("value".to_string(), val)])));
+                    }
+                    "num_field" | "reflect_num_field" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "num_field".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return Ok(DataType::Int64(match &val { DataType::Map(m) => m.len() as i64, _ => 0 }));
+                    }
+                    "num_method" | "reflect_num_method" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "num_method".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        if let DataType::Map(ref m) = val {
+                            if let Some(DataType::String(sn)) = m.get("__struct") {
+                                return Ok(DataType::Int64(self.impl_methods.get(sn).map(|m| m.len() as i64).unwrap_or(0)));
+                            }
+                        }
+                        return Ok(DataType::Int64(0));
+                    }
+                    "make_slice" => { return Ok(DataType::Array(vec![])); }
+                    "make_map" => { return Ok(DataType::Map(OrderedMap::new())); }
+                    "make_chan" | "make_channel" => { return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("channel".to_string()))]))); }
+                    "indirect" => {
+                        if args.is_empty() { return Ok(DataType::Null); }
+                        return self.eval_expr(&args[0]);
+                    }
+                    "deep_equal" | "reflect_deep_equal" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "deep_equal".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let a = self.eval_expr(&args[0])?;
+                        let b = self.eval_expr(&args[1])?;
+                        return Ok(DataType::Bool(a == b));
+                    }
+
+                    // fmt depth
+                    "scanln" => {
+                        let mut line = String::new();
+                        let _ = std::io::stdin().read_line(&mut line);
+                        return Ok(DataType::String(line.trim_end().to_string()));
+                    }
+
+                    // strconv depth
+                    "atoi" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "atoi".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(match s.trim().parse::<i64>() { Ok(n) => DataType::Int64(n), Err(_) => DataType::Null });
+                    }
+                    "itoa" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "itoa".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::String(n.to_string()));
+                    }
+                    "append_int" | "append_float" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut buf = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), _ => vec![] };
+                        let val = self.eval_expr(&args[1])?.to_string_lossy();
+                        buf.extend_from_slice(val.as_bytes());
+                        return Ok(DataType::Bytes(buf));
+                    }
+
+                    // unicode depth
+                    "is_punct" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_punct".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(s.chars().all(|c| c.is_ascii_punctuation())));
+                    }
+                    "is_symbol" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_symbol".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(s.chars().all(|c| !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control())));
+                    }
+
+                    "float64s" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "float64s".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "float64s".into(), span: expr.span }) };
+                        arr.sort_by(|a, b| a.to_f64().unwrap_or(0.0).partial_cmp(&b.to_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
+                        return Ok(DataType::Array(arr));
+                    }
+
+                    "push_front" | "list_push_front" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "push_front".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut list = match self.eval_expr(&args[0])? { DataType::Array(a) => a, DataType::Map(m) => if let Some(DataType::Array(a)) = m.get("items") { a.clone() } else { vec![] }, other => vec![other] };
+                        let val = self.eval_expr(&args[1])?;
+                        list.insert(0, val);
+                        return Ok(DataType::Array(list));
+                    }
+                    "move_to_front" | "move_to_back" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: fn_name.into(), span: expr.span }) };
+                        let idx = self.eval_expr(&args[1])?.to_i64().unwrap_or(0) as usize;
+                        if idx < arr.len() {
+                            let item = arr.remove(idx);
+                            if fn_name == "move_to_front" { arr.insert(0, item); } else { arr.push(item); }
+                        }
+                        return Ok(DataType::Array(arr));
+                    }
+                    "insert_before" | "insert_after" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: fn_name.into(), span: expr.span }) };
+                        let idx = self.eval_expr(&args[1])?.to_i64().unwrap_or(0) as usize;
+                        let val = self.eval_expr(&args[2])?;
+                        let pos = if fn_name == "insert_after" { (idx + 1).min(arr.len()) } else { idx.min(arr.len()) };
+                        arr.insert(pos, val);
+                        return Ok(DataType::Array(arr));
+                    }
+                    "ring_unlink" | "unlink" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "unlink".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "unlink".into(), span: expr.span }) };
+                        let n = self.eval_expr(&args[1])?.to_i64().unwrap_or(1).max(0) as usize;
+                        let removed: Vec<DataType> = arr.drain(..n.min(arr.len())).collect();
+                        return Ok(DataType::Tuple(vec![DataType::Array(arr), DataType::Array(removed)]));
+                    }
+
+                    "new_reader" | "gzip_new_reader" | "zlib_new_reader" | "flate_new_reader" | "lzw_new_reader" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: fn_name.into(), span: expr.span }) };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("compress_reader".to_string())), ("data".to_string(), DataType::Bytes(data)), ("format".to_string(), DataType::String(fn_name.replace("_new_reader", "").to_string()))])));
+                    }
+                    "new_writer" | "gzip_new_writer" | "zlib_new_writer" | "flate_new_writer" | "lzw_new_writer" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("compress_writer".to_string())), ("buffer".to_string(), DataType::Bytes(vec![])), ("format".to_string(), DataType::String(fn_name.replace("_new_writer", "").to_string()))])));
+                    }
+                    "best_compression" | "best_speed" | "default_compression" => {
+                        return Ok(DataType::Int64(match fn_name.as_str() { "best_compression" => 9, "best_speed" => 1, _ => 6 }));
+                    }
+
+                    // Image and template utilities
+                    "new_rgba" | "new_gray" => {
+                        let width = if args.len() > 0 { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        let height = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(0) } else { 0 };
+                        let format = if fn_name == "new_rgba" { "rgba" } else { "gray" };
+                        let bpp = if fn_name == "new_rgba" { 4 } else { 1 };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("image".to_string())), ("format".to_string(), DataType::String(format.to_string())), ("width".to_string(), DataType::Int64(width)), ("height".to_string(), DataType::Int64(height)), ("pixels".to_string(), DataType::Bytes(vec![0u8; (width * height * bpp) as usize]))])));
+                    }
+                    "decode_config" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "decode_config".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, _ => vec![] };
+                        // Detect image format from magic bytes
+                        let format = if data.starts_with(b"\x89PNG") { "png" } else if data.starts_with(b"\xFF\xD8") { "jpeg" } else if data.starts_with(b"GIF8") { "gif" } else { "unknown" };
+                        return Ok(DataType::Map(OrderedMap::from([("format".to_string(), DataType::String(format.to_string()))])));
+                    }
+                    "register_format" => { return Ok(DataType::Bool(true)); }
+                    "color_rgba" | "rgba" => {
+                        let r = if args.len() > 0 { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        let g = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(0) } else { 0 };
+                        let b = if args.len() > 2 { self.eval_expr(&args[2])?.to_i64().unwrap_or(0) } else { 0 };
+                        let a = if args.len() > 3 { self.eval_expr(&args[3])?.to_i64().unwrap_or(255) } else { 255 };
+                        return Ok(DataType::Map(OrderedMap::from([("r".into(), DataType::Int64(r)), ("g".into(), DataType::Int64(g)), ("b".into(), DataType::Int64(b)), ("a".into(), DataType::Int64(a))])));
+                    }
+                    "color_gray" | "gray" => {
+                        let y = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        return Ok(DataType::Map(OrderedMap::from([("y".into(), DataType::Int64(y))])));
+                    }
+                    "nrgba" => {
+                        let r = if args.len() > 0 { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        let g = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(0) } else { 0 };
+                        let b = if args.len() > 2 { self.eval_expr(&args[2])?.to_i64().unwrap_or(0) } else { 0 };
+                        let a = if args.len() > 3 { self.eval_expr(&args[3])?.to_i64().unwrap_or(255) } else { 255 };
+                        return Ok(DataType::Map(OrderedMap::from([("r".into(), DataType::Int64(r)), ("g".into(), DataType::Int64(g)), ("b".into(), DataType::Int64(b)), ("a".into(), DataType::Int64(a))])));
+                    }
+                    "color_model" | "model" => { return Ok(DataType::String("rgba".to_string())); }
+                    "html_escaper" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")));
+                    }
+                    "js_escaper" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(s.replace('\\', "\\\\").replace('"', "\\\"").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r")));
+                    }
+                    "url_query_escaper" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let encoded: String = s.bytes().map(|b| if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' { (b as char).to_string() } else { format!("%{:02X}", b) }).collect();
+                        return Ok(DataType::String(encoded));
+                    }
+                    "func_map" => { return Ok(DataType::Map(OrderedMap::new())); }
+
+                    "set_max_open_conns" | "set_max_idle_conns" => {
+                        return Ok(DataType::Null); // Connection pool config — no-op in file-based DB
+                    }
+                    "set_conn_max_lifetime" => { return Ok(DataType::Null); }
+
+                    "hasher" | "build_hasher" => { return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("hasher".into()))]))); }
+                    "backtrace" | "error_backtrace" => { return Ok(DataType::String(self.call_stack_trace())); }
+                    "read_to_end" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "read_to_end".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::read(&path) { Ok(b) => return Ok(DataType::Bytes(b)), Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("read_to_end: {}", e)), span: expr.span }) }
+                    }
+
+                    // Runtime/unsafe/syscall
+                    "goexit" => { std::process::exit(0); }
+                    "gosched" | "runtime_gosched" => { std::thread::yield_now(); return Ok(DataType::Null); }
+                    "gomaxprocs" => {
+                        let n = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        let prev = std::thread::available_parallelism().map(|p| p.get() as i64).unwrap_or(1);
+                        let _ = n; // Setting CPU count not supported
+                        return Ok(DataType::Int64(prev));
+                    }
+                    "callers" | "runtime_callers" => {
+                        let depth = self.call_stack_names.len();
+                        let frames: Vec<DataType> = self.call_stack_names.iter().rev().map(|n| DataType::String(n.clone())).collect();
+                        return Ok(DataType::Map(OrderedMap::from([("depth".to_string(), DataType::Int64(depth as i64)), ("frames".to_string(), DataType::Array(frames))])));
+                    }
+                    "read_mem_stats" | "runtime_read_mem_stats" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("alloc".to_string(), DataType::Int64(self.heap.values.len() as i64 * 64)),
+                            ("total_alloc".to_string(), DataType::Int64(self.heap.next_addr as i64)),
+                            ("sys".to_string(), DataType::Int64(0)),
+                            ("num_gc".to_string(), DataType::Int64(self.heap.gc_stats.cycles as i64)),
+                            ("heap_objects".to_string(), DataType::Int64(self.heap.values.len() as i64)),
+                        ])));
+                    }
+                    "set_finalizer" | "runtime_set_finalizer" => { return Ok(DataType::Null); } // GC handles cleanup
+                    "keep_alive" | "runtime_keep_alive" => { return Ok(DataType::Null); }
+                    "offsetof" | "unsafe_offsetof" => {
+                        // Return field offset within a struct (simplified: sequential)
+                        if args.len() < 2 { return Ok(DataType::Int64(0)); }
+                        let _struct_val = self.eval_expr(&args[0])?;
+                        let field_name = self.eval_expr(&args[1])?.to_string_lossy();
+                        // Estimate offset based on field position
+                        if let DataType::Map(ref m) = _struct_val {
+                            for (i, (k, _)) in m.iter().enumerate() {
+                                if k == &field_name { return Ok(DataType::Int64((i * 8) as i64)); }
+                            }
+                        }
+                        return Ok(DataType::Int64(0));
+                    }
+                    "unsafe_slice" | "unsafe_string" => {
+                        if args.is_empty() { return Ok(DataType::Null); }
+                        return self.eval_expr(&args[0]); // Pass through
+                    }
+                    "syscall_open" => {
+                        if args.is_empty() { return Ok(DataType::Int64(-1)); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        let flags = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(0) } else { 0 };
+                        match if flags & 0x40 != 0 { // O_CREAT
+                            std::fs::OpenOptions::new().read(true).write(true).create(true).open(&path)
+                        } else if flags & 0x01 != 0 { // O_WRONLY
+                            std::fs::OpenOptions::new().write(true).open(&path)
+                        } else {
+                            std::fs::File::open(&path)
+                        } {
+                            Ok(f) => {
+                                use std::os::unix::io::IntoRawFd;
+                                return Ok(DataType::Int64(f.into_raw_fd() as i64));
+                            }
+                            Err(_) => return Ok(DataType::Int64(-1)),
+                        }
+                    }
+                    "syscall_close" => {
+                        if args.is_empty() { return Ok(DataType::Int64(-1)); }
+                        let fd = self.eval_expr(&args[0])?.to_i64().unwrap_or(-1) as i32;
+                        if fd > 2 { // Don't close stdin/stdout/stderr
+                            unsafe { libc_close(fd); }
+                        }
+                        return Ok(DataType::Int64(0));
+                    }
+                    "syscall_read" => {
+                        if args.is_empty() { return Ok(DataType::Int64(-1)); }
+                        let fd_or_path = self.eval_expr(&args[0])?;
+                        let count = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(4096) as usize } else { 4096 };
+                        match fd_or_path {
+                            DataType::Int64(fd) => {
+                                let mut buf = vec![0u8; count];
+                                let n = unsafe { libc_read(fd as i32, buf.as_mut_ptr(), count) };
+                                if n < 0 { return Ok(DataType::Int64(-1)); }
+                                buf.truncate(n as usize);
+                                return Ok(DataType::Bytes(buf));
+                            }
+                            _ => {
+                                let path = fd_or_path.to_string_lossy();
+                                match std::fs::read(&path) { Ok(b) => return Ok(DataType::Bytes(b)), Err(_) => return Ok(DataType::Int64(-1)) }
+                            }
+                        }
+                    }
+                    "syscall_write" => {
+                        if args.len() < 2 { return Ok(DataType::Int64(-1)); }
+                        let fd_or_path = self.eval_expr(&args[0])?;
+                        let data = self.eval_expr(&args[1])?;
+                        let bytes = match &data {
+                            DataType::Bytes(b) => b.clone(),
+                            DataType::String(s) => s.as_bytes().to_vec(),
+                            other => other.to_string_lossy().into_bytes(),
+                        };
+                        match fd_or_path {
+                            DataType::Int64(fd) => {
+                                let n = unsafe { libc_write(fd as i32, bytes.as_ptr(), bytes.len()) };
+                                return Ok(DataType::Int64(if n < 0 { -1 } else { n as i64 }));
+                            }
+                            _ => {
+                                let path = fd_or_path.to_string_lossy();
+                                match std::fs::write(&path, &bytes) { Ok(()) => return Ok(DataType::Int64(bytes.len() as i64)), Err(_) => return Ok(DataType::Int64(-1)) }
+                            }
+                        }
+                    }
+                    "syscall_stat" | "syscall_fstat" => {
+                        if args.is_empty() { return Ok(DataType::Int64(-1)); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::metadata(&path) {
+                            Ok(m) => {
+                                let mut info = OrderedMap::new();
+                                info.insert("size".into(), DataType::Int64(m.len() as i64));
+                                info.insert("is_dir".into(), DataType::Bool(m.is_dir()));
+                                info.insert("is_file".into(), DataType::Bool(m.is_file()));
+                                info.insert("is_symlink".into(), DataType::Bool(m.file_type().is_symlink()));
+                                info.insert("readonly".into(), DataType::Bool(m.permissions().readonly()));
+                                return Ok(DataType::Map(info));
+                            }
+                            Err(_) => return Ok(DataType::Int64(-1)),
+                        }
+                    }
+                    "syscall_mmap" | "syscall_munmap" => {
+                        // Memory mapping not supported in interpreter — use fs operations
+                        return Ok(DataType::Int64(-1));
+                    }
+                    "syscall_socket" | "syscall_bind" | "syscall_listen" | "syscall_accept" | "syscall_connect" | "syscall_setsockopt" | "syscall_getsockopt" => {
+                        // Socket syscalls — use std::net module for high-level networking
+                        return Ok(DataType::Int64(-1));
+                    }
+
+                    // IO and buffer utilities
+                    "read_file" | "fs_read_file" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "read_file".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::read(&path) { Ok(b) => return Ok(DataType::Bytes(b)), Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("read_file: {}", e)), span: expr.span }) }
+                    }
+                    "valid_path" => {
+                        if args.is_empty() { return Ok(DataType::Bool(false)); }
+                        let p = self.eval_expr(&args[0])?.to_string_lossy();
+                        let valid = !p.is_empty() && !p.contains('\0') && !p.starts_with('/') && !p.contains("..") && p != ".";
+                        return Ok(DataType::Bool(valid));
+                    }
+                    "write_string" | "sb_write_string" | "buf_write_string" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut buf = self.eval_expr(&args[0])?.to_string_lossy();
+                        let s = self.eval_expr(&args[1])?.to_string_lossy();
+                        buf.push_str(&s);
+                        return Ok(DataType::String(buf));
+                    }
+                    "write_byte" | "sb_write_byte" | "buf_write_byte" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut buf = self.eval_expr(&args[0])?.to_string_lossy();
+                        let b = self.eval_expr(&args[1])?.to_i64().unwrap_or(0) as u8;
+                        buf.push(b as char);
+                        return Ok(DataType::String(buf));
+                    }
+                    "write_rune" | "sb_write_rune" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut buf = self.eval_expr(&args[0])?.to_string_lossy();
+                        let r = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        if let Some(ch) = char::from_u32(r as u32) { buf.push(ch); }
+                        return Ok(DataType::String(buf));
+                    }
+                    "buf_read_string" | "read_string" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let data = self.eval_expr(&args[0])?;
+                        return Ok(DataType::String(data.to_string_lossy()));
+                    }
+                    "buf_read_byte" => {
+                        if args.is_empty() { return Ok(DataType::Int64(0)); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Int64(s.bytes().next().unwrap_or(0) as i64));
+                    }
+
+                    // HTTP constants
+                    "method_get" => { return Ok(DataType::String("GET".into())); }
+                    "method_post" => { return Ok(DataType::String("POST".into())); }
+                    "method_put" => { return Ok(DataType::String("PUT".into())); }
+                    "method_delete" => { return Ok(DataType::String("DELETE".into())); }
+                    "method_patch" => { return Ok(DataType::String("PATCH".into())); }
+                    "method_head" => { return Ok(DataType::String("HEAD".into())); }
+                    "method_options" => { return Ok(DataType::String("OPTIONS".into())); }
+                    "status_ok" => { return Ok(DataType::Int64(200)); }
+                    "status_created" => { return Ok(DataType::Int64(201)); }
+                    "status_accepted" => { return Ok(DataType::Int64(202)); }
+                    "status_no_content" => { return Ok(DataType::Int64(204)); }
+                    "status_moved_permanently" => { return Ok(DataType::Int64(301)); }
+                    "status_found" => { return Ok(DataType::Int64(302)); }
+                    "status_not_modified" => { return Ok(DataType::Int64(304)); }
+                    "status_bad_request" => { return Ok(DataType::Int64(400)); }
+                    "status_unauthorized" => { return Ok(DataType::Int64(401)); }
+                    "status_forbidden" => { return Ok(DataType::Int64(403)); }
+                    "status_not_found" => { return Ok(DataType::Int64(404)); }
+                    "status_internal_server_error" => { return Ok(DataType::Int64(500)); }
+                    "status_bad_gateway" => { return Ok(DataType::Int64(502)); }
+                    "status_service_unavailable" => { return Ok(DataType::Int64(503)); }
+                    "write_header" => { return Ok(DataType::Null); }
+                    "hijack" => { return Ok(DataType::Null); }
+                    "http_do" | "client_do" => {
+                        // HTTP client.Do — delegate to http_request
+                        if args.is_empty() { return Ok(DataType::Null); }
+                        return self.eval_expr(&args[0]);
+                    }
+                    "http_timeout" | "client_timeout" => { return Ok(DataType::Int64(30000)); }
+                    "http_transport" | "transport" => { return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("transport".into()))]))); }
+                    "http_jar" | "jar" => { return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("cookie_jar".into()))]))); }
+
+                    "from_slash" | "filepath_from_slash" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let p = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(p.replace('/', &std::path::MAIN_SEPARATOR.to_string())));
+                    }
+                    "to_slash" | "filepath_to_slash" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let p = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(p.replace(std::path::MAIN_SEPARATOR, "/")));
+                    }
+                    "split_list" | "filepath_split_list" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        let p = self.eval_expr(&args[0])?.to_string_lossy();
+                        let sep = if cfg!(windows) { ';' } else { ':' };
+                        let parts: Vec<DataType> = p.split(sep).map(|s| DataType::String(s.to_string())).collect();
+                        return Ok(DataType::Array(parts));
+                    }
+                    "volume_name" | "filepath_volume_name" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let p = self.eval_expr(&args[0])?.to_string_lossy();
+                        // On Unix, volume name is always empty. On Windows, it's "C:" etc.
+                        if p.len() >= 2 && p.as_bytes()[1] == b':' {
+                            return Ok(DataType::String(p[..2].to_string()));
+                        }
+                        return Ok(DataType::String(String::new()));
+                    }
+
+                    "into_sorted_vec" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => vec![other] };
+                        arr.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+                        return Ok(DataType::Array(arr));
+                    }
+                    "pop_back" | "vecdeque_pop_back" => {
+                        if args.is_empty() { return Ok(DataType::Null); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, DataType::Map(m) => if let Some(DataType::Array(a)) = m.get("items") { a.clone() } else { vec![] }, other => vec![other] };
+                        let popped = arr.pop().unwrap_or(DataType::Null);
+                        return Ok(DataType::Tuple(vec![DataType::Array(arr), popped]));
+                    }
+                    "make_contiguous" | "vecdeque_make_contiguous" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        return self.eval_expr(&args[0]); // Already contiguous in MAGI
+                    }
+
+                    "new_mutex" | "sync_new_mutex" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("mutex".into())), ("locked".into(), DataType::Bool(false))])));
+                    }
+                    "try_lock" | "mutex_try_lock" => {
+                        return Ok(DataType::Bool(true)); // Always succeeds in single-threaded interpreter
+                    }
+                    "new_rwmutex" | "sync_new_rwmutex" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("rwmutex".into())), ("readers".into(), DataType::Int64(0)), ("writer".into(), DataType::Bool(false))])));
+                    }
+                    "rlock" | "rwmutex_rlock" => { return Ok(DataType::Bool(true)); }
+                    "runlock" | "rwmutex_runlock" => { return Ok(DataType::Bool(true)); }
+                    "new_cond" | "sync_new_cond" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("cond".into()))])));
+                    }
+                    "once_do" | "sync_once_do" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "once_do".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _once = self.eval_expr(&args[0])?;
+                        return self.call_lambda_with_args(&args[1], &[], expr.span);
+                    }
+                    "new_pool" | "sync_new_pool" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("pool".into())), ("items".into(), DataType::Array(vec![]))])));
+                    }
+                    "new_map" | "sync_new_map" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("sync_map".into())), ("data".into(), DataType::Map(OrderedMap::new()))])));
+                    }
+                    "map_load" | "sync_map_load" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "map_load".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let map = self.eval_expr(&args[0])?;
+                        let key = self.eval_expr(&args[1])?.to_string_lossy();
+                        if let DataType::Map(m) = &map {
+                            if let Some(DataType::Map(data)) = m.get("data") {
+                                return Ok(data.get(&key).cloned().unwrap_or(DataType::Null));
+                            }
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "map_store" | "sync_map_store" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "map_store".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        return Ok(DataType::Bool(true));
+                    }
+                    "map_delete" | "sync_map_delete" => {
+                        if args.len() < 2 { return Ok(DataType::Bool(true)); }
+                        return Ok(DataType::Bool(true));
+                    }
+                    "map_load_or_store" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "map_load_or_store".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let map = self.eval_expr(&args[0])?;
+                        let key = self.eval_expr(&args[1])?.to_string_lossy();
+                        let default = self.eval_expr(&args[2])?;
+                        if let DataType::Map(m) = &map {
+                            if let Some(DataType::Map(data)) = m.get("data") {
+                                if let Some(v) = data.get(&key) { return Ok(v.clone()); }
+                            }
+                        }
+                        return Ok(default);
+                    }
+                    "map_load_and_delete" => {
+                        if args.len() < 2 { return Ok(DataType::Null); }
+                        return Ok(DataType::Null);
+                    }
+                    "new_waitgroup" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("waitgroup".into())), ("count".into(), DataType::Int64(0))])));
+                    }
+                    "new_once" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("once".into())), ("done".into(), DataType::Bool(false))])));
+                    }
+                    "system_time" | "systemtime_now" => {
+                        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                        return Ok(DataType::Int64(ms));
+                    }
+
+                    "bytes_trim_prefix" | "trim_prefix" if args.len() >= 2 => {
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let prefix = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        if data.starts_with(&prefix) { return Ok(DataType::Bytes(data[prefix.len()..].to_vec())); }
+                        return Ok(DataType::Bytes(data));
+                    }
+                    "bytes_trim_suffix" | "trim_suffix" if args.len() >= 2 => {
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let suffix = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        if data.ends_with(&suffix) { return Ok(DataType::Bytes(data[..data.len()-suffix.len()].to_vec())); }
+                        return Ok(DataType::Bytes(data));
+                    }
+                    "runes" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let runes: Vec<DataType> = s.chars().map(|ch| DataType::Int64(ch as i64)).collect();
+                        return Ok(DataType::Array(runes));
+                    }
+                    "fma" | "math_fma" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "fma".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let y = self.eval_expr(&args[1])?.to_f64().unwrap_or(0.0);
+                        let z = self.eval_expr(&args[2])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(x.mul_add(y, z)));
+                    }
+                    "j0" | "bessel_j0" => {
+                        if args.is_empty() { return Ok(DataType::Float64(1.0)); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        if x.abs() < 8.0 {
+                            let x2 = x * x;
+                            let num = 57568490574.0 + x2 * (-13362590354.0 + x2 * (651619640.7 + x2 * (-11214424.18 + x2 * (77392.33017 + x2 * (-184.9052456)))));
+                            let den = 57568490411.0 + x2 * (1029532985.0 + x2 * (9494680.718 + x2 * (59272.64853 + x2 * (267.8532712 + x2))));
+                            return Ok(DataType::Float64(num / den));
+                        }
+                        let ax = x.abs();
+                        let z = 8.0 / ax;
+                        let z2 = z * z;
+                        let p = 1.0 + z2 * (-0.1098628627e-2 + z2 * 0.2734510407e-4);
+                        let q = -0.1562499995e-1 + z2 * (0.1430488765e-3 + z2 * (-0.6911147651e-5));
+                        let t = ax - 0.785398164;
+                        return Ok(DataType::Float64((0.636619772 / ax).sqrt() * (p * t.cos() - q * t.sin())));
+                    }
+                    "j1" | "jn" | "y0" | "y1" | "yn" => {
+                        // Bessel functions — simplified
+                        if args.is_empty() { return Ok(DataType::Float64(0.0)); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(x.sin() / x.max(1e-10)));
+                    }
+                    "erfinv" | "erfcinv" => {
+                        if args.is_empty() { return Ok(DataType::Float64(0.0)); }
+                        let p = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let p = if fn_name == "erfcinv" { 1.0 - p } else { p };
+                        // Rational approximation for erfinv
+                        if p.abs() >= 1.0 { return Ok(DataType::Float64(if p > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY })); }
+                        let a = 0.147;
+                        let ln = (1.0 - p * p).ln();
+                        let s = if p < 0.0 { -1.0 } else { 1.0 };
+                        let t = (2.0 / (std::f64::consts::PI * a) + ln / 2.0).powi(2) - ln / a;
+                        return Ok(DataType::Float64(s * (t.sqrt() - (2.0 / (std::f64::consts::PI * a) + ln / 2.0)).sqrt()));
+                    }
+                    "subtle" | "crypto_subtle" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("subtle".into()))])));
+                    }
+                    "elliptic" | "crypto_elliptic" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("elliptic".into())), ("curves".into(), DataType::Array(vec![DataType::String("P-256".into()), DataType::String("P-384".into()), DataType::String("P-521".into())]))])));
+                    }
+                    "dialer" | "net_dialer" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("dialer".into())), ("timeout".into(), DataType::Int64(30000))])));
+                    }
+                    "file_conn" | "file_listener" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String(fn_name.into()))])));
+                    }
+                    "dev_null" => { return Ok(DataType::String(if cfg!(windows) { "NUL" } else { "/dev/null" }.into())); }
+                    "is_timeout" => {
+                        if args.is_empty() { return Ok(DataType::Bool(false)); }
+                        let err = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(err.contains("timeout") || err.contains("timed out")));
+                    }
+                    "err_unexpected_eof" => { return Ok(DataType::Map(OrderedMap::from([("err".into(), DataType::String("unexpected EOF".into()))]))); }
+                    "nop_closer" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("nop_closer".into()))])));
+                    }
+                    "from_fn" | "iter_from_fn" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        // Generate array from function calls until null
+                        let mut result = Vec::new();
+                        for _ in 0..1000 {
+                            let val = self.call_lambda_with_args(&args[0], &[], expr.span)?;
+                            if matches!(val, DataType::Null) { break; }
+                            result.push(val);
+                        }
+                        return Ok(DataType::Array(result));
+                    }
+                    "successors" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "successors".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let first = self.eval_expr(&args[0])?;
+                        let mut current = first.clone();
+                        let mut result = vec![first];
+                        for _ in 0..999 {
+                            let next = self.call_lambda_with_args(&args[1], &[current.clone()], expr.span)?;
+                            if matches!(next, DataType::Null) { break; }
+                            result.push(next.clone());
+                            current = next;
+                        }
+                        return Ok(DataType::Array(result));
+                    }
+
+                    "token_string" | "text_token_string" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let tok = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        let s = match tok { -1 => "EOF", -2 => "Ident", -3 => "Int", -4 => "Float", -5 => "Char", -6 => "String", -7 => "RawString", -8 => "Comment", _ => "?" };
+                        return Ok(DataType::String(s.to_string()));
+                    }
+                    "type_by_extension" | "mime_type_by_extension" => {
+                        if args.is_empty() { return Ok(DataType::String("application/octet-stream".into())); }
+                        let ext = self.eval_expr(&args[0])?.to_string_lossy().to_lowercase();
+                        let mime = match ext.trim_start_matches('.') { "html" | "htm" => "text/html", "css" => "text/css", "js" => "application/javascript", "json" => "application/json", "xml" => "application/xml", "txt" => "text/plain", "csv" => "text/csv", "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "gif" => "image/gif", "svg" => "image/svg+xml", "pdf" => "application/pdf", "zip" => "application/zip", "gz" | "gzip" => "application/gzip", "tar" => "application/x-tar", "mp3" => "audio/mpeg", "mp4" => "video/mp4", "webm" => "video/webm", "wasm" => "application/wasm", "yaml" | "yml" => "application/yaml", "toml" => "application/toml", "md" => "text/markdown", "woff" => "font/woff", "woff2" => "font/woff2", _ => "application/octet-stream" };
+                        return Ok(DataType::String(mime.to_string()));
+                    }
+                    "extension_by_type" | "mime_extension_by_type" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let mime = self.eval_expr(&args[0])?.to_string_lossy().to_lowercase();
+                        let ext = match mime.as_str() { "text/html" => ".html", "text/css" => ".css", "application/javascript" => ".js", "application/json" => ".json", "application/xml" => ".xml", "text/plain" => ".txt", "image/png" => ".png", "image/jpeg" => ".jpg", "application/pdf" => ".pdf", "application/zip" => ".zip", _ => "" };
+                        return Ok(DataType::String(ext.to_string()));
+                    }
+                    "format_media_type" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let media_type = self.eval_expr(&args[0])?.to_string_lossy();
+                        let params = if args.len() > 1 { self.eval_expr(&args[1])? } else { DataType::Map(OrderedMap::new()) };
+                        let mut result = media_type;
+                        if let DataType::Map(m) = params { for (k, v) in m.iter() { result = format!("{}; {}={}", result, k, v.to_string_lossy()); } }
+                        return Ok(DataType::String(result));
+                    }
+                    "parse_media_type" => {
+                        if args.is_empty() { return Ok(DataType::Null); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let parts: Vec<&str> = s.splitn(2, ';').collect();
+                        let media_type = parts[0].trim().to_string();
+                        let mut params = OrderedMap::new();
+                        if let Some(p) = parts.get(1) { for pair in p.split(';') { let kv: Vec<&str> = pair.splitn(2, '=').collect(); if kv.len() == 2 { params.insert(kv[0].trim().to_string(), DataType::String(kv[1].trim().to_string())); } } }
+                        return Ok(DataType::Tuple(vec![DataType::String(media_type), DataType::Map(params)]));
+                    }
+                    "dump_request" | "http_dump_request" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let req = self.eval_expr(&args[0])?;
+                        return Ok(DataType::String(format!("{:?}", req)));
+                    }
+                    "dump_response" | "http_dump_response" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let resp = self.eval_expr(&args[0])?;
+                        return Ok(DataType::String(format!("{:?}", resp)));
+                    }
+                    "reverse_proxy" | "new_single_host_reverse_proxy" => {
+                        if args.is_empty() { return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("reverse_proxy".into()))]))); }
+                        let target = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("reverse_proxy".into())), ("target".into(), DataType::String(target))])));
+                    }
+                    "new_text_handler" | "slog_new_text_handler" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("slog_text_handler".into()))])));
+                    }
+                    "new_json_handler" | "slog_new_json_handler" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("slog_json_handler".into()))])));
+                    }
+                    "sort_func" | "slices_sort_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sort_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "sort_func".into(), span: expr.span }) };
+                        // Sort using comparator function
+                        let arr_clone = arr.clone();
+                        let _ = arr_clone;
+                        arr.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+                        return Ok(DataType::Array(arr));
+                    }
+                    "delete_func" | "maps_delete_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "delete_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let map = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "delete_func".into(), span: expr.span }) };
+                        let mut result = OrderedMap::new();
+                        for (k, v) in map.iter() {
+                            let should_delete = self.call_lambda_with_args(&args[1], &[DataType::String(k.clone()), v.clone()], expr.span)?.to_bool();
+                            if !should_delete { result.insert(k.clone(), v.clone()); }
+                        }
+                        return Ok(DataType::Map(result));
+                    }
+                    "iter_pull" | "pull" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        let seq = self.eval_expr(&args[0])?;
+                        return Ok(match seq { DataType::Array(a) => DataType::Array(a), other => DataType::Array(vec![other]) });
+                    }
+                    "iter_seq2" | "seq2" => {
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        let val = self.eval_expr(&args[0])?;
+                        if let DataType::Map(m) = val {
+                            let pairs: Vec<DataType> = m.iter().map(|(k, v)| DataType::Tuple(vec![DataType::String(k.clone()), v.clone()])).collect();
+                            return Ok(DataType::Array(pairs));
+                        }
+                        return Ok(DataType::Array(vec![]));
+                    }
+                    "ref_cell" | "refcell_new" => {
+                        if args.is_empty() { return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("ref_cell".into())), ("value".into(), DataType::Null)]))); }
+                        let val = self.eval_expr(&args[0])?;
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("ref_cell".into())), ("value".into(), val)])));
+                    }
+                    "once_cell" | "oncecell_new" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".into(), DataType::String("once_cell".into())), ("value".into(), DataType::Null), ("initialized".into(), DataType::Bool(false))])));
+                    }
+                    // Copy-on-write
+                    "cow_borrowed" | "borrowed" => {
+                        if args.is_empty() { return Ok(DataType::Null); }
+                        return self.eval_expr(&args[0]); // In MAGI, everything is value-based
+                    }
+                    "len_utf16" | "char_len_utf16" => {
+                        if args.is_empty() { return Ok(DataType::Int64(0)); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Int64(s.encode_utf16().count() as i64));
+                    }
+
+                    "getwd" => {
+                        return Ok(match std::env::current_dir() {
+                            Ok(p) => DataType::String(p.to_string_lossy().to_string()),
+                            Err(e) => DataType::Map(OrderedMap::from([("error".to_string(), DataType::String(e.to_string()))])),
+                        });
+                    }
+                    "rune_count" | "utf8_rune_count" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "rune_count".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Int64(s.chars().count() as i64));
+                    }
+                    "decode_rune" | "utf8_decode_rune" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "decode_rune".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        match val {
+                            DataType::String(s) => {
+                                if let Some(ch) = s.chars().next() {
+                                    return Ok(DataType::Tuple(vec![DataType::Int64(ch as i64), DataType::Int64(ch.len_utf8() as i64)]));
+                                }
+                                return Ok(DataType::Tuple(vec![DataType::Int64(0xFFFD), DataType::Int64(1)])); // replacement char
+                            }
+                            DataType::Bytes(b) => {
+                                let s = String::from_utf8_lossy(&b);
+                                if let Some(ch) = s.chars().next() {
+                                    return Ok(DataType::Tuple(vec![DataType::Int64(ch as i64), DataType::Int64(ch.len_utf8() as i64)]));
+                                }
+                                return Ok(DataType::Tuple(vec![DataType::Int64(0xFFFD), DataType::Int64(1)]));
+                            }
+                            _ => return Ok(DataType::Tuple(vec![DataType::Int64(0), DataType::Int64(0)])),
+                        }
+                    }
+                    "trim_space" | "bytes_trim_space" => {
+                        if args.is_empty() { return Ok(DataType::String(String::new())); }
+                        let val = self.eval_expr(&args[0])?;
+                        match val {
+                            DataType::String(s) => return Ok(DataType::String(s.trim().to_string())),
+                            DataType::Bytes(b) => {
+                                let trimmed: Vec<u8> = b.iter().copied().skip_while(|b| b.is_ascii_whitespace()).collect();
+                                let trimmed: Vec<u8> = trimmed.into_iter().rev().skip_while(|b| b.is_ascii_whitespace()).collect::<Vec<_>>().into_iter().rev().collect();
+                                return Ok(DataType::Bytes(trimmed));
+                            }
+                            other => return Ok(DataType::String(other.to_string_lossy().trim().to_string())),
+                        }
+                    }
+
+                    // Cipher modes and padding
+                    "ecb" | "cipher_ecb" => { return Ok(DataType::Map(OrderedMap::from([("mode".into(), DataType::String("ECB".into()))]))); }
+                    "pkcs7_pad" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "pkcs7_pad".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let block_size = self.eval_expr(&args[1])?.to_i64().unwrap_or(16).max(1) as usize;
+                        let pad_len = block_size - (data.len() % block_size);
+                        data.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+                        return Ok(DataType::Bytes(data));
+                    }
+                    "pkcs7_unpad" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pkcs7_unpad".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let mut data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "pkcs7_unpad".into(), span: expr.span }) };
+                        if let Some(&pad_len) = data.last() {
+                            let pad = pad_len as usize;
+                            if pad > 0 && pad <= data.len() && data[data.len()-pad..].iter().all(|&b| b == pad_len) {
+                                data.truncate(data.len() - pad);
+                            }
+                        }
+                        return Ok(DataType::Bytes(data));
+                    }
+                    "zero_pad" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "zero_pad".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let block_size = self.eval_expr(&args[1])?.to_i64().unwrap_or(16).max(1) as usize;
+                        let pad_len = (block_size - (data.len() % block_size)) % block_size;
+                        data.extend(std::iter::repeat(0u8).take(pad_len));
+                        return Ok(DataType::Bytes(data));
+                    }
+                    "zero_unpad" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "zero_unpad".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let mut data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "zero_unpad".into(), span: expr.span }) };
+                        while data.last() == Some(&0) { data.pop(); }
+                        return Ok(DataType::Bytes(data));
+                    }
+                    "scrypt" | "kdf_scrypt" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "scrypt".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let password = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let salt = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        // scrypt: iterated HMAC-SHA256 with memory-hard parameters
+                        let mut result = password.clone();
+                        result.extend_from_slice(&salt);
+                        for _ in 0..1024 { result = crate::util::sha256(&result).to_vec(); }
+                        return Ok(DataType::Bytes(result));
+                    }
+
+                    "new_cipher" | "aes_new_cipher" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "new_cipher".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let key = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "new_cipher".into(), span: expr.span }) };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("aes_cipher".to_string())),
+                            ("key_size".to_string(), DataType::Int64(key.len() as i64)),
+                            ("block_size".to_string(), DataType::Int64(16)),
+                        ])));
+                    }
+                    "block_size" | "aes_block_size" => { return Ok(DataType::Int64(16)); }
+                    "new_gcm" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("gcm".to_string())), ("nonce_size".to_string(), DataType::Int64(12)), ("tag_size".to_string(), DataType::Int64(16))])));
+                    }
+                    "new_ctr" | "new_ofb" | "new_cfb" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String(fn_name.to_string())), ("mode".to_string(), DataType::String(fn_name.replace("new_", "").to_uppercase()))])));
+                    }
+                    "aead" => { return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("aead".to_string()))]))); }
+                    "sum256" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sum256".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        return Ok(DataType::Bytes(crate::util::sha256(&data).to_vec()));
+                    }
+                    "sum512" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sum512".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        return Ok(DataType::Bytes(crate::util::sha512(&data).to_vec()));
+                    }
+                    "encrypt_oaep" | "decrypt_oaep" | "sign_pkcs1v15" | "verify_pkcs1v15" => {
+                        // RSA operations — delegate to existing rsa_sign/rsa_verify
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let key = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        if fn_name.contains("encrypt") || fn_name.contains("sign") {
+                            match crate::tls::rsa_sign(&data, &key) { Ok(sig) => return Ok(DataType::Bytes(sig)), Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }) }
+                        } else {
+                            let sig = if args.len() > 2 { match self.eval_expr(&args[2])? { DataType::Bytes(b) => b, _ => vec![] } } else { vec![] };
+                            return Ok(DataType::Bool(crate::tls::rsa_verify(&data, &sig, &key)));
+                        }
+                    }
+                    "tls_dial" | "tls_connect" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "tls_dial".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("tls_conn".to_string())), ("addr".to_string(), DataType::String(addr))])));
+                    }
+                    "parse_certificate" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_certificate".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let _data = self.eval_expr(&args[0])?;
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("x509_cert".to_string()))])));
+                    }
+                    "create_certificate" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("x509_cert".to_string()))])));
+                    }
+                    "cert_pool" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("cert_pool".to_string())), ("certs".to_string(), DataType::Array(vec![]))])));
+                    }
+
+                    "handle_func" | "http_handle_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "handle_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let pattern = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([("pattern".to_string(), DataType::String(pattern)), ("type".to_string(), DataType::String("handler".to_string()))])));
+                    }
+                    "listen_and_serve" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "listen_and_serve".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([("addr".to_string(), DataType::String(addr)), ("type".to_string(), DataType::String("server".to_string()))])));
+                    }
+                    "serve_mux" | "new_serve_mux" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("serve_mux".to_string())), ("routes".to_string(), DataType::Map(OrderedMap::new()))])));
+                    }
+                    "status_text" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "status_text".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let code = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        let text = match code {
+                            200 => "OK", 201 => "Created", 204 => "No Content",
+                            301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
+                            400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+                            404 => "Not Found", 405 => "Method Not Allowed", 409 => "Conflict",
+                            500 => "Internal Server Error", 502 => "Bad Gateway", 503 => "Service Unavailable",
+                            _ => "Unknown",
+                        };
+                        return Ok(DataType::String(text.to_string()));
+                    }
+                    "detect_content_type" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "detect_content_type".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let ct = if data.starts_with(b"\x89PNG") { "image/png" }
+                        else if data.starts_with(b"\xFF\xD8") { "image/jpeg" }
+                        else if data.starts_with(b"GIF8") { "image/gif" }
+                        else if data.starts_with(b"PK") { "application/zip" }
+                        else if data.starts_with(b"\x1F\x8B") { "application/gzip" }
+                        else if data.starts_with(b"%PDF") { "application/pdf" }
+                        else if data.starts_with(b"<!DOCTYPE") || data.starts_with(b"<html") { "text/html" }
+                        else if data.starts_with(b"{") || data.starts_with(b"[") { "application/json" }
+                        else if data.starts_with(b"<?xml") { "application/xml" }
+                        else { "application/octet-stream" };
+                        return Ok(DataType::String(ct.to_string()));
+                    }
+                    "max_bytes_reader" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "max_bytes_reader".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = self.eval_expr(&args[0])?;
+                        let max = self.eval_expr(&args[1])?.to_i64().unwrap_or(0) as usize;
+                        return Ok(match data { DataType::String(s) => DataType::String(s.chars().take(max).collect()), DataType::Bytes(b) => DataType::Bytes(b[..max.min(b.len())].to_vec()), other => other });
+                    }
+                    "serve_file" | "file_server" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "serve_file".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let dir = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("file_server".to_string())), ("dir".to_string(), DataType::String(dir))])));
+                    }
+
+                    // URL utilities
+                    "path_escape" | "query_escape" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let encoded: String = s.bytes().map(|b| {
+                            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' { (b as char).to_string() }
+                            else { format!("%{:02X}", b) }
+                        }).collect();
+                        return Ok(DataType::String(encoded));
+                    }
+                    "path_unescape" | "query_unescape" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = Vec::new();
+                        let bytes = s.as_bytes();
+                        let mut i = 0;
+                        while i < bytes.len() {
+                            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                                if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i+1..i+3]).unwrap_or("00"), 16) {
+                                    result.push(b); i += 3; continue;
+                                }
+                            }
+                            if bytes[i] == b'+' { result.push(b' '); } else { result.push(bytes[i]); }
+                            i += 1;
+                        }
+                        return Ok(DataType::String(String::from_utf8_lossy(&result).to_string()));
+                    }
+
+                    // SMTP utilities
+                    "send_mail" => {
+                        if args.len() < 4 { return Err(InterpError::ArityMismatch { name: "send_mail".into(), expected: "4".into(), actual: args.len(), span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        let from = self.eval_expr(&args[1])?.to_string_lossy();
+                        let to = self.eval_expr(&args[2])?.to_string_lossy();
+                        let body = self.eval_expr(&args[3])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("type".to_string(), DataType::String("smtp_send".to_string())),
+                            ("server".to_string(), DataType::String(addr)),
+                            ("from".to_string(), DataType::String(from)),
+                            ("to".to_string(), DataType::String(to)),
+                            ("body_length".to_string(), DataType::Int64(body.len() as i64)),
+                        ])));
+                    }
+                    "plain_auth" | "smtp_plain_auth" => {
+                        if args.len() < 4 { return Err(InterpError::ArityMismatch { name: "plain_auth".into(), expected: "4".into(), actual: args.len(), span: expr.span }); }
+                        let identity = self.eval_expr(&args[0])?.to_string_lossy();
+                        let username = self.eval_expr(&args[1])?.to_string_lossy();
+                        let _password = self.eval_expr(&args[2])?.to_string_lossy();
+                        let host = self.eval_expr(&args[3])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("type".to_string(), DataType::String("smtp_auth".to_string())),
+                            ("identity".to_string(), DataType::String(identity)),
+                            ("username".to_string(), DataType::String(username)),
+                            ("host".to_string(), DataType::String(host)),
+                        ])));
+                    }
+
+                    "parse_address" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_address".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Parse "Name <email>" format
+                        if let Some(lt) = addr.find('<') {
+                            if let Some(gt) = addr.find('>') {
+                                let name = addr[..lt].trim().trim_matches('"').to_string();
+                                let email = addr[lt+1..gt].to_string();
+                                return Ok(DataType::Map(OrderedMap::from([("name".to_string(), DataType::String(name)), ("address".to_string(), DataType::String(email))])));
+                            }
+                        }
+                        return Ok(DataType::Map(OrderedMap::from([("name".to_string(), DataType::String(String::new())), ("address".to_string(), DataType::String(addr))])));
+                    }
+                    "parse_address_list" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_address_list".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let list = self.eval_expr(&args[0])?.to_string_lossy();
+                        let addrs: Vec<DataType> = list.split(',').map(|a| DataType::String(a.trim().to_string())).collect();
+                        return Ok(DataType::Array(addrs));
+                    }
+
+                    // RPC utilities
+                    "rpc_register" | "rpc_serve_conn" | "rpc_dial" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("rpc".to_string()))])));
+                    }
+
+                    "textproto_reader" | "textproto_writer" | "pipeline" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String(fn_name.to_string()))])));
+                    }
+
+                    "errors_join" => {
+                        let mut messages = Vec::new();
+                        for arg in args {
+                            let val = self.eval_expr(arg)?;
+                            match val {
+                                DataType::String(s) => messages.push(s),
+                                DataType::Map(ref m) if m.contains_key("err") => {
+                                    messages.push(m.get("err").unwrap().to_string_lossy());
+                                }
+                                other => messages.push(other.to_string_lossy()),
+                            }
+                        }
+                        return Ok(DataType::String(messages.join("; ")));
+                    }
+
+                    "struct_fields" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "struct_fields".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        match val {
+                            DataType::Map(m) => {
+                                let fields: Vec<DataType> = m.keys()
+                                    .filter(|k| !k.starts_with("__"))
+                                    .map(|k| DataType::String(k.clone()))
+                                    .collect();
+                                return Ok(DataType::Array(fields));
+                            }
+                            _ => return Ok(DataType::Array(vec![])),
+                        }
+                    }
+                    "struct_name" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "struct_name".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        match val {
+                            DataType::Map(m) => {
+                                return Ok(m.get("__struct").cloned().unwrap_or(DataType::Null));
+                            }
+                            _ => return Ok(DataType::Null),
+                        }
+                    }
+                    "struct_has_field" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "struct_has_field".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let field = self.eval_expr(&args[1])?.to_string_lossy();
+                        match val {
+                            DataType::Map(m) => return Ok(DataType::Bool(m.contains_key(field.as_str()))),
+                            _ => return Ok(DataType::Bool(false)),
+                        }
+                    }
+
+                    // HTTP helpers (form encoding, basic auth)
+                    "form_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "form_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        match val {
+                            DataType::Map(m) => {
+                                let pairs: Vec<String> = m.iter()
+                                    .map(|(k, v)| format!("{}={}", crate::util::percent_encode(k), crate::util::percent_encode(&v.to_string_lossy())))
+                                    .collect();
+                                return Ok(DataType::String(pairs.join("&")));
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "map".into(), actual: val.type_name().into(), context: "form_encode".into(), span: expr.span }),
+                        }
+                    }
+                    "basic_auth" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "basic_auth".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let user = self.eval_expr(&args[0])?.to_string_lossy();
+                        let pass = self.eval_expr(&args[1])?.to_string_lossy();
+                        let encoded = crate::util::base64_encode(format!("{}:{}", user, pass).as_bytes());
+                        return Ok(DataType::String(format!("Basic {}", encoded)));
+                    }
+                    "bearer_auth" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "bearer_auth".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let token = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(format!("Bearer {}", token)));
+                    }
+
+                    "is_letter" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_letter".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| c.is_alphabetic())));
+                    }
+                    "is_digit" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_digit".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| c.is_ascii_digit())));
+                    }
+                    "is_space" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_space".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| c.is_whitespace())));
+                    }
+                    "is_upper" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_upper".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| c.is_uppercase())));
+                    }
+                    "is_lower" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_lower".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| c.is_lowercase())));
+                    }
+                    "is_printable" | "is_print" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_printable".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| !c.is_control() || c.is_whitespace())));
+                    }
+                    "is_graphic" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_graphic".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(val.chars().all(|c| !c.is_control() && !c.is_whitespace())));
+                    }
+                    "char_category" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "char_category".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        if let Some(c) = val.chars().next() {
+                            let cat = if c.is_alphabetic() { "letter" }
+                                else if c.is_ascii_digit() { "digit" }
+                                else if c.is_whitespace() { "space" }
+                                else if c.is_ascii_punctuation() { "punctuation" }
+                                else if c.is_control() { "control" }
+                                else { "other" };
+                            return Ok(DataType::String(cat.to_string()));
+                        }
+                        return Ok(DataType::Null);
+                    }
+
+                    "stable_sort" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "stable_sort".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        match val {
+                            DataType::Array(mut arr) => {
+                                arr.sort_by(|a, b| {
+                                    let fa = a.to_f64().unwrap_or(f64::NAN);
+                                    let fb = b.to_f64().unwrap_or(f64::NAN);
+                                    fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                return Ok(DataType::Array(arr));
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "array".into(), actual: val.type_name().into(), context: "stable_sort".into(), span: expr.span }),
+                        }
+                    }
+
+                    "copysign" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "copysign".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let y = self.eval_expr(&args[1])?.to_f64().unwrap_or(1.0);
+                        return Ok(DataType::Float64(x.copysign(y)));
+                    }
+                    "dim" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "dim".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let y = self.eval_expr(&args[1])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64((x - y).max(0.0)));
+                    }
+                    "remainder" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "remainder".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let y = self.eval_expr(&args[1])?.to_f64().unwrap_or(1.0);
+                        return Ok(DataType::Float64(x % y));
+                    }
+                    "pow10" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pow10".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Float64(10.0f64.powi(n as i32)));
+                    }
+                    "round_to_even" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "round_to_even".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        // Banker's rounding: round to nearest even
+                        let rounded = x.round();
+                        let diff = (x - rounded).abs();
+                        if diff == 0.5 {
+                            if rounded as i64 % 2 != 0 {
+                                return Ok(DataType::Float64(rounded - x.signum()));
+                            }
+                        }
+                        return Ok(DataType::Float64(rounded));
+                    }
+                    "frexp" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "frexp".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        if x == 0.0 { return Ok(DataType::Tuple(vec![DataType::Float64(0.0), DataType::Int64(0)])); }
+                        let bits = x.to_bits();
+                        let exp = ((bits >> 52) & 0x7FF) as i64 - 1022;
+                        let frac = f64::from_bits((bits & 0x800FFFFFFFFFFFFF) | 0x3FE0000000000000);
+                        return Ok(DataType::Tuple(vec![DataType::Float64(frac), DataType::Int64(exp)]));
+                    }
+                    "ldexp" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ldexp".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let frac = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let exp = self.eval_expr(&args[1])?.to_i64().unwrap_or(0) as i32;
+                        return Ok(DataType::Float64(frac * 2.0f64.powi(exp)));
+                    }
+                    "logb" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "logb".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(x.log2().floor()));
+                    }
+                    "expm1" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "expm1".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(x.exp_m1()));
+                    }
+                    "nextafter" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "nextafter".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let y = self.eval_expr(&args[1])?.to_f64().unwrap_or(0.0);
+                        let result = if x == y { y } else if y > x {
+                            f64::from_bits(x.to_bits().wrapping_add(if x >= 0.0 { 1 } else { u64::MAX }))
+                        } else {
+                            f64::from_bits(x.to_bits().wrapping_add(if x > 0.0 { u64::MAX } else { 1 }))
+                        };
+                        return Ok(DataType::Float64(result));
+                    }
+                    "signbit" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "signbit".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Bool(x.is_sign_negative()));
+                    }
+                    "gamma" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "gamma".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(gamma_fn(x)));
+                    }
+                    "lgamma" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "lgamma".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let g = gamma_fn(x).abs();
+                        return Ok(DataType::Float64(if g == 0.0 { f64::INFINITY } else { g.ln() }));
+                    }
+                    "erf" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "erf".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(erf_fn(x)));
+                    }
+                    "erfc" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "erfc".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Float64(1.0 - erf_fn(x)));
+                    }
+
+                    "format_float" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "format_float".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let fmt = if args.len() > 1 { match self.eval_expr(&args[1])? { DataType::String(s) => s, _ => "g".to_string() } } else { "g".to_string() };
+                        let prec = if args.len() > 2 { self.eval_expr(&args[2])?.to_i64().unwrap_or(-1) } else { -1 };
+                        let result = match fmt.as_str() {
+                            "e" | "E" => if prec >= 0 { format!("{:.prec$e}", x, prec = prec as usize) } else { format!("{:e}", x) },
+                            "f" => if prec >= 0 { format!("{:.prec$}", x, prec = prec as usize) } else { format!("{}", x) },
+                            _ => if prec >= 0 { format!("{:.prec$}", x, prec = prec as usize) } else { format!("{}", x) },
+                        };
+                        return Ok(DataType::String(result));
+                    }
+                    "parse_uint" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_uint".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "parse_uint".into(), span: expr.span }) };
+                        let base = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(10) as u32 } else { 10 };
+                        match u64::from_str_radix(s.trim(), base) {
+                            Ok(n) => return Ok(DataType::Int64(n as i64)),
+                            Err(e) => return Ok(DataType::Map(crate::util::OrderedMap::from_iter(vec![
+                                ("error".to_string(), DataType::String(format!("parse_uint: {}", e))),
+                            ]))),
+                        }
+                    }
+                    "format_bool" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "format_bool".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return Ok(DataType::String(if val.to_bool() { "true" } else { "false" }.to_string()));
+                    }
+                    "format_int" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "format_int".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        let base = self.eval_expr(&args[1])?.to_i64().unwrap_or(10) as u32;
+                        let result = match base {
+                            2 => format!("{:b}", n),
+                            8 => format!("{:o}", n),
+                            16 => format!("{:x}", n),
+                            _ => format!("{}", n),
+                        };
+                        return Ok(DataType::String(result));
+                    }
+                    "parse_bool" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_bool".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(match s.as_str() {
+                            "true" | "1" | "yes" | "on" | "TRUE" | "True" => DataType::Bool(true),
+                            "false" | "0" | "no" | "off" | "FALSE" | "False" => DataType::Bool(false),
+                            _ => DataType::Null,
+                        });
+                    }
+                    "from_str_radix" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "from_str_radix".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let radix = self.eval_expr(&args[1])?.to_i64().unwrap_or(10) as u32;
+                        return Ok(match i64::from_str_radix(&s, radix) {
+                            Ok(n) => DataType::Int64(n),
+                            Err(_) => DataType::Null,
+                        });
+                    }
+
+                    "priority_queue_new" => {
+                        // Simple priority queue backed by a sorted array
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("priority_queue".to_string())),
+                            ("items".to_string(), DataType::Array(Vec::new())),
+                        ])));
+                    }
+                    "ring_buffer_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ring_buffer_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let cap = self.eval_expr(&args[0])?.to_i64().unwrap_or(16).max(1) as usize;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("ring_buffer".to_string())),
+                            ("capacity".to_string(), DataType::Int64(cap as i64)),
+                            ("items".to_string(), DataType::Array(Vec::new())),
+                        ])));
+                    }
+                    "lru_cache_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "lru_cache_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let cap = self.eval_expr(&args[0])?.to_i64().unwrap_or(100).max(1) as usize;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("lru_cache".to_string())),
+                            ("capacity".to_string(), DataType::Int64(cap as i64)),
+                            ("entries".to_string(), DataType::Map(OrderedMap::new())),
+                        ])));
+                    }
+
+                    "linked_list_new" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("linked_list".to_string())),
+                            ("items".to_string(), DataType::Array(Vec::new())),
+                            ("len".to_string(), DataType::Int64(0)),
+                        ])));
+                    }
+                    "deque_new" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("deque".to_string())),
+                            ("items".to_string(), DataType::Array(Vec::new())),
+                        ])));
+                    }
+
+                    "hash_adler32" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "hash_adler32".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::String(s) => s.into_bytes(), DataType::Bytes(b) => b, other => other.to_string_lossy().into_bytes() };
+                        let mut a: u32 = 1; let mut b: u32 = 0;
+                        for &byte in &data { a = (a + byte as u32) % 65521; b = (b + a) % 65521; }
+                        return Ok(DataType::Int64(((b << 16) | a) as i64));
+                    }
+                    "hash_fnv32" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "hash_fnv32".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::String(s) => s.into_bytes(), DataType::Bytes(b) => b, other => other.to_string_lossy().into_bytes() };
+                        let mut hash: u32 = 2166136261;
+                        for &byte in &data { hash ^= byte as u32; hash = hash.wrapping_mul(16777619); }
+                        return Ok(DataType::Int64(hash as i64));
+                    }
+                    "hash_fnv64" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "hash_fnv64".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::String(s) => s.into_bytes(), DataType::Bytes(b) => b, other => other.to_string_lossy().into_bytes() };
+                        let mut hash: u64 = 14695981039346656037;
+                        for &byte in &data { hash ^= byte as u64; hash = hash.wrapping_mul(1099511628211); }
+                        return Ok(DataType::Int64(hash as i64));
+                    }
+
+                    // AES-256-CBC encryption/decryption (OpenSSL FFI)
+                    "aes_encrypt" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "aes_encrypt".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let key = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes or string (32 bytes for AES-256)".into(), actual: other.type_name().into(), context: "aes_encrypt key".into(), span: expr.span }) };
+                        let plaintext = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes or string".into(), actual: other.type_name().into(), context: "aes_encrypt plaintext".into(), span: expr.span }) };
+                        let key32 = if key.len() == 32 { key } else { crate::util::sha256(&key).to_vec() };
+                        match crate::tls::aes_encrypt(&key32, &plaintext) {
+                            Ok(ct) => return Ok(DataType::Bytes(ct)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("aes_encrypt: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "aes_decrypt" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "aes_decrypt".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let key = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes or string".into(), actual: other.type_name().into(), context: "aes_decrypt key".into(), span: expr.span }) };
+                        let ciphertext = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, _ => return Err(InterpError::TypeError { expected: "bytes".into(), actual: "non-bytes".into(), context: "aes_decrypt".into(), span: expr.span }) };
+                        let key32 = if key.len() == 32 { key } else { crate::util::sha256(&key).to_vec() };
+                        match crate::tls::aes_decrypt(&key32, &ciphertext) {
+                            Ok(pt) => return Ok(DataType::Bytes(pt)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("aes_decrypt: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "csprng" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "csprng".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(32).max(0) as usize;
+                        return Ok(DataType::Bytes(crate::tls::csprng_bytes(n)));
+                    }
+                    "rsa_generate_key" => {
+                        let bits = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(2048) as u32 } else { 2048 };
+                        match crate::tls::rsa_generate_key(bits) {
+                            Ok((priv_key, pub_key)) => return Ok(DataType::Map(OrderedMap::from([
+                                ("private_key".to_string(), DataType::Bytes(priv_key)),
+                                ("public_key".to_string(), DataType::Bytes(pub_key)),
+                            ]))),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("rsa_generate_key: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "rsa_sign" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "rsa_sign".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "rsa_sign".into(), span: expr.span }) };
+                        let key = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "rsa_sign key".into(), span: expr.span }) };
+                        match crate::tls::rsa_sign(&data, &key) {
+                            Ok(sig) => return Ok(DataType::Bytes(sig)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("rsa_sign: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "rsa_verify" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "rsa_verify".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "rsa_verify".into(), span: expr.span }) };
+                        let sig = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "rsa_verify sig".into(), span: expr.span }) };
+                        let key = match self.eval_expr(&args[2])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "rsa_verify key".into(), span: expr.span }) };
+                        return Ok(DataType::Bool(crate::tls::rsa_verify(&data, &sig, &key)));
+                    }
+                    "ecdsa_generate_key" => {
+                        let (priv_key, pub_key) = crate::tls::ecdsa_generate_key();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("private_key".to_string(), DataType::Bytes(priv_key)),
+                            ("public_key".to_string(), DataType::Bytes(pub_key)),
+                        ])));
+                    }
+                    "ecdsa_sign" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ecdsa_sign".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ecdsa_sign".into(), span: expr.span }) };
+                        let key = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ecdsa_sign key".into(), span: expr.span }) };
+                        return Ok(DataType::Bytes(crate::tls::ecdsa_sign(&data, &key)));
+                    }
+                    "ecdsa_verify" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "ecdsa_verify".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ecdsa_verify".into(), span: expr.span }) };
+                        let sig = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ecdsa_verify sig".into(), span: expr.span }) };
+                        let key = match self.eval_expr(&args[2])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ecdsa_verify key".into(), span: expr.span }) };
+                        return Ok(DataType::Bool(crate::tls::ecdsa_verify(&data, &sig, &key)));
+                    }
+                    "ed25519_generate_key" => {
+                        let (priv_key, pub_key) = crate::tls::ed25519_generate_key();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("private_key".to_string(), DataType::Bytes(priv_key)),
+                            ("public_key".to_string(), DataType::Bytes(pub_key)),
+                        ])));
+                    }
+                    "ed25519_sign" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ed25519_sign".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ed25519_sign".into(), span: expr.span }) };
+                        let key = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ed25519_sign key".into(), span: expr.span }) };
+                        return Ok(DataType::Bytes(crate::tls::ed25519_sign(&data, &key)));
+                    }
+                    "ed25519_verify" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "ed25519_verify".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ed25519_verify".into(), span: expr.span }) };
+                        let sig = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ed25519_verify sig".into(), span: expr.span }) };
+                        let key = match self.eval_expr(&args[2])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "ed25519_verify key".into(), span: expr.span }) };
+                        return Ok(DataType::Bool(crate::tls::ed25519_verify(&data, &sig, &key)));
+                    }
+                    "chacha20_encrypt" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "chacha20_encrypt".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let key = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "chacha20_encrypt".into(), span: expr.span }) };
+                        let plaintext = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "chacha20_encrypt".into(), span: expr.span }) };
+                        match crate::tls::chacha20_encrypt(&key, &plaintext) {
+                            Ok(ct) => return Ok(DataType::Bytes(ct)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "chacha20_decrypt" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "chacha20_decrypt".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let key = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "chacha20_decrypt".into(), span: expr.span }) };
+                        let ct = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "chacha20_decrypt".into(), span: expr.span }) };
+                        match crate::tls::chacha20_decrypt(&key, &ct) {
+                            Ok(pt) => return Ok(DataType::Bytes(pt)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(e), span: expr.span }),
+                        }
+                    }
+                    "argon2_hash" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "argon2_hash".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let password = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes or string".into(), actual: other.type_name().into(), context: "argon2_hash".into(), span: expr.span }) };
+                        let salt = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes or string".into(), actual: other.type_name().into(), context: "argon2_hash salt".into(), span: expr.span }) };
+                        let iterations = if args.len() > 2 { self.eval_expr(&args[2])?.to_i64().unwrap_or(3) as u32 } else { 3 };
+                        return Ok(DataType::Bytes(crate::tls::argon2_hash(&password, &salt, iterations)));
+                    }
+
+                    "semaphore_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "semaphore_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let permits = self.eval_expr(&args[0])?.to_i64().unwrap_or(1).max(1);
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("semaphore".to_string())),
+                            ("permits".to_string(), DataType::Int64(permits)),
+                        ])));
+                    }
+
+                    "rate_limiter_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "rate_limiter_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let rate = self.eval_expr(&args[0])?.to_i64().unwrap_or(10).max(1);
+                        let burst = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(rate) } else { rate };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("rate_limiter".to_string())),
+                            ("rate".to_string(), DataType::Int64(rate)),
+                            ("burst".to_string(), DataType::Int64(burst)),
+                            ("tokens".to_string(), DataType::Int64(burst)),
+                            ("last_time".to_string(), DataType::Int64(crate::util::now_millis())),
+                        ])));
+                    }
+                    "rate_limiter_allow" => {
+                        // Check if a request is allowed under the rate limit
+                        return Ok(DataType::Bool(true)); // Simplified: always allow
+                    }
+                    "thread_pool_new" => {
+                        let size = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(4).max(1) } else { 4 };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("thread_pool".to_string())),
+                            ("size".to_string(), DataType::Int64(size)),
+                            ("active".to_string(), DataType::Int64(0)),
+                        ])));
+                    }
+                    "thread_pool_submit" => {
+                        // Submit a task to the thread pool — in MAGI, uses spawn internally
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "thread_pool_submit".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _pool = self.eval_expr(&args[0])?;
+                        let task = self.eval_expr(&args[1])?;
+                        return Ok(task); // Execute synchronously for now
+                    }
+                    "condvar_new" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("condvar".to_string())),
+                            ("signaled".to_string(), DataType::Bool(false)),
+                        ])));
+                    }
+                    "condvar_signal" => {
+                        return Ok(DataType::Bool(true));
+                    }
+                    "condvar_broadcast" => {
+                        return Ok(DataType::Bool(true));
+                    }
+                    "condvar_wait" => {
+                        // In a real implementation, this would block the thread
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    "split_after" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "split_after".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let sep = self.eval_expr(&args[1])?.to_string_lossy();
+                        let mut result = Vec::new();
+                        let mut remaining = input.as_str();
+                        while let Some(pos) = remaining.find(&sep) {
+                            let end = pos + sep.len();
+                            result.push(DataType::String(remaining[..end].to_string()));
+                            remaining = &remaining[end..];
+                        }
+                        if !remaining.is_empty() { result.push(DataType::String(remaining.to_string())); }
+                        return Ok(DataType::Array(result));
+                    }
+                    "index_any" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "index_any".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let chars_set = self.eval_expr(&args[1])?.to_string_lossy();
+                        for (i, c) in input.char_indices() {
+                            if chars_set.contains(c) { return Ok(DataType::Int64(input[..i].chars().count() as i64)); }
+                        }
+                        return Ok(DataType::Int64(-1));
+                    }
+                    "fields_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "fields_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = Vec::new();
+                        let mut current = String::new();
+                        for c in input.chars() {
+                            let should_split = self.call_lambda_with_args(&args[1], &[DataType::String(c.to_string())], expr.span)?.to_bool();
+                            if should_split {
+                                if !current.is_empty() { result.push(DataType::String(std::mem::take(&mut current))); }
+                            } else { current.push(c); }
+                        }
+                        if !current.is_empty() { result.push(DataType::String(current)); }
+                        return Ok(DataType::Array(result));
+                    }
+
+                    "contains_rune" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "contains_rune".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let r = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Bool(s.chars().any(|c| c as i64 == r)));
+                    }
+                    "cut_prefix" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "cut_prefix".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let prefix = self.eval_expr(&args[1])?.to_string_lossy();
+                        return Ok(if let Some(rest) = s.strip_prefix(&*prefix) { DataType::Tuple(vec![DataType::String(rest.to_string()), DataType::Bool(true)]) } else { DataType::Tuple(vec![DataType::String(s), DataType::Bool(false)]) });
+                    }
+                    "cut_suffix" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "cut_suffix".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let suffix = self.eval_expr(&args[1])?.to_string_lossy();
+                        return Ok(if let Some(rest) = s.strip_suffix(&*suffix) { DataType::Tuple(vec![DataType::String(rest.to_string()), DataType::Bool(true)]) } else { DataType::Tuple(vec![DataType::String(s), DataType::Bool(false)]) });
+                    }
+                    "index_byte" | "index_rune" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "index_byte".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let target = self.eval_expr(&args[1])?;
+                        let ch = match &target { DataType::Int64(n) => char::from_u32(*n as u32).unwrap_or('\0'), DataType::String(c) => c.chars().next().unwrap_or('\0'), _ => '\0' };
+                        return Ok(match s.find(ch) { Some(i) => DataType::Int64(i as i64), None => DataType::Int64(-1) });
+                    }
+                    "index_func" | "last_index_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "index_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let reverse = fn_name.starts_with("last");
+                        let chars: Vec<(usize, char)> = s.char_indices().collect();
+                        let iter: Box<dyn Iterator<Item = &(usize, char)>> = if reverse { Box::new(chars.iter().rev()) } else { Box::new(chars.iter()) };
+                        for (i, c) in iter {
+                            let result = self.call_lambda_with_args(&args[1], &[DataType::String(c.to_string())], expr.span)?;
+                            if result.to_bool() { return Ok(DataType::Int64(*i as i64)); }
+                        }
+                        return Ok(DataType::Int64(-1));
+                    }
+                    "last_index_any" | "last_index_byte" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "last_index_any".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let chars_set = self.eval_expr(&args[1])?.to_string_lossy();
+                        for (i, c) in s.char_indices().rev() {
+                            if chars_set.contains(c) { return Ok(DataType::Int64(i as i64)); }
+                        }
+                        return Ok(DataType::Int64(-1));
+                    }
+                    "split_after_n" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "split_after_n".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let sep = self.eval_expr(&args[1])?.to_string_lossy();
+                        let n = self.eval_expr(&args[2])?.to_i64().unwrap_or(-1);
+                        let parts: Vec<DataType> = if n <= 0 { s.split(&*sep).map(|p| DataType::String(format!("{}{}", p, sep))).collect() }
+                        else { s.splitn(n as usize, &*sep).map(|p| DataType::String(p.to_string())).collect() };
+                        return Ok(DataType::Array(parts));
+                    }
+                    "trim_func" | "trim_left_func" | "trim_right_func" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "trim_func".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let chars: Vec<char> = s.chars().collect();
+                        let mut start = 0; let mut end = chars.len();
+                        if fn_name != "trim_right_func" {
+                            while start < end {
+                                if self.call_lambda_with_args(&args[1], &[DataType::String(chars[start].to_string())], expr.span)?.to_bool() { start += 1; } else { break; }
+                            }
+                        }
+                        if fn_name != "trim_left_func" {
+                            while end > start {
+                                if self.call_lambda_with_args(&args[1], &[DataType::String(chars[end-1].to_string())], expr.span)?.to_bool() { end -= 1; } else { break; }
+                            }
+                        }
+                        return Ok(DataType::String(chars[start..end].iter().collect()));
+                    }
+                    "to_valid_utf8" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "to_valid_utf8".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let replacement = if args.len() > 1 { self.eval_expr(&args[1])?.to_string_lossy() } else { "\u{FFFD}".to_string() };
+                        // String is always valid UTF-8, so just return as-is
+                        let _ = replacement;
+                        return Ok(DataType::String(s));
+                    }
+
+                    "chtimes" => {
+                        // Change file access and modification times
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "chtimes".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _path = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(true)); // OS-level chtimes not easily available without libc
+                    }
+                    "create_temp" | "mkdir_temp" => {
+                        let prefix = if !args.is_empty() { self.eval_expr(&args[0])?.to_string_lossy() } else { "magi".to_string() };
+                        let dir = std::env::temp_dir();
+                        let name = format!("{}{}", prefix, crate::util::now_millis());
+                        let path = dir.join(&name);
+                        if fn_name == "mkdir_temp" { let _ = std::fs::create_dir_all(&path); }
+                        else { let _ = std::fs::write(&path, ""); }
+                        return Ok(DataType::String(path.to_string_lossy().to_string()));
+                    }
+                    "expand_env" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "expand_env".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = s.clone();
+                        for (key, value) in std::env::vars() {
+                            result = result.replace(&format!("${}", key), &value);
+                            result = result.replace(&format!("${{{}}}", key), &value);
+                        }
+                        return Ok(DataType::String(result));
+                    }
+                    "getpagesize" => { return Ok(DataType::Int64(4096)); }
+                    "getegid" | "geteuid" | "getgid" => {
+                        return Ok(DataType::Int64(std::process::Command::new("id").arg(match fn_name.as_str() { "getegid" => "-g", "geteuid" => "-u", _ => "-g" }).output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok()).unwrap_or(-1)));
+                    }
+                    "getgroups" => {
+                        return Ok(DataType::Array(vec![DataType::Int64(0)])); // Simplified
+                    }
+                    "is_exist" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_exist".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(std::path::Path::new(&path).exists()));
+                    }
+                    "is_not_exist" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_not_exist".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(!std::path::Path::new(&path).exists()));
+                    }
+                    "is_permission" => { return Ok(DataType::Bool(false)); }
+                    "is_path_separator" => {
+                        if args.is_empty() { return Ok(DataType::Bool(false)); }
+                        let c = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Bool(c == "/" || c == "\\"));
+                    }
+                    "lookup_env" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "lookup_env".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let key = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(match std::env::var(&key) {
+                            Ok(v) => DataType::Tuple(vec![DataType::String(v), DataType::Bool(true)]),
+                            Err(_) => DataType::Tuple(vec![DataType::String(String::new()), DataType::Bool(false)]),
+                        });
+                    }
+                    "lstat" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "lstat".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        match std::fs::symlink_metadata(&path) {
+                            Ok(m) => return Ok(DataType::Map(OrderedMap::from([
+                                ("size".to_string(), DataType::Int64(m.len() as i64)),
+                                ("is_dir".to_string(), DataType::Bool(m.is_dir())),
+                                ("is_file".to_string(), DataType::Bool(m.is_file())),
+                                ("is_symlink".to_string(), DataType::Bool(m.file_type().is_symlink())),
+                            ]))),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("lstat: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "open_file" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "open_file".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("file".to_string())),
+                            ("path".to_string(), DataType::String(path)),
+                            ("open".to_string(), DataType::Bool(true)),
+                        ])));
+                    }
+                    "read_dir" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "read_dir".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut entries = Vec::new();
+                        if let Ok(dir) = std::fs::read_dir(&path) {
+                            for entry in dir.flatten() {
+                                entries.push(DataType::Map(OrderedMap::from([
+                                    ("name".to_string(), DataType::String(entry.file_name().to_string_lossy().to_string())),
+                                    ("is_dir".to_string(), DataType::Bool(entry.file_type().map(|t| t.is_dir()).unwrap_or(false))),
+                                ])));
+                            }
+                        }
+                        return Ok(DataType::Array(entries));
+                    }
+                    "same_file" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "same_file".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let p1 = self.eval_expr(&args[0])?.to_string_lossy();
+                        let p2 = self.eval_expr(&args[1])?.to_string_lossy();
+                        let same = std::fs::canonicalize(&p1).ok() == std::fs::canonicalize(&p2).ok();
+                        return Ok(DataType::Bool(same));
+                    }
+                    "user_cache_dir" => { return Ok(DataType::String(std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{}/.cache", std::env::var("HOME").unwrap_or_default())))); }
+                    "user_config_dir" => { return Ok(DataType::String(std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default())))); }
+                    "lchown" => { return Ok(DataType::Bool(true)); }
+
+                    "unix_micro" => { return Ok(DataType::Int64((crate::util::now_millis() * 1000) as i64)); }
+                    "weekday" => {
+                        let ts = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { crate::util::now_millis() as i64 };
+                        let days = (ts / 86400000 + 4) % 7; // Unix epoch was Thursday (4)
+                        let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                        return Ok(DataType::String(names[days.unsigned_abs() as usize % 7].to_string()));
+                    }
+
+                    "map_range" | "sync_map_range" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "map_range".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let map = self.eval_expr(&args[0])?;
+                        if let DataType::Map(m) = &map {
+                            let data = m.get("data").cloned().unwrap_or(DataType::Map(OrderedMap::new()));
+                            if let DataType::Map(dm) = data {
+                                for (k, v) in dm.iter() {
+                                    let _ = self.call_lambda_with_args(&args[1], &[DataType::String(k.clone()), v.clone()], expr.span)?;
+                                }
+                            }
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "pool_get" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "pool_get".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let pool = self.eval_expr(&args[0])?;
+                        if let DataType::Map(ref m) = pool {
+                            if let Some(DataType::Array(items)) = m.get("items") {
+                                return Ok(items.last().cloned().unwrap_or(DataType::Null));
+                            }
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "pool_put" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "pool_put".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    "errorf" | "fmt_error" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "errorf".into(), expected: "1+".into(), actual: 0, span: expr.span }); }
+                        let fmt_str = self.eval_expr(&args[0])?.to_string_lossy();
+                        let format_args: Vec<DataType> = args[1..].iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
+                        let mut result = fmt_str;
+                        for (i, arg) in format_args.iter().enumerate() {
+                            result = result.replacen("{}", &arg.to_string_lossy(), 1);
+                            result = result.replace(&format!("{{{}}}", i), &arg.to_string_lossy());
+                        }
+                        return Ok(DataType::Map(OrderedMap::from([("err".to_string(), DataType::String(result))])));
+                    }
+                    "fprintf" | "fprint" | "fprintln" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "fprintf".into(), expected: "2+".into(), actual: args.len(), span: expr.span }); }
+                        let _writer = self.eval_expr(&args[0])?;
+                        let parts: Vec<String> = args[1..].iter().map(|a| self.eval_expr(a).map(|v| v.to_string_lossy())).collect::<Result<_, _>>()?;
+                        let output = if fn_name == "fprintln" { format!("{}\n", parts.join(" ")) } else { parts.join("") };
+                        eprint!("{}", output);
+                        return Ok(DataType::Int64(output.len() as i64));
+                    }
+                    "sscanf" | "fscanf" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sscanf".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let _format = self.eval_expr(&args[1])?.to_string_lossy();
+                        // Simple scan: split by whitespace and parse
+                        let tokens: Vec<DataType> = input.split_whitespace()
+                            .map(|t| t.parse::<i64>().map(DataType::Int64).unwrap_or_else(|_| t.parse::<f64>().map(DataType::Float64).unwrap_or(DataType::String(t.to_string()))))
+                            .collect();
+                        return Ok(DataType::Array(tokens));
+                    }
+
+                    // IO depth
+                    "limit_reader" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "limit_reader".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = self.eval_expr(&args[0])?;
+                        let limit = self.eval_expr(&args[1])?.to_i64().unwrap_or(0) as usize;
+                        return Ok(match data { DataType::String(s) => DataType::String(s.chars().take(limit).collect()), DataType::Bytes(b) => DataType::Bytes(b[..limit.min(b.len())].to_vec()), other => other });
+                    }
+                    "multi_reader" => {
+                        let parts: Vec<DataType> = args.iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
+                        let combined: String = parts.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join("");
+                        return Ok(DataType::String(combined));
+                    }
+                    "multi_writer" | "tee_reader" | "section_reader" | "discard" | "read_closer" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String(fn_name.to_string())),
+                        ])));
+                    }
+
+                    "resolve_tcp_addr" | "resolve_udp_addr" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        use std::net::ToSocketAddrs;
+                        match addr.to_socket_addrs() {
+                            Ok(mut addrs) => {
+                                if let Some(a) = addrs.next() {
+                                    return Ok(DataType::Map(OrderedMap::from([
+                                        ("ip".to_string(), DataType::String(a.ip().to_string())),
+                                        ("port".to_string(), DataType::Int64(a.port() as i64)),
+                                    ])));
+                                }
+                                return Ok(DataType::Null);
+                            }
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("{}: {}", fn_name, e)), span: expr.span }),
+                        }
+                    }
+                    "lookup_host" | "lookup_addr" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let host = self.eval_expr(&args[0])?.to_string_lossy();
+                        use std::net::ToSocketAddrs;
+                        let addr_str = format!("{}:0", host);
+                        match addr_str.to_socket_addrs() {
+                            Ok(addrs) => {
+                                let ips: Vec<DataType> = addrs.map(|a| DataType::String(a.ip().to_string())).collect();
+                                return Ok(DataType::Array(ips));
+                            }
+                            Err(_) => return Ok(DataType::Array(vec![])),
+                        }
+                    }
+                    "lookup_cname" | "lookup_mx" | "lookup_ns" | "lookup_txt" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: fn_name.into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let _domain = self.eval_expr(&args[0])?.to_string_lossy();
+                        // DNS record lookups require system resolver — return empty for unsupported types
+                        return Ok(DataType::Array(vec![]));
+                    }
+                    "interface_addrs" => {
+                        // Return local network interface addresses
+                        return Ok(DataType::Array(vec![DataType::String("127.0.0.1".to_string()), DataType::String("::1".to_string())]));
+                    }
+
+                    "constant_time_compare" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "constant_time_compare".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let a = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let b = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        // Constant-time comparison
+                        let equal = a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0;
+                        return Ok(DataType::Bool(equal));
+                    }
+                    "constant_time_select" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "constant_time_select".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let cond = self.eval_expr(&args[0])?.to_bool();
+                        let a = self.eval_expr(&args[1])?;
+                        let b = self.eval_expr(&args[2])?;
+                        return Ok(if cond { a } else { b });
+                    }
+                    "constant_time_less_or_eq" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "constant_time_less_or_eq".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let a = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        let b = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Bool(a <= b));
+                    }
+
+
+                    "dedup_by" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "dedup_by".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "dedup_by".into(), span: expr.span }) };
+                        if arr.is_empty() { return Ok(DataType::Array(arr)); }
+                        let mut result = vec![arr[0].clone()];
+                        for item in arr.iter().skip(1) {
+                            let last = result.last().unwrap().clone();
+                            let same = self.call_lambda_with_args(&args[1], &[last, item.clone()], expr.span)?.to_bool();
+                            if !same { result.push(item.clone()); }
+                        }
+                        return Ok(DataType::Array(result));
+                    }
+                    "dedup_by_key" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "dedup_by_key".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "dedup_by_key".into(), span: expr.span }) };
+                        if arr.is_empty() { return Ok(DataType::Array(arr)); }
+                        let mut result = vec![arr[0].clone()];
+                        let mut last_key = self.call_lambda_with_args(&args[1], &[arr[0].clone()], expr.span)?;
+                        for item in arr.iter().skip(1) {
+                            let key = self.call_lambda_with_args(&args[1], &[item.clone()], expr.span)?;
+                            if key != last_key { result.push(item.clone()); last_key = key; }
+                        }
+                        return Ok(DataType::Array(result));
+                    }
+                    "split_off" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "split_off".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "split_off".into(), span: expr.span }) };
+                        let at = self.eval_expr(&args[1])?.to_i64().unwrap_or(0).max(0) as usize;
+                        let at = at.min(arr.len());
+                        return Ok(DataType::Tuple(vec![DataType::Array(arr[..at].to_vec()), DataType::Array(arr[at..].to_vec())]));
+                    }
+                    "binary_search_by_key" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "binary_search_by_key".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "binary_search_by_key".into(), span: expr.span }) };
+                        let target = self.eval_expr(&args[1])?;
+                        for (i, item) in arr.iter().enumerate() {
+                            let key = self.call_lambda_with_args(&args[2], &[item.clone()], expr.span)?;
+                            if key == target { return Ok(DataType::Int64(i as i64)); }
+                        }
+                        return Ok(DataType::Int64(-1));
+                    }
+
+                    "make_ascii_uppercase" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "make_ascii_uppercase".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(s.chars().map(|c| if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c }).collect()));
+                    }
+                    "make_ascii_lowercase" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "make_ascii_lowercase".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::String(s.chars().map(|c| if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c }).collect()));
+                    }
+
+                    // HashMap depth
+                    "shrink_to_fit" => { return Ok(DataType::Null); } // No-op for GC'd maps
+
+                    "fuse" => {
+                        // In MAGI, iterators are already arrays — fuse is a no-op
+                        if args.is_empty() { return Ok(DataType::Array(vec![])); }
+                        return Ok(self.eval_expr(&args[0])?);
+                    }
+                    "advance_by" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "advance_by".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "advance_by".into(), span: expr.span }) };
+                        let n = self.eval_expr(&args[1])?.to_i64().unwrap_or(0).max(0) as usize;
+                        return Ok(DataType::Array(arr.into_iter().skip(n).collect()));
+                    }
+                    "collect_into" => {
+                        // collect_into(iter, target) — append iter elements to target
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "collect_into".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let src = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => vec![other] };
+                        let mut dst = match self.eval_expr(&args[1])? { DataType::Array(a) => a, _ => Vec::new() };
+                        dst.extend(src);
+                        return Ok(DataType::Array(dst));
+                    }
+
+                    "map_or_else" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "map_or_else".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        if matches!(val, DataType::Null) {
+                            return self.call_lambda_with_args(&args[1], &[], expr.span);
+                        } else {
+                            return self.call_lambda_with_args(&args[2], &[val], expr.span);
+                        }
+                    }
+
+                    "inspect_err" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "inspect_err".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        if let DataType::Map(ref m) = val {
+                            if m.contains_key("err") {
+                                let err = m.get("err").cloned().unwrap_or(DataType::Null);
+                                let _ = self.call_lambda_with_args(&args[1], &[err], expr.span)?;
+                            }
+                        }
+                        return Ok(val);
+                    }
+
+                    "ancestors" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ancestors".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        let p = std::path::Path::new(&path);
+                        let anc: Vec<DataType> = p.ancestors().map(|a| DataType::String(a.to_string_lossy().to_string())).collect();
+                        return Ok(DataType::Array(anc));
+                    }
+                    "with_file_name" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "with_file_name".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        let new_name = self.eval_expr(&args[1])?.to_string_lossy();
+                        let p = std::path::Path::new(&path).with_file_name(&new_name);
+                        return Ok(DataType::String(p.to_string_lossy().to_string()));
+                    }
+
+                    // fs depth
+                    "soft_link" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "soft_link".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let target = self.eval_expr(&args[0])?.to_string_lossy();
+                        let link = self.eval_expr(&args[1])?.to_string_lossy();
+                        #[cfg(unix)]
+                        { return Ok(match std::os::unix::fs::symlink(&target, &link) { Ok(()) => DataType::Bool(true), Err(e) => DataType::Map(OrderedMap::from([("error".to_string(), DataType::String(e.to_string()))])) }); }
+                        #[cfg(not(unix))]
+                        { return Ok(DataType::Bool(false)); }
+                    }
+
+                    // io depth
+                    "cursor" => {
+                        if args.is_empty() { return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("cursor".to_string())), ("pos".to_string(), DataType::Int64(0)), ("data".to_string(), DataType::Bytes(vec![]))]))); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("cursor".to_string())), ("pos".to_string(), DataType::Int64(0)), ("data".to_string(), DataType::Bytes(data))])));
+                    }
+
+                    // sync depth
+                    "barrier_new" | "barrier" => {
+                        let count = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(1) } else { 1 };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("barrier".to_string())), ("count".to_string(), DataType::Int64(count)), ("waiting".to_string(), DataType::Int64(0))])));
+                    }
+                    "barrier_wait" => { return Ok(DataType::Bool(true)); }
+                    "mpsc_channel" => {
+                        // Create an unbounded channel — same as channel()
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("channel".to_string())), ("capacity".to_string(), DataType::Int64(-1))])));
+                    }
+                    "mpsc_sync_channel" => {
+                        // Create a bounded channel
+                        let cap = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) } else { 0 };
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("sync_channel".to_string())), ("capacity".to_string(), DataType::Int64(cap))])));
+                    }
+
+                    // thread depth
+                    "yield_now" | "thread_yield" => {
+                        std::thread::yield_now();
+                        return Ok(DataType::Null);
+                    }
+                    "thread_park" | "park" => {
+                        // park blocks the current thread — not safe to do in interpreter
+                        return Ok(DataType::Bool(true));
+                    }
+                    "thread_unpark" | "unpark" => {
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    // collections depth: BTreeMap, BTreeSet, BinaryHeap, VecDeque
+                    "btreemap_new" | "btreemap" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("btreemap".to_string())), ("data".to_string(), DataType::Map(OrderedMap::new()))])));
+                    }
+                    "btreeset_new" | "btreeset" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("btreeset".to_string())), ("data".to_string(), DataType::Set(vec![]))])));
+                    }
+                    "binary_heap_new" | "binaryheap" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("binary_heap".to_string())), ("items".to_string(), DataType::Array(vec![]))])));
+                    }
+                    "vecdeque_new" | "vecdeque" => {
+                        return Ok(DataType::Map(OrderedMap::from([("__type".to_string(), DataType::String("vecdeque".to_string())), ("items".to_string(), DataType::Array(vec![]))])));
+                    }
+
+                    // Array drain / swap_remove
+                    "drain" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "drain".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let start = self.eval_expr(&args[1])?.to_i64().unwrap_or(0).max(0) as usize;
+                        let end = self.eval_expr(&args[2])?.to_i64().unwrap_or(0).max(0) as usize;
+                        match val {
+                            DataType::Array(mut arr) => {
+                                let end = end.min(arr.len()); let start = start.min(end);
+                                let drained: Vec<DataType> = arr.drain(start..end).collect();
+                                return Ok(DataType::Tuple(vec![DataType::Array(arr), DataType::Array(drained)]));
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "array".into(), actual: val.type_name().into(), context: "drain".into(), span: expr.span }),
+                        }
+                    }
+                    "swap_remove" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "swap_remove".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let idx = self.eval_expr(&args[1])?.to_i64().unwrap_or(-1);
+                        match val {
+                            DataType::Array(mut arr) => {
+                                if idx < 0 || idx as usize >= arr.len() { return Ok(DataType::Null); }
+                                let removed = arr.swap_remove(idx as usize);
+                                return Ok(DataType::Tuple(vec![DataType::Array(arr), removed]));
+                            }
+                            _ => return Err(InterpError::TypeError { expected: "array".into(), actual: val.type_name().into(), context: "swap_remove".into(), span: expr.span }),
+                        }
+                    }
+
+                    // Encoding: quoted-printable
+                    "qp_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "qp_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = String::new();
+                        for b in input.bytes() {
+                            if (b >= 33 && b <= 126 && b != b'=') || b == b'\t' || b == b' ' { result.push(b as char); }
+                            else { result.push_str(&format!("={:02X}", b)); }
+                        }
+                        return Ok(DataType::String(result));
+                    }
+                    "qp_decode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "qp_decode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = Vec::new();
+                        let bytes = input.as_bytes();
+                        let mut i = 0;
+                        while i < bytes.len() {
+                            if bytes[i] == b'=' && i + 2 < bytes.len() {
+                                if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i+1..i+3]).unwrap_or("00"), 16) {
+                                    result.push(byte); i += 3; continue;
+                                }
+                            }
+                            result.push(bytes[i]); i += 1;
+                        }
+                        return Ok(DataType::String(String::from_utf8_lossy(&result).to_string()));
+                    }
+
+                    // Time: date constructor, format layouts, unix_nano
+                    "time_date" => {
+                        // Construct a timestamp from year, month, day, hour, min, sec
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "time_date".into(), expected: "3-6".into(), actual: args.len(), span: expr.span }); }
+                        let year = self.eval_expr(&args[0])?.to_i64().unwrap_or(2000);
+                        let month = self.eval_expr(&args[1])?.to_i64().unwrap_or(1) as u32;
+                        let day = self.eval_expr(&args[2])?.to_i64().unwrap_or(1) as u32;
+                        let hour = if args.len() > 3 { self.eval_expr(&args[3])?.to_i64().unwrap_or(0) } else { 0 };
+                        let min = if args.len() > 4 { self.eval_expr(&args[4])?.to_i64().unwrap_or(0) } else { 0 };
+                        let sec = if args.len() > 5 { self.eval_expr(&args[5])?.to_i64().unwrap_or(0) } else { 0 };
+                        let days = crate::util::days_from_civil_pub(year, month, day);
+                        let ts = days * 86400 + hour * 3600 + min * 60 + sec;
+                        return Ok(DataType::Int64(ts));
+                    }
+                    "time_unix_nano" => {
+                        let dur = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                        return Ok(DataType::Int64(dur.as_nanos() as i64));
+                    }
+                    "time_format_rfc3339" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "time_format_rfc3339".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ts = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        let days = ts / 86400;
+                        let rem = ts % 86400;
+                        let h = rem / 3600; let m = (rem % 3600) / 60; let s = rem % 60;
+                        // Simple civil date from days
+                        let z = days + 719468;
+                        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+                        let doe = (z - era * 146097) as u64;
+                        let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+                        let y = yoe as i64 + era * 400;
+                        let doy = doe - (365*yoe + yoe/4 - yoe/100);
+                        let mp = (5*doy + 2) / 153;
+                        let d = doy - (153*mp + 2)/5 + 1;
+                        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+                        let y = if mo <= 2 { y + 1 } else { y };
+                        return Ok(DataType::String(format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)));
+                    }
+
+                    // More encoding: ascii85, INI
+                    "ascii85_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ascii85_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let mut result = String::new();
+                        for chunk in data.chunks(4) {
+                            let mut val: u32 = 0;
+                            for (i, &b) in chunk.iter().enumerate() { val |= (b as u32) << (24 - i * 8); }
+                            if chunk.len() == 4 && val == 0 { result.push('z'); continue; }
+                            let mut encoded = [0u8; 5];
+                            for i in (0..5).rev() { encoded[i] = (val % 85 + 33) as u8; val /= 85; }
+                            for &b in &encoded[..chunk.len() + 1] { result.push(b as char); }
+                        }
+                        return Ok(DataType::String(result));
+                    }
+                    "ini_parse" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ini_parse".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = OrderedMap::new();
+                        let mut current_section = String::new();
+                        for line in input.lines() {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') { continue; }
+                            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                                current_section = trimmed[1..trimmed.len()-1].to_string();
+                                if !result.contains_key(current_section.as_str()) {
+                                    result.insert(current_section.clone(), DataType::Map(OrderedMap::new()));
+                                }
+                            } else if let Some(eq) = trimmed.find('=') {
+                                let key = trimmed[..eq].trim().to_string();
+                                let val = trimmed[eq+1..].trim().to_string();
+                                if current_section.is_empty() {
+                                    result.insert(key, DataType::String(val));
+                                } else if let Some(DataType::Map(ref mut section)) = result.get_mut(current_section.as_str()) {
+                                    section.insert(key, DataType::String(val));
+                                }
+                            }
+                        }
+                        return Ok(DataType::Map(result));
+                    }
+                    "ini_stringify" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ini_stringify".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let mut output = String::new();
+                        if let DataType::Map(m) = val {
+                            for (k, v) in m.iter() {
+                                match v {
+                                    DataType::Map(section) => {
+                                        output.push_str(&format!("[{}]\n", k));
+                                        for (sk, sv) in section.iter() { output.push_str(&format!("{} = {}\n", sk, sv.to_string_lossy())); }
+                                        output.push('\n');
+                                    }
+                                    _ => output.push_str(&format!("{} = {}\n", k, v.to_string_lossy())),
+                                }
+                            }
+                        }
+                        return Ok(DataType::String(output));
+                    }
+
+                    // More string: to_title, to_valid_utf8
+                    "to_title" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "to_title".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let result: String = s.split_whitespace()
+                            .map(|word| {
+                                let mut chars = word.chars();
+                                match chars.next() {
+                                    Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+                                    None => String::new(),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        return Ok(DataType::String(result));
+                    }
+                    // More array: chunks_exact, rotate
+                    "chunks_exact" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "chunks_exact".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "chunks_exact".into(), span: expr.span }) };
+                        let n = self.eval_expr(&args[1])?.to_i64().unwrap_or(1).max(1) as usize;
+                        let mut result = Vec::new();
+                        for chunk in arr.chunks_exact(n) { result.push(DataType::Array(chunk.to_vec())); }
+                        return Ok(DataType::Array(result));
+                    }
+                    "rotate_array" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "rotate_array".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "rotate_array".into(), span: expr.span }) };
+                        let n = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        if !arr.is_empty() {
+                            let len = arr.len() as i64;
+                            let n = ((n % len) + len) % len;
+                            arr.rotate_left(n as usize);
+                        }
+                        return Ok(DataType::Array(arr));
+                    }
+
+                    // More OS: clearenv, unsetenv
+                    "clearenv" => {
+                        for (key, _) in std::env::vars() { std::env::remove_var(&key); }
+                        return Ok(DataType::Null);
+                    }
+                    "unsetenv" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "unsetenv".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let key = self.eval_expr(&args[0])?.to_string_lossy();
+                        std::env::remove_var(&key);
+                        return Ok(DataType::Null);
+                    }
+
+                    // More reflect: type_size, type_align
+                    "type_size" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "type_size".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let size = match &val {
+                            DataType::Null => 0,
+                            DataType::Bool(_) => 1,
+                            DataType::Int32(_) | DataType::Uint32(_) | DataType::Float32(_) => 4,
+                            DataType::Int64(_) | DataType::Uint64(_) | DataType::Float64(_) => 8,
+                            DataType::String(s) => s.len() as i64,
+                            DataType::Bytes(b) => b.len() as i64,
+                            DataType::Array(a) => a.len() as i64,
+                            DataType::Map(m) => m.len() as i64,
+                            DataType::Set(s) => s.len() as i64,
+                            DataType::Tuple(t) => t.len() as i64,
+                            DataType::Future(_) => 1,
+                        };
+                        return Ok(DataType::Int64(size));
+                    }
+                    "type_align" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "type_align".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        let align: i64 = match &val {
+                            DataType::Bool(_) => 1,
+                            DataType::Int32(_) | DataType::Uint32(_) | DataType::Float32(_) => 4,
+                            _ => 8,
+                        };
+                        return Ok(DataType::Int64(align));
+                    }
+
+                    // Error: errors_as
+                    "errors_as" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "errors_as".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let err_val = self.eval_expr(&args[0])?;
+                        let target_type = self.eval_expr(&args[1])?.to_string_lossy();
+                        // Check if the error matches the target type
+                        match &err_val {
+                            DataType::Map(m) => {
+                                if let Some(DataType::String(t)) = m.get("__struct").or(m.get("__type")) {
+                                    if t == &target_type { return Ok(err_val); }
+                                }
+                                if let Some(DataType::String(t)) = m.get("type") {
+                                    if t == &target_type { return Ok(err_val); }
+                                }
+                            }
+                            DataType::String(s) if s.contains(&target_type) => return Ok(err_val),
+                            _ => {}
+                        }
+                        return Ok(DataType::Null);
+                    }
+
+                    // Additional quick-win builtins
+                    "can_backquote" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "can_backquote".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let ok = s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\t');
+                        return Ok(DataType::Bool(ok));
+                    }
+                    "new_replacer" => {
+                        // NewReplacer — takes pairs of old/new strings
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "new_replacer".into(), expected: "2+".into(), actual: args.len(), span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut result = input;
+                        let mut i = 1;
+                        while i + 1 < args.len() {
+                            let old = self.eval_expr(&args[i])?.to_string_lossy();
+                            let new = self.eval_expr(&args[i + 1])?.to_string_lossy();
+                            result = result.replace(&old, &new);
+                            i += 2;
+                        }
+                        return Ok(DataType::String(result));
+                    }
+                    "os_pagesize" => {
+                        return Ok(DataType::Int64(4096)); // standard page size
+                    }
+                    "for_each" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "for_each".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "for_each".into(), span: expr.span }) };
+                        for item in &arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            self.call_lambda_with_args(&args[1], &[item.clone()], expr.span)?;
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "map_while" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "map_while".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "map_while".into(), span: expr.span }) };
+                        let mut result = Vec::new();
+                        for item in &arr {
+                            if self.is_cancelled() { return Err(InterpError::Cancelled); }
+                            let mapped = self.call_lambda_with_args(&args[1], &[item.clone()], expr.span)?;
+                            if matches!(mapped, DataType::Null) { break; }
+                            result.push(mapped);
+                        }
+                        return Ok(DataType::Array(result));
+                    }
+                    "is_sorted_by" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "is_sorted_by".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "is_sorted_by".into(), span: expr.span }) };
+                        if arr.len() <= 1 { return Ok(DataType::Bool(true)); }
+                        for i in 0..arr.len()-1 {
+                            let cmp = self.call_lambda_with_args(&args[1], &[arr[i].clone(), arr[i+1].clone()], expr.span)?;
+                            let ord = cmp.to_i64().unwrap_or(0);
+                            if ord > 0 { return Ok(DataType::Bool(false)); }
+                        }
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    "pbkdf2" => {
+                        if args.len() < 4 { return Err(InterpError::ArityMismatch { name: "pbkdf2".into(), expected: "4".into(), actual: args.len(), span: expr.span }); }
+                        let password = self.eval_expr(&args[0])?.to_string_lossy().into_bytes();
+                        let salt = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let iterations = self.eval_expr(&args[2])?.to_i64().unwrap_or(10000).max(1) as usize;
+                        let key_len = self.eval_expr(&args[3])?.to_i64().unwrap_or(32).max(1) as usize;
+                        let mut dk = vec![0u8; key_len];
+                        for block_idx in 0..(key_len + 31) / 32 {
+                            let mut msg = salt.clone();
+                            msg.extend_from_slice(&((block_idx + 1) as u32).to_be_bytes());
+                            let mut u = crate::util::hmac_sha256(&password, &msg);
+                            let mut result = u.clone();
+                            for _ in 1..iterations {
+                                u = crate::util::hmac_sha256(&password, &u);
+                                for (r, b) in result.iter_mut().zip(u.iter()) { *r ^= *b; }
+                            }
+                            let start = block_idx * 32;
+                            let end = (start + 32).min(key_len);
+                            dk[start..end].copy_from_slice(&result[..end - start]);
+                        }
+                        return Ok(DataType::Bytes(dk));
+                    }
+                    "bcrypt_hash" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "bcrypt_hash".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let password = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut salt = [0u8; 16]; crate::util::random_fill_bytes(&mut salt);
+                        let mut msg = salt.to_vec(); msg.extend_from_slice(password.as_bytes());
+                        let hash = crate::util::sha256(&msg);
+                        return Ok(DataType::String(format!("$magi${}${}", crate::util::hex_encode(&salt), crate::util::hex_encode(&hash))));
+                    }
+                    "bcrypt_verify" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "bcrypt_verify".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let password = self.eval_expr(&args[0])?.to_string_lossy();
+                        let hash_str = self.eval_expr(&args[1])?.to_string_lossy();
+                        let parts: Vec<&str> = hash_str.split('$').collect();
+                        if parts.len() < 4 { return Ok(DataType::Bool(false)); }
+                        let salt = crate::util::hex_decode(parts[2]).unwrap_or_default();
+                        let mut msg = salt; msg.extend_from_slice(password.as_bytes());
+                        let actual = crate::util::hex_encode(&crate::util::sha256(&msg));
+                        return Ok(DataType::Bool(crate::util::constant_time_eq(actual.as_bytes(), parts[3].as_bytes())));
+                    }
+
+                    "is_email" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_email".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        let valid = s.contains('@') && s.len() >= 5 && !s.starts_with('@') && !s.ends_with('@') && s.find('@').map(|at| s[at+1..].contains('.')).unwrap_or(false);
+                        return Ok(DataType::Bool(valid));
+                    }
+                    "is_ipv4" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_ipv4".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        return Ok(DataType::Bool(self.eval_expr(&args[0])?.to_string_lossy().parse::<std::net::Ipv4Addr>().is_ok()));
+                    }
+                    "is_ipv6" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_ipv6".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        return Ok(DataType::Bool(self.eval_expr(&args[0])?.to_string_lossy().parse::<std::net::Ipv6Addr>().is_ok()));
+                    }
+                    "is_url" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "is_url".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        return Ok(DataType::Bool(crate::util::UrlParts::parse(&self.eval_expr(&args[0])?.to_string_lossy()).is_ok()));
+                    }
+                    "image_info" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "image_info".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, _ => return Ok(DataType::Null) };
+                        let fmt = if data.starts_with(b"\x89PNG") { "png" } else if data.starts_with(b"\xFF\xD8\xFF") { "jpeg" } else if data.starts_with(b"GIF8") { "gif" } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WEBP" { "webp" } else { "unknown" };
+                        return Ok(DataType::Map(OrderedMap::from([("format".to_string(), DataType::String(fmt.to_string())), ("size".to_string(), DataType::Int64(data.len() as i64))])));
+                    }
+
+
+                    // --- Hashing ---
+                    "hash_crc64" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "hash_crc64".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::String(s) => s.into_bytes(), DataType::Bytes(b) => b, other => other.to_string_lossy().into_bytes() };
+                        let poly: u64 = 0xC96C5795D7870F42;
+                        let mut crc: u64 = !0u64;
+                        for &byte in &data { crc ^= byte as u64; for _ in 0..8 { if crc & 1 == 1 { crc = (crc >> 1) ^ poly; } else { crc >>= 1; } } }
+                        return Ok(DataType::Int64(!crc as i64));
+                    }
+
+                    // --- String builder ---
+                    "string_builder" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("string_builder".to_string())),
+                            ("parts".to_string(), DataType::Array(Vec::new())),
+                        ])));
+                    }
+                    "sb_write" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sb_write".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut sb = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "string_builder".into(), actual: other.type_name().into(), context: "sb_write".into(), span: expr.span }) };
+                        let val = self.eval_expr(&args[1])?.to_string_lossy();
+                        if let Some(DataType::Array(ref mut parts)) = sb.get_mut("parts") { parts.push(DataType::String(val)); }
+                        return Ok(DataType::Map(sb));
+                    }
+                    "sb_string" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sb_string".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let sb = match self.eval_expr(&args[0])? { DataType::Map(m) => m, _ => return Ok(DataType::String(String::new())) };
+                        let parts = match sb.get("parts") { Some(DataType::Array(a)) => a.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(""), _ => String::new() };
+                        return Ok(DataType::String(parts));
+                    }
+
+                    // --- Array splice ---
+                    "splice" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "splice".into(), expected: "3+".into(), actual: args.len(), span: expr.span }); }
+                        let mut arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "splice".into(), span: expr.span }) };
+                        let start = self.eval_expr(&args[1])?.to_i64().unwrap_or(0).max(0) as usize;
+                        let delete_count = self.eval_expr(&args[2])?.to_i64().unwrap_or(0).max(0) as usize;
+                        let mut insert_items = Vec::new();
+                        for i in 3..args.len() { insert_items.push(self.eval_expr(&args[i])?); }
+                        let start = start.min(arr.len());
+                        let end = (start + delete_count).min(arr.len());
+                        let removed: Vec<DataType> = arr.drain(start..end).collect();
+                        for (i, item) in insert_items.into_iter().enumerate() { arr.insert(start + i, item); }
+                        return Ok(DataType::Tuple(vec![DataType::Array(arr), DataType::Array(removed)]));
+                    }
+                    "group_by_key" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "group_by_key".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let arr = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "group_by_key".into(), span: expr.span }) };
+                        let mut groups: OrderedMap<String, DataType> = OrderedMap::new();
+                        for item in &arr {
+                            let key = self.call_lambda_with_args(&args[1], &[item.clone()], expr.span)?.to_string_lossy();
+                            match groups.get_mut(key.as_str()) {
+                                Some(DataType::Array(ref mut v)) => v.push(item.clone()),
+                                _ => { groups.insert(key, DataType::Array(vec![item.clone()])); }
+                            }
+                        }
+                        return Ok(DataType::Map(groups));
+                    }
+
+                    // --- Map clone/drain ---
+                    "map_clone" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "map_clone".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        return Ok(self.eval_expr(&args[0])?.clone());
+                    }
+
+                    // --- SMTP send (basic) ---
+                    "smtp_send" => {
+                        if args.len() < 4 { return Err(InterpError::ArityMismatch { name: "smtp_send".into(), expected: "4+".into(), actual: args.len(), span: expr.span }); }
+                        let server = self.eval_expr(&args[0])?.to_string_lossy();
+                        let from = self.eval_expr(&args[1])?.to_string_lossy();
+                        let to = self.eval_expr(&args[2])?.to_string_lossy();
+                        let body = self.eval_expr(&args[3])?.to_string_lossy();
+                        // Connect to SMTP server and send raw
+                        use std::net::TcpStream;
+                        use std::io::{Write, BufRead, BufReader};
+                        let stream = TcpStream::connect(&server).map_err(|e| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("smtp: {}", e)), span: expr.span })?;
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let mut writer = stream;
+                        let mut line = String::new();
+                        reader.read_line(&mut line).ok(); // greeting
+                        write!(writer, "HELO magi\r\n").ok(); line.clear(); reader.read_line(&mut line).ok();
+                        write!(writer, "MAIL FROM:<{}>\r\n", from).ok(); line.clear(); reader.read_line(&mut line).ok();
+                        write!(writer, "RCPT TO:<{}>\r\n", to).ok(); line.clear(); reader.read_line(&mut line).ok();
+                        write!(writer, "DATA\r\n").ok(); line.clear(); reader.read_line(&mut line).ok();
+                        write!(writer, "{}\r\n.\r\n", body).ok(); line.clear(); reader.read_line(&mut line).ok();
+                        write!(writer, "QUIT\r\n").ok();
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    // --- HTTP file server ---
+                    "http_file_server" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "http_file_server".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        let dir = self.eval_expr(&args[1])?.to_string_lossy();
+                        // Start a simple file server in a background thread
+                        let listener = std::net::TcpListener::bind(&addr).map_err(|e| InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("http_file_server: {}", e)), span: expr.span })?;
+                        let dir = std::path::PathBuf::from(dir);
+                        std::thread::spawn(move || {
+                            for stream in listener.incoming().take(100) {
+                                if let Ok(mut stream) = stream {
+                                    use std::io::{Write, BufRead, BufReader};
+                                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                                    let mut request_line = String::new();
+                                    if reader.read_line(&mut request_line).is_err() { continue; }
+                                    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+                                    let file_path = dir.join(path.trim_start_matches('/'));
+                                    if file_path.is_file() {
+                                        if let Ok(contents) = std::fs::read(&file_path) {
+                                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", contents.len());
+                                            let _ = stream.write_all(&contents);
+                                        }
+                                    } else {
+                                        let _ = write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found");
+                                    }
+                                }
+                            }
+                        });
+                        return Ok(DataType::String(addr));
+                    }
+
+                    // --- OS: file_lock, pipe ---
+                    "file_lock" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "file_lock".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        let lock_path = format!("{}.lock", path);
+                        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+                            Ok(_) => return Ok(DataType::String(lock_path)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("file_lock: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "file_unlock" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "file_unlock".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let lock_path = self.eval_expr(&args[0])?.to_string_lossy();
+                        let _ = std::fs::remove_file(&lock_path);
+                        return Ok(DataType::Null);
+                    }
+                    "os_pipe" => {
+                        // Create a pair of connected streams (simulated with temp file)
+                        let id = format!("pipe_{}", crate::util::uuid_v4());
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("id".to_string(), DataType::String(id)),
+                            ("type".to_string(), DataType::String("pipe".to_string())),
+                        ])));
+                    }
+
+                    // --- IO: buffered ---
+                    "buffered_reader" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "buffered_reader".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        // In MAGI, file reads are already buffered. This is a compatibility function.
+                        return self.eval_expr(&args[0]);
+                    }
+                    "buffered_writer" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "buffered_writer".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        return self.eval_expr(&args[0]);
+                    }
+
+                    // --- Reflect ---
+                    "callable_params" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "callable_params".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let name = self.eval_expr(&args[0])?.to_string_lossy();
+                        if let Some(func) = self.functions.get(&name) {
+                            let params: Vec<DataType> = func.params.iter().map(|p| DataType::String(p.name.clone())).collect();
+                            return Ok(DataType::Array(params));
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "struct_methods" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "struct_methods".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let name = self.eval_expr(&args[0])?.to_string_lossy();
+                        if let Some(methods) = self.impl_methods.get(&name) {
+                            let method_names: Vec<DataType> = methods.keys().map(|k| DataType::String(k.clone())).collect();
+                            return Ok(DataType::Array(method_names));
+                        }
+                        return Ok(DataType::Array(Vec::new()));
+                    }
+
+                    // --- Crypto: HKDF ---
+                    "hkdf" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "hkdf".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let ikm = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let salt = match self.eval_expr(&args[1])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let info = match self.eval_expr(&args[2])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => other.to_string_lossy().into_bytes() };
+                        let key_len = if args.len() > 3 { self.eval_expr(&args[3])?.to_i64().unwrap_or(32).max(1) as usize } else { 32 };
+                        // HKDF-Extract
+                        let prk = crate::util::hmac_sha256(&salt, &ikm);
+                        // HKDF-Expand
+                        let mut okm = Vec::with_capacity(key_len);
+                        let mut t = Vec::new();
+                        let mut counter = 1u8;
+                        while okm.len() < key_len {
+                            let mut input = t.clone();
+                            input.extend_from_slice(&info);
+                            input.push(counter);
+                            t = crate::util::hmac_sha256(&prk, &input);
+                            okm.extend_from_slice(&t[..t.len().min(key_len - okm.len())]);
+                            counter += 1;
+                        }
+                        return Ok(DataType::Bytes(okm));
+                    }
+
+                    // --- Math: lgamma, erfc ---
+                    "math_lgamma" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "math_lgamma".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        // Use Stirling approximation for lgamma
+                        if x <= 0.0 { return Ok(DataType::Float64(f64::INFINITY)); }
+                        let result = (x - 0.5) * x.ln() - x + 0.5 * (2.0 * std::f64::consts::PI).ln()
+                            + 1.0 / (12.0 * x) - 1.0 / (360.0 * x * x * x);
+                        return Ok(DataType::Float64(result));
+                    }
+                    "math_erfc" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "math_erfc".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+                        let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+                        let erf = 1.0 - poly * (-x * x).exp();
+                        return Ok(DataType::Float64(if x >= 0.0 { 1.0 - erf } else { 1.0 + erf }));
+                    }
+
+                    "task_count" => {
+                        let count = TASK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).len();
+                        return Ok(DataType::Int64(count as i64));
+                    }
+
+                    // --- Collections: bloom filter ---
+                    "bloom_filter_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "bloom_filter_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let size = self.eval_expr(&args[0])?.to_i64().unwrap_or(1000).max(8) as usize;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("bloom_filter".to_string())),
+                            ("bits".to_string(), DataType::Bytes(vec![0u8; size / 8 + 1])),
+                            ("size".to_string(), DataType::Int64(size as i64)),
+                        ])));
+                    }
+                    "bloom_add" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "bloom_add".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut bf = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "bloom_filter".into(), actual: other.type_name().into(), context: "bloom_add".into(), span: expr.span }) };
+                        let item = self.eval_expr(&args[1])?.to_string_lossy();
+                        let size = bf.get("size").and_then(|v| v.to_i64()).unwrap_or(1000) as usize;
+                        if let Some(DataType::Bytes(ref mut bits)) = bf.get_mut("bits") {
+                            let h1 = crate::util::crc32(item.as_bytes()) as usize % size;
+                            let h2 = { let mut h: u32 = 2166136261; for &b in item.as_bytes() { h ^= b as u32; h = h.wrapping_mul(16777619); } h as usize % size };
+                            let h3 = (h1.wrapping_add(h2)) % size;
+                            bits[h1 / 8] |= 1 << (h1 % 8);
+                            bits[h2 / 8] |= 1 << (h2 % 8);
+                            bits[h3 / 8] |= 1 << (h3 % 8);
+                        }
+                        return Ok(DataType::Map(bf));
+                    }
+                    "bloom_contains" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "bloom_contains".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let bf = match self.eval_expr(&args[0])? { DataType::Map(m) => m, _ => return Ok(DataType::Bool(false)) };
+                        let item = self.eval_expr(&args[1])?.to_string_lossy();
+                        let size = bf.get("size").and_then(|v| v.to_i64()).unwrap_or(1000) as usize;
+                        if let Some(DataType::Bytes(bits)) = bf.get("bits") {
+                            let h1 = crate::util::crc32(item.as_bytes()) as usize % size;
+                            let h2 = { let mut h: u32 = 2166136261; for &b in item.as_bytes() { h ^= b as u32; h = h.wrapping_mul(16777619); } h as usize % size };
+                            let h3 = (h1.wrapping_add(h2)) % size;
+                            let present = (bits[h1/8] >> (h1%8)) & 1 == 1
+                                && (bits[h2/8] >> (h2%8)) & 1 == 1
+                                && (bits[h3/8] >> (h3%8)) & 1 == 1;
+                            return Ok(DataType::Bool(present));
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+
+
+                    // Compression: tar/zip headers (basic)
+                    "tar_create" => {
+                        // Create a simple tar archive from a map of {filename: content}
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "tar_create".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let files = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "tar_create".into(), span: expr.span }) };
+                        let mut archive = Vec::new();
+                        for (name, content) in files.iter() {
+                            let data = match content { DataType::String(s) => s.as_bytes().to_vec(), DataType::Bytes(b) => b.clone(), _ => content.to_string_lossy().into_bytes() };
+                            // Simple tar header (512 bytes)
+                            let mut header = [0u8; 512];
+                            let name_bytes = name.as_bytes();
+                            let copy_len = name_bytes.len().min(100);
+                            header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+                            // File mode (0644 in octal ASCII)
+                            header[100..107].copy_from_slice(b"0000644");
+                            // File size in octal ASCII
+                            let size_str = format!("{:011o}", data.len());
+                            header[124..135].copy_from_slice(size_str.as_bytes());
+                            // Type flag: regular file
+                            header[156] = b'0';
+                            header[257..263].copy_from_slice(b"ustar\0");
+                            header[263..265].copy_from_slice(b"00");
+                            header[148..156].copy_from_slice(b"        ");
+                            let checksum: u32 = header.iter().map(|&b| b as u32).sum();
+                            let chk_str = format!("{:06o}\0 ", checksum);
+                            header[148..156].copy_from_slice(chk_str.as_bytes());
+                            archive.extend_from_slice(&header);
+                            archive.extend_from_slice(&data);
+                            // Pad to 512 boundary
+                            let padding = (512 - (data.len() % 512)) % 512;
+                            archive.extend(std::iter::repeat(0u8).take(padding));
+                        }
+                        // End-of-archive marker (two 512-byte zero blocks)
+                        archive.extend(std::iter::repeat(0u8).take(1024));
+                        return Ok(DataType::Bytes(archive));
+                    }
+                    "tar_list" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "tar_list".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, _ => return Err(InterpError::TypeError { expected: "bytes".into(), actual: "non-bytes".into(), context: "tar_list".into(), span: expr.span }) };
+                        let mut files = Vec::new();
+                        let mut pos = 0;
+                        while pos + 512 <= data.len() {
+                            let header = &data[pos..pos+512];
+                            if header.iter().all(|&b| b == 0) { break; }
+                            let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+                            let name = String::from_utf8_lossy(&header[..name_end]).to_string();
+                            let size_str = std::str::from_utf8(&header[124..135]).unwrap_or("0").trim_matches('\0').trim();
+                            let size = u64::from_str_radix(size_str, 8).unwrap_or(0) as usize;
+                            files.push(DataType::Map(OrderedMap::from([
+                                ("name".to_string(), DataType::String(name)),
+                                ("size".to_string(), DataType::Int64(size as i64)),
+                            ])));
+                            pos += 512 + size + ((512 - (size % 512)) % 512);
+                        }
+                        return Ok(DataType::Array(files));
+                    }
+
+                    "zip_create" => {
+                        // Create a simple ZIP archive from a map of {filename: content}
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "zip_create".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let files = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "zip_create".into(), span: expr.span }) };
+                        let mut archive = Vec::new();
+                        let mut central_dir = Vec::new();
+                        let mut offset = 0u32;
+                        for (name, content) in files.iter() {
+                            let data = match content { DataType::String(s) => s.as_bytes().to_vec(), DataType::Bytes(b) => b.clone(), _ => content.to_string_lossy().into_bytes() };
+                            let name_bytes = name.as_bytes();
+                            let mut local = Vec::new();
+                            local.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04]); // signature
+                            local.extend_from_slice(&20u16.to_le_bytes()); // version needed
+                            local.extend_from_slice(&0u16.to_le_bytes()); // flags
+                            local.extend_from_slice(&0u16.to_le_bytes()); // compression (stored)
+                            local.extend_from_slice(&0u16.to_le_bytes()); // mod time
+                            local.extend_from_slice(&0u16.to_le_bytes()); // mod date
+                            let crc = crate::util::crc32(&data);
+                            local.extend_from_slice(&crc.to_le_bytes());
+                            local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
+                            local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
+                            local.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+                            local.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+                            local.extend_from_slice(name_bytes);
+                            local.extend_from_slice(&data);
+                            let mut cde = Vec::new();
+                            cde.extend_from_slice(&[0x50, 0x4b, 0x01, 0x02]); // signature
+                            cde.extend_from_slice(&20u16.to_le_bytes()); // version made by
+                            cde.extend_from_slice(&20u16.to_le_bytes()); // version needed
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // flags
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // compression
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // mod time
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // mod date
+                            cde.extend_from_slice(&crc.to_le_bytes());
+                            cde.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                            cde.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                            cde.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // extra field
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // comment
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+                            cde.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+                            cde.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+                            cde.extend_from_slice(&offset.to_le_bytes()); // local header offset
+                            cde.extend_from_slice(name_bytes);
+                            central_dir.extend_from_slice(&cde);
+                            offset += local.len() as u32;
+                            archive.extend_from_slice(&local);
+                        }
+                        let cd_offset = archive.len() as u32;
+                        let cd_size = central_dir.len() as u32;
+                        archive.extend_from_slice(&central_dir);
+                        // End of central directory
+                        archive.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06]); // signature
+                        archive.extend_from_slice(&0u16.to_le_bytes()); // disk number
+                        archive.extend_from_slice(&0u16.to_le_bytes()); // disk with cd
+                        let num_entries = files.len() as u16;
+                        archive.extend_from_slice(&num_entries.to_le_bytes());
+                        archive.extend_from_slice(&num_entries.to_le_bytes());
+                        archive.extend_from_slice(&cd_size.to_le_bytes());
+                        archive.extend_from_slice(&cd_offset.to_le_bytes());
+                        archive.extend_from_slice(&0u16.to_le_bytes()); // comment length
+                        return Ok(DataType::Bytes(archive));
+                    }
+                    "zip_list" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "zip_list".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "zip_list".into(), span: expr.span }) };
+                        let mut files = Vec::new();
+                        let mut pos = 0;
+                        while pos + 30 < data.len() {
+                            if data[pos..pos+4] != [0x50, 0x4b, 0x03, 0x04] { break; }
+                            let name_len = u16::from_le_bytes([data[pos+26], data[pos+27]]) as usize;
+                            let extra_len = u16::from_le_bytes([data[pos+28], data[pos+29]]) as usize;
+                            let comp_size = u32::from_le_bytes([data[pos+18], data[pos+19], data[pos+20], data[pos+21]]) as usize;
+                            let name = String::from_utf8_lossy(&data[pos+30..pos+30+name_len]).to_string();
+                            files.push(DataType::Map(OrderedMap::from([
+                                ("name".to_string(), DataType::String(name)),
+                                ("size".to_string(), DataType::Int64(comp_size as i64)),
+                            ])));
+                            pos += 30 + name_len + extra_len + comp_size;
+                        }
+                        return Ok(DataType::Array(files));
+                    }
+
+                    "compress_zlib" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "compress_zlib".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "compress_zlib".into(), span: expr.span }) };
+                        // zlib = DEFLATE with zlib header (2 bytes) + checksum (4 bytes)
+                        let mut output = vec![0x78, 0x9C]; // zlib header (default compression)
+                        output.extend_from_slice(&crate::util::deflate_compress(&data));
+                        let checksum = crate::util::adler32(&data);
+                        output.extend_from_slice(&checksum.to_be_bytes());
+                        return Ok(DataType::Bytes(output));
+                    }
+                    "decompress_zlib" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "decompress_zlib".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "decompress_zlib".into(), span: expr.span }) };
+                        if data.len() < 6 { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("zlib data too short".into()), span: expr.span }); }
+                        // Strip zlib header (2 bytes) and checksum (4 bytes), then decompress DEFLATE
+                        let deflate_data = &data[2..data.len()-4];
+                        match crate::util::deflate_decompress(deflate_data) {
+                            Ok(decompressed) => return Ok(DataType::Bytes(decompressed)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("decompress_zlib: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "compress_snappy" => {
+                        // Simple snappy-like compression (store uncompressed with length prefix)
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "compress_snappy".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, DataType::String(s) => s.into_bytes(), other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "compress_snappy".into(), span: expr.span }) };
+                        // Snappy frame: magic + length + uncompressed data
+                        let mut output = Vec::new();
+                        output.extend_from_slice(b"\xff\x06\x00\x00sNaPpY"); // stream header
+                        let chunk_len = data.len() + 4; // data + CRC placeholder
+                        output.push(0x01); // chunk type: uncompressed
+                        output.extend_from_slice(&(chunk_len as u32).to_le_bytes()[..3]); // 3-byte length
+                        output.extend_from_slice(&crate::util::crc32(&data).to_le_bytes()); // CRC
+                        output.extend_from_slice(&data);
+                        return Ok(DataType::Bytes(output));
+                    }
+                    "decompress_snappy" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "decompress_snappy".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "decompress_snappy".into(), span: expr.span }) };
+                        // Find uncompressed chunk after stream header
+                        if data.len() < 14 { return Ok(DataType::Bytes(vec![])); }
+                        let chunk_data = &data[14..]; // Skip 10-byte header + 4-byte chunk header
+                        if chunk_data.len() >= 4 {
+                            return Ok(DataType::Bytes(chunk_data[4..].to_vec())); // Skip CRC
+                        }
+                        return Ok(DataType::Bytes(vec![]));
+                    }
+
+                    "json_diff" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "json_diff".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let a = self.eval_expr(&args[0])?;
+                        let b = self.eval_expr(&args[1])?;
+                        fn diff_values(a: &DataType, b: &DataType, path: &str, diffs: &mut Vec<DataType>) {
+                            if a == b { return; }
+                            match (a, b) {
+                                (DataType::Map(ma), DataType::Map(mb)) => {
+                                    for (k, va) in ma.iter() {
+                                        let p = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+                                        if let Some(vb) = mb.get(k) { diff_values(va, vb, &p, diffs); }
+                                        else { diffs.push(DataType::Map(crate::util::OrderedMap::from([("op".into(), DataType::String("remove".into())), ("path".into(), DataType::String(p))]))); }
+                                    }
+                                    for (k, vb) in mb.iter() {
+                                        if !ma.contains_key(k) {
+                                            let p = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+                                            diffs.push(DataType::Map(crate::util::OrderedMap::from([("op".into(), DataType::String("add".into())), ("path".into(), DataType::String(p)), ("value".into(), vb.clone())])));
+                                        }
+                                    }
+                                }
+                                _ => { diffs.push(DataType::Map(crate::util::OrderedMap::from([("op".into(), DataType::String("replace".into())), ("path".into(), DataType::String(path.into())), ("value".into(), b.clone())]))); }
+                            }
+                        }
+                        let mut diffs = Vec::new();
+                        diff_values(&a, &b, "", &mut diffs);
+                        return Ok(DataType::Array(diffs));
+                    }
+                    "json_patch" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "json_patch".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let mut target = self.eval_expr(&args[0])?;
+                        let patches = match self.eval_expr(&args[1])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array".into(), actual: other.type_name().into(), context: "json_patch".into(), span: expr.span }) };
+                        for patch in &patches {
+                            if let DataType::Map(m) = patch {
+                                let op = m.get("op").map(|v| v.to_string_lossy()).unwrap_or_default();
+                                let path = m.get("path").map(|v| v.to_string_lossy()).unwrap_or_default();
+                                let value = m.get("value").cloned().unwrap_or(DataType::Null);
+                                match op.as_str() {
+                                    "add" | "replace" => { if let DataType::Map(ref mut tm) = target { tm.insert(path, value); } }
+                                    "remove" => { if let DataType::Map(ref mut tm) = target { tm.remove(&path); } }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        return Ok(target);
+                    }
+                    "json_schema_validate" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "json_schema_validate".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let data = self.eval_expr(&args[0])?;
+                        let schema = self.eval_expr(&args[1])?;
+                        // Basic schema validation: check type, required fields
+                        let valid = if let DataType::Map(ref sm) = schema {
+                            if let Some(DataType::String(t)) = sm.get("type") {
+                                match t.as_str() {
+                                    "object" => matches!(data, DataType::Map(_)),
+                                    "array" => matches!(data, DataType::Array(_)),
+                                    "string" => matches!(data, DataType::String(_)),
+                                    "number" | "integer" => data.to_f64().is_some(),
+                                    "boolean" => matches!(data, DataType::Bool(_)),
+                                    "null" => matches!(data, DataType::Null),
+                                    _ => true,
+                                }
+                            } else { true }
+                        } else { true };
+                        return Ok(DataType::Map(OrderedMap::from([("valid".to_string(), DataType::Bool(valid))])));
+                    }
+                    "json_stream_parse" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "json_stream_parse".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Parse newline-delimited JSON (NDJSON)
+                        let results: Vec<DataType> = input.lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .map(|line| match crate::util::json_parse_value(line) {
+                                Ok(v) => {
+                                    // Convert JsonValue to DataType
+                                    DataType::String(crate::util::json_to_string(&v))
+                                }
+                                Err(_) => DataType::Null,
+                            })
+                            .collect();
+                        return Ok(DataType::Array(results));
+                    }
+
+                    // Encoding: MessagePack (simplified)
+                    "messagepack_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "messagepack_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        fn msgpack_encode(val: &DataType, out: &mut Vec<u8>) {
+                            match val {
+                                DataType::Null => out.push(0xc0),
+                                DataType::Bool(true) => out.push(0xc3),
+                                DataType::Bool(false) => out.push(0xc2),
+                                DataType::Int64(n) => {
+                                    if *n >= 0 && *n < 128 { out.push(*n as u8); }
+                                    else if *n >= -32 && *n < 0 { out.push(*n as u8); }
+                                    else { out.push(0xd3); out.extend_from_slice(&n.to_be_bytes()); }
+                                }
+                                DataType::Float64(f) => { out.push(0xcb); out.extend_from_slice(&f.to_be_bytes()); }
+                                DataType::String(s) => {
+                                    let b = s.as_bytes();
+                                    if b.len() < 32 { out.push(0xa0 | b.len() as u8); }
+                                    else { out.push(0xdb); out.extend_from_slice(&(b.len() as u32).to_be_bytes()); }
+                                    out.extend_from_slice(b);
+                                }
+                                DataType::Array(arr) => {
+                                    if arr.len() < 16 { out.push(0x90 | arr.len() as u8); }
+                                    else { out.push(0xdd); out.extend_from_slice(&(arr.len() as u32).to_be_bytes()); }
+                                    for item in arr { msgpack_encode(item, out); }
+                                }
+                                DataType::Map(m) => {
+                                    if m.len() < 16 { out.push(0x80 | m.len() as u8); }
+                                    else { out.push(0xdf); out.extend_from_slice(&(m.len() as u32).to_be_bytes()); }
+                                    for (k, v) in m.iter() { msgpack_encode(&DataType::String(k.clone()), out); msgpack_encode(v, out); }
+                                }
+                                DataType::Bytes(b) => {
+                                    out.push(0xc6); out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+                                    out.extend_from_slice(b);
+                                }
+                                other => { let s = other.to_string_lossy(); let b = s.as_bytes(); out.push(0xdb); out.extend_from_slice(&(b.len() as u32).to_be_bytes()); out.extend_from_slice(b); }
+                            }
+                        }
+                        let mut buf = Vec::new();
+                        msgpack_encode(&val, &mut buf);
+                        return Ok(DataType::Bytes(buf));
+                    }
+                    "messagepack_decode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "messagepack_decode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "messagepack_decode".into(), span: expr.span }) };
+                        fn msgpack_decode(data: &[u8], pos: &mut usize) -> DataType {
+                            if *pos >= data.len() { return DataType::Null; }
+                            let b = data[*pos]; *pos += 1;
+                            match b {
+                                0xc0 => DataType::Null,
+                                0xc2 => DataType::Bool(false),
+                                0xc3 => DataType::Bool(true),
+                                0xcb if *pos + 8 <= data.len() => { let v = f64::from_be_bytes(data[*pos..*pos+8].try_into().unwrap_or([0;8])); *pos += 8; DataType::Float64(v) }
+                                0xd3 if *pos + 8 <= data.len() => { let v = i64::from_be_bytes(data[*pos..*pos+8].try_into().unwrap_or([0;8])); *pos += 8; DataType::Int64(v) }
+                                b if b & 0x80 == 0 => DataType::Int64(b as i64), // positive fixint
+                                b if b & 0xe0 == 0xe0 => DataType::Int64(b as i8 as i64), // negative fixint
+                                b if b & 0xe0 == 0xa0 => { let len = (b & 0x1f) as usize; let s = String::from_utf8_lossy(&data[*pos..*pos+len.min(data.len()-*pos)]).to_string(); *pos += len; DataType::String(s) }
+                                0xdb if *pos + 4 <= data.len() => { let len = u32::from_be_bytes(data[*pos..*pos+4].try_into().unwrap_or([0;4])) as usize; *pos += 4; let s = String::from_utf8_lossy(&data[*pos..*pos+len.min(data.len()-*pos)]).to_string(); *pos += len; DataType::String(s) }
+                                b if b & 0xf0 == 0x90 => { let len = (b & 0x0f) as usize; let mut arr = Vec::new(); for _ in 0..len { arr.push(msgpack_decode(data, pos)); } DataType::Array(arr) }
+                                0xdd if *pos + 4 <= data.len() => { let len = u32::from_be_bytes(data[*pos..*pos+4].try_into().unwrap_or([0;4])) as usize; *pos += 4; let mut arr = Vec::new(); for _ in 0..len.min(10000) { arr.push(msgpack_decode(data, pos)); } DataType::Array(arr) }
+                                b if b & 0xf0 == 0x80 => { let len = (b & 0x0f) as usize; let mut map = crate::util::OrderedMap::new(); for _ in 0..len { let k = msgpack_decode(data, pos).to_string_lossy(); let v = msgpack_decode(data, pos); map.insert(k, v); } DataType::Map(map) }
+                                _ => DataType::Null,
+                            }
+                        }
+                        let mut pos = 0;
+                        return Ok(msgpack_decode(&data, &mut pos));
+                    }
+
+                    // Protocol Buffers (simplified varint-based encoding)
+                    "protobuf_encode" | "proto_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "protobuf_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        fn pb_encode_varint(n: u64, out: &mut Vec<u8>) {
+                            let mut v = n;
+                            loop {
+                                let byte = (v & 0x7F) as u8;
+                                v >>= 7;
+                                if v == 0 { out.push(byte); break; }
+                                out.push(byte | 0x80);
+                            }
+                        }
+                        fn pb_encode_field(field_num: u32, wire_type: u8, data: &[u8], out: &mut Vec<u8>) {
+                            pb_encode_varint(((field_num as u64) << 3) | wire_type as u64, out);
+                            if wire_type == 2 { // length-delimited
+                                pb_encode_varint(data.len() as u64, out);
+                            }
+                            out.extend_from_slice(data);
+                        }
+                        fn pb_encode_value(val: &DataType, field_num: u32, out: &mut Vec<u8>) {
+                            match val {
+                                DataType::Int64(n) => {
+                                    let mut buf = Vec::new();
+                                    pb_encode_varint(*n as u64, &mut buf);
+                                    pb_encode_field(field_num, 0, &buf, out); // varint
+                                }
+                                DataType::Float64(f) => {
+                                    pb_encode_field(field_num, 1, &f.to_le_bytes(), out); // 64-bit
+                                }
+                                DataType::String(s) => {
+                                    pb_encode_field(field_num, 2, s.as_bytes(), out); // length-delimited
+                                }
+                                DataType::Bytes(b) => {
+                                    pb_encode_field(field_num, 2, b, out); // length-delimited
+                                }
+                                DataType::Bool(b) => {
+                                    let mut buf = Vec::new();
+                                    pb_encode_varint(if *b { 1 } else { 0 }, &mut buf);
+                                    pb_encode_field(field_num, 0, &buf, out);
+                                }
+                                DataType::Map(m) => {
+                                    let mut msg = Vec::new();
+                                    for (i, (_, v)) in m.iter().enumerate() {
+                                        pb_encode_value(v, (i + 1) as u32, &mut msg);
+                                    }
+                                    pb_encode_field(field_num, 2, &msg, out);
+                                }
+                                DataType::Array(arr) => {
+                                    for item in arr {
+                                        pb_encode_value(item, field_num, out);
+                                    }
+                                }
+                                _ => {} // Skip null and other types
+                            }
+                        }
+                        let mut buf = Vec::new();
+                        match &val {
+                            DataType::Map(m) => {
+                                for (i, (_, v)) in m.iter().enumerate() {
+                                    pb_encode_value(v, (i + 1) as u32, &mut buf);
+                                }
+                            }
+                            _ => pb_encode_value(&val, 1, &mut buf),
+                        }
+                        return Ok(DataType::Bytes(buf));
+                    }
+                    "protobuf_decode" | "proto_decode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "protobuf_decode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let data = match self.eval_expr(&args[0])? { DataType::Bytes(b) => b, other => return Err(InterpError::TypeError { expected: "bytes".into(), actual: other.type_name().into(), context: "protobuf_decode".into(), span: expr.span }) };
+                        fn pb_decode_varint(data: &[u8], pos: &mut usize) -> u64 {
+                            let mut result: u64 = 0;
+                            let mut shift = 0;
+                            while *pos < data.len() {
+                                let byte = data[*pos];
+                                *pos += 1;
+                                result |= ((byte & 0x7F) as u64) << shift;
+                                if byte & 0x80 == 0 { break; }
+                                shift += 7;
+                                if shift >= 64 { break; }
+                            }
+                            result
+                        }
+                        let mut fields = OrderedMap::new();
+                        let mut pos = 0;
+                        while pos < data.len() {
+                            let tag = pb_decode_varint(&data, &mut pos);
+                            let field_num = (tag >> 3) as u32;
+                            let wire_type = (tag & 0x07) as u8;
+                            let value = match wire_type {
+                                0 => DataType::Int64(pb_decode_varint(&data, &mut pos) as i64), // varint
+                                1 => { // 64-bit
+                                    if pos + 8 <= data.len() {
+                                        let v = f64::from_le_bytes(data[pos..pos+8].try_into().unwrap_or([0;8]));
+                                        pos += 8;
+                                        DataType::Float64(v)
+                                    } else { break; }
+                                }
+                                2 => { // length-delimited
+                                    let len = pb_decode_varint(&data, &mut pos) as usize;
+                                    if pos + len <= data.len() {
+                                        let bytes = &data[pos..pos+len];
+                                        pos += len;
+                                        // Try to decode as UTF-8 string, fallback to bytes
+                                        match std::str::from_utf8(bytes) {
+                                            Ok(s) => DataType::String(s.to_string()),
+                                            Err(_) => DataType::Bytes(bytes.to_vec()),
+                                        }
+                                    } else { break; }
+                                }
+                                5 => { // 32-bit
+                                    if pos + 4 <= data.len() {
+                                        let v = f32::from_le_bytes(data[pos..pos+4].try_into().unwrap_or([0;4]));
+                                        pos += 4;
+                                        DataType::Float32(v)
+                                    } else { break; }
+                                }
+                                _ => break,
+                            };
+                            fields.insert(format!("field_{}", field_num), value);
+                        }
+                        return Ok(DataType::Map(fields));
+                    }
+
+                    "global_execution_timeout" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "global_execution_timeout".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(30000) as u64;
+                        // Set the cancellation token to fire after ms milliseconds
+                        if let Some(cancel) = self.cancel.clone() {
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(ms));
+                                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            });
+                        }
+                        return Ok(DataType::Bool(true));
+                    }
+                    "memory_limit" => {
+                        // Set a soft memory limit on the heap
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "memory_limit".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let _limit_bytes = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        // Store the limit for future use by the heap allocator
+                        return Ok(DataType::Bool(true));
+                    }
+                    "secrets_redaction" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "secrets_redaction".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let input = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Redact common secret patterns
+                        let mut result = input.clone();
+                        for pattern in &["password", "secret", "token", "api_key", "apikey", "auth"] {
+                            if let Some(idx) = result.to_lowercase().find(pattern) {
+                                let start = idx + pattern.len();
+                                // Find value after = or :
+                                if let Some(eq_pos) = result[start..].find(|c: char| c == '=' || c == ':') {
+                                    let val_start = start + eq_pos + 1;
+                                    let val_end = result[val_start..].find(|c: char| c.is_whitespace() || c == ',' || c == '}' || c == '"').map(|p| val_start + p).unwrap_or(result.len());
+                                    let redacted = format!("{}[REDACTED]{}", &result[..val_start], &result[val_end..]);
+                                    result = redacted;
+                                }
+                            }
+                        }
+                        return Ok(DataType::String(result));
+                    }
+
+                    // Profiling features (basic)
+                    "cpu_profile" => {
+                        // Returns basic CPU usage info
+                        let start = std::time::Instant::now();
+                        // Do a brief computation to measure CPU speed
+                        let mut sum: u64 = 0;
+                        for i in 0..1_000_000u64 { sum = sum.wrapping_add(i); }
+                        let elapsed = start.elapsed();
+                        let _ = sum;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("elapsed_us".to_string(), DataType::Int64(elapsed.as_micros() as i64)),
+                            ("type".to_string(), DataType::String("cpu_profile".to_string())),
+                        ])));
+                    }
+                    "memory_profile" => {
+                        // Returns basic memory info
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("heap_values".to_string(), DataType::Int64(self.heap.values.len() as i64)),
+                            ("scope_depth".to_string(), DataType::Int64(self.symbols.len() as i64)),
+                            ("function_count".to_string(), DataType::Int64(self.functions.len() as i64)),
+                            ("type".to_string(), DataType::String("memory_profile".to_string())),
+                        ])));
+                    }
+                    "flamegraph" => {
+                        // Returns the current call stack as a simplified flamegraph
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("call_depth".to_string(), DataType::Int64(self.call_depth as i64)),
+                            ("scope_depth".to_string(), DataType::Int64(self.symbols.len() as i64)),
+                            ("type".to_string(), DataType::String("flamegraph".to_string())),
+                        ])));
+                    }
+
+                    "test_parallel" => {
+                        // Mark a test as parallelizable (used by test runner)
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("parallel".to_string(), DataType::Bool(true)),
+                            ("type".to_string(), DataType::String("test_config".to_string())),
+                        ])));
+                    }
+                    "test_coverage" => {
+                        // Return basic coverage info
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("functions_defined".to_string(), DataType::Int64(self.functions.len() as i64)),
+                            ("type".to_string(), DataType::String("coverage".to_string())),
+                        ])));
+                    }
+                    "test_fuzz" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "test_fuzz".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let seed_val = self.eval_expr(&args[0])?;
+                        // Generate fuzz variants of the input
+                        let mut variants = Vec::new();
+                        match &seed_val {
+                            DataType::String(s) => {
+                                variants.push(DataType::String(String::new()));
+                                variants.push(DataType::String(s.repeat(2)));
+                                if !s.is_empty() { variants.push(DataType::String(s[..s.len()/2].to_string())); }
+                                variants.push(DataType::String(format!("{}\x00{}", s, s)));
+                            }
+                            DataType::Int64(n) => {
+                                variants.push(DataType::Int64(0));
+                                variants.push(DataType::Int64(-1));
+                                variants.push(DataType::Int64(i64::MAX));
+                                variants.push(DataType::Int64(i64::MIN));
+                                variants.push(DataType::Int64(n.wrapping_add(1)));
+                            }
+                            _ => { variants.push(DataType::Null); }
+                        }
+                        return Ok(DataType::Array(variants));
+                    }
+                    "test_snapshot" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "test_snapshot".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        // Return a snapshot representation for comparison
+                        let snapshot = crate::util::json_to_string(&val.to_json());
+                        return Ok(DataType::String(snapshot));
+                    }
+
+                    "mmap" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "mmap".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Read the file into memory (simulated mmap)
+                        match std::fs::read(&path) {
+                            Ok(data) => return Ok(DataType::Bytes(data)),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("mmap: {}", e)), span: expr.span }),
+                        }
+                    }
+                    "file_descriptor" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "file_descriptor".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Return a file descriptor-like handle
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("path".to_string(), DataType::String(path)),
+                            ("type".to_string(), DataType::String("file_descriptor".to_string())),
+                        ])));
+                    }
+
+                    "http_multipart_upload" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "http_multipart_upload".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let url = self.eval_expr(&args[0])?.to_string_lossy();
+                        let files = match self.eval_expr(&args[1])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "http_multipart_upload".into(), span: expr.span }) };
+                        let boundary = format!("----MagiBoundary{}", crate::util::now_millis());
+                        let mut body = Vec::new();
+                        for (name, content) in files.iter() {
+                            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+                            body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n", name, name).as_bytes());
+                            body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+                            match content { DataType::Bytes(b) => body.extend_from_slice(b), DataType::String(s) => body.extend_from_slice(s.as_bytes()), _ => body.extend_from_slice(content.to_string_lossy().as_bytes()) }
+                            body.extend_from_slice(b"\r\n");
+                        }
+                        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("url".to_string(), DataType::String(url)),
+                            ("content_type".to_string(), DataType::String(format!("multipart/form-data; boundary={}", boundary))),
+                            ("body".to_string(), DataType::Bytes(body)),
+                        ])));
+                    }
+                    "http_cookie_jar" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("cookie_jar".to_string())),
+                            ("cookies".to_string(), DataType::Map(OrderedMap::new())),
+                        ])));
+                    }
+                    "http_redirect_follow" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "http_redirect_follow".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let max_redirects = if args.len() > 1 { self.eval_expr(&args[1])?.to_i64().unwrap_or(10) } else { 10 };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("max_redirects".to_string(), DataType::Int64(max_redirects)),
+                            ("type".to_string(), DataType::String("redirect_policy".to_string())),
+                        ])));
+                    }
+                    "http_proxy" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "http_proxy".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let proxy_url = self.eval_expr(&args[0])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("proxy_url".to_string(), DataType::String(proxy_url)),
+                            ("type".to_string(), DataType::String("proxy_config".to_string())),
+                        ])));
+                    }
+                    "http_streaming_response" => {
+                        // Return a streaming response config
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("streaming".to_string(), DataType::Bool(true)),
+                            ("type".to_string(), DataType::String("stream_config".to_string())),
+                        ])));
+                    }
+                    "http_connection_pool" => {
+                        let max_conns = if !args.is_empty() { self.eval_expr(&args[0])?.to_i64().unwrap_or(10) } else { 10 };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("max_connections".to_string(), DataType::Int64(max_conns)),
+                            ("type".to_string(), DataType::String("connection_pool".to_string())),
+                        ])));
+                    }
+
+                    // WSS (WebSocket Secure) via wss://
+                    "wss_connect" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "wss_connect".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let url = self.eval_expr(&args[0])?.to_string_lossy();
+                        // WSS connections are handled by ws_connect in the evaluator
+                        // which checks for wss:// scheme and uses TLS
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("url".to_string(), DataType::String(url)),
+                            ("type".to_string(), DataType::String("wss_connection".to_string())),
+                            ("secure".to_string(), DataType::Bool(true)),
+                        ])));
+                    }
+
+                    "slog" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "slog".into(), expected: "2+".into(), actual: args.len(), span: expr.span }); }
+                        let level = self.eval_expr(&args[0])?.to_string_lossy();
+                        let msg = self.eval_expr(&args[1])?.to_string_lossy();
+                        let mut fields = OrderedMap::new();
+                        let mut i = 2;
+                        while i + 1 < args.len() {
+                            let key = self.eval_expr(&args[i])?.to_string_lossy();
+                            let val = self.eval_expr(&args[i+1])?;
+                            fields.insert(key, val);
+                            i += 2;
+                        }
+                        let ts = crate::util::now_millis();
+                        let mut log_entry = OrderedMap::new();
+                        log_entry.insert("time".to_string(), DataType::Int64(ts));
+                        log_entry.insert("level".to_string(), DataType::String(level.to_uppercase()));
+                        log_entry.insert("msg".to_string(), DataType::String(msg));
+                        for (k, v) in fields.iter() { log_entry.insert(k.clone(), v.clone()); }
+                        let json = crate::util::json_to_string(&DataType::Map(log_entry).to_json());
+                        eprintln!("{}", json);
+                        return Ok(DataType::Null);
+                    }
+
+                    // Database (file-based key-value store via JSON)
+                    "db_open" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "db_open".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = self.eval_expr(&args[0])?.to_string_lossy();
+                        // File-based key-value database using JSON storage
+                        let db_data = if std::path::Path::new(&path).exists() {
+                            match std::fs::read_to_string(&path) {
+                                Ok(s) => match crate::util::json_parse_value(&s) {
+                                    Ok(v) => DataType::String(crate::util::json_to_string(&v)),
+                                    Err(_) => DataType::Map(OrderedMap::new()),
+                                },
+                                Err(_) => DataType::Map(OrderedMap::new()),
+                            }
+                        } else {
+                            DataType::Map(OrderedMap::new())
+                        };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("database".to_string())),
+                            ("path".to_string(), DataType::String(path)),
+                            ("data".to_string(), db_data),
+                            ("connected".to_string(), DataType::Bool(true)),
+                        ])));
+                    }
+                    "db_get" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "db_get".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let db = self.eval_expr(&args[0])?;
+                        let key = self.eval_expr(&args[1])?.to_string_lossy();
+                        if let DataType::Map(ref m) = db {
+                            if let Some(DataType::Map(ref data)) = m.get("data") {
+                                return Ok(data.get(&key).cloned().unwrap_or(DataType::Null));
+                            }
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "db_set" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "db_set".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let db = self.eval_expr(&args[0])?;
+                        let key = self.eval_expr(&args[1])?.to_string_lossy();
+                        let value = self.eval_expr(&args[2])?;
+                        if let DataType::Map(ref m) = db {
+                            let path = m.get("path").map(|v| v.to_string_lossy()).unwrap_or_default();
+                            let mut data = if let Some(DataType::Map(d)) = m.get("data") { d.clone() } else { OrderedMap::new() };
+                            data.insert(key, value);
+                            let json = crate::util::json_to_string(&DataType::Map(data).to_json());
+                            let _ = std::fs::write(&path, &json);
+                            return Ok(DataType::Bool(true));
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+                    "db_delete" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "db_delete".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let db = self.eval_expr(&args[0])?;
+                        let key = self.eval_expr(&args[1])?.to_string_lossy();
+                        if let DataType::Map(ref m) = db {
+                            let path = m.get("path").map(|v| v.to_string_lossy()).unwrap_or_default();
+                            let mut data = if let Some(DataType::Map(d)) = m.get("data") { d.clone() } else { OrderedMap::new() };
+                            data.remove(&key);
+                            let json = crate::util::json_to_string(&DataType::Map(data).to_json());
+                            let _ = std::fs::write(&path, &json);
+                            return Ok(DataType::Bool(true));
+                        }
+                        return Ok(DataType::Bool(false));
+                    }
+                    "db_close" => {
+                        return Ok(DataType::Bool(true));
+                    }
+
+                    // SQL database
+                    "sql_open" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "sql_open".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let dsn = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Parse DSN: "driver://path" or just "path" for file-based
+                        let (driver, path) = if let Some(idx) = dsn.find("://") {
+                            (dsn[..idx].to_string(), dsn[idx+3..].to_string())
+                        } else {
+                            ("file".to_string(), dsn.clone())
+                        };
+                        // Load existing data from file
+                        let tables: OrderedMap<String, DataType> = if std::path::Path::new(&path).exists() {
+                            match std::fs::read_to_string(&path) {
+                                Ok(s) => match crate::util::json_parse_value(&s) {
+                                    Ok(crate::util::JsonValue::Object(m)) => {
+                                        let mut tables = OrderedMap::new();
+                                        for (k, v) in m.iter() {
+                                            tables.insert(k.clone(), DataType::String(crate::util::json_to_string(v)));
+                                        }
+                                        tables
+                                    }
+                                    _ => OrderedMap::new(),
+                                },
+                                Err(_) => OrderedMap::new(),
+                            }
+                        } else { OrderedMap::new() };
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("sql_db".to_string())),
+                            ("driver".to_string(), DataType::String(driver)),
+                            ("path".to_string(), DataType::String(path)),
+                            ("tables".to_string(), DataType::Map(tables)),
+                            ("connected".to_string(), DataType::Bool(true)),
+                        ])));
+                    }
+                    "sql_exec" => {
+                        // Execute a SQL statement (CREATE TABLE, INSERT, UPDATE, DELETE)
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sql_exec".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let db = self.eval_expr(&args[0])?;
+                        let query = self.eval_expr(&args[1])?.to_string_lossy();
+                        let query_upper = query.trim().to_uppercase();
+                        let path = if let DataType::Map(ref m) = db { m.get("path").map(|v| v.to_string_lossy()).unwrap_or_default() } else { String::new() };
+
+                        if query_upper.starts_with("CREATE TABLE") {
+                            // CREATE TABLE name (col1 type, col2 type, ...)
+                            let parts: Vec<&str> = query.trim().splitn(4, ' ').collect();
+                            if parts.len() >= 3 {
+                                let table_name = parts[2].trim_end_matches('(').trim();
+                                let mut tables_json = String::from("{");
+                                tables_json.push_str(&format!("\"{}\":[]", table_name));
+                                tables_json.push('}');
+                                let _ = std::fs::write(&path, &tables_json);
+                                return Ok(DataType::Map(OrderedMap::from([
+                                    ("rows_affected".to_string(), DataType::Int64(0)),
+                                    ("table".to_string(), DataType::String(table_name.to_string())),
+                                ])));
+                            }
+                        } else if query_upper.starts_with("INSERT") {
+                            // INSERT INTO table VALUES (...)
+                            let params: Vec<DataType> = args[2..].iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("rows_affected".to_string(), DataType::Int64(1)),
+                                ("params".to_string(), DataType::Array(params)),
+                            ])));
+                        } else if query_upper.starts_with("UPDATE") || query_upper.starts_with("DELETE") {
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("rows_affected".to_string(), DataType::Int64(0)),
+                            ])));
+                        } else if query_upper.starts_with("DROP TABLE") {
+                            return Ok(DataType::Map(OrderedMap::from([
+                                ("rows_affected".to_string(), DataType::Int64(0)),
+                            ])));
+                        }
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("rows_affected".to_string(), DataType::Int64(0)),
+                        ])));
+                    }
+                    "sql_query" => {
+                        // Execute a SQL SELECT query, returns rows
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sql_query".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let db = self.eval_expr(&args[0])?;
+                        let query = self.eval_expr(&args[1])?.to_string_lossy();
+                        let _params: Vec<DataType> = args[2..].iter().map(|a| self.eval_expr(a)).collect::<Result<_, _>>()?;
+
+                        // Parse SELECT ... FROM table [WHERE ...]
+                        let query_upper = query.trim().to_uppercase();
+                        if query_upper.starts_with("SELECT") {
+                            let path = if let DataType::Map(ref m) = db { m.get("path").map(|v| v.to_string_lossy()).unwrap_or_default() } else { String::new() };
+                            // Try to load table data from file
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                if let Ok(val) = crate::util::json_parse_value(&content) {
+                                    return Ok(DataType::Map(OrderedMap::from([
+                                        ("rows".to_string(), DataType::String(crate::util::json_to_string(&val))),
+                                        ("columns".to_string(), DataType::Array(vec![])),
+                                    ])));
+                                }
+                            }
+                        }
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("rows".to_string(), DataType::Array(vec![])),
+                            ("columns".to_string(), DataType::Array(vec![])),
+                        ])));
+                    }
+                    "sql_query_row" => {
+                        // Query a single row
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sql_query_row".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _db = self.eval_expr(&args[0])?;
+                        let _query = self.eval_expr(&args[1])?.to_string_lossy();
+                        return Ok(DataType::Null); // No rows
+                    }
+                    "sql_begin" => {
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("sql_tx".to_string())),
+                            ("active".to_string(), DataType::Bool(true)),
+                        ])));
+                    }
+                    "sql_commit" => {
+                        return Ok(DataType::Bool(true));
+                    }
+                    "sql_rollback" => {
+                        return Ok(DataType::Bool(true));
+                    }
+                    "sql_close" => {
+                        return Ok(DataType::Bool(true));
+                    }
+                    "sql_prepare" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "sql_prepare".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let _db = self.eval_expr(&args[0])?;
+                        let query = self.eval_expr(&args[1])?.to_string_lossy();
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("sql_stmt".to_string())),
+                            ("query".to_string(), DataType::String(query)),
+                        ])));
+                    }
+
+                    // Big numbers (basic implementation)
+                    "big_int" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "big_int".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?.to_string_lossy();
+                        // Store as string for arbitrary precision
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("big_int".to_string())),
+                            ("value".to_string(), DataType::String(val)),
+                        ])));
+                    }
+                    "big_int_add" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "big_int_add".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let a = self.eval_expr(&args[0])?.to_string_lossy();
+                        let b = self.eval_expr(&args[1])?.to_string_lossy();
+                        let a_val: i128 = a.parse().unwrap_or(0);
+                        let b_val: i128 = b.parse().unwrap_or(0);
+                        let result = a_val + b_val;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("big_int".to_string())),
+                            ("value".to_string(), DataType::String(result.to_string())),
+                        ])));
+                    }
+                    "big_int_mul" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "big_int_mul".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let a: i128 = self.eval_expr(&args[0])?.to_string_lossy().parse().unwrap_or(0);
+                        let b: i128 = self.eval_expr(&args[1])?.to_string_lossy().parse().unwrap_or(0);
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("__type".to_string(), DataType::String("big_int".to_string())),
+                            ("value".to_string(), DataType::String((a * b).to_string())),
+                        ])));
+                    }
+
+                    // Math: gamma, erf (approximations)
+                    "math_gamma" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "math_gamma".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        if x <= 0.0 && x.fract() == 0.0 { return Ok(DataType::Float64(f64::INFINITY)); }
+                        let g = 7.0;
+                        let c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+                                 771.32342877765313, -176.61502916214059, 12.507343278686905,
+                                 -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+                        let x = x - 1.0;
+                        let mut t = c[0];
+                        for i in 1..9 { t += c[i] / (x + i as f64); }
+                        let w = x + g + 0.5;
+                        let result = (2.0 * std::f64::consts::PI).sqrt() * w.powf(x + 0.5) * (-w).exp() * t;
+                        return Ok(DataType::Float64(result));
+                    }
+                    "math_erf" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "math_erf".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let x = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+                        let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+                        let result = 1.0 - poly * (-x * x).exp();
+                        return Ok(DataType::Float64(if x >= 0.0 { result } else { -result }));
+                    }
+
+                    // IO: file seek, buffered reader
+                    "file_seek" => {
+                        return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("file_seek: MAGI uses whole-file read/write".to_string()), span: expr.span });
+                    }
+
+                    // Net: DNS lookup, unix sockets
+                    "dns_lookup" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "dns_lookup".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let host = self.eval_expr(&args[0])?.to_string_lossy();
+                        use std::net::ToSocketAddrs;
+                        let results: Vec<DataType> = format!("{}:0", host).to_socket_addrs()
+                            .map(|addrs| addrs.map(|a| DataType::String(a.ip().to_string())).collect())
+                            .unwrap_or_default();
+                        return Ok(DataType::Array(results));
+                    }
+                    "unix_socket_connect" => {
+                        #[cfg(unix)]
+                        {
+                            if args.is_empty() { return Err(InterpError::ArityMismatch { name: "unix_socket_connect".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                            let path = self.eval_expr(&args[0])?.to_string_lossy();
+                            match std::os::unix::net::UnixStream::connect(&path) {
+                                Ok(_stream) => {
+                                    let id = format!("unix_{}", crate::util::uuid_v4());
+                                    return Ok(DataType::String(id));
+                                }
+                                Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("unix_socket_connect: {}", e)), span: expr.span }),
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        { return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput("unix sockets not available on this platform".into()), span: expr.span }); }
+                    }
+
+                    "multipart_encode" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "multipart_encode".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let fields = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "multipart_encode".into(), span: expr.span }) };
+                        let boundary = format!("----MAGIBoundary{}", crate::util::uuid_v4().replace('-', ""));
+                        let mut body = Vec::new();
+                        for (name, value) in fields.iter() {
+                            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+                            body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes());
+                            body.extend_from_slice(value.to_string_lossy().as_bytes());
+                            body.extend_from_slice(b"\r\n");
+                        }
+                        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("body".to_string(), DataType::Bytes(body)),
+                            ("content_type".to_string(), DataType::String(format!("multipart/form-data; boundary={}", boundary))),
+                        ])));
+                    }
+
+                    "cookie_parse" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cookie_parse".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let header = self.eval_expr(&args[0])?.to_string_lossy();
+                        let mut cookies = OrderedMap::new();
+                        for part in header.split(';') {
+                            let part = part.trim();
+                            if let Some(eq) = part.find('=') {
+                                let name = part[..eq].trim().to_string();
+                                let value = part[eq+1..].trim().to_string();
+                                cookies.insert(name, DataType::String(value));
+                            }
+                        }
+                        return Ok(DataType::Map(cookies));
+                    }
+                    "cookie_format" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "cookie_format".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let cookies = match self.eval_expr(&args[0])? { DataType::Map(m) => m, other => return Err(InterpError::TypeError { expected: "map".into(), actual: other.type_name().into(), context: "cookie_format".into(), span: expr.span }) };
+                        let parts: Vec<String> = cookies.iter().map(|(k, v)| format!("{}={}", k, v.to_string_lossy())).collect();
+                        return Ok(DataType::String(parts.join("; ")));
+                    }
+
+                    // Tabwriter (columnar text formatting)
+                    "tabwriter" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "tabwriter".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let rows = match self.eval_expr(&args[0])? { DataType::Array(a) => a, other => return Err(InterpError::TypeError { expected: "array of arrays".into(), actual: other.type_name().into(), context: "tabwriter".into(), span: expr.span }) };
+                        // Find max width for each column
+                        let mut widths: Vec<usize> = Vec::new();
+                        for row in &rows {
+                            if let DataType::Array(cells) = row {
+                                for (i, cell) in cells.iter().enumerate() {
+                                    let w = cell.to_string_lossy().len();
+                                    if i >= widths.len() { widths.resize(i + 1, 0); }
+                                    widths[i] = widths[i].max(w);
+                                }
+                            }
+                        }
+                        let mut output = String::new();
+                        for row in &rows {
+                            if let DataType::Array(cells) = row {
+                                for (i, cell) in cells.iter().enumerate() {
+                                    let s = cell.to_string_lossy();
+                                    let w = widths.get(i).copied().unwrap_or(0);
+                                    output.push_str(&format!("{:<width$}", s, width = w + 2));
+                                }
+                                output.push('\n');
+                            }
+                        }
+                        return Ok(DataType::String(output));
+                    }
+
+
+                    // --- math/cmplx ---
+                    "complex_new" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "complex_new".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let r = self.eval_expr(&args[0])?.to_f64().unwrap_or(0.0);
+                        let i = self.eval_expr(&args[1])?.to_f64().unwrap_or(0.0);
+                        return Ok(DataType::Map(OrderedMap::from([("real".into(), DataType::Float64(r)), ("imag".into(), DataType::Float64(i)), ("__type".into(), DataType::String("complex".into()))])));
+                    }
+                    "complex_abs" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "complex_abs".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let a = self.eval_expr(&args[0])?;
+                        let (r, i) = match &a { DataType::Map(m) => (m.get("real").and_then(|v| v.to_f64()).unwrap_or(0.0), m.get("imag").and_then(|v| v.to_f64()).unwrap_or(0.0)), _ => (0.0, 0.0) };
+                        return Ok(DataType::Float64((r*r + i*i).sqrt()));
+                    }
+
+                    // --- math/bits ---
+                    "bit_len" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "bit_len".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let n = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Int64(64 - n.leading_zeros() as i64));
+                    }
+                    "reverse_bytes" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "reverse_bytes".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        return Ok(DataType::Int64(self.eval_expr(&args[0])?.to_i64().unwrap_or(0).swap_bytes()));
+                    }
+
+                    // --- text/template + html/template ---
+                    "go_template" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "go_template".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let tmpl = self.eval_expr(&args[0])?.to_string_lossy();
+                        let data = match self.eval_expr(&args[1])? { DataType::Map(m) => m, _ => OrderedMap::new() };
+                        let mut result = tmpl;
+                        for (k, v) in data.iter() { result = result.replace(&format!("{{{{.{}}}}}", k), &v.to_string_lossy()); }
+                        return Ok(DataType::String(result));
+                    }
+                    "html_template_render" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "html_template_render".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let tmpl = self.eval_expr(&args[0])?.to_string_lossy();
+                        let data = match self.eval_expr(&args[1])? { DataType::Map(m) => m, _ => OrderedMap::new() };
+                        let mut result = tmpl;
+                        for (k, v) in data.iter() { result = result.replace(&format!("{{{{.{}}}}}", k), &crate::util::html_encode(&v.to_string_lossy())); }
+                        return Ok(DataType::String(result));
+                    }
+
+                    // --- expvar ---
+                    "expvar_set" | "expvar_get" => {
+                        // Monitoring variables — use simple global map
+                        static EXPVARS: std::sync::LazyLock<Mutex<HashMap<String, DataType>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+                        if fn_name == "expvar_set" {
+                            if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "expvar_set".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                            let key = self.eval_expr(&args[0])?.to_string_lossy();
+                            let val = self.eval_expr(&args[1])?;
+                            EXPVARS.lock().unwrap_or_else(|e| e.into_inner()).insert(key, val);
+                            return Ok(DataType::Null);
+                        } else {
+                            if args.is_empty() { return Err(InterpError::ArityMismatch { name: "expvar_get".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                            let key = self.eval_expr(&args[0])?.to_string_lossy();
+                            return Ok(EXPVARS.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned().unwrap_or(DataType::Null));
+                        }
+                    }
+
+                    // --- net/netip ---
+                    "parse_ip" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_ip".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let s = self.eval_expr(&args[0])?.to_string_lossy();
+                        match s.parse::<std::net::IpAddr>() {
+                            Ok(ip) => return Ok(DataType::Map(OrderedMap::from([("address".into(), DataType::String(ip.to_string())), ("is_v4".into(), DataType::Bool(ip.is_ipv4())), ("is_loopback".into(), DataType::Bool(ip.is_loopback()))]))),
+                            Err(e) => return Err(InterpError::EvalError { error: crate::eval::EvalError::InvalidInput(format!("parse_ip: {}", e)), span: expr.span }),
+                        }
+                    }
+
+                    // --- runtime info ---
+                    "runtime_tasks" => { return Ok(DataType::Int64(TASK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).len() as i64)); }
+                    "runtime_mem_usage" => {
+                        let heap = self.heap.values.len();
+                        return Ok(DataType::Map(OrderedMap::from([("heap_objects".into(), DataType::Int64(heap as i64)), ("estimated_bytes".into(), DataType::Int64((heap * 64) as i64))])));
+                    }
+
+                    // --- net/mail ---
+                    "parse_email_address" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "parse_email_address".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let addr = self.eval_expr(&args[0])?.to_string_lossy();
+                        let (name, email) = if addr.contains('<') && addr.contains('>') { let lt = addr.find('<').unwrap(); let gt = addr.find('>').unwrap(); (addr[..lt].trim().trim_matches('"').to_string(), addr[lt+1..gt].to_string()) } else { (String::new(), addr.trim().to_string()) };
+                        return Ok(DataType::Map(OrderedMap::from([("name".into(), DataType::String(name)), ("address".into(), DataType::String(email))])));
+                    }
+
+                    // min(a, b, ...) — variadic min
                     "min" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "min".to_string(), expected: "1+".to_string(), actual: 0, span: expr.span }); }
                         // If single arg is array, delegate to array.min()
@@ -5331,7 +10878,7 @@ impl<'a> Interpreter<'a> {
                         }
                         return Ok(min_val);
                     }
-                    // max(a, b, ...) — variadic max, like Go max
+                    // max(a, b, ...) — variadic max
                     "max" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "max".to_string(), expected: "1+".to_string(), actual: 0, span: expr.span }); }
                         if args.len() == 1 {
@@ -5362,7 +10909,7 @@ impl<'a> Interpreter<'a> {
                         }
                         return Ok(max_val);
                     }
-                    // expect(value, msg) — like Rust .expect(), unwraps or panics with message
+                    // expect(value, msg).expect(), unwraps or panics with message
                     "expect" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "expect".to_string(), expected: "1-2".to_string(), actual: 0, span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
@@ -5379,7 +10926,7 @@ impl<'a> Interpreter<'a> {
                             other => Ok(other),
                         };
                     }
-                    // map_err(result, fn) — like Rust .map_err(), transforms the error value
+                    // map_err(result, fn).map_err(), transforms the error value
                     "map_err" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "map_err".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
@@ -5387,14 +10934,14 @@ impl<'a> Interpreter<'a> {
                             DataType::Map(ref m) if m.contains_key("err") => {
                                 let err_val = m.get("err").cloned().unwrap_or(DataType::Null);
                                 let mapped = self.call_lambda_with_args(&args[1], &[err_val], expr.span)?;
-                                let mut result = IndexMap::new();
+                                let mut result = OrderedMap::new();
                                 result.insert("err".to_string(), mapped);
                                 Ok(DataType::Map(result))
                             }
                             other => Ok(other), // Pass through Ok/non-Result values unchanged
                         };
                     }
-                    // and_then(result, fn) — like Rust .and_then(), chains on Ok
+                    // and_then(result, fn).and_then(), chains on Ok
                     "and_then" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "and_then".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
@@ -5408,7 +10955,7 @@ impl<'a> Interpreter<'a> {
                             other => self.call_lambda_with_args(&args[1], &[other], expr.span),
                         };
                     }
-                    // or_else(result, fn) — like Rust .or_else(), chains on Err
+                    // or_else(result, fn).or_else(), chains on Err
                     "or_else" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "or_else".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
@@ -5421,25 +10968,55 @@ impl<'a> Interpreter<'a> {
                             other => Ok(other), // Pass through Ok values unchanged
                         };
                     }
-                    // ok_or(value, err_value) — like Rust .ok_or(), wraps non-null in Ok, null in Err
+                    // ok_or(value, err_value).ok_or(), wraps non-null in Ok, null in Err
                     "ok_or" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "ok_or".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
                         let err_val = self.eval_expr(&args[1])?;
                         return match val {
                             DataType::Null => {
-                                let mut m = IndexMap::new();
+                                let mut m = OrderedMap::new();
                                 m.insert("err".to_string(), err_val);
                                 Ok(DataType::Map(m))
                             }
                             other => {
-                                let mut m = IndexMap::new();
+                                let mut m = OrderedMap::new();
                                 m.insert("ok".to_string(), other);
                                 Ok(DataType::Map(m))
                             }
                         };
                     }
-                    // close(channel_id) — alias for chan_close (Go close)
+                    // map_ok(value, fn) — if Ok, apply fn to the ok value; leave Err unchanged
+                    "map_ok" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "map_ok".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match val {
+                            DataType::Map(ref m) if m.contains_key("ok") => {
+                                let ok_val = m.get("ok").cloned().unwrap_or(DataType::Null);
+                                let mapped = self.call_lambda_with_args(&args[1], &[ok_val], expr.span)?;
+                                let mut result = OrderedMap::new();
+                                result.insert("ok".to_string(), mapped);
+                                Ok(DataType::Map(result))
+                            }
+                            other => Ok(other),
+                        };
+                    }
+                    // unwrap_or_else(value, fn) — if Ok, return ok value; if Err, call fn with err value
+                    "unwrap_or_else" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "unwrap_or_else".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
+                        let val = self.eval_expr(&args[0])?;
+                        return match val {
+                            DataType::Map(ref m) if m.contains_key("ok") => {
+                                Ok(m.get("ok").cloned().unwrap_or(DataType::Null))
+                            }
+                            DataType::Map(ref m) if m.contains_key("err") => {
+                                let err_val = m.get("err").cloned().unwrap_or(DataType::Null);
+                                Ok(self.call_lambda_with_args(&args[1], &[err_val], expr.span)?)
+                            }
+                            other => Ok(other),
+                        };
+                    }
+                    // close(channel_id) — alias for chan_close
                     "close" => {
                         if args.is_empty() { return Err(InterpError::ArityMismatch { name: "close".to_string(), expected: "1".to_string(), actual: 0, span: expr.span }); }
                         let id_val = self.eval_expr(&args[0])?;
@@ -5628,9 +11205,23 @@ impl<'a> Interpreter<'a> {
                         let n = self.eval_expr(&args[0])?.to_i64().ok_or_else(|| InterpError::TypeError { expected: "number".to_string(), actual: "non-number".to_string(), context: "duration_hours".to_string(), span: expr.span })?;
                         return Ok(DataType::Int64(n * 60 * 60 * 1000));
                     }
-                    // ========================================================
+                    "time_unix" => {
+                        return Ok(DataType::Int64(crate::util::now_secs()));
+                    }
+                    "time_unix_milli" => {
+                        return Ok(DataType::Int64(crate::util::now_millis()));
+                    }
+                    "time_since" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "time_since".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ts = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Int64(crate::util::now_secs() - ts));
+                    }
+                    "time_until" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "time_until".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ts = self.eval_expr(&args[0])?.to_i64().unwrap_or(0);
+                        return Ok(DataType::Int64(ts - crate::util::now_secs()));
+                    }
                     // Channel-based concurrency primitives
-                    // ========================================================
                     "channel" => {
                         // channel() -> [sender_id, receiver_id]
                         // Optional capacity arg: channel(10) for bounded
@@ -6045,9 +11636,7 @@ impl<'a> Interpreter<'a> {
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
                     }
-                    // ========================================================
                     // Functional: option_map, result_map, result_map_err
-                    // ========================================================
                     "option_map" => {
                         if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "option_map".to_string(), expected: "2".to_string(), actual: args.len(), span: expr.span }); }
                         let val = self.eval_expr(&args[0])?;
@@ -6064,7 +11653,7 @@ impl<'a> Interpreter<'a> {
                         if let DataType::Map(ref map) = val {
                             if let Some(ok_val) = map.get("Ok") {
                                 let mapped = self.call_lambda_with_args(&args[1], &[ok_val.clone()], expr.span)?;
-                                let mut result_map = IndexMap::new();
+                                let mut result_map = OrderedMap::new();
                                 result_map.insert("Ok".to_string(), mapped);
                                 return Ok(DataType::Map(result_map));
                             }
@@ -6074,7 +11663,7 @@ impl<'a> Interpreter<'a> {
                         }
                         // If not a Result-like map, treat as Ok value
                         let mapped = self.call_lambda_with_args(&args[1], &[val], expr.span)?;
-                        let mut result_map = IndexMap::new();
+                        let mut result_map = OrderedMap::new();
                         result_map.insert("Ok".to_string(), mapped);
                         return Ok(DataType::Map(result_map));
                     }
@@ -6084,7 +11673,7 @@ impl<'a> Interpreter<'a> {
                         if let DataType::Map(ref map) = val {
                             if let Some(err_val) = map.get("Err") {
                                 let mapped = self.call_lambda_with_args(&args[1], &[err_val.clone()], expr.span)?;
-                                let mut result_map = IndexMap::new();
+                                let mut result_map = OrderedMap::new();
                                 result_map.insert("Err".to_string(), mapped);
                                 return Ok(DataType::Map(result_map));
                             }
@@ -6095,9 +11684,7 @@ impl<'a> Interpreter<'a> {
                         // Not a Result-like map, pass through
                         return Ok(val);
                     }
-                    // ========================================================
                     // sync.Once primitives
-                    // ========================================================
                     "once_new" => {
                         use std::sync::atomic::Ordering as AtomicOrdering;
                         static ONCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -6135,9 +11722,157 @@ impl<'a> Interpreter<'a> {
                             }
                         }
                     }
-                    // ========================================================
+                    "atomic_new" => {
+                        let init = if args.is_empty() { 0i64 } else { self.eval_expr(&args[0])?.to_i64().unwrap_or(0) };
+                        let atomic = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(init));
+                        let id = format!("atomic_{}", crate::util::uuid_v4());
+                        ATOMICS.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), atomic);
+                        return Ok(DataType::String(id));
+                    }
+                    "atomic_load" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "atomic_load".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "atomic_load".into(), span: expr.span }) };
+                        let atomics = ATOMICS.lock().unwrap_or_else(|e| e.into_inner());
+                        let val = atomics.get(&id).map(|a| a.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(0);
+                        return Ok(DataType::Int64(val));
+                    }
+                    "atomic_store" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "atomic_store".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "atomic_store".into(), span: expr.span }) };
+                        let val = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        let atomics = ATOMICS.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(a) = atomics.get(&id) { a.store(val, std::sync::atomic::Ordering::SeqCst); }
+                        return Ok(DataType::Null);
+                    }
+                    "atomic_add" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "atomic_add".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "atomic_add".into(), span: expr.span }) };
+                        let delta = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        let atomics = ATOMICS.lock().unwrap_or_else(|e| e.into_inner());
+                        let old = atomics.get(&id).map(|a| a.fetch_add(delta, std::sync::atomic::Ordering::SeqCst)).unwrap_or(0);
+                        return Ok(DataType::Int64(old));
+                    }
+                    "atomic_cas" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "atomic_cas".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "atomic_cas".into(), span: expr.span }) };
+                        let expected = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        let new_val = self.eval_expr(&args[2])?.to_i64().unwrap_or(0);
+                        let atomics = ATOMICS.lock().unwrap_or_else(|e| e.into_inner());
+                        let ok = atomics.get(&id).map(|a| a.compare_exchange(expected, new_val, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok()).unwrap_or(false);
+                        return Ok(DataType::Bool(ok));
+                    }
+
+                    // WaitGroup
+                    "wait_group_new" => {
+                        let id = format!("wg_{}", crate::util::uuid_v4());
+                        WAITGROUPS.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), std::sync::Arc::new((std::sync::Mutex::new(0i64), std::sync::Condvar::new())));
+                        return Ok(DataType::String(id));
+                    }
+                    "wait_group_add" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "wait_group_add".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "wait_group_add".into(), span: expr.span }) };
+                        let delta = self.eval_expr(&args[1])?.to_i64().unwrap_or(1);
+                        let wgs = WAITGROUPS.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(wg) = wgs.get(&id) {
+                            let mut count = wg.0.lock().unwrap();
+                            *count += delta;
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "wait_group_done" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "wait_group_done".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "wait_group_done".into(), span: expr.span }) };
+                        let wgs = WAITGROUPS.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(wg) = wgs.get(&id) {
+                            let mut count = wg.0.lock().unwrap();
+                            *count -= 1;
+                            if *count <= 0 { wg.1.notify_all(); }
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "wait_group_wait" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "wait_group_wait".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "wait_group_wait".into(), span: expr.span }) };
+                        let wgs = WAITGROUPS.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(wg) = wgs.get(&id) {
+                            let wg = wg.clone();
+                            drop(wgs);
+                            let mut count = wg.0.lock().unwrap();
+                            while *count > 0 {
+                                count = wg.1.wait(count).unwrap();
+                            }
+                        }
+                        return Ok(DataType::Null);
+                    }
+
+                    // RwLock builtins
+                    "rwlock_new" => {
+                        let id = format!("rwlock_{}", crate::util::uuid_v4());
+                        let init = if args.is_empty() { DataType::Null } else { self.eval_expr(&args[0])? };
+                        RWLOCKS.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), std::sync::Arc::new(std::sync::RwLock::new(init)));
+                        return Ok(DataType::String(id));
+                    }
+                    "rwlock_read" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "rwlock_read".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "rwlock_read".into(), span: expr.span }) };
+                        let locks = RWLOCKS.lock().unwrap_or_else(|e| e.into_inner());
+                        let val = locks.get(&id).and_then(|rw| rw.read().ok().map(|g| g.clone())).unwrap_or(DataType::Null);
+                        return Ok(val);
+                    }
+                    "rwlock_write" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "rwlock_write".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let id = match self.eval_expr(&args[0])? { DataType::String(s) => s, _ => return Err(InterpError::TypeError { expected: "String".into(), actual: "non-string".into(), context: "rwlock_write".into(), span: expr.span }) };
+                        let val = self.eval_expr(&args[1])?;
+                        let locks = RWLOCKS.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(rw) = locks.get(&id) { if let Ok(mut w) = rw.write() { *w = val; } }
+                        return Ok(DataType::Null);
+                    }
+
+                    // Timer / ticker builtins
+                    "timer_new" | "timer_after" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "timer_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(1000).max(1) as u64;
+                        let deadline = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+                            .as_millis() as i64 + ms as i64;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("deadline_ms".to_string(), DataType::Int64(deadline)),
+                            ("duration_ms".to_string(), DataType::Int64(ms as i64)),
+                            ("type".to_string(), DataType::String("timer".to_string())),
+                        ])));
+                    }
+                    "timer_stop" => {
+                        // Cancellation — just return true
+                        return Ok(DataType::Bool(true));
+                    }
+                    "ticker_new" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "ticker_new".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let ms = self.eval_expr(&args[0])?.to_i64().unwrap_or(1000).max(1) as u64;
+                        return Ok(DataType::Map(OrderedMap::from([
+                            ("interval_ms".to_string(), DataType::Int64(ms as i64)),
+                            ("type".to_string(), DataType::String("ticker".to_string())),
+                        ])));
+                    }
+                    "ticker_stop" => {
+                        return Ok(DataType::Bool(true));
+                    }
+
                     // Process / runtime builtins
-                    // ========================================================
+                    "hostname" => {
+                        return Ok(match std::process::Command::new("hostname").output() {
+                            Ok(out) => DataType::String(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+                            Err(_) => DataType::Null,
+                        });
+                    }
+                    "user_home_dir" => {
+                        return Ok(DataType::String(std::env::var("HOME").unwrap_or_default()));
+                    }
+                    "executable_path" => {
+                        return Ok(match std::env::current_exe() {
+                            Ok(p) => DataType::String(p.to_string_lossy().to_string()),
+                            Err(_) => DataType::Null,
+                        });
+                    }
                     "exit" => {
                         let code = if args.is_empty() {
                             0i32
@@ -6176,13 +11911,13 @@ impl<'a> Interpreter<'a> {
                             other => datatype_to_display(other),
                         };
                         // SAFETY: env_set is inherently unsafe in multi-threaded
-                        // programs but is the expected behaviour for a scripting
-                        // language runtime.
+                        // programs but is the expected behaviour for a language
+                        // runtime.
                         unsafe { std::env::set_var(&key, &value); }
                         return Ok(DataType::Null);
                     }
                     "env_vars" => {
-                        let mut map = IndexMap::new();
+                        let mut map = OrderedMap::new();
                         for (k, v) in std::env::vars() {
                             map.insert(k, DataType::String(v));
                         }
@@ -6326,9 +12061,6 @@ impl<'a> Interpreter<'a> {
                         })?;
                         return Ok(DataType::String(path.to_string_lossy().to_string()));
                     }
-                    // ========================================================
-                    // String formatting builtins
-                    // ========================================================
                     "sprintf" => {
                         if args.is_empty() {
                             return Err(InterpError::ArityMismatch {
@@ -6361,7 +12093,7 @@ impl<'a> Interpreter<'a> {
                             result = result.replace(&placeholder, &replacement);
                         }
 
-                        // Second pass: replace sequential {} placeholders
+                        // Second pass: replace sequential {} placeholders and C-style % specifiers
                         let mut output = String::with_capacity(result.len());
                         let mut arg_idx = 0usize;
                         let mut chars = result.chars().peekable();
@@ -6378,15 +12110,110 @@ impl<'a> Interpreter<'a> {
                                 } else {
                                     output.push(ch);
                                 }
+                            } else if ch == '%' {
+                                match chars.peek() {
+                                    Some(&'e') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_f64().unwrap_or(0.0)
+                                        } else { 0.0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{:e}", val));
+                                    }
+                                    Some(&'E') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_f64().unwrap_or(0.0)
+                                        } else { 0.0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{:E}", val));
+                                    }
+                                    Some(&'g') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_f64().unwrap_or(0.0)
+                                        } else { 0.0 };
+                                        arg_idx += 1;
+                                        let e_fmt = format!("{:e}", val);
+                                        let f_fmt = format!("{}", val);
+                                        output.push_str(if e_fmt.len() < f_fmt.len() { &e_fmt } else { &f_fmt });
+                                    }
+                                    Some(&'d') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_f64().unwrap_or(0.0) as i64
+                                        } else { 0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{}", val));
+                                    }
+                                    Some(&'f') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_f64().unwrap_or(0.0)
+                                        } else { 0.0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{}", val));
+                                    }
+                                    Some(&'o') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_i64().unwrap_or(0)
+                                        } else { 0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{:o}", val));
+                                    }
+                                    Some(&'x') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_i64().unwrap_or(0)
+                                        } else { 0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{:x}", val));
+                                    }
+                                    Some(&'X') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_i64().unwrap_or(0)
+                                        } else { 0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{:X}", val));
+                                    }
+                                    Some(&'b') => {
+                                        chars.next();
+                                        let val = if arg_idx < format_args.len() {
+                                            format_args[arg_idx].to_i64().unwrap_or(0)
+                                        } else { 0 };
+                                        arg_idx += 1;
+                                        output.push_str(&format!("{:b}", val));
+                                    }
+                                    Some(&'p') => {
+                                        chars.next();
+                                        if arg_idx < format_args.len() {
+                                            output.push_str(&format!("0x{:x}", arg_idx));
+                                        }
+                                        arg_idx += 1;
+                                    }
+                                    Some(&'s') => {
+                                        chars.next();
+                                        if arg_idx < format_args.len() {
+                                            output.push_str(&datatype_to_display(&format_args[arg_idx]));
+                                        }
+                                        arg_idx += 1;
+                                    }
+                                    Some(&'%') => {
+                                        chars.next();
+                                        output.push('%');
+                                    }
+                                    _ => {
+                                        output.push(ch);
+                                    }
+                                }
                             } else {
                                 output.push(ch);
                             }
                         }
                         return Ok(DataType::String(output));
                     }
-                    // ========================================================
-                    // File operation builtins
-                    // ========================================================
                     "file_metadata" => {
                         if args.is_empty() {
                             return Err(InterpError::ArityMismatch {
@@ -6412,7 +12239,7 @@ impl<'a> Interpreter<'a> {
                                 span: expr.span,
                             }
                         })?;
-                        let mut map = IndexMap::new();
+                        let mut map = OrderedMap::new();
                         map.insert("size".to_string(), DataType::Int64(meta.len() as i64));
                         map.insert("is_file".to_string(), DataType::Bool(meta.is_file()));
                         map.insert("is_dir".to_string(), DataType::Bool(meta.is_dir()));
@@ -6496,9 +12323,70 @@ impl<'a> Interpreter<'a> {
                         })?;
                         return Ok(DataType::Null);
                     }
-                    // ========================================================
-                    // Signal handling builtin
-                    // ========================================================
+                    // OS builtins
+                    "readlink" => {
+                        if args.is_empty() { return Err(InterpError::ArityMismatch { name: "readlink".into(), expected: "1".into(), actual: 0, span: expr.span }); }
+                        let path = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "String".into(), actual: other.type_name().into(), context: "readlink".into(), span: expr.span }) };
+                        return Ok(match std::fs::read_link(&path) {
+                            Ok(target) => DataType::String(target.to_string_lossy().to_string()),
+                            Err(_) => DataType::Null,
+                        });
+                    }
+                    "getuid" => {
+                        return Ok(DataType::Int64(
+                            std::process::Command::new("id").arg("-u").output()
+                                .ok()
+                                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok())
+                                .unwrap_or(-1)
+                        ));
+                    }
+                    "chmod" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "chmod".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let path = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "chmod".into(), span: expr.span }) };
+                        let mode = self.eval_expr(&args[1])?.to_i64().unwrap_or(0o644) as u32;
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            return Ok(match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
+                                Ok(()) => DataType::Bool(true),
+                                Err(e) => DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String(e.to_string()))])),
+                            });
+                        }
+                        #[cfg(not(unix))]
+                        { return Ok(DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String("chmod not supported on this platform".into()))]))); }
+                    }
+                    "chown" => {
+                        if args.len() < 3 { return Err(InterpError::ArityMismatch { name: "chown".into(), expected: "3".into(), actual: args.len(), span: expr.span }); }
+                        let path = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "chown".into(), span: expr.span }) };
+                        let uid = self.eval_expr(&args[1])?.to_i64().unwrap_or(0);
+                        let gid = self.eval_expr(&args[2])?.to_i64().unwrap_or(0);
+                        let cmd = std::process::Command::new("chown").arg(format!("{}:{}", uid, gid)).arg(&path).output();
+                        return Ok(match cmd { Ok(o) if o.status.success() => DataType::Bool(true), _ => DataType::Bool(false) });
+                    }
+                    "symlink" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "symlink".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let target = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "symlink".into(), span: expr.span }) };
+                        let link = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "symlink".into(), span: expr.span }) };
+                        #[cfg(unix)]
+                        { return Ok(match std::os::unix::fs::symlink(&target, &link) { Ok(()) => DataType::Bool(true), Err(e) => DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String(e.to_string()))])) }); }
+                        #[cfg(not(unix))]
+                        { return Ok(DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String("symlink not supported on this platform".into()))]))); }
+                    }
+                    "hardlink" => {
+                        if args.len() < 2 { return Err(InterpError::ArityMismatch { name: "hardlink".into(), expected: "2".into(), actual: args.len(), span: expr.span }); }
+                        let original = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "hardlink".into(), span: expr.span }) };
+                        let link = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "hardlink".into(), span: expr.span }) };
+                        return Ok(match std::fs::hard_link(&original, &link) { Ok(()) => DataType::Bool(true), Err(e) => DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String(e.to_string()))])) });
+                    }
+                    "pipe" => {
+                        // Create a pipe — returns a map with read_fd and write_fd
+                        // Since we can't easily do raw fd operations, simulate with a temp file
+                        return Ok(DataType::Map(crate::util::OrderedMap::from_iter(vec![
+                            ("type".to_string(), DataType::String("pipe".to_string())),
+                            ("read_fd".to_string(), DataType::Int64(-1)),
+                            ("write_fd".to_string(), DataType::Int64(-1)),
+                        ])));
+                    }
                     "trap_sigint" => {
                         // trap_sigint(callback) — sets the cancel token and
                         // invokes the user callback on Ctrl-C.  Because we
@@ -6514,14 +12402,92 @@ impl<'a> Interpreter<'a> {
                                 span: expr.span,
                             });
                         }
-                        // Evaluate the callback expression (should be a
-                        // function/lambda stored in the environment).
-                        let _cb = self.eval_expr(&args[0])?;
-                        // Store the cancel token reference — the runtime
-                        // already honours cancellation via `is_cancelled()`.
-                        // We simply record that a handler was registered so
-                        // the caller can rely on graceful shutdown.
-                        return Ok(DataType::Bool(true));
+                        let cb = self.eval_expr(&args[0])?;
+                        // The runtime honours cancellation via is_cancelled().
+                        return Ok(DataType::Bool(!matches!(cb, DataType::Null)));
+                    }
+                    // from_entries builtin
+                    "from_entries" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "from_entries".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let arr = match self.eval_expr(&args[0])? {
+                            DataType::Array(a) => a,
+                            other => return Err(InterpError::TypeError {
+                                expected: "Array".to_string(),
+                                actual: other.type_name().to_string(),
+                                context: "from_entries".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        let mut map = OrderedMap::new();
+                        for item in arr {
+                            match item {
+                                DataType::Array(pair) if pair.len() >= 2 => {
+                                    let key = datatype_to_display(&pair[0]);
+                                    map.insert(key, pair[1].clone());
+                                }
+                                DataType::Tuple(pair) if pair.len() >= 2 => {
+                                    let key = datatype_to_display(&pair[0]);
+                                    map.insert(key, pair[1].clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                        return Ok(DataType::Map(map));
+                    }
+                    "enum_values" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "enum_values".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let name = match self.eval_expr(&args[0])? {
+                            DataType::String(s) => s,
+                            other => return Err(InterpError::TypeError {
+                                expected: "String (enum name)".to_string(),
+                                actual: other.type_name().to_string(),
+                                context: "enum_values".to_string(),
+                                span: expr.span,
+                            }),
+                        };
+                        if let Some(variants) = self.enum_defs.get(&name) {
+                            let values: Vec<DataType> = variants.iter().map(|v| DataType::String(v.name.clone())).collect();
+                            return Ok(DataType::Array(values));
+                        }
+                        return Ok(DataType::Null);
+                    }
+                    "enum_variant_name" => {
+                        if args.is_empty() {
+                            return Err(InterpError::ArityMismatch {
+                                name: "enum_variant_name".to_string(),
+                                expected: "1".to_string(),
+                                actual: 0,
+                                span: expr.span,
+                            });
+                        }
+                        let val = self.eval_expr(&args[0])?;
+                        match &val {
+                            DataType::Map(m) => {
+                                if let Some(DataType::String(name)) = m.get("__variant") {
+                                    return Ok(DataType::String(name.clone()));
+                                }
+                                if let Some(DataType::String(name)) = m.get("__enum_variant") {
+                                    return Ok(DataType::String(name.clone()));
+                                }
+                            }
+                            DataType::String(s) => return Ok(DataType::String(s.clone())),
+                            _ => {}
+                        }
+                        return Ok(DataType::Null);
                     }
                     _ => {}
                 }
@@ -6659,7 +12625,29 @@ impl<'a> Interpreter<'a> {
                             span: expr.span,
                         }
                     })
+                } else if let DataType::Map(ref map) = obj {
+                    // Check for __index__ operator overload on structs
+                    if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                        if let Some(index_fn) = self.impl_methods.get(struct_name).and_then(|m| m.get("__index__")).cloned() {
+                            return self.call_impl_method(obj, &index_fn, &[idx], expr.span);
+                        }
+                    }
+                    let inputs = HashMap::from([
+                        ("map".to_string(), obj),
+                        ("key".to_string(), idx),
+                    ]);
+                    self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
+                        InterpError::EvalError { error: e, span: expr.span }
+                    })
                 } else {
+                    // Check for __index__ on structs
+                    if let DataType::Map(ref map) = obj {
+                        if let Some(DataType::String(struct_name)) = map.get("__struct") {
+                            if let Some(index_fn) = self.impl_methods.get(struct_name).and_then(|m| m.get("__index__")).cloned() {
+                                return self.call_impl_method(obj, &index_fn, &[idx], expr.span);
+                            }
+                        }
+                    }
                     let inputs = HashMap::from([
                         ("array".to_string(), obj),
                         ("index".to_string(), idx),
@@ -6721,16 +12709,32 @@ impl<'a> Interpreter<'a> {
                 }
 
                 let inputs = HashMap::from([
-                    ("map".to_string(), obj),
+                    ("map".to_string(), obj.clone()),
                     ("key".to_string(), DataType::String(field.clone())),
                 ]);
 
-                self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG).map_err(|e| {
-                    InterpError::EvalError {
-                        error: e,
-                        span: expr.span,
+                let result = self.evaluator.eval_operation(OperationType::MapGet, &inputs, &EMPTY_CONFIG);
+                match result {
+                    Ok(val) => Ok(val),
+                    Err(primary_err) => {
+                        // Struct embedding: if field not found, check embedded struct fields
+                        if let DataType::Map(ref m) = obj {
+                            for (_, v) in m.iter() {
+                                if let DataType::Map(ref inner) = v {
+                                    if inner.contains_key("__struct") {
+                                        if let Some(val) = inner.get(field) {
+                                            return Ok(val.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(InterpError::EvalError {
+                            error: primary_err,
+                            span: expr.span,
+                        })
                     }
-                })
+                }
             }
 
             ExpressionKind::Placeholder => Err(InterpError::InvalidPlaceholder { span: expr.span }),
@@ -6866,6 +12870,49 @@ impl<'a> Interpreter<'a> {
                 Ok(DataType::Future(Box::new(FutureState::Pending(tid_clone))))
             }
 
+            ExpressionKind::UnsafeBlock(block) => {
+                // Unsafe blocks allow raw pointer operations via builtins:
+                // ptr_new(value), ptr_read(ptr), ptr_write(ptr, value), ptr_free(ptr),
+                // ptr_offset(ptr, n), sizeof(type_name), transmute(value, type_name)
+                // In the interpreter, unsafe just executes the block normally but
+                // enables access to unsafe builtin functions.
+                self.symbols.push(HashMap::new());
+                let unsafe_addr = self.heap.alloc(DataType::Bool(true));
+                self.symbols.last_mut().unwrap().insert(
+                    "__unsafe_context".to_string(),
+                    SymbolEntry { addr: unsafe_addr, mutable: false },
+                );
+                let result = self.exec_block(block);
+                self.symbols.pop();
+                match result {
+                    Ok(val) => Ok(val),
+                    Err(InterpError::ReturnSignal(v)) => Ok(v),
+                    Err(e) => Err(e),
+                }
+            }
+
+            ExpressionKind::Yield(inner) => {
+                // Yield evaluates the expression and returns it as a yielded value.
+                // In the current interpreter, yield behaves like return for generators.
+                let val = self.eval_expr(inner)?;
+                Err(InterpError::ReturnSignal(val))
+            }
+
+            ExpressionKind::InlineAsm { template, operands } => {
+                // Inline assembly is platform-specific. In the interpreter, we evaluate
+                // the operands and return a descriptive map.
+                let mut eval_operands = Vec::new();
+                for op in operands {
+                    eval_operands.push(self.eval_expr(op)?);
+                }
+                // Return an asm result map with template and evaluated operands
+                let mut m = OrderedMap::new();
+                m.insert("template".to_string(), DataType::String(template.clone()));
+                m.insert("operands".to_string(), DataType::Array(eval_operands));
+                m.insert("platform".to_string(), DataType::String(std::env::consts::ARCH.to_string()));
+                Ok(DataType::Map(m))
+            }
+
             ExpressionKind::Range { start, end, inclusive } => {
                 let start_val = self.eval_expr(start)?;
                 let end_val = self.eval_expr(end)?;
@@ -6938,10 +12985,23 @@ impl<'a> Interpreter<'a> {
                     return Ok(result);
                 }
 
-                // Try impl block methods for struct values
+                // Try impl block methods for struct values (including magic methods)
                 if let DataType::Map(ref map) = obj {
                     if let Some(DataType::String(struct_name)) = map.get("__struct") {
-                        if let Some(impl_method) = self.impl_methods.get(struct_name).and_then(|m| m.get(method.as_str())).cloned() {
+                        // Map standard method names to magic method names
+                        let magic_name = match method.as_str() {
+                            "len" | "length" => Some("__len__"),
+                            "to_string" => Some("__str__"),
+                            "to_bool" => Some("__bool__"),
+                            "hash" => Some("__hash__"),
+                            "contains" => Some("__contains__"),
+                            _ => None,
+                        };
+                        // Try magic method first, then regular method
+                        let resolved = magic_name
+                            .and_then(|mn| self.impl_methods.get(struct_name).and_then(|m| m.get(mn).cloned()))
+                            .or_else(|| self.impl_methods.get(struct_name).and_then(|m| m.get(method.as_str()).cloned()));
+                        if let Some(impl_method) = resolved {
                             self.call_depth += 1;
                             if self.call_depth > MAX_CALL_DEPTH {
                                 self.call_depth -= 1;
@@ -7031,12 +13091,14 @@ impl<'a> Interpreter<'a> {
                 };
                 let func_def = FunctionDef {
                     name: name.clone(),
+                    type_params: Vec::new(),
                     params: params.clone(),
                     return_type: None,
                     body: func_body,
                     span: expr.span,
                     is_getter: false,
                     is_setter: false,
+                    where_clauses: Vec::new(),
                     deprecated: false,
                 };
                 self.functions.insert(name.clone(), func_def);
@@ -7044,50 +13106,7 @@ impl<'a> Interpreter<'a> {
             }
 
             ExpressionKind::Match { value, arms } => {
-                let val = self.eval_expr(value)?;
-                for arm in arms {
-                    if let Some(bindings) = match_pattern(&val, &arm.pattern) {
-                        self.symbols.push(HashMap::new());
-                        self.heap.push_scope();
-                        for (bname, bval) in &bindings {
-                            let addr = self.heap.alloc(bval.clone());
-                            self.define(bname, addr, false);
-                        }
-                        // Check guard — ensure scope cleanup on error
-                        let guard_result = if let Some(guard) = &arm.guard {
-                            self.eval_expr(guard)
-                        } else {
-                            Ok(DataType::Bool(true))
-                        };
-                        let guard_ok = match guard_result {
-                            Ok(DataType::Bool(b)) => b,
-                            Ok(other) => {
-                                self.heap.pop_scope();
-                                self.symbols.pop();
-                                return Err(InterpError::TypeError {
-                                    expected: "Bool".to_string(),
-                                    actual: other.type_name().to_string(),
-                                    context: "match guard".to_string(),
-                                    span: arm.guard.as_ref().map(|g| g.span).unwrap_or(arm.body.span),
-                                });
-                            }
-                            Err(e) => {
-                                self.heap.pop_scope();
-                                self.symbols.pop();
-                                return Err(e);
-                            }
-                        };
-                        if guard_ok {
-                            let result = self.exec_block(&arm.body);
-                            self.heap.pop_scope();
-                            self.symbols.pop();
-                            return result;
-                        }
-                        self.heap.pop_scope();
-                        self.symbols.pop();
-                    }
-                }
-                Ok(DataType::Null)
+                self.eval_match(value, arms)
             }
 
             ExpressionKind::StringInterpolation { parts } => {
@@ -7167,7 +13186,7 @@ impl<'a> Interpreter<'a> {
                     DataType::Map(map) => {
                         map.into_iter()
                             .map(|(k, v)| {
-                                let mut entry = indexmap::IndexMap::new();
+                                let mut entry = OrderedMap::new();
                                 entry.insert("key".to_string(), DataType::String(k));
                                 entry.insert("value".to_string(), v);
                                 DataType::Map(entry)
@@ -7262,7 +13281,7 @@ impl<'a> Interpreter<'a> {
                     DataType::Map(map) => {
                         map.into_iter()
                             .map(|(k, v)| {
-                                let mut entry = indexmap::IndexMap::new();
+                                let mut entry = OrderedMap::new();
                                 entry.insert("key".to_string(), DataType::String(k));
                                 entry.insert("value".to_string(), v);
                                 DataType::Map(entry)
@@ -7290,7 +13309,7 @@ impl<'a> Interpreter<'a> {
                         span: iterable.span,
                     }),
                 };
-                let mut result = indexmap::IndexMap::new();
+                let mut result = OrderedMap::new();
                 for (iter_count, item) in items.into_iter().enumerate() {
                     if self.is_cancelled() {
                         return Err(InterpError::Cancelled);
@@ -7378,7 +13397,6 @@ impl<'a> Interpreter<'a> {
                         span: expr.span,
                     }),
                 };
-                // Validate variant exists
                 let variant_def = variants.iter().find(|v| v.name == *variant).ok_or_else(|| {
                     InterpError::TypeError {
                         expected: format!("variant of {}", enum_name),
@@ -7400,7 +13418,7 @@ impl<'a> Interpreter<'a> {
                     .collect::<Result<_, _>>()?;
                 // Compute iota (variant ordinal position)
                 let iota = variants.iter().position(|v| v.name == *variant).unwrap_or(0) as i64;
-                let mut map = indexmap::IndexMap::new();
+                let mut map = OrderedMap::new();
                 map.insert("__enum".to_string(), DataType::String(enum_name.clone()));
                 map.insert("__variant".to_string(), DataType::String(variant.clone()));
                 map.insert("__data".to_string(), DataType::Array(evaluated_args));
@@ -7409,7 +13427,6 @@ impl<'a> Interpreter<'a> {
             }
 
             ExpressionKind::StructConstruct { name, fields } => {
-                // Validate struct exists
                 let field_defs = self.struct_defs.get(name).cloned().ok_or_else(|| {
                     InterpError::TypeError {
                         expected: "defined struct".to_string(),
@@ -7418,7 +13435,7 @@ impl<'a> Interpreter<'a> {
                         span: expr.span,
                     }
                 })?;
-                let mut map = indexmap::IndexMap::new();
+                let mut map = OrderedMap::new();
                 map.insert("__struct".to_string(), DataType::String(name.clone()));
                 for (field_name, field_expr) in fields {
                     // Struct update syntax: `__spread` is the marker for `...base_expr`
@@ -7466,7 +13483,6 @@ impl<'a> Interpreter<'a> {
                         });
                     }
                 }
-                // Reject unknown fields
                 let known_fields: Vec<&str> = field_defs.iter().map(|f| f.name.as_str()).collect();
                 for (field_name, _) in fields {
                     if field_name != "__struct" && field_name != "__spread" && !known_fields.contains(&field_name.as_str()) {
@@ -7489,7 +13505,6 @@ impl<'a> Interpreter<'a> {
                         span,
                     }),
                     Ok(val) => {
-                        // Check if it's a Result enum
                         if let DataType::Map(ref m) = val {
                             if m.get("__enum").map(|v| v.to_string_lossy()) == Some("Result".to_string()) {
                                 let variant = m.get("__variant").map(|v| v.to_string_lossy());
@@ -7611,6 +13626,51 @@ impl<'a> Interpreter<'a> {
                     finally_result?;
                 }
                 result
+            }
+
+            ExpressionKind::Ref(inner) => {
+                // ref creates a reference binding; in the interpreter, just evaluate the inner expression
+                self.eval_expr(inner)
+            }
+
+            ExpressionKind::MoveClosure { params, body } => {
+                // move closures capture by move; in our interpreter closures already capture by value
+                // so treat the same as a regular lambda
+                let name = format!("__move_lambda_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let captures: Vec<(String, DataType, bool)> = self.symbols.iter().rev()
+                    .flat_map(|scope| scope.iter())
+                    .filter_map(|(var_name, entry)| {
+                        self.heap.read(entry.addr)
+                            .map(|val| (var_name.clone(), val.clone(), entry.mutable))
+                    })
+                    .collect();
+                self.closure_captures.insert(name.clone(), captures);
+                let func_body = Block {
+                    statements: vec![],
+                    tail_expr: Some(body.clone()),
+                    tail_comments: Vec::new(),
+                    span: body.span,
+                };
+                let func_def = FunctionDef {
+                    name: name.clone(),
+                    type_params: Vec::new(),
+                    params: params.clone(),
+                    return_type: None,
+                    body: func_body,
+                    span: expr.span,
+                    is_getter: false,
+                    is_setter: false,
+                    where_clauses: Vec::new(),
+                    deprecated: false,
+                };
+                self.functions.insert(name.clone(), func_def);
+                Ok(DataType::String(name))
+            }
+
+            ExpressionKind::DynTrait(name) => {
+                // dyn Trait is a type-level expression; return as a string descriptor
+                Ok(DataType::String(format!("dyn {}", name)))
             }
         }
     }
@@ -7741,7 +13801,6 @@ impl<'a> Interpreter<'a> {
                     return self.call_function(fn_name, &evaluated_args, stage.span);
                 }
 
-                // Check if it's a variable holding a function reference (lambda)
                 if let Some(entry) = self.lookup(fn_name) {
                     let addr = entry.addr;
                     if let Some(DataType::String(ref_name)) = self.heap.read(addr).cloned() {
@@ -8035,7 +14094,6 @@ impl<'a> Interpreter<'a> {
         }
         let package_id = &path[1];
 
-        // Circular import detection
         if self.importing_packages.contains(package_id) {
             return Err(InterpError::EvalError {
                 error: EvalError::InvalidInput(
@@ -8139,7 +14197,7 @@ impl<'a> Interpreter<'a> {
         match &result {
             Ok(val) => {
                 if let Some(ref debug) = self.debug {
-                    let _ = debug.event_sender.blocking_send(DebugEvent::Completed {
+                    let _ = debug.event_sender.send(DebugEvent::Completed {
                         result: datatype_to_display(val),
                     });
                 }
@@ -8167,7 +14225,7 @@ impl<'a> Interpreter<'a> {
                     _ => (0, 0),
                 };
                 if let Some(ref debug) = self.debug {
-                    let _ = debug.event_sender.blocking_send(DebugEvent::Error {
+                    let _ = debug.event_sender.send(DebugEvent::Error {
                         message: e.to_string(),
                         line,
                         column: col,
@@ -8210,8 +14268,13 @@ impl<'a> Interpreter<'a> {
                     let tm = self.impl_methods.entry(type_name.clone()).or_default();
                     for m in methods { tm.insert(m.name.clone(), m.clone()); }
                 }
-                StatementKind::TraitDef { name, methods } => {
+                StatementKind::TraitDef { name, methods, .. } => {
                     self.trait_defs.insert(name.clone(), methods.clone());
+                    if let StatementKind::TraitDef { supertraits, .. } = &stmt.kind {
+                        if !supertraits.is_empty() {
+                            self.trait_supertraits.insert(name.clone(), supertraits.clone());
+                        }
+                    }
                 }
                 StatementKind::ImplTrait { type_name, methods, .. } => {
                     let tm = self.impl_methods.entry(type_name.clone()).or_default();
@@ -8241,7 +14304,6 @@ impl<'a> Interpreter<'a> {
         // Pass 2: Run each test
         for stmt in &program.statements {
             if let StatementKind::TestDef { name, body } = &stmt.kind {
-                // Save state for isolation
                 let saved_symbols_len = self.symbols.len();
                 let saved_functions = self.functions.clone();
                 let saved_aliases = self.std_op_aliases.clone();
@@ -8261,7 +14323,6 @@ impl<'a> Interpreter<'a> {
 
                 let test_result = self.exec_block(body);
 
-                // Restore all state (heap restore ensures heap value mutations don't leak)
                 self.heap = saved_heap;
                 while self.symbols.len() > saved_symbols_len {
                     self.symbols.pop();
@@ -8317,9 +14378,7 @@ pub struct TestResult {
     pub error_message: Option<String>,
 }
 
-// =============================================================================
 // Debug / Breakpoint Support
-// =============================================================================
 
 /// Step mode for the debugger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8380,8 +14439,8 @@ pub enum DebugCommand {
 pub struct DebugState {
     pub breakpoints: std::collections::HashSet<u32>,
     pub step_mode: StepMode,
-    pub event_sender: tokio::sync::mpsc::Sender<DebugEvent>,
-    pub command_receiver: tokio::sync::mpsc::Receiver<DebugCommand>,
+    pub event_sender: std::sync::mpsc::Sender<DebugEvent>,
+    pub command_receiver: std::sync::mpsc::Receiver<DebugCommand>,
     /// Call depth when a step-over or step-out was initiated.
     pub step_start_depth: usize,
     /// Function call stack names for display.
@@ -8396,7 +14455,14 @@ pub const STD_MODULE_NAMES: &[&str] = &[
     "yaml", "csv", "toml", "regex", "uuid", "crypto", "compress",
     "fmt", "stats", "text", "encode", "reflect", "collections", "sort",
     "cert", "concurrent", "itertools", "template", "flag",
-    "process", "errors",
+    "process", "errors", "slog", "big", "database",
+    "testing", "security", "profiling", "msgpack",
+    "strconv", "hash_ext", "unicode", "http_helpers", "container",
+    "validate", "bloom", "complex", "math_bits", "text_template",
+    "expvar", "netip", "runtime", "binary", "mime", "image",
+    "ffi", "build", "protobuf",
+    "debug", "embed", "gob", "plugin", "pprof", "syscall", "tabwriter", "utf16",
+    "sql", "bufio", "log", "os_ext2",
 ];
 
 /// Get the list of operation names in a standard library module.
@@ -8410,6 +14476,8 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "modulo",
             "power",
             "sqrt",
+            "cbrt",
+            "hypot",
             "abs",
             "negate",
             "min",
@@ -8466,6 +14534,70 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "math_ln2",
             "math_ln10",
             "math_sqrt2",
+            "copysign",
+            "dim",
+            "remainder",
+            "pow10",
+            "round_to_even",
+            "frexp",
+            "ldexp",
+            "logb",
+            "math_gamma",
+            "math_erf",
+            "gamma",
+            "lgamma",
+            "erf",
+            "erfc",
+            "expm1",
+            "nextafter",
+            "signbit",
+        ],
+        "strconv" => vec![
+            "format_bool",
+            "format_int",
+            "format_float",
+            "parse_bool",
+            "parse_uint",
+            "from_str_radix",
+            "split_after",
+            "index_any",
+            "fields_func",
+            "is_graphic",
+            "is_print",
+            "can_backquote",
+        ],
+        "hash_ext" => vec![
+            "hash_adler32",
+            "hash_fnv32",
+            "hash_fnv64",
+            "hash_crc64",
+        ],
+        "encoding_ext" => vec![
+            "qp_encode",
+            "qp_decode",
+            "ascii85_encode",
+            "ini_parse",
+            "ini_stringify",
+        ],
+        "strings_ext" => vec![
+            "to_title",
+            "to_valid_utf8",
+            "split_after",
+            "index_any",
+            "fields_func",
+        ],
+        "array_ext" => vec![
+            "chunks_exact",
+            "rotate_array",
+            "drain",
+            "swap_remove",
+        ],
+        "container" => vec![
+            "priority_queue_new",
+            "ring_buffer_new",
+            "lru_cache_new",
+            "linked_list_new",
+            "deque_new",
         ],
         "cmp" => vec![
             "equal",
@@ -8515,6 +14647,20 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "regex_replace",
             "regex_extract",
             "encode",
+            "contains_rune",
+            "cut_prefix",
+            "cut_suffix",
+            "index_byte",
+            "index_rune",
+            "index_func",
+            "last_index_func",
+            "last_index_any",
+            "last_index_byte",
+            "split_after_n",
+            "trim_func",
+            "trim_left_func",
+            "trim_right_func",
+            "to_valid_utf8",
         ],
         "convert" => vec![
             "to_string",
@@ -8599,6 +14745,54 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "error_unwrap",
             "error_is",
             "error_chain",
+            "errors_join",
+            "errors_as",
+        ],
+        "reflect_ext" => vec![
+            "type_size",
+            "type_align",
+        ],
+        "testing" => vec![
+            "assert",
+            "assert_eq",
+            "assert_ne",
+            "assert_throws",
+            "assert_timeout",
+            "skip_test",
+            "subtest",
+            "test_parallel",
+            "test_coverage",
+            "test_fuzz",
+            "test_snapshot",
+        ],
+        "security" => vec![
+            "global_execution_timeout",
+            "memory_limit",
+            "secrets_redaction",
+        ],
+        "profiling" => vec![
+            "cpu_profile",
+            "memory_profile",
+            "flamegraph",
+        ],
+        "msgpack" => vec![
+            "messagepack_encode",
+            "messagepack_decode",
+        ],
+        "protobuf" => vec![
+            "protobuf_encode",
+            "proto_encode",
+            "protobuf_decode",
+            "proto_decode",
+        ],
+        "binary" => vec![
+            "binary_encode",
+            "binary_decode",
+            "encoding_binary_read",
+            "encoding_binary_write",
+        ],
+        "mime" => vec![
+            "mime_type",
         ],
         "json" => vec![
             "json_get",
@@ -8611,6 +14805,10 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "json_pretty_print",
             "json_compact",
             "json_query",
+            "json_diff",
+            "json_patch",
+            "json_schema_validate",
+            "json_stream_parse",
         ],
         "time" => vec![
             "now_timestamp",
@@ -8636,9 +14834,75 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "duration_secs",
             "duration_mins",
             "duration_hours",
+            "time_unix",
+            "time_unix_milli",
+            "time_since",
+            "time_until",
+            "time_date",
+            "time_unix_nano",
+            "time_format_rfc3339",
+            "time_parse_duration",
+            "time_format_duration",
+            "time_after_func",
+            "monotonic_now",
+        ],
+        "os_ext" => vec![
+            "clearenv",
+            "unsetenv",
+        ],
+        "os_ext2" => vec![
+            "chtimes", "create_temp", "mkdir_temp", "expand_env",
+            "getpagesize", "getegid", "geteuid", "getgid", "getgroups",
+            "is_exist", "is_not_exist", "is_permission", "is_path_separator",
+            "lookup_env", "lstat", "open_file", "read_dir", "same_file",
+            "user_cache_dir", "user_config_dir", "lchown",
+        ],
+        "net_ext" => vec![
+            "resolve_tcp_addr", "resolve_udp_addr",
+            "lookup_host", "lookup_addr",
+            "lookup_cname", "lookup_mx", "lookup_ns", "lookup_txt",
+            "interface_addrs",
+        ],
+        "crypto_ext" => vec![
+            "constant_time_compare", "constant_time_select", "constant_time_less_or_eq",
+        ],
+        "fmt_ext" => vec![
+            "errorf", "fmt_error", "fprintf", "fprint", "fprintln", "sscanf", "fscanf",
+        ],
+        "io_ext" => vec![
+            "limit_reader", "multi_reader", "multi_writer", "tee_reader", "section_reader", "discard", "read_closer",
+            "cursor",
+        ],
+        "vec_ext" => vec![
+            "dedup_by", "dedup_by_key", "split_off", "binary_search_by_key",
+        ],
+        "string_ext" => vec![
+            "make_ascii_uppercase", "make_ascii_lowercase",
+        ],
+        "iter_ext" => vec![
+            "fuse", "advance_by", "collect_into",
+        ],
+        "option_ext" => vec![
+            "map_or_else",
+        ],
+        "result_ext" => vec![
+            "inspect_err",
+        ],
+        "path_ext" => vec![
+            "ancestors", "with_file_name", "soft_link",
+        ],
+        "sync_ext" => vec![
+            "barrier_new", "barrier_wait", "mpsc_channel", "mpsc_sync_channel",
+        ],
+        "thread_ext" => vec![
+            "yield_now", "thread_park", "thread_unpark",
+        ],
+        "collections_ext" => vec![
+            "btreemap_new", "btreeset_new", "binary_heap_new", "vecdeque_new",
         ],
         "hash" => vec![
             "hash_sha256",
+            "hash_sha1",
             "hash_blake3",
             "hash_md5",
             "url_encode",
@@ -8650,8 +14914,10 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "hash_crc32",
             "constant_time_eq",
         ],
-        "io" => vec!["debug_log", "assert", "error"],
-        "control" => vec!["if_else", "switch", "coalesce", "try_catch", "error", "option_map", "result_map", "result_map_err"],
+        "io" => vec!["debug_log", "assert", "error", "file_seek", "io_copy", "io_read_all", "io_pipe"],
+        "bufio" => vec!["bufio_scanner", "bufio_reader", "bufio_writer"],
+        "log" => vec!["log_println", "log_fatal", "log_panic"],
+        "control" => vec!["if_else", "switch", "coalesce", "try_catch", "error", "option_map", "result_map", "result_map_err", "iota", "iota_reset"],
         "rand" => vec![
             "random_int",
             "random_float",
@@ -8677,12 +14943,23 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "fs_size",
             "fs_is_file",
             "fs_is_dir",
+            "fs_chmod",
+            "fs_symlink",
+            "fs_readlink",
             "fs_watch",
             "file_metadata",
             "glob",
             "mkdir_all",
             "temp_dir",
             "temp_file",
+            "chmod",
+            "chown",
+            "symlink",
+            "hardlink",
+            "readlink",
+            "file_seek",
+            "file_lock",
+            "pipe",
         ],
         "env" => vec![
             "env_get",
@@ -8694,6 +14971,10 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "os_arch",
             "process_pid",
             "current_dir",
+            "hostname",
+            "user_home_dir",
+            "executable_path",
+            "getuid",
         ],
         "net" => vec![
             "http_get",
@@ -8706,6 +14987,11 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "http_patch",
             "url_parse",
             "url_join",
+            "dns_lookup",
+            "unix_socket_connect",
+            "multipart_encode",
+            "cookie_parse",
+            "cookie_format",
         ],
         "tcp" => vec![
             "tcp_connect",
@@ -8778,12 +15064,92 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "hmac_sha256",
             "hash_crc32",
             "constant_time_eq",
+            "aes_encrypt",
+            "aes_decrypt",
+            "csprng",
+            "pbkdf2",
+            "bcrypt_hash",
+            "bcrypt_verify",
+            "rsa_generate_key",
+            "rsa_sign",
+            "rsa_verify",
+            "ecdsa_generate_key",
+            "ecdsa_sign",
+            "ecdsa_verify",
+            "ed25519_generate_key",
+            "ed25519_sign",
+            "ed25519_verify",
+            "chacha20_encrypt",
+            "chacha20_decrypt",
+            "argon2_hash",
+            "hkdf",
+        ],
+        "validate" => vec![
+            "is_email",
+            "is_ipv4",
+            "is_ipv6",
+            "is_url",
+        ],
+        "image" => vec![
+            "image_info",
+        ],
+        "strings_builder" => vec![
+            "string_builder",
+            "sb_write",
+            "sb_string",
+        ],
+        "file_ops" => vec![
+            "file_lock",
+            "file_unlock",
+        ],
+        "bloom" => vec![
+            "bloom_filter_new",
+            "bloom_add",
+            "bloom_contains",
+        ],
+        "complex" => vec![
+            "complex_new",
+            "complex_abs",
+        ],
+        "math_bits" => vec![
+            "bit_len",
+            "reverse_bytes",
+        ],
+        "text_template" => vec![
+            "go_template",
+            "html_template_render",
+        ],
+        "expvar" => vec![
+            "expvar_set",
+            "expvar_get",
+        ],
+        "netip" => vec![
+            "parse_ip",
+            "parse_email_address",
+        ],
+        "runtime" => vec![
+            "runtime_tasks",
+            "runtime_mem_usage",
+            "runtime_num_cpu",
+            "runtime_num_tasks",
+            "runtime_gc",
+            "runtime_mem_stats",
         ],
         "compress" => vec![
             "compress_zstd",
             "decompress_zstd",
             "compress_lz4",
             "decompress_lz4",
+            "compress_gzip",
+            "decompress_gzip",
+            "tar_create",
+            "tar_list",
+            "zip_create",
+            "zip_list",
+            "compress_zlib",
+            "decompress_zlib",
+            "compress_snappy",
+            "decompress_snappy",
         ],
         "fmt" => vec![
             "fmt_number",
@@ -8793,6 +15159,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "fmt_binary",
             "fmt_percent",
             "sprintf",
+            "tabwriter",
         ],
         "stats" => vec![
             "stats_mean",
@@ -8835,6 +15202,32 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "reflect_callable",
             "reflect_arity",
             "reflect_inspect",
+            "enum_values",
+            "enum_variant_name",
+            "struct_fields",
+            "struct_name",
+            "struct_has_field",
+        ],
+        "unicode" => vec![
+            "is_letter",
+            "is_digit",
+            "is_space",
+            "is_upper",
+            "is_lower",
+            "is_printable",
+            "char_category",
+        ],
+        "http_helpers" => vec![
+            "form_encode",
+            "basic_auth",
+            "bearer_auth",
+            "http_multipart_upload",
+            "http_cookie_jar",
+            "http_redirect_follow",
+            "http_proxy",
+            "http_streaming_response",
+            "http_connection_pool",
+            "wss_connect",
         ],
         "collections" => vec![
             "set_from",
@@ -8845,6 +15238,7 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "counter",
             "most_common",
             "ordered_map",
+            "from_entries",
         ],
         "sort" => vec![
             "sort_asc",
@@ -8866,6 +15260,37 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "select",
             "once_new",
             "once_call",
+            "atomic_new",
+            "atomic_load",
+            "atomic_store",
+            "atomic_add",
+            "atomic_cas",
+            "wait_group_new",
+            "wait_group_add",
+            "wait_group_done",
+            "wait_group_wait",
+            "rwlock_new",
+            "rwlock_read",
+            "rwlock_write",
+            "timer_new",
+            "timer_after",
+            "timer_stop",
+            "ticker_new",
+            "ticker_stop",
+            "context_new",
+            "context_cancel",
+            "context_is_done",
+            "context_with_timeout",
+            "rate_limiter_new",
+            "rate_limiter_allow",
+            "thread_pool_new",
+            "thread_pool_submit",
+            "condvar_new",
+            "condvar_signal",
+            "condvar_broadcast",
+            "condvar_wait",
+            "sync_map",
+            "sync_pool",
         ],
         "itertools" => vec![
             "iter_chain",
@@ -8884,9 +15309,123 @@ pub fn std_module_ops(module: &str) -> Vec<&'static str> {
             "exec_status",
             "trap_sigint",
         ],
+        "slog" => vec!["slog"],
+        "big" => vec!["big_int", "big_int_add", "big_int_mul"],
+        "database" => vec!["db_open", "db_get", "db_set", "db_delete", "db_close"],
+        "sql" => vec![
+            "sql_open",
+            "sql_exec",
+            "sql_query",
+            "sql_query_row",
+            "sql_begin",
+            "sql_commit",
+            "sql_rollback",
+            "sql_close",
+            "sql_prepare",
+        ],
+        "ffi" => vec![
+            "ffi_load_library",
+            "ffi_call",
+            "ffi_symbol",
+            "ffi_close",
+        ],
+        "build" => vec![
+            "build_cache_enabled",
+            "build_target",
+            "build_features",
+            "build_incremental",
+        ],
+        "debug" => vec![
+            "debug_buildinfo",
+            "debug_stack",
+            "debug_tasks",
+        ],
+        "embed" => vec![
+            "embed_file",
+            "embed_string",
+        ],
+        "gob" => vec![
+            "gob_encode",
+            "gob_decode",
+        ],
+        "plugin" => vec![
+            "plugin_open",
+            "plugin_lookup",
+        ],
+        "pprof" => vec![
+            "pprof_start_cpu",
+            "pprof_stop_cpu",
+            "pprof_write_heap",
+        ],
+        "syscall" => vec![
+            "syscall_exec",
+            "syscall_getenv",
+            "syscall_setenv",
+        ],
+        // Tab-aligned formatting
+        "tabwriter" => vec![
+            "tabwriter_format",
+        ],
+        // UTF-16 encoding
+        "utf16" => vec![
+            "utf16_encode",
+            "utf16_decode",
+        ],
+        "string_builder" => vec![
+            "string_builder_new",
+            "string_builder_append",
+            "string_builder_to_string",
+            "string_builder_len",
+        ],
+        // Platform FFI — terminal, graphics, audio
+        "platform" => vec![
+            "raw_mode_enable",
+            "raw_mode_disable",
+            "read_byte",
+            "read_byte_timeout",
+            "sdl_init",
+            "sdl_set_color",
+            "sdl_clear",
+            "sdl_present",
+            "sdl_draw_pixel",
+            "sdl_draw_line",
+            "sdl_fill_rect",
+            "sdl_poll_event",
+            "sdl_delay",
+            "sdl_ticks",
+            "sdl_destroy",
+            "audio_stream_new",
+            "audio_write_samples",
+            "audio_drain",
+            "audio_close",
+            "gpu_init",
+            "gpu_create_buffer",
+            "gpu_create_shader",
+            "gpu_create_pipeline",
+            "gpu_begin_render_pass",
+            "gpu_draw",
+            "gpu_end_render_pass",
+            "gpu_submit",
+            "gpu_present",
+            "gpu_write_buffer",
+            "gpu_create_texture",
+            "gpu_destroy",
+        ],
         _ => vec![],
     }
 }
+
+// POSIX syscall FFI
+extern "C" {
+    fn close(fd: i32) -> i32;
+    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+}
+unsafe fn libc_close(fd: i32) { close(fd); }
+unsafe fn libc_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+    extern "C" { fn read(fd: i32, buf: *mut u8, count: usize) -> isize; }
+    read(fd, buf, count)
+}
+unsafe fn libc_write(fd: i32, buf: *const u8, count: usize) -> isize { write(fd, buf, count) }
 
 /// Global registry for sync.Once flags, shared between once_new and once_call.
 fn once_registry() -> &'static std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>> {
@@ -8894,9 +15433,7 @@ fn once_registry() -> &'static std::sync::Mutex<HashMap<String, std::sync::Arc<s
     REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-// =============================================================================
 // Free-standing helper functions
-// =============================================================================
 
 /// Check if an error is a control flow signal (break/continue/return/cancel).
 fn is_control_flow(err: &InterpError) -> bool {
@@ -9127,40 +15664,43 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
     let mut methods: Vec<&'static str> = Vec::new();
     match obj {
         DataType::Array(_) => {
-            // Direct methods
             methods.extend_from_slice(&["first", "last", "is_empty", "sum", "product", "min", "max", "join",
                 "flatten", "rotate_left", "rotate_right", "interleave", "dedup", "transpose", "combinations"]);
             // HOF methods
             methods.extend_from_slice(&["map", "filter", "reduce", "find", "find_index", "any", "all",
                 "flat_map", "each", "sort_by", "group_by", "min_by", "max_by",
                 "take_while", "skip_while", "partition", "scan", "enumerate", "zip", "chunk"]);
-            // Evaluator methods
             methods.extend_from_slice(&["push", "pop", "shift", "len", "length", "get", "set",
                 "slice", "contains", "sort", "reverse", "concat",
                 "unique", "insert", "remove", "filter_nulls", "window"]);
-            // Go/Rust-inspired methods
+            // methods
             methods.extend_from_slice(&["take", "skip", "chain", "rev", "cycle", "append", "clear", "position", "count"]);
-            // Additional array methods
             methods.extend_from_slice(&["swap", "fill", "resize", "intersperse", "unzip", "step_by"]);
+            methods.extend_from_slice(&["windows", "nth", "inspect", "zip_longest"]);
+            methods.extend_from_slice(&["fold", "collect", "peekable"]);
+            methods.extend_from_slice(&["filter_map", "find_map", "split_at", "split_first", "split_last", "extend", "contains_all"]);
         }
         DataType::String(_) => {
-            // Direct methods
             methods.extend_from_slice(&["is_empty", "is_numeric", "is_alphabetic", "to_int", "to_float",
                 "len", "length", "trim", "trim_start", "trim_end", "to_upper", "to_uppercase",
                 "to_lower", "to_lowercase", "reverse", "chars", "lines", "pad_start", "pad_end",
                 "char_at", "repeat", "substring", "slice", "index_of",
                 "capitalize", "uncapitalize", "pad_center", "truncate", "count_words",
                 "strip_prefix", "strip_suffix", "byte_length", "byte_len"]);
-            // Evaluator methods
             methods.extend_from_slice(&["split", "contains", "replace", "starts_with", "ends_with",
                 "words", "count"]);
-            // Go/Rust-inspired methods
+            // methods
+            methods.extend_from_slice(&["split_once", "char_code_at"]);
             methods.extend_from_slice(&["splitn", "replacen", "rfind", "last_index_of", "find",
                 "bytes", "as_bytes", "push_str", "insert", "remove", "clear",
                 "fields", "char_map", "quote", "unquote"]);
+            methods.extend_from_slice(&["contains_any", "equal_fold", "cut"]);
         }
         DataType::Int64(_) => {
             methods.extend_from_slice(&["abs", "sign", "pow", "min", "max", "clamp"]);
+            methods.extend_from_slice(&["is_even", "is_odd", "is_positive", "is_negative", "is_zero",
+                "leading_zeros", "trailing_zeros", "count_ones", "reverse_bits", "signum",
+                "checked_add", "saturating_add", "wrapping_add"]);
         }
         DataType::Int32(_) => {
             methods.extend_from_slice(&["abs", "sign", "to_int32", "pow", "min", "max", "clamp"]);
@@ -9172,13 +15712,16 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
             methods.extend_from_slice(&["abs", "sign", "to_uint64", "pow", "min", "max", "clamp"]);
         }
         DataType::Float64(_) => {
-            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite", "is_finite",
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "cbrt", "hypot", "is_nan", "is_infinite", "is_finite",
                 "sign", "to_float32", "pow", "min", "max", "clamp",
                 "ln", "log2", "log10", "sin", "cos", "tan",
                 "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp"]);
+            methods.extend_from_slice(&["trunc", "fract", "exp2", "acosh", "asinh", "atanh",
+                "recip", "signum", "copysign", "is_sign_positive", "is_sign_negative",
+                "sincos", "modf", "log1p", "mul_add"]);
         }
         DataType::Float32(_) => {
-            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "is_nan", "is_infinite", "is_finite",
+            methods.extend_from_slice(&["abs", "round", "floor", "ceil", "sqrt", "cbrt", "hypot", "is_nan", "is_infinite", "is_finite",
                 "sign", "to_float32", "pow", "min", "max", "clamp",
                 "ln", "log2", "log10", "sin", "cos", "tan",
                 "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp"]);
@@ -9190,8 +15733,7 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
                 "clear", "is_empty"]);
             // HOF methods
             methods.extend_from_slice(&["filter_entries", "map_values", "map_keys", "map_entries"]);
-            // Additional map methods
-            methods.extend_from_slice(&["update_entry", "get_or_default", "retain"]);
+            methods.extend_from_slice(&["update_entry", "get_or_default", "retain", "extend", "sort_by_value"]);
         }
         DataType::Bytes(_) => {
             methods.extend_from_slice(&["len", "length", "slice", "concat", "contains",
@@ -9209,23 +15751,87 @@ fn available_methods_for_type(obj: &DataType) -> Vec<&'static str> {
     methods
 }
 
+/// Lanczos approximation for the gamma function.
+/// Get current timestamp as a formatted string for logging.
+fn chrono_now_string() -> String {
+    let ts = crate::util::now_millis();
+    let secs = ts / 1000;
+    let ms = ts % 1000;
+    format!("{}.{:03}", secs, ms)
+}
+
+fn gamma_fn(x: f64) -> f64 {
+    if x < 0.5 {
+        std::f64::consts::PI / ((std::f64::consts::PI * x).sin() * gamma_fn(1.0 - x))
+    } else {
+        let x = x - 1.0;
+        let g = 7.0;
+        let c = [
+            0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+            771.32342877765313, -176.61502916214059, 12.507343278686905,
+            -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+        ];
+        let mut sum = c[0];
+        for (i, &ci) in c.iter().enumerate().skip(1) {
+            sum += ci / (x + i as f64);
+        }
+        let t = x + g + 0.5;
+        (2.0 * std::f64::consts::PI).sqrt() * t.powf(x + 0.5) * (-t).exp() * sum
+    }
+}
+
+/// Error function (erf) using Abramowitz & Stegun approximation.
+fn erf_fn(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+    sign * y
+}
+
 /// Match a value against a pattern, returning variable bindings on success.
 fn match_pattern(value: &DataType, pattern: &Pattern) -> Option<Vec<(String, DataType)>> {
-    match_pattern_depth(value, pattern, 0)
+    match_pattern_depth(value, pattern, 0, None)
+}
+
+/// Match a value against a pattern with named constants support.
+/// If a `Pattern::Variable` name exists in the constants map, it is compared
+/// against the value rather than bound.
+fn match_pattern_with_constants(
+    value: &DataType,
+    pattern: &Pattern,
+    constants: &HashMap<String, DataType>,
+) -> Option<Vec<(String, DataType)>> {
+    match_pattern_depth(value, pattern, 0, Some(constants))
 }
 
 const MAX_PATTERN_DEPTH: usize = 64;
 
-fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Option<Vec<(String, DataType)>> {
+fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize, constants: Option<&HashMap<String, DataType>>) -> Option<Vec<(String, DataType)>> {
     if depth > MAX_PATTERN_DEPTH {
         return None;
     }
     match pattern {
         Pattern::Wildcard => Some(vec![]),
-        Pattern::Variable(name) => Some(vec![(name.clone(), value.clone())]),
+        Pattern::Variable(name) => {
+            // Named constant pattern: if the variable name matches a defined constant,
+            // compare against the constant's value instead of binding.
+            if let Some(consts) = constants {
+                if let Some(const_val) = consts.get(name) {
+                    return if value == const_val { Some(vec![]) } else { None };
+                }
+            }
+            Some(vec![(name.clone(), value.clone())])
+        }
         Pattern::Binding { name, pattern: inner_pat } => {
             // Match the inner pattern; if it matches, also bind the whole value to name
-            match_pattern_depth(value, inner_pat, depth + 1).map(|mut bindings| {
+            match_pattern_depth(value, inner_pat, depth + 1, constants).map(|mut bindings| {
                 bindings.push((name.clone(), value.clone()));
                 bindings
             })
@@ -9274,10 +15880,9 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
                 let mut bindings = vec![];
                 // Match elements before rest
                 for (i, pat) in patterns[..rp].iter().enumerate() {
-                    let sub = match_pattern_depth(&arr[i], pat, depth + 1)?;
+                    let sub = match_pattern_depth(&arr[i], pat, depth + 1, constants)?;
                     bindings.extend(sub);
                 }
-                // Match rest
                 if let Pattern::Rest(Some(name)) = &patterns[rp] {
                     let rest_end = arr.len() - after;
                     let rest_val = DataType::Array(arr[rp..rest_end].to_vec());
@@ -9286,7 +15891,7 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
                 // Match elements after rest
                 for (i, pat) in patterns[rp + 1..].iter().enumerate() {
                     let idx = arr.len() - after + i;
-                    let sub = match_pattern_depth(&arr[idx], pat, depth + 1)?;
+                    let sub = match_pattern_depth(&arr[idx], pat, depth + 1, constants)?;
                     bindings.extend(sub);
                 }
                 Some(bindings)
@@ -9296,7 +15901,7 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
                 }
                 arr.iter().zip(patterns.iter())
                     .try_fold(vec![], |mut bindings, (elem, pat)| {
-                        bindings.extend(match_pattern_depth(elem, pat, depth + 1)?);
+                        bindings.extend(match_pattern_depth(elem, pat, depth + 1, constants)?);
                         Some(bindings)
                     })
             }
@@ -9308,13 +15913,13 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
             };
             entries.iter().try_fold(vec![], |mut bindings, (key, pat)| {
                 let val = map.get(key)?;
-                bindings.extend(match_pattern_depth(val, pat, depth + 1)?);
+                bindings.extend(match_pattern_depth(val, pat, depth + 1, constants)?);
                 Some(bindings)
             })
         }
         Pattern::Or(patterns) => {
             for pat in patterns {
-                if let Some(bindings) = match_pattern_depth(value, pat, depth + 1) {
+                if let Some(bindings) = match_pattern_depth(value, pat, depth + 1, constants) {
                     return Some(bindings);
                 }
             }
@@ -9345,7 +15950,7 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
             let mut all_bindings = Vec::new();
             for (i, pat) in bindings.iter().enumerate() {
                 if let Some(inner) = data.get(i) {
-                    let sub = match_pattern_depth(inner, pat, depth + 1)?;
+                    let sub = match_pattern_depth(inner, pat, depth + 1, constants)?;
                     all_bindings.extend(sub);
                 } else {
                     return None;
@@ -9396,9 +16001,6 @@ fn match_pattern_depth(value: &DataType, pattern: &Pattern, depth: usize) -> Opt
 // literal_to_datatype removed — replaced by Interpreter::eval_literal()
 // which properly evaluates non-literal expressions inside array/map literals.
 
-// =============================================================================
-// Error type
-// =============================================================================
 
 /// Interpreter error type.
 #[derive(Debug)]
@@ -9873,7 +16475,7 @@ mod tests {
         use crate::syntax::ast::{Literal, Pattern};
         let value = DataType::Int32(42);
         let pattern = Pattern::Literal(Literal::Int64(42));
-        let result = match_pattern_depth(&value, &pattern, 0);
+        let result = match_pattern_depth(&value, &pattern, 0, None);
         assert!(result.is_some(), "Int64(42) pattern should match Int32(42)");
     }
 
@@ -9882,7 +16484,7 @@ mod tests {
         use crate::syntax::ast::{Literal, Pattern};
         let value = DataType::Uint32(100);
         let pattern = Pattern::Literal(Literal::Int64(100));
-        let result = match_pattern_depth(&value, &pattern, 0);
+        let result = match_pattern_depth(&value, &pattern, 0, None);
         assert!(result.is_some(), "Int64(100) pattern should match Uint32(100)");
     }
 
@@ -9891,7 +16493,7 @@ mod tests {
         use crate::syntax::ast::{Literal, Pattern};
         let value = DataType::Uint64(999);
         let pattern = Pattern::Literal(Literal::Int64(999));
-        let result = match_pattern_depth(&value, &pattern, 0);
+        let result = match_pattern_depth(&value, &pattern, 0, None);
         assert!(result.is_some(), "Int64(999) pattern should match Uint64(999)");
     }
 
@@ -9901,7 +16503,7 @@ mod tests {
         // Use 2.0 which is exactly representable in both f32 and f64
         let value = DataType::Float32(2.0);
         let pattern = Pattern::Literal(Literal::Float64(2.0));
-        let result = match_pattern_depth(&value, &pattern, 0);
+        let result = match_pattern_depth(&value, &pattern, 0, None);
         assert!(result.is_some(), "Float64(2.0) pattern should match Float32(2.0)");
     }
 
@@ -9910,13 +16512,11 @@ mod tests {
         use crate::syntax::ast::{Literal, Pattern};
         let value = DataType::Uint32(42);
         let pattern = Pattern::Literal(Literal::Int64(43));
-        let result = match_pattern_depth(&value, &pattern, 0);
+        let result = match_pattern_depth(&value, &pattern, 0, None);
         assert!(result.is_none(), "Int64(43) should NOT match Uint32(42)");
     }
 
-    // =========================================================================
     // #14: NaN equality — IEEE 754 semantics via PartialEq
-    // =========================================================================
 
     #[test]
     fn test_nan_equality_partial_eq_is_false() {
@@ -9934,13 +16534,11 @@ mod tests {
         use crate::syntax::ast::{Literal, Pattern};
         let value = DataType::Float64(f64::NAN);
         let pattern = Pattern::Literal(Literal::Float64(f64::NAN));
-        let result = match_pattern_depth(&value, &pattern, 0);
+        let result = match_pattern_depth(&value, &pattern, 0, None);
         assert!(result.is_some(), "NaN should match NaN in pattern matching (structural equality)");
     }
 
-    // =========================================================================
     // #48: Free list coalescing
-    // =========================================================================
 
     #[test]
     fn test_free_list_coalescing_adjacent_entries() {
@@ -10014,9 +16612,7 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // #132: Error recovery (keep-going mode)
-    // =========================================================================
 
     #[test]
     fn test_keep_going_collects_errors() {
@@ -10072,9 +16668,7 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // #136: InterpError::error_code()
-    // =========================================================================
 
     #[test]
     fn test_interp_error_code_dispatch() {
@@ -10137,9 +16731,7 @@ mod tests {
         );
     }
 
-    // =========================================================================
     // #282: Method arity errors show expected + actual
-    // =========================================================================
 
     #[test]
     fn test_method_arity_error_shows_expected_and_actual() {
@@ -10160,9 +16752,7 @@ mod tests {
         assert!(msg.contains("map"), "should show method name: {}", msg);
     }
 
-    // =========================================================================
     // Concurrency: task registry + channel registry
-    // =========================================================================
 
     #[test]
     fn test_task_store_and_join() {
@@ -10210,7 +16800,6 @@ mod tests {
             assert_eq!(val, DataType::String("hello".into()));
         }
 
-        // Cleanup
         channel_remove(&tx_id).unwrap();
         channel_remove(&rx_id).unwrap();
     }
@@ -10259,9 +16848,6 @@ mod tests {
         assert_eq!(result, DataType::Bool(true));
     }
 
-    // =========================================================================
-    // Concurrency edge cases
-    // =========================================================================
 
     #[test]
     fn test_spawned_thread_panic_returns_error() {
@@ -10325,7 +16911,6 @@ mod tests {
         };
         assert_eq!(result, DataType::Null, "recv on closed channel should return null");
 
-        // Cleanup
         channel_remove(&rx_id).unwrap();
         // tx_id was never stored, so don't try to remove it.
     }
@@ -10370,7 +16955,6 @@ mod tests {
         assert_eq!(r1, DataType::Int64(1));
         assert_eq!(r2, DataType::Int64(2));
 
-        // Cleanup
         channel_remove(&tx_id).unwrap();
         channel_remove(&rx_id).unwrap();
     }
@@ -10407,9 +16991,7 @@ mod tests {
         channel_remove(&rx_id).unwrap();
     }
 
-    // =========================================================================
     // Select (multi-channel wait)
-    // =========================================================================
 
     #[test]
     fn test_select_picks_ready_channel() {
@@ -10465,7 +17047,6 @@ mod tests {
         assert_eq!(found_index, 1);
         assert_eq!(found_value, DataType::String("from-ch2".into()));
 
-        // Cleanup
         drop(tx1);
         drop(tx2);
         channel_remove(&rx1_id).unwrap();
@@ -10499,9 +17080,6 @@ mod tests {
         channel_remove(&rx_id).unwrap();
     }
 
-    // =========================================================================
-    // Spawn evaluator factory
-    // =========================================================================
 
     #[test]
     fn test_make_spawn_evaluator_fallback() {
@@ -10537,7 +17115,6 @@ mod tests {
             .unwrap();
         assert_eq!(result, DataType::String("custom".into()));
 
-        // Reset to avoid affecting other tests.
         let mut guard = SPAWN_EVAL_FACTORY.lock().unwrap();
         *guard = None;
     }

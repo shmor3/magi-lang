@@ -4,7 +4,7 @@
 
 use super::analysis::DocumentState;
 use crate::syntax::ast::StatementKind;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a code lens request.
 ///
@@ -34,7 +34,7 @@ pub fn handle_code_lens(state: &DocumentState) -> Vec<CodeLens> {
                 command: Some(Command {
                     title: "Run Test".to_string(),
                     command: "magi.runTest".to_string(),
-                    arguments: Some(vec![serde_json::Value::String(name.clone())]),
+                    arguments: Some(vec![crate::util::JsonValue::String(name.clone())]),
                 }),
                 data: None,
             });
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(cmd.command, "magi.runTest");
         assert_eq!(
             cmd.arguments.as_ref().unwrap()[0],
-            serde_json::Value::String("my test".to_string())
+            crate::util::JsonValue::String("my test".to_string())
         );
     }
 }

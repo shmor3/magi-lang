@@ -2,7 +2,7 @@
 
 use super::analysis::{find_enum_variant_at_position, find_word_at_position, DocumentState};
 use crate::syntax::interpreter::{std_module_ops, STD_MODULE_NAMES};
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a hover request. Looks up the word under the cursor in symbol maps.
 pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover> {
@@ -136,7 +136,6 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
         });
     }
 
-    // Check if it's a builtin function
     if let Some(desc) = builtin_description(&word) {
         let info = format!("```magi\nfn {}(...)\n```\n{}", word, desc);
         return Some(Hover {
@@ -148,7 +147,6 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
         });
     }
 
-    // Check if it's a known method name
     if let Some(desc) = method_description(&word) {
         let info = format!("```magi\n.{}(...)\n```\n{}", word, desc);
         return Some(Hover {
@@ -160,7 +158,6 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
         });
     }
 
-    // Check if it's a keyword
     if is_keyword(&word) {
         let info = format!("`{}` — MAGI keyword", word);
         return Some(Hover {
@@ -172,7 +169,6 @@ pub fn handle_hover(state: &DocumentState, params: &HoverParams) -> Option<Hover
         });
     }
 
-    // Check if it's a stdlib operation (imported via `use std::module::*`)
     if let Some((module, desc)) = find_stdlib_operation(&word) {
         let info = format!(
             "```magi\nfn {}(...)\n```\n{}\n\n*From `std::{}`*",
@@ -250,7 +246,6 @@ fn method_description(name: &str) -> Option<&'static str> {
         // Generic methods (aliases not covered by builtin_description)
         "length" => Some("Returns the length (alias for `len`)."),
         "size" => Some("Returns the number of entries in a map (alias for `len`)."),
-        // Array methods
         "push" => Some("Appends an element to the array and returns the new array."),
         "pop" => Some("Removes and returns the last element of the array."),
         "shift" => Some("Removes and returns the first element of the array."),
@@ -292,7 +287,6 @@ fn method_description(name: &str) -> Option<&'static str> {
         "partition" => Some("Splits into [matches, non-matches]."),
         "scan" => Some("Like reduce, but returns all intermediate accumulator values."),
         "filter_nulls" => Some("Removes null elements from the array."),
-        // String methods
         "split" => Some("Splits the string by a delimiter. Returns an array."),
         "replace" => Some("Replaces all occurrences of a substring."),
         "trim" => Some("Removes leading and trailing whitespace."),
@@ -316,7 +310,6 @@ fn method_description(name: &str) -> Option<&'static str> {
         "is_alphabetic" => Some("Returns true if all characters are alphabetic."),
         "to_int" => Some("Parses the string as an integer. Returns null on failure."),
         "to_float" => Some("Parses the string as a float. Returns null on failure."),
-        // Map methods
         "has" => Some("Returns true if the map contains the given key."),
         "delete" => Some("Removes a key from the map. Returns the updated map."),
         "keys" => Some("Returns an array of all keys in the map."),
@@ -326,10 +319,8 @@ fn method_description(name: &str) -> Option<&'static str> {
         "filter_entries" => Some("Filters map entries by a predicate (key, value) -> bool."),
         "map_values" => Some("Transforms map values with a function. Returns a new map."),
         "map_keys" => Some("Transforms map keys with a function. Returns a new map."),
-        // Bytes methods
         "base64_encode" => Some("Encodes bytes as a base64 string."),
         "base64_decode" => Some("Decodes a base64 string to bytes."),
-        // Numeric methods
         "sign" => Some("Returns the sign of the number (-1, 0, or 1)."),
         "is_nan" => Some("Returns true if the value is NaN."),
         "is_infinite" => Some("Returns true if the value is infinite."),

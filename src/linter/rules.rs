@@ -344,7 +344,6 @@ fn is_terminating_block(block: &Block) -> bool {
             _ => {}
         }
     }
-    // Check tail expression
     if let Some(tail) = &block.tail_expr {
         return is_terminating_expr(tail);
     }
@@ -489,9 +488,7 @@ pub fn check_match_exhaustiveness(
     diagnostics
 }
 
-// =============================================================================
 // W205: Self-comparison (comparing a value to itself)
-// =============================================================================
 
 /// Check if a binary comparison compares an expression to itself.
 /// e.g., `x == x`, `y != y`, `a > a`, `a < a`, `a >= a`, `a <= a`
@@ -572,9 +569,7 @@ fn op_symbol(op: &BinOp) -> &'static str {
     }
 }
 
-// =============================================================================
 // W209: Shadowed variable in same scope
-// =============================================================================
 
 /// Check for variables declared more than once in the same block scope.
 /// Only checks within a flat block (not nested scopes). Skips _-prefixed names.
@@ -663,9 +658,7 @@ pub fn check_same_scope_shadowing(stmts: &[Statement]) -> Vec<AstDiagnostic> {
     diagnostics
 }
 
-// =============================================================================
 // W212: Return/break/continue/throw in finally block
-// =============================================================================
 
 /// Check if a finally block contains return/break/continue/throw statements,
 /// which override the try/catch result and are almost always bugs.
@@ -878,9 +871,7 @@ fn find_control_flow_in_expr(expr: &Expression, diagnostics: &mut Vec<AstDiagnos
     }
 }
 
-// =============================================================================
 // W216: Empty enum definition
-// =============================================================================
 
 /// W216: Check for empty enum definitions (enum with zero variants).
 pub fn check_empty_enum(variants: &[EnumVariant], name: &str, span: Span) -> Option<AstDiagnostic> {
@@ -900,9 +891,7 @@ pub fn check_empty_enum(variants: &[EnumVariant], name: &str, span: Span) -> Opt
     None
 }
 
-// =============================================================================
 // W230: Self-assignment
-// =============================================================================
 
 /// W230: Check `let x = x` patterns (self-assignment in let binding).
 pub fn check_self_assignment_let(name: &str, value: &Expression, span: Span) -> Option<AstDiagnostic> {
@@ -944,9 +933,7 @@ pub fn check_self_assignment(name: &str, value: &Expression, span: Span) -> Opti
     None
 }
 
-// =============================================================================
 // W231: Boolean literal in if-else return
-// =============================================================================
 
 /// W231: Check for `if cond { true } else { false }` patterns.
 pub fn check_boolean_if_else(expr: &Expression) -> Option<AstDiagnostic> {
@@ -994,9 +981,7 @@ pub fn check_boolean_if_else(expr: &Expression) -> Option<AstDiagnostic> {
     None
 }
 
-// =============================================================================
 // W215: Negated if condition with else branch
-// =============================================================================
 
 /// W215: Check for `if !cond { a } else { b }` which should be `if cond { b } else { a }`.
 pub fn check_negated_if_else(condition: &Expression, else_block: Option<&Block>, span: Span) -> Option<AstDiagnostic> {
@@ -1019,9 +1004,7 @@ pub fn check_negated_if_else(condition: &Expression, else_block: Option<&Block>,
     None
 }
 
-// =============================================================================
 // W233: Deeply nested code
-// =============================================================================
 
 /// W233: Check for deeply nested code blocks.
 pub fn check_deep_nesting(stmts: &[Statement], max_depth: usize) -> Vec<AstDiagnostic> {
@@ -1080,9 +1063,7 @@ fn check_nesting_depth_stmt(stmt: &Statement, depth: usize, max_depth: usize, di
     }
 }
 
-// =============================================================================
 // W229: Empty match arm body
-// =============================================================================
 
 /// W229: Check for match arms that have empty bodies.
 pub fn check_empty_match_arms(arms: &[MatchArm]) -> Vec<AstDiagnostic> {
@@ -1155,6 +1136,738 @@ pub fn check_todo_comments(source: &str) -> Vec<AstDiagnostic> {
         }
     }
     diagnostics
+}
+
+// W238: Unused variables
+
+/// Collect all names referenced in an expression (variable reads).
+fn collect_referenced_names(expr: &Expression, names: &mut std::collections::HashSet<String>) {
+    match &expr.kind {
+        ExpressionKind::Variable(name) => { names.insert(name.clone()); }
+        ExpressionKind::BinaryOp { left, right, .. } => {
+            collect_referenced_names(left, names);
+            collect_referenced_names(right, names);
+        }
+        ExpressionKind::UnaryOp { operand, .. } => {
+            collect_referenced_names(operand, names);
+        }
+        ExpressionKind::Call { name, args, kwargs, .. } => {
+            names.insert(name.clone());
+            for a in args { collect_referenced_names(a, names); }
+            for (_, a) in kwargs { collect_referenced_names(a, names); }
+        }
+        ExpressionKind::MethodCall { object, args, kwargs, .. } => {
+            collect_referenced_names(object, names);
+            for a in args { collect_referenced_names(a, names); }
+            for (_, a) in kwargs { collect_referenced_names(a, names); }
+        }
+        ExpressionKind::FieldAccess { object, .. } => {
+            collect_referenced_names(object, names);
+        }
+        ExpressionKind::Index { object, index } => {
+            collect_referenced_names(object, names);
+            collect_referenced_names(index, names);
+        }
+        ExpressionKind::IfElse { condition, then_block, else_block } => {
+            collect_referenced_names(condition, names);
+            collect_referenced_names_block(then_block, names);
+            if let Some(eb) = else_block { collect_referenced_names_block(eb, names); }
+        }
+        ExpressionKind::Block(block) => {
+            collect_referenced_names_block(block, names);
+        }
+        ExpressionKind::Match { value, arms } => {
+            collect_referenced_names(value, names);
+            for arm in arms {
+                collect_referenced_names_block(&arm.body, names);
+                if let Some(g) = &arm.guard { collect_referenced_names(g, names); }
+            }
+        }
+        ExpressionKind::Lambda { body, .. } => {
+            collect_referenced_names(body, names);
+        }
+        ExpressionKind::Pipe { left, right } => {
+            collect_referenced_names(left, names);
+            collect_referenced_names(right, names);
+        }
+        ExpressionKind::Range { start, end, .. } => {
+            collect_referenced_names(start, names);
+            collect_referenced_names(end, names);
+        }
+        ExpressionKind::NullCoalesce { left, right } => {
+            collect_referenced_names(left, names);
+            collect_referenced_names(right, names);
+        }
+        ExpressionKind::OptionalChain { object, .. } => {
+            collect_referenced_names(object, names);
+        }
+        ExpressionKind::Spread(inner) | ExpressionKind::Await(inner) | ExpressionKind::Spawn(inner) | ExpressionKind::TryPropagate(inner) => {
+            collect_referenced_names(inner, names);
+        }
+        ExpressionKind::StringInterpolation { parts } => {
+            for part in parts {
+                if let StringPart::Expr(e) = part { collect_referenced_names(e, names); }
+            }
+        }
+        ExpressionKind::Literal(Literal::Array(elems)) => {
+            for e in elems { collect_referenced_names(e, names); }
+        }
+        ExpressionKind::Literal(Literal::Map(entries)) => {
+            for (_, v) in entries { collect_referenced_names(v, names); }
+        }
+        ExpressionKind::ListComprehension { expr: inner, iterable, condition, .. } => {
+            collect_referenced_names(inner, names);
+            collect_referenced_names(iterable, names);
+            if let Some(c) = condition { collect_referenced_names(c, names); }
+        }
+        ExpressionKind::MapComprehension { key_expr, value_expr, iterable, condition, .. } => {
+            collect_referenced_names(key_expr, names);
+            collect_referenced_names(value_expr, names);
+            collect_referenced_names(iterable, names);
+            if let Some(c) = condition { collect_referenced_names(c, names); }
+        }
+        ExpressionKind::EnumConstruct { args, .. } => {
+            for a in args { collect_referenced_names(a, names); }
+        }
+        ExpressionKind::StructConstruct { fields, .. } => {
+            for (_, v) in fields { collect_referenced_names(v, names); }
+        }
+        ExpressionKind::Loop { body, .. } => {
+            collect_referenced_names_block(body, names);
+        }
+        ExpressionKind::TryCatchExpr { try_block, catch_block, finally_block, .. } => {
+            collect_referenced_names_block(try_block, names);
+            collect_referenced_names_block(catch_block, names);
+            if let Some(fb) = finally_block { collect_referenced_names_block(fb, names); }
+        }
+        _ => {}
+    }
+}
+
+/// Collect referenced names from a block.
+fn collect_referenced_names_block(block: &Block, names: &mut std::collections::HashSet<String>) {
+    for stmt in &block.statements {
+        collect_referenced_names_stmt(stmt, names);
+    }
+    if let Some(tail) = &block.tail_expr {
+        collect_referenced_names(tail, names);
+    }
+}
+
+/// Collect referenced names from a statement.
+fn collect_referenced_names_stmt(stmt: &Statement, names: &mut std::collections::HashSet<String>) {
+    match &stmt.kind {
+        StatementKind::Let { value, .. }
+        | StatementKind::LetMut { value, .. }
+        | StatementKind::LetDestructure { value, .. }
+        | StatementKind::ConstDef { value, .. } => {
+            collect_referenced_names(value, names);
+        }
+        StatementKind::Assignment { name, value } => {
+            names.insert(name.clone());
+            collect_referenced_names(value, names);
+        }
+        StatementKind::CompoundAssign { name, value, .. } => {
+            names.insert(name.clone());
+            collect_referenced_names(value, names);
+        }
+        StatementKind::FieldAssignment { object, value, .. } => {
+            collect_referenced_names(object, names);
+            collect_referenced_names(value, names);
+        }
+        StatementKind::IndexAssignment { object, index, value } => {
+            collect_referenced_names(object, names);
+            collect_referenced_names(index, names);
+            collect_referenced_names(value, names);
+        }
+        StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
+            collect_referenced_names_block(&fdef.body, names);
+        }
+        StatementKind::ForLoop { iterable, body, .. } => {
+            collect_referenced_names(iterable, names);
+            collect_referenced_names_block(body, names);
+        }
+        StatementKind::WhileLoop { condition, body, .. } => {
+            collect_referenced_names(condition, names);
+            collect_referenced_names_block(body, names);
+        }
+        StatementKind::DoWhileLoop { condition, body, .. } | StatementKind::CStyleFor { condition, body, .. } => {
+            collect_referenced_names(condition, names);
+            collect_referenced_names_block(body, names);
+        }
+        StatementKind::Output(expr)
+        | StatementKind::ExprStatement(expr)
+        | StatementKind::Defer(expr)
+        | StatementKind::Throw(expr) => {
+            collect_referenced_names(expr, names);
+        }
+        StatementKind::Return(Some(expr)) | StatementKind::Break { value: Some(expr), .. } => {
+            collect_referenced_names(expr, names);
+        }
+        StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+            collect_referenced_names_block(try_block, names);
+            collect_referenced_names_block(catch_block, names);
+            if let Some(fb) = finally_block { collect_referenced_names_block(fb, names); }
+        }
+        StatementKind::ModuleDef { body, .. } => {
+            collect_referenced_names_block(body, names);
+        }
+        StatementKind::TestDef { body, .. } => {
+            collect_referenced_names_block(body, names);
+        }
+        _ => {}
+    }
+}
+
+/// W238: Check for unused variables in a block (let bindings never referenced later).
+pub fn check_unused_variables(stmts: &[Statement]) -> Vec<AstDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Collect all names referenced in subsequent statements for each let binding
+    for (i, stmt) in stmts.iter().enumerate() {
+        let bound_names: Vec<(String, Span)> = match &stmt.kind {
+            StatementKind::Let { name, .. } | StatementKind::LetMut { name, .. } => {
+                vec![(name.clone(), stmt.span)]
+            }
+            _ => continue,
+        };
+
+        for (name, span) in bound_names {
+            // Skip _ prefixed names (conventional suppression)
+            if name.starts_with('_') { continue; }
+
+            // Collect all names referenced in the rest of the block
+            let mut referenced = std::collections::HashSet::new();
+            for later_stmt in &stmts[i + 1..] {
+                collect_referenced_names_stmt(later_stmt, &mut referenced);
+            }
+
+            if !referenced.contains(&name) {
+                let code = ErrorCode::W238;
+                diagnostics.push(AstDiagnostic {
+                    line: span.start_line,
+                    column: span.start_col,
+                    message: format!("unused variable: `{}`", name),
+                    severity: DiagnosticSeverity::Warning,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: Some(format!("Prefix with underscore `_{}` to suppress, or remove", name)),
+                    source_file: None,
+                });
+            }
+        }
+    }
+
+    diagnostics
+}
+
+// W239: Unnecessary mut
+
+/// W239: Check for `let mut x` where `x` is never reassigned in subsequent statements.
+pub fn check_unnecessary_mut(stmts: &[Statement]) -> Vec<AstDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for (i, stmt) in stmts.iter().enumerate() {
+        let (name, span) = match &stmt.kind {
+            StatementKind::LetMut { name, .. } => (name.clone(), stmt.span),
+            _ => continue,
+        };
+
+        // Skip _ prefixed names
+        if name.starts_with('_') { continue; }
+
+        // Check if any subsequent statement reassigns this variable
+        let mut is_reassigned = false;
+        for later_stmt in &stmts[i + 1..] {
+            if stmt_reassigns_name(later_stmt, &name) {
+                is_reassigned = true;
+                break;
+            }
+        }
+
+        if !is_reassigned {
+            let code = ErrorCode::W239;
+            diagnostics.push(AstDiagnostic {
+                line: span.start_line,
+                column: span.start_col,
+                message: format!("variable `{}` is declared as `mut` but never reassigned", name),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some(format!("Use `let {}` instead of `let mut {}`", name, name)),
+                source_file: None,
+            });
+        }
+    }
+
+    diagnostics
+}
+
+/// Check if a statement reassigns a given variable name.
+fn stmt_reassigns_name(stmt: &Statement, name: &str) -> bool {
+    match &stmt.kind {
+        StatementKind::Assignment { name: n, .. } if n == name => true,
+        StatementKind::CompoundAssign { name: n, .. } if n == name => true,
+        // Check inside nested blocks (e.g., x could be reassigned inside a loop)
+        StatementKind::ForLoop { body, .. }
+        | StatementKind::WhileLoop { body, .. }
+        | StatementKind::DoWhileLoop { body, .. }
+        | StatementKind::CStyleFor { body, .. } => {
+            body.statements.iter().any(|s| stmt_reassigns_name(s, name))
+        }
+        StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+            try_block.statements.iter().any(|s| stmt_reassigns_name(s, name))
+                || catch_block.statements.iter().any(|s| stmt_reassigns_name(s, name))
+                || finally_block.as_ref().is_some_and(|fb| fb.statements.iter().any(|s| stmt_reassigns_name(s, name)))
+        }
+        StatementKind::ExprStatement(expr) => expr_reassigns_name(expr, name),
+        _ => false,
+    }
+}
+
+/// Check if an expression contains a reassignment of the given name.
+fn expr_reassigns_name(expr: &Expression, name: &str) -> bool {
+    match &expr.kind {
+        ExpressionKind::IfElse { then_block, else_block, .. } => {
+            then_block.statements.iter().any(|s| stmt_reassigns_name(s, name))
+                || else_block.as_ref().is_some_and(|eb| eb.statements.iter().any(|s| stmt_reassigns_name(s, name)))
+        }
+        ExpressionKind::Block(block) => {
+            block.statements.iter().any(|s| stmt_reassigns_name(s, name))
+        }
+        ExpressionKind::Match { arms, .. } => {
+            arms.iter().any(|arm| arm.body.statements.iter().any(|s| stmt_reassigns_name(s, name)))
+        }
+        ExpressionKind::Loop { body, .. } => {
+            body.statements.iter().any(|s| stmt_reassigns_name(s, name))
+        }
+        _ => false,
+    }
+}
+
+// W240: Needless return
+
+/// W240: Check for `return expr` as the last statement in a block where the
+/// expression alone would suffice as an implicit return.
+pub fn check_needless_return(stmts: &[Statement], span: Span) -> Option<AstDiagnostic> {
+    if let Some(last) = stmts.last() {
+        if let StatementKind::Return(Some(_)) = &last.kind {
+            let code = ErrorCode::W240;
+            return Some(AstDiagnostic {
+                line: last.span.start_line,
+                column: last.span.start_col,
+                message: "needless `return` as last statement".to_string(),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some("Remove the `return` keyword; the expression alone is the implicit return value".to_string()),
+                source_file: None,
+            });
+        }
+    }
+    // Suppress unused parameter warning
+    let _ = span;
+    None
+}
+
+// W241: Comparison to bool literal
+
+/// W241: Check for `x == true`, `x == false`, `true == x`, `false == x`.
+pub fn check_bool_comparison(op: &BinOp, left: &Expression, right: &Expression, span: Span) -> Option<AstDiagnostic> {
+    // Only check == and !=
+    match op {
+        BinOp::Eq | BinOp::NotEq => {}
+        _ => return None,
+    }
+
+    let left_is_bool = matches!(&left.kind, ExpressionKind::Literal(Literal::Bool(_)));
+    let right_is_bool = matches!(&right.kind, ExpressionKind::Literal(Literal::Bool(_)));
+
+    if left_is_bool || right_is_bool {
+        let code = ErrorCode::W241;
+        let suggestion = if *op == BinOp::Eq {
+            if right_is_bool {
+                match &right.kind {
+                    ExpressionKind::Literal(Literal::Bool(true)) => "Use the value directly instead of `x == true`".to_string(),
+                    ExpressionKind::Literal(Literal::Bool(false)) => "Use `!x` instead of `x == false`".to_string(),
+                    _ => unreachable!(),
+                }
+            } else {
+                match &left.kind {
+                    ExpressionKind::Literal(Literal::Bool(true)) => "Use the value directly instead of `true == x`".to_string(),
+                    ExpressionKind::Literal(Literal::Bool(false)) => "Use `!x` instead of `false == x`".to_string(),
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            "Use `!x` or the value directly instead of comparing to a boolean literal".to_string()
+        };
+
+        return Some(AstDiagnostic {
+            line: span.start_line,
+            column: span.start_col,
+            message: "comparison to boolean literal".to_string(),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: Some(suggestion),
+            source_file: None,
+        });
+    }
+
+    None
+}
+
+// W242: Collapsible if
+
+/// W242: Check for `if a { if b { ... } }` that could be `if a && b { ... }`.
+/// Only flags when:
+/// - The outer `if` has no `else` branch
+/// - The outer then-block has exactly one statement, which is an expression-statement
+///   containing another `if` with no `else` branch
+pub fn check_collapsible_if(
+    then_block: &Block,
+    else_block: &Option<Block>,
+    span: Span,
+) -> Option<AstDiagnostic> {
+    // Only applies when outer if has no else
+    if else_block.is_some() { return None; }
+    // Only applies when then_block has no tail expr
+    if then_block.tail_expr.is_some() { return None; }
+
+    if then_block.statements.len() != 1 { return None; }
+
+    let inner_stmt = &then_block.statements[0];
+    if let StatementKind::ExprStatement(inner_expr) = &inner_stmt.kind {
+        if let ExpressionKind::IfElse { else_block: inner_else, .. } = &inner_expr.kind {
+            if inner_else.is_none() {
+                let code = ErrorCode::W242;
+                return Some(AstDiagnostic {
+                    line: span.start_line,
+                    column: span.start_col,
+                    message: "this `if` can be collapsed into the outer `if` with `&&`".to_string(),
+                    severity: DiagnosticSeverity::Warning,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: Some("Combine into `if outer_cond && inner_cond { ... }`".to_string()),
+                    source_file: None,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// W243: Check for too many function parameters (> 7).
+pub fn check_too_many_params(fdef: &FunctionDef) -> Option<AstDiagnostic> {
+    const MAX_PARAMS: usize = 7;
+    if fdef.params.len() > MAX_PARAMS {
+        let code = ErrorCode::W243;
+        return Some(AstDiagnostic {
+            line: fdef.span.start_line,
+            column: fdef.span.start_col,
+            message: format!("function '{}' has {} parameters (max {})", fdef.name, fdef.params.len(), MAX_PARAMS),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: Some("Consider using a struct to group parameters".to_string()),
+            source_file: None,
+        });
+    }
+    None
+}
+
+/// W244: Check for TODO/FIXME/HACK/XXX comments in code.
+/// This is used by the linter to find items that need attention.
+pub fn check_todo_comment(stmt: &Statement, source: &str) -> Vec<AstDiagnostic> {
+    let mut results = Vec::new();
+    let line = stmt.span.start_line as usize;
+    if let Some(source_line) = source.lines().nth(line.saturating_sub(1)) {
+        let upper = source_line.to_uppercase();
+        for marker in &["TODO", "FIXME", "HACK", "XXX"] {
+            if upper.contains(marker) {
+                let code = ErrorCode::W244;
+                results.push(AstDiagnostic {
+                    line: stmt.span.start_line,
+                    column: stmt.span.start_col,
+                    message: format!("{} comment found", marker),
+                    severity: DiagnosticSeverity::Info,
+                    code: Some(code.to_string()),
+                    help: Some(code.help().to_string()),
+                    suggestion: None,
+                    source_file: None,
+                });
+            }
+        }
+    }
+    results
+}
+
+
+/// W246: Check for empty match body (match with no arms).
+pub fn check_empty_match(expr: &Expression) -> Option<AstDiagnostic> {
+    if let ExpressionKind::Match { arms, .. } = &expr.kind {
+        if arms.is_empty() {
+            let code = ErrorCode::W246;
+            return Some(AstDiagnostic {
+                line: expr.span.start_line,
+                column: expr.span.start_col,
+                message: "match expression has no arms".to_string(),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some("Add match arms or use a default `_ =>` case".to_string()),
+                source_file: None,
+            });
+        }
+    }
+    None
+}
+
+/// W247: Check for unused imports in a program.
+pub fn check_unused_imports(program: &Program) -> Vec<AstDiagnostic> {
+    let mut results = Vec::new();
+    let mut imported_names: Vec<(String, Span)> = Vec::new();
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Pass 1: collect imports
+    for stmt in &program.statements {
+        if let StatementKind::Use { path, .. } = &stmt.kind {
+            for segment in path {
+                imported_names.push((segment.clone(), stmt.span));
+            }
+        }
+    }
+
+    // Pass 2: collect all used identifiers (simplified)
+    fn collect_used(expr: &Expression, used: &mut std::collections::HashSet<String>) {
+        match &expr.kind {
+            ExpressionKind::Variable(name) => { used.insert(name.clone()); }
+            ExpressionKind::Call { name, args, .. } => {
+                used.insert(name.clone());
+                for a in args { collect_used(a, used); }
+            }
+            ExpressionKind::MethodCall { object, args, .. } => {
+                collect_used(object, used);
+                for a in args { collect_used(a, used); }
+            }
+            ExpressionKind::BinaryOp { left, right, .. } => {
+                collect_used(left, used);
+                collect_used(right, used);
+            }
+            _ => {}
+        }
+    }
+
+    for stmt in &program.statements {
+        match &stmt.kind {
+            StatementKind::ExprStatement(e) | StatementKind::Output(e) | StatementKind::Throw(e) => {
+                collect_used(e, &mut used_names);
+            }
+            StatementKind::Let { value, .. } | StatementKind::LetMut { value, .. } => {
+                collect_used(value, &mut used_names);
+            }
+            _ => {}
+        }
+    }
+
+    for (name, span) in &imported_names {
+        if name != "*" && !used_names.contains(name) {
+            let code = ErrorCode::W247;
+            results.push(AstDiagnostic {
+                line: span.start_line,
+                column: span.start_col,
+                message: format!("unused import: '{}'", name),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some(format!("Remove the unused import '{}'", name)),
+                source_file: None,
+            });
+        }
+    }
+    results
+}
+
+/// W248: Check for unused functions (defined but never called).
+pub fn check_unused_functions(program: &Program) -> Vec<AstDiagnostic> {
+    let mut results = Vec::new();
+    let mut defined: Vec<(String, Span)> = Vec::new();
+    let mut called: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for stmt in &program.statements {
+        match &stmt.kind {
+            StatementKind::FunctionDef(f) => {
+                if !f.name.starts_with('_') && f.name != "main" {
+                    defined.push((f.name.clone(), f.span));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_calls(expr: &Expression, calls: &mut std::collections::HashSet<String>) {
+        match &expr.kind {
+            ExpressionKind::Call { name, args, .. } => {
+                calls.insert(name.clone());
+                for a in args { collect_calls(a, calls); }
+            }
+            ExpressionKind::Variable(name) => { calls.insert(name.clone()); }
+            ExpressionKind::BinaryOp { left, right, .. } => {
+                collect_calls(left, calls);
+                collect_calls(right, calls);
+            }
+            ExpressionKind::MethodCall { object, args, .. } => {
+                collect_calls(object, calls);
+                for a in args { collect_calls(a, calls); }
+            }
+            _ => {}
+        }
+    }
+
+    for stmt in &program.statements {
+        match &stmt.kind {
+            StatementKind::ExprStatement(e) | StatementKind::Output(e) => { collect_calls(e, &mut called); }
+            StatementKind::Let { value, .. } | StatementKind::LetMut { value, .. } => { collect_calls(value, &mut called); }
+            StatementKind::FunctionDef(f) => {
+                for s in &f.body.statements {
+                    if let StatementKind::ExprStatement(e) | StatementKind::Output(e) = &s.kind {
+                        collect_calls(e, &mut called);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (name, span) in &defined {
+        if !called.contains(name) {
+            let code = ErrorCode::W248;
+            results.push(AstDiagnostic {
+                line: span.start_line,
+                column: span.start_col,
+                message: format!("function '{}' is defined but never called", name),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some(format!("Remove '{}' or prefix with `_`", name)),
+                source_file: None,
+            });
+        }
+    }
+    results
+}
+
+/// W249: Check for single-arm match (should be if-let).
+pub fn check_single_match(expr: &Expression) -> Option<AstDiagnostic> {
+    if let ExpressionKind::Match { arms, .. } = &expr.kind {
+        if arms.len() == 1 {
+            let code = ErrorCode::W249;
+            return Some(AstDiagnostic {
+                line: expr.span.start_line,
+                column: expr.span.start_col,
+                message: "match with single arm".to_string(),
+                severity: DiagnosticSeverity::Warning,
+                code: Some(code.to_string()),
+                help: Some(code.help().to_string()),
+                suggestion: Some("Consider using `if let` instead of `match` with one arm".to_string()),
+                source_file: None,
+            });
+        }
+    }
+    None
+}
+
+/// W250: Check for high cognitive complexity in a function.
+pub fn check_cognitive_complexity(fdef: &FunctionDef) -> Option<AstDiagnostic> {
+    const MAX_COMPLEXITY: usize = 25;
+    fn count_complexity(stmts: &[Statement], depth: usize) -> usize {
+        let mut score = 0;
+        for stmt in stmts {
+            match &stmt.kind {
+                StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. }
+                | StatementKind::DoWhileLoop { body, .. } => {
+                    score += 1 + depth;
+                    score += count_complexity(&body.statements, depth + 1);
+                }
+                StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+                    score += 1;
+                    score += count_complexity(&try_block.statements, depth + 1);
+                    score += count_complexity(&catch_block.statements, depth + 1);
+                    if let Some(fb) = finally_block { score += count_complexity(&fb.statements, depth + 1); }
+                }
+                StatementKind::Return(_) | StatementKind::Break { .. } | StatementKind::Continue { .. } => {
+                    score += 1;
+                }
+                _ => {}
+            }
+        }
+        score
+    }
+    let complexity = count_complexity(&fdef.body.statements, 1);
+    if complexity > MAX_COMPLEXITY {
+        let code = ErrorCode::W250;
+        return Some(AstDiagnostic {
+            line: fdef.span.start_line,
+            column: fdef.span.start_col,
+            message: format!("function '{}' has cognitive complexity {} (max {})", fdef.name, complexity, MAX_COMPLEXITY),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: Some("Break this function into smaller helper functions".to_string()),
+            source_file: None,
+        });
+    }
+    None
+}
+
+/// W251: Check for overly long function bodies (> 100 lines).
+pub fn check_function_length(fdef: &FunctionDef) -> Option<AstDiagnostic> {
+    const MAX_LINES: u32 = 100;
+    let body_lines = fdef.span.end_line.saturating_sub(fdef.span.start_line);
+    if body_lines > MAX_LINES {
+        let code = ErrorCode::W251;
+        return Some(AstDiagnostic {
+            line: fdef.span.start_line,
+            column: fdef.span.start_col,
+            message: format!("function '{}' is {} lines long (max {})", fdef.name, body_lines, MAX_LINES),
+            severity: DiagnosticSeverity::Warning,
+            code: Some(code.to_string()),
+            help: Some(code.help().to_string()),
+            suggestion: Some("Extract logic into helper functions".to_string()),
+            source_file: None,
+        });
+    }
+    None
+}
+
+/// W252: Check for manual map/filter reimplementation.
+/// Detects patterns like: `let result = []; for x in arr { result.push(f(x)); }`.
+pub fn check_manual_map(stmt: &Statement) -> Option<AstDiagnostic> {
+    if let StatementKind::ForLoop { body, .. } = &stmt.kind {
+        // Look for push calls inside the loop body
+        for s in &body.statements {
+            if let StatementKind::ExprStatement(expr) = &s.kind {
+                if let ExpressionKind::MethodCall { method, .. } = &expr.kind {
+                    if method == "push" {
+                        let code = ErrorCode::W252;
+                        return Some(AstDiagnostic {
+                            line: stmt.span.start_line,
+                            column: stmt.span.start_col,
+                            message: "loop with push() may be replaceable with .map()".to_string(),
+                            severity: DiagnosticSeverity::Info,
+                            code: Some(code.to_string()),
+                            help: Some(code.help().to_string()),
+                            suggestion: Some("Consider using `.map()` or `.filter()` instead".to_string()),
+                            source_file: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// W237: Check for magic numbers in expressions (#152).

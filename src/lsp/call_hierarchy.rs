@@ -5,7 +5,7 @@
 
 use super::analysis::{char_col_to_utf16, find_word_at_position, DocumentState};
 use crate::syntax::ast::*;
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a prepareCallHierarchy request.
 ///
@@ -237,9 +237,6 @@ pub fn handle_outgoing_calls(
     outgoing
 }
 
-// =============================================================================
-// AST walking helpers
-// =============================================================================
 
 /// Find all calls to `target_name` in a block, returning their spans.
 fn find_calls_in_block(block: &Block, target_name: &str) -> Vec<Span> {
@@ -272,6 +269,7 @@ fn find_calls_in_statement(stmt: &Statement, target_name: &str, spans: &mut Vec<
         StatementKind::Let { value, .. }
         | StatementKind::LetMut { value, .. }
         | StatementKind::ConstDef { value, .. }
+        | StatementKind::StaticDef { value, .. }
         | StatementKind::Assignment { value, .. }
         | StatementKind::Output(value)
         | StatementKind::ExprStatement(value)
@@ -408,8 +406,17 @@ fn find_calls_in_expr(expr: &Expression, target_name: &str, spans: &mut Vec<Span
             find_calls_in_expr(end, target_name, spans);
         }
         ExpressionKind::Await(inner) | ExpressionKind::Spawn(inner)
-        | ExpressionKind::Spread(inner) | ExpressionKind::TryPropagate(inner) => {
+        | ExpressionKind::Spread(inner) | ExpressionKind::TryPropagate(inner)
+        | ExpressionKind::Yield(inner) => {
             find_calls_in_expr(inner, target_name, spans);
+        }
+        ExpressionKind::UnsafeBlock(block) => {
+            spans.extend(find_calls_in_block(block, target_name));
+        }
+        ExpressionKind::InlineAsm { operands, .. } => {
+            for op in operands {
+                find_calls_in_expr(op, target_name, spans);
+            }
         }
         ExpressionKind::Lambda { body, .. } => {
             find_calls_in_expr(body, target_name, spans);
@@ -484,7 +491,10 @@ fn find_calls_in_expr(expr: &Expression, target_name: &str, spans: &mut Vec<Span
                 _ => {}
             }
         }
-        ExpressionKind::Variable(_) | ExpressionKind::Placeholder => {}
+        ExpressionKind::Ref(inner) | ExpressionKind::MoveClosure { body: inner, .. } => {
+            find_calls_in_expr(inner, target_name, spans);
+        }
+        ExpressionKind::Variable(_) | ExpressionKind::Placeholder | ExpressionKind::DynTrait(_) => {}
     }
 }
 
@@ -503,6 +513,7 @@ fn collect_calls_in_statement(stmt: &Statement, call_map: &mut std::collections:
         StatementKind::Let { value, .. }
         | StatementKind::LetMut { value, .. }
         | StatementKind::ConstDef { value, .. }
+        | StatementKind::StaticDef { value, .. }
         | StatementKind::Assignment { value, .. }
         | StatementKind::Output(value)
         | StatementKind::ExprStatement(value)
@@ -614,8 +625,17 @@ fn collect_calls_in_expr(expr: &Expression, call_map: &mut std::collections::Has
             collect_calls_in_expr(end, call_map);
         }
         ExpressionKind::Await(inner) | ExpressionKind::Spawn(inner)
-        | ExpressionKind::Spread(inner) | ExpressionKind::TryPropagate(inner) => {
+        | ExpressionKind::Spread(inner) | ExpressionKind::TryPropagate(inner)
+        | ExpressionKind::Yield(inner) => {
             collect_calls_in_expr(inner, call_map);
+        }
+        ExpressionKind::UnsafeBlock(block) => {
+            collect_calls_in_block(block, call_map);
+        }
+        ExpressionKind::InlineAsm { operands, .. } => {
+            for op in operands {
+                collect_calls_in_expr(op, call_map);
+            }
         }
         ExpressionKind::Lambda { body, .. } => {
             collect_calls_in_expr(body, call_map);
@@ -690,7 +710,10 @@ fn collect_calls_in_expr(expr: &Expression, call_map: &mut std::collections::Has
                 _ => {}
             }
         }
-        ExpressionKind::Variable(_) | ExpressionKind::Placeholder => {}
+        ExpressionKind::Ref(inner) | ExpressionKind::MoveClosure { body: inner, .. } => {
+            collect_calls_in_expr(inner, call_map);
+        }
+        ExpressionKind::Variable(_) | ExpressionKind::Placeholder | ExpressionKind::DynTrait(_) => {}
     }
 }
 

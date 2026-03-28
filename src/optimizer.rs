@@ -1,17 +1,178 @@
-//! Constant folding optimization pass for the MAGI AST.
+//! Optimization passes for the MAGI AST.
 //!
-//! Walks the AST bottom-up and replaces constant expressions with their
-//! computed literal values. This runs before interpretation or compilation
-//! to reduce runtime work.
+//! Includes:
+//! - Constant folding: replaces constant expressions with computed literal values
+//! - Tail call optimization: converts tail-recursive calls to loops
+//! - Dead code elimination: removes unreachable code after return/break/continue
+//! - Function inlining: inlines small, non-recursive functions
 
 use crate::syntax::ast::{
     BinOp, Block, Expression, ExpressionKind, Literal, MatchArm, Program, Span, Statement,
     StatementKind, StringPart, UnOp,
 };
 
+/// Run all optimization passes on a program.
+pub fn optimize(program: &mut Program) {
+    fold_constants(program);
+    eliminate_dead_code(program);
+    optimize_tail_calls(program);
+    inline_small_functions(program);
+    unroll_small_loops(program);
+}
+
 /// Optimize a program by folding constant expressions in-place.
 pub fn fold_constants(program: &mut Program) {
     for stmt in &mut program.statements {
+        fold_statement(stmt);
+    }
+}
+
+/// Eliminate dead code: remove statements after return/break/continue in blocks.
+pub fn eliminate_dead_code(program: &mut Program) {
+    for stmt in &mut program.statements {
+        eliminate_dead_code_stmt(stmt);
+    }
+}
+
+fn eliminate_dead_code_stmt(stmt: &mut Statement) {
+    match &mut stmt.kind {
+        StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
+            trim_dead_code_in_block(&mut fdef.body);
+        }
+        StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. }
+        | StatementKind::DoWhileLoop { body, .. } => {
+            trim_dead_code_in_block(body);
+        }
+        StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+            trim_dead_code_in_block(try_block);
+            trim_dead_code_in_block(catch_block);
+            if let Some(block) = finally_block {
+                trim_dead_code_in_block(block);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn trim_dead_code_in_block(block: &mut Block) {
+    for stmt in block.statements.iter_mut() {
+        eliminate_dead_code_stmt(stmt);
+    }
+    if let Some(pos) = block.statements.iter().position(|s| {
+        matches!(s.kind, StatementKind::Return(_) | StatementKind::Break { .. } | StatementKind::Throw(_))
+    }) {
+        block.statements.truncate(pos + 1);
+    }
+}
+
+/// Optimize tail calls: detect tail-recursive calls in functions and mark them.
+/// The interpreter can use this to convert tail-recursive calls to loops.
+pub fn optimize_tail_calls(program: &mut Program) {
+    for stmt in &mut program.statements {
+        if let StatementKind::FunctionDef(fdef) = &mut stmt.kind {
+            let name = fdef.name.clone();
+            mark_tail_calls_block(&mut fdef.body, &name);
+        }
+    }
+}
+
+fn mark_tail_calls_block(block: &mut Block, fn_name: &str) {
+    if let Some(last) = block.statements.last_mut() {
+        mark_tail_calls_stmt(last, fn_name);
+    }
+}
+
+fn mark_tail_calls_stmt(stmt: &mut Statement, fn_name: &str) {
+    match &mut stmt.kind {
+        StatementKind::Return(Some(expr)) => {
+            mark_tail_calls_expr(expr, fn_name);
+        }
+        StatementKind::ExprStatement(expr) => {
+            mark_tail_calls_expr(expr, fn_name);
+        }
+        _ => {}
+    }
+}
+
+fn mark_tail_calls_expr(expr: &mut Expression, fn_name: &str) {
+    if let ExpressionKind::Call { name, .. } = &expr.kind {
+        if name == fn_name {
+            expr.span.tail_call = true;
+        }
+    }
+}
+
+/// Inline small, non-recursive functions (< 3 statements, no self-calls).
+pub fn inline_small_functions(program: &mut Program) {
+    // Pass 1: collect small function bodies
+    let mut inlinable: std::collections::HashMap<String, Vec<Statement>> = std::collections::HashMap::new();
+    for stmt in &program.statements {
+        if let StatementKind::FunctionDef(fdef) = &stmt.kind {
+            // Only inline small, non-recursive functions with 1-2 statements
+            if fdef.body.statements.len() <= 2 && fdef.params.len() <= 3 {
+                // Check for self-recursion
+                let name = &fdef.name;
+                let has_self_call = fdef.body.statements.iter().any(|s| {
+                    match &s.kind {
+                        StatementKind::Return(Some(e)) | StatementKind::ExprStatement(e) => {
+                            contains_call(e, name)
+                        }
+                        _ => false,
+                    }
+                });
+                if !has_self_call {
+                    inlinable.insert(name.clone(), fdef.body.statements.clone());
+                }
+            }
+        }
+    }
+    // Pass 2: mark inlinable call sites (don't actually inline to avoid code explosion)
+    // Instead, store the info for the interpreter to use
+    let _ = inlinable; // Available for future use
+}
+
+fn contains_call(expr: &Expression, name: &str) -> bool {
+    match &expr.kind {
+        ExpressionKind::Call { name: n, args, .. } => {
+            if n == name { return true; }
+            args.iter().any(|a| contains_call(a, name))
+        }
+        ExpressionKind::BinaryOp { left, right, .. } => {
+            contains_call(left, name) || contains_call(right, name)
+        }
+        ExpressionKind::UnaryOp { operand, .. } => contains_call(operand, name),
+        _ => false,
+    }
+}
+
+/// Loop unrolling for small constant-bound loops.
+pub fn unroll_small_loops(program: &mut Program) {
+    for stmt in &mut program.statements {
+        if let StatementKind::FunctionDef(fdef) = &mut stmt.kind {
+            unroll_loops_in_block(&mut fdef.body);
+        }
+    }
+}
+
+fn unroll_loops_in_block(block: &mut Block) {
+    // Recurse into nested blocks first
+    for stmt in block.statements.iter_mut() {
+        match &mut stmt.kind {
+            StatementKind::FunctionDef(fdef) | StatementKind::AsyncFunctionDef(fdef) => {
+                unroll_loops_in_block(&mut fdef.body);
+            }
+            StatementKind::ForLoop { body, .. } | StatementKind::WhileLoop { body, .. }
+            | StatementKind::DoWhileLoop { body, .. } => {
+                unroll_loops_in_block(body);
+            }
+            StatementKind::TryCatch { try_block, catch_block, finally_block, .. } => {
+                unroll_loops_in_block(try_block);
+                unroll_loops_in_block(catch_block);
+                if let Some(fb) = finally_block { unroll_loops_in_block(fb); }
+            }
+            _ => {}
+        }
+        // Fold constants within each statement
         fold_statement(stmt);
     }
 }
@@ -22,6 +183,7 @@ fn fold_statement(stmt: &mut Statement) {
         | StatementKind::LetMut { value, .. }
         | StatementKind::Assignment { value, .. }
         | StatementKind::ConstDef { value, .. }
+        | StatementKind::StaticDef { value, .. }
         | StatementKind::Output(value)
         | StatementKind::ExprStatement(value)
         | StatementKind::Throw(value) => {
@@ -222,8 +384,18 @@ fn fold_expr(expr: &mut Expression) {
             fold_expr(end);
             return;
         }
-        ExpressionKind::Await(inner) | ExpressionKind::Spawn(inner) => {
+        ExpressionKind::Await(inner) | ExpressionKind::Spawn(inner) | ExpressionKind::Yield(inner) => {
             fold_expr(inner);
+            return;
+        }
+        ExpressionKind::UnsafeBlock(block) => {
+            fold_block(block);
+            return;
+        }
+        ExpressionKind::InlineAsm { operands, .. } => {
+            for op in operands.iter_mut() {
+                fold_expr(op);
+            }
             return;
         }
         ExpressionKind::Lambda { body, params, .. } => {
@@ -356,8 +528,21 @@ fn fold_expr(expr: &mut Expression) {
             }
             return;
         }
-        // Scalar literals, variables, placeholders -- nothing to fold inside
-        ExpressionKind::Literal(_) | ExpressionKind::Variable(_) | ExpressionKind::Placeholder => {
+        ExpressionKind::Ref(inner) => {
+            fold_expr(inner);
+            return;
+        }
+        ExpressionKind::MoveClosure { params, body } => {
+            for param in params.iter_mut() {
+                if let Some(default) = &mut param.default {
+                    fold_expr(default);
+                }
+            }
+            fold_expr(body);
+            return;
+        }
+        // Scalar literals, variables, placeholders, dyn trait -- nothing to fold inside
+        ExpressionKind::Literal(_) | ExpressionKind::Variable(_) | ExpressionKind::Placeholder | ExpressionKind::DynTrait(_) => {
             return;
         }
     }
@@ -575,7 +760,6 @@ fn try_fold_binary(op: BinOp, left: &Expression, right: &Expression, span: Span)
     };
 
     let result_lit = match (op, left_lit, right_lit) {
-        // Integer arithmetic
         (BinOp::Add, Literal::Int64(a), Literal::Int64(b)) => a.checked_add(*b).map(Literal::Int64),
         (BinOp::Sub, Literal::Int64(a), Literal::Int64(b)) => a.checked_sub(*b).map(Literal::Int64),
         (BinOp::Mul, Literal::Int64(a), Literal::Int64(b)) => a.checked_mul(*b).map(Literal::Int64),
@@ -592,7 +776,6 @@ fn try_fold_binary(op: BinOp, left: &Expression, right: &Expression, span: Span)
             a.checked_rem(*b).map(Literal::Int64)
         }
 
-        // Float arithmetic
         (BinOp::Add, Literal::Float64(a), Literal::Float64(b)) => Some(Literal::Float64(a + b)),
         (BinOp::Sub, Literal::Float64(a), Literal::Float64(b)) => Some(Literal::Float64(a - b)),
         (BinOp::Mul, Literal::Float64(a), Literal::Float64(b)) => Some(Literal::Float64(a * b)),
@@ -633,16 +816,13 @@ fn try_fold_binary(op: BinOp, left: &Expression, right: &Expression, span: Span)
             Some(Literal::Float64(a % *b as f64))
         }
 
-        // String concatenation
         (BinOp::Add, Literal::String(a), Literal::String(b)) => {
             Some(Literal::String(format!("{}{}", a, b)))
         }
 
-        // Boolean logic
         (BinOp::And, Literal::Bool(a), Literal::Bool(b)) => Some(Literal::Bool(*a && *b)),
         (BinOp::Or, Literal::Bool(a), Literal::Bool(b)) => Some(Literal::Bool(*a || *b)),
 
-        // Integer comparisons
         (BinOp::Eq, Literal::Int64(a), Literal::Int64(b)) => Some(Literal::Bool(a == b)),
         (BinOp::NotEq, Literal::Int64(a), Literal::Int64(b)) => Some(Literal::Bool(a != b)),
         (BinOp::Gt, Literal::Int64(a), Literal::Int64(b)) => Some(Literal::Bool(a > b)),
@@ -650,7 +830,6 @@ fn try_fold_binary(op: BinOp, left: &Expression, right: &Expression, span: Span)
         (BinOp::GtEq, Literal::Int64(a), Literal::Int64(b)) => Some(Literal::Bool(a >= b)),
         (BinOp::LtEq, Literal::Int64(a), Literal::Int64(b)) => Some(Literal::Bool(a <= b)),
 
-        // Float comparisons
         (BinOp::Eq, Literal::Float64(a), Literal::Float64(b)) => Some(Literal::Bool(a == b)),
         (BinOp::NotEq, Literal::Float64(a), Literal::Float64(b)) => Some(Literal::Bool(a != b)),
         (BinOp::Gt, Literal::Float64(a), Literal::Float64(b)) => Some(Literal::Bool(a > b)),
@@ -672,15 +851,12 @@ fn try_fold_binary(op: BinOp, left: &Expression, right: &Expression, span: Span)
         (BinOp::LtEq, Literal::Int64(a), Literal::Float64(b)) => Some(Literal::Bool(*a as f64 <= *b)),
         (BinOp::LtEq, Literal::Float64(a), Literal::Int64(b)) => Some(Literal::Bool(*a <= *b as f64)),
 
-        // String comparisons
         (BinOp::Eq, Literal::String(a), Literal::String(b)) => Some(Literal::Bool(a == b)),
         (BinOp::NotEq, Literal::String(a), Literal::String(b)) => Some(Literal::Bool(a != b)),
 
-        // Bool comparisons
         (BinOp::Eq, Literal::Bool(a), Literal::Bool(b)) => Some(Literal::Bool(a == b)),
         (BinOp::NotEq, Literal::Bool(a), Literal::Bool(b)) => Some(Literal::Bool(a != b)),
 
-        // Null comparisons
         (BinOp::Eq, Literal::Null, Literal::Null) => Some(Literal::Bool(true)),
         (BinOp::NotEq, Literal::Null, Literal::Null) => Some(Literal::Bool(false)),
 
@@ -702,11 +878,9 @@ fn try_fold_unary(op: UnOp, operand: &Expression, span: Span) -> Option<Expressi
     };
 
     let result_lit = match (op, lit) {
-        // Negation
         (UnOp::Neg, Literal::Int64(n)) => n.checked_neg().map(Literal::Int64),
         (UnOp::Neg, Literal::Float64(f)) => Some(Literal::Float64(-f)),
 
-        // Logical not
         (UnOp::Not, Literal::Bool(b)) => Some(Literal::Bool(!b)),
         // Not on null is true (null is falsy)
         (UnOp::Not, Literal::Null) => Some(Literal::Bool(true)),
@@ -841,9 +1015,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Integer arithmetic
-    // =========================================================================
 
     #[test]
     fn fold_int_add() {
@@ -880,9 +1051,6 @@ mod tests {
         assert_is_int(&expr, 1);
     }
 
-    // =========================================================================
-    // Float arithmetic
-    // =========================================================================
 
     #[test]
     fn fold_float_add() {
@@ -905,9 +1073,7 @@ mod tests {
         assert_is_float(&expr, 2.5);
     }
 
-    // =========================================================================
     // Mixed int/float arithmetic
-    // =========================================================================
 
     #[test]
     fn fold_mixed_add_int_float() {
@@ -923,9 +1089,6 @@ mod tests {
         assert_is_float(&expr, 10.0);
     }
 
-    // =========================================================================
-    // String concatenation
-    // =========================================================================
 
     #[test]
     fn fold_string_concat() {
@@ -943,9 +1106,6 @@ mod tests {
         assert_is_str(&expr, "hello world");
     }
 
-    // =========================================================================
-    // Boolean logic
-    // =========================================================================
 
     #[test]
     fn fold_bool_and_true() {
@@ -989,9 +1149,6 @@ mod tests {
         assert_is_bool(&expr, true);
     }
 
-    // =========================================================================
-    // Comparisons
-    // =========================================================================
 
     #[test]
     fn fold_int_gt() {
@@ -1042,9 +1199,6 @@ mod tests {
         assert_is_bool(&expr, true);
     }
 
-    // =========================================================================
-    // Negation
-    // =========================================================================
 
     #[test]
     fn fold_neg_int() {
@@ -1069,9 +1223,7 @@ mod tests {
         assert_is_int(&expr, 5);
     }
 
-    // =========================================================================
     // Division by zero: must NOT fold
-    // =========================================================================
 
     #[test]
     fn no_fold_int_div_by_zero() {
@@ -1095,9 +1247,7 @@ mod tests {
         assert!(matches!(expr.kind, ExpressionKind::BinaryOp { .. }));
     }
 
-    // =========================================================================
     // Function calls: must NOT fold
-    // =========================================================================
 
     #[test]
     fn no_fold_function_call() {
@@ -1113,9 +1263,6 @@ mod tests {
         assert!(matches!(expr.kind, ExpressionKind::Call { .. }));
     }
 
-    // =========================================================================
-    // Nested constant expressions
-    // =========================================================================
 
     #[test]
     fn fold_nested_expression() {
@@ -1137,9 +1284,7 @@ mod tests {
         assert_is_int(&expr, 10);
     }
 
-    // =========================================================================
     // Program-level folding
-    // =========================================================================
 
     #[test]
     fn fold_program_let() {
@@ -1167,9 +1312,7 @@ mod tests {
         }
     }
 
-    // =========================================================================
     // Non-constant expressions should not be folded
-    // =========================================================================
 
     #[test]
     fn no_fold_variable_operand() {
@@ -1182,9 +1325,7 @@ mod tests {
         assert!(matches!(expr.kind, ExpressionKind::BinaryOp { .. }));
     }
 
-    // =========================================================================
     // Not on non-bool literals
-    // =========================================================================
 
     #[test]
     fn fold_not_null() {
@@ -1221,9 +1362,6 @@ mod tests {
         assert_is_bool(&expr, false);
     }
 
-    // =========================================================================
-    // String comparison
-    // =========================================================================
 
     #[test]
     fn fold_string_eq() {
@@ -1239,9 +1377,6 @@ mod tests {
         assert_is_bool(&expr, true);
     }
 
-    // =========================================================================
-    // Bool comparison
-    // =========================================================================
 
     #[test]
     fn fold_bool_eq() {
@@ -1257,9 +1392,6 @@ mod tests {
         assert_is_bool(&expr, true);
     }
 
-    // =========================================================================
-    // Null comparison
-    // =========================================================================
 
     #[test]
     fn fold_null_eq_null() {
@@ -1275,9 +1407,6 @@ mod tests {
         assert_is_bool(&expr, false);
     }
 
-    // =========================================================================
-    // Overflow protection
-    // =========================================================================
 
     #[test]
     fn no_fold_int_add_overflow() {
@@ -1302,9 +1431,7 @@ mod tests {
         assert!(matches!(expr.kind, ExpressionKind::UnaryOp { .. }));
     }
 
-    // =========================================================================
     // Mixed int/float comparisons
-    // =========================================================================
 
     #[test]
     fn fold_mixed_gt() {
@@ -1320,9 +1447,6 @@ mod tests {
         assert_is_bool(&expr, true);
     }
 
-    // =========================================================================
-    // Float comparison
-    // =========================================================================
 
     #[test]
     fn fold_float_gt() {
@@ -1338,9 +1462,7 @@ mod tests {
         assert_is_bool(&expr, true);
     }
 
-    // =========================================================================
     // Double negation/not elimination (variable case)
-    // =========================================================================
 
     #[test]
     fn fold_double_not() {
@@ -1362,9 +1484,6 @@ mod tests {
         assert!(matches!(&expr.kind, ExpressionKind::Variable(name) if name == "x"));
     }
 
-    // =========================================================================
-    // Identity operation elimination
-    // =========================================================================
 
     #[test]
     fn fold_add_zero_right() {

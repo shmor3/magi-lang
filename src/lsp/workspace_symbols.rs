@@ -4,7 +4,7 @@
 //! top-level function, struct, and enum definitions.
 
 use crate::lsp::analysis::{analyze_document, char_col_to_utf16};
-use tower_lsp::lsp_types::*;
+use super::types::*;
 
 /// Handle a workspace symbol request.
 ///
@@ -82,7 +82,6 @@ fn collect_magi_files(
 
             let (state, _) = analyze_document(&source);
 
-            // Collect functions
             for func in state.functions.values() {
                 // Skip internal test symbols (registered as "test:name")
                 if func.name.starts_with("test \"") {
@@ -107,7 +106,6 @@ fn collect_magi_files(
                 });
             }
 
-            // Collect structs
             for st in state.structs.values() {
                 if !query_lower.is_empty() && !st.name.to_lowercase().contains(query_lower) {
                     continue;
@@ -128,7 +126,6 @@ fn collect_magi_files(
                 });
             }
 
-            // Collect enums
             for en in state.enums.values() {
                 if !query_lower.is_empty() && !en.name.to_lowercase().contains(query_lower) {
                     continue;
