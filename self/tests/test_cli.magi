@@ -1,0 +1,218 @@
+// Tests for self/cli.magi — CLI pipeline functions
+// Run: cat self/types.magi self/lexer.magi self/ast.magi self/parser.magi self/type_checker.magi self/interpreter.magi self/optimizer.magi self/linter.magi self/formatter.magi self/cli.magi self/tests/test_cli.magi > /tmp/_cli_test.magi && cargo run --bin magi -- run /tmp/_cli_test.magi
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+func has_substr(s, needle) {
+    s.contains(needle)
+}
+
+func has_warning(warnings, needle) {
+    for w in warnings {
+        if w.contains(needle) { return true }
+    }
+    false
+}
+
+// ── run_source ────────────────────────────────────────────────────────
+
+func test_run_source_arithmetic() {
+    run_source("const x = 1 + 2")
+    println("PASS: run_source arithmetic")
+}
+
+func test_run_source_with_binding() {
+    run_source("const x = 5; const y = x + 1")
+    println("PASS: run_source with binding")
+}
+
+// ── check_source ──────────────────────────────────────────────────────
+
+func test_check_source_valid() {
+    const result = check_source("const x = 5")
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: check_source valid program has no errors")
+}
+
+func test_check_source_multiple_bindings() {
+    const result = check_source("const a = 1; const b = 2; const c = a + b")
+    const errors = result[0]
+    assert(len(errors) == 0)
+    println("PASS: check_source multiple bindings")
+}
+
+func test_check_source_returns_two_lists() {
+    const result = check_source("func f(x) { x + 1 }")
+    assert(len(result) == 2)
+    println("PASS: check_source returns [errors, warnings]")
+}
+
+// ── lint_source ───────────────────────────────────────────────────────
+
+func test_lint_source_clean() {
+    const warnings = lint_source("const _x = 5")
+    assert(typeof(warnings) == "array")
+    println("PASS: lint_source returns array")
+}
+
+func test_lint_source_unused_var() {
+    const warnings = lint_source("func f() { const unused = 99; 0 }")
+    assert(has_warning(warnings, "unused"))
+    println("PASS: lint_source detects unused variable")
+}
+
+func test_lint_source_no_warnings_for_used() {
+    const warnings = lint_source("func f(x) { x + 1 }")
+    assert(!has_warning(warnings, "unused variable 'x'"))
+    println("PASS: lint_source no warning for used param")
+}
+
+// ── fmt_source ────────────────────────────────────────────────────────
+
+func test_fmt_source_returns_string() {
+    const out = fmt_source("const x = 1 + 2")
+    assert(typeof(out) == "string")
+    assert(len(out) > 0)
+    println("PASS: fmt_source returns non-empty string")
+}
+
+func test_fmt_source_idempotent() {
+    const src = "const x = 42"
+    const once = fmt_source(src)
+    const twice = fmt_source(once)
+    assert(once == twice)
+    println("PASS: fmt_source is idempotent")
+}
+
+func test_fmt_source_contains_keyword() {
+    const out = fmt_source("const x = 1")
+    assert(has_substr(out, "const"))
+    println("PASS: fmt_source output contains 'const'")
+}
+
+// ── eval_expr_source ──────────────────────────────────────────────────
+
+func test_expr_source_int() {
+    const result = eval_expr_source("1 + 2")
+    assert(result == 3)
+    println("PASS: eval_expr_source integer arithmetic")
+}
+
+func test_expr_source_string() {
+    const result = eval_expr_source("\"hello\" + \" world\"")
+    assert(result == "hello world")
+    println("PASS: eval_expr_source string concat")
+}
+
+func test_expr_source_bool() {
+    const result = eval_expr_source("5 > 3")
+    assert(result == true)
+    println("PASS: eval_expr_source boolean comparison")
+}
+
+func test_expr_source_with_variable() {
+    const result = eval_expr_source("const x = 10; x * 2")
+    assert(result == 20)
+    println("PASS: eval_expr_source variable binding")
+}
+
+// ── dispatch ──────────────────────────────────────────────────────────
+
+func test_dispatch_version_no_panic() {
+    dispatch("version", [])
+    println("PASS: dispatch version")
+}
+
+func test_dispatch_help_no_panic() {
+    dispatch("help", [])
+    println("PASS: dispatch help")
+}
+
+func test_dispatch_unknown_no_panic() {
+    dispatch("notacommand", [])
+    println("PASS: dispatch unknown command")
+}
+
+func test_dispatch_run_missing_arg() {
+    dispatch("run", [])
+    println("PASS: dispatch run missing arg handled")
+}
+
+func test_dispatch_check_missing_arg() {
+    dispatch("check", [])
+    println("PASS: dispatch check missing arg handled")
+}
+
+func test_dispatch_lint_missing_arg() {
+    dispatch("lint", [])
+    println("PASS: dispatch lint missing arg handled")
+}
+
+func test_dispatch_fmt_missing_arg() {
+    dispatch("fmt", [])
+    println("PASS: dispatch fmt missing arg handled")
+}
+
+func test_dispatch_eval_missing_arg() {
+    dispatch("eval", [])
+    println("PASS: dispatch eval missing arg handled")
+}
+
+// ── End-to-End Pipeline ───────────────────────────────────────────────
+
+func test_pipeline_parse_check_optimize_run() {
+    const src = "const a = 2 + 3; const b = a * 4; b"
+    const program = parse(src)
+    const check_result = check(program)
+    assert(len(check_result[0]) == 0)
+    const optimized = optimize(program)
+    const val = eval_program(optimized)
+    assert(val == 20)
+    println("PASS: full pipeline parse->check->optimize->run")
+}
+
+func test_pipeline_fmt_then_run() {
+    const src = "const x=10; x+5"
+    const formatted = fmt_source(src)
+    const result = eval_expr_source(formatted)
+    assert(result == 15)
+    println("PASS: fmt then run produces same result")
+}
+
+// ── Run All Tests ─────────────────────────────────────────────────────
+
+test_run_source_arithmetic()
+test_run_source_with_binding()
+
+test_check_source_valid()
+test_check_source_multiple_bindings()
+test_check_source_returns_two_lists()
+
+test_lint_source_clean()
+test_lint_source_unused_var()
+test_lint_source_no_warnings_for_used()
+
+test_fmt_source_returns_string()
+test_fmt_source_idempotent()
+test_fmt_source_contains_keyword()
+
+test_expr_source_int()
+test_expr_source_string()
+test_expr_source_bool()
+test_expr_source_with_variable()
+
+test_dispatch_version_no_panic()
+test_dispatch_help_no_panic()
+test_dispatch_unknown_no_panic()
+test_dispatch_run_missing_arg()
+test_dispatch_check_missing_arg()
+test_dispatch_lint_missing_arg()
+test_dispatch_fmt_missing_arg()
+test_dispatch_eval_missing_arg()
+
+test_pipeline_parse_check_optimize_run()
+test_pipeline_fmt_then_run()
+
+println("")
+println("All CLI tests passed.")

@@ -1,0 +1,156 @@
+// MAGI Self-Hosted Compiler — CLI Entry Point
+//
+// Ties together: parse → type_check → optimize → interpret (run)
+//                parse → type_check (check)
+//                parse → lint (lint)
+//                parse → format (fmt)
+//                parse → interpret expression (eval)
+//
+// Note: actual CLI arg dispatch requires stage-0 host support (process_args / fs_read).
+// This module exposes pipeline functions that can be called directly or wired to a host CLI.
+
+const VERSION = "1.0.0-self"
+
+// ── Pipeline Functions ──────────────────────────────────────────────
+
+// run_source: parse → type check → optimize → interpret
+// Prints errors/warnings to stdout, then runs the program.
+func run_source(source) {
+    const program = parse(source)
+    const result = check(program)
+    const errors = result[0]
+    const warnings = result[1]
+    if len(errors) > 0 {
+        for err in errors {
+            println(f"error: {err}")
+        }
+        return null
+    }
+    for w in warnings {
+        println(f"warning: {w}")
+    }
+    const optimized = optimize(program)
+    eval_program(optimized)
+}
+
+// check_source: parse → type check → return (errors, warnings)
+func check_source(source) {
+    const program = parse(source)
+    check(program)
+}
+
+// lint_source: parse → lint → return warnings array
+func lint_source(source) {
+    const program = parse(source)
+    lint(program)
+}
+
+// fmt_source: parse → format → return formatted source string
+func fmt_source(source) {
+    const program = parse(source)
+    format_program(program)
+}
+
+// eval_expr_source: wrap expression in last-value program, interpret, return result
+func eval_expr_source(expr_source) {
+    eval_source(expr_source)
+}
+
+// ── Help / Version ──────────────────────────────────────────────────
+
+func print_help() {
+    println("MAGI Programming Language (self-hosted)")
+    println("")
+    println("Commands:")
+    println("  run <file>      Run a MAGI program")
+    println("  check <file>    Type check a program")
+    println("  lint <file>     Lint a program")
+    println("  fmt <file>      Format a program")
+    println("  eval '<expr>'   Evaluate an expression")
+    println("  version         Print version")
+    println("  help            Print this help")
+    println("")
+    println("Flags:")
+    println("  --help, -h      Print this help")
+}
+
+func print_version() {
+    println(f"MAGI {VERSION} (self-hosted)")
+}
+
+// ── Host CLI Dispatch ───────────────────────────────────────────────
+//
+// dispatch(command, args) is called by the host stage-0 runtime when
+// actual argv is available. `args` is the remaining arguments after
+// the command name.
+//
+func dispatch(command, args) {
+    match command {
+        "run" => {
+            if len(args) < 1 {
+                println("Usage: magi run <file>")
+                return null
+            }
+            const source = fs_read(args[0])
+            run_source(source)
+        },
+        "check" => {
+            if len(args) < 1 {
+                println("Usage: magi check <file>")
+                return null
+            }
+            const source = fs_read(args[0])
+            const result = check_source(source)
+            const errors = result[0]
+            const warnings = result[1]
+            for w in warnings { println(f"warning: {w}") }
+            for err in errors { println(f"error: {err}") }
+            if len(errors) == 0 {
+                println("OK: no errors")
+            }
+            null
+        },
+        "lint" => {
+            if len(args) < 1 {
+                println("Usage: magi lint <file>")
+                return null
+            }
+            const source = fs_read(args[0])
+            const warnings = lint_source(source)
+            if len(warnings) == 0 {
+                println("OK: no warnings")
+            } else {
+                for w in warnings { println(f"warning: {w}") }
+            }
+            null
+        },
+        "fmt" => {
+            if len(args) < 1 {
+                println("Usage: magi fmt <file>")
+                return null
+            }
+            const source = fs_read(args[0])
+            const formatted = fmt_source(source)
+            println(formatted)
+            null
+        },
+        "eval" => {
+            if len(args) < 1 {
+                println("Usage: magi eval '<expr>'")
+                return null
+            }
+            const result = eval_expr_source(args[0])
+            if result != null {
+                println(to_string(result))
+            }
+            null
+        },
+        "version" => print_version(),
+        "help" | "--help" | "-h" => print_help(),
+        _ => {
+            println(f"Unknown command: {command}")
+            print_help()
+            null
+        },
+    }
+}
