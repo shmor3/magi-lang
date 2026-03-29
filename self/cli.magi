@@ -8159,3 +8159,1360 @@ func get_terminal_height() {
     }
     24 // default
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Doc Generation
+// ═══════════════════════════════════════════════════════════════════
+
+// Extract all doc comments (///) from source and generate documentation.
+func doc_generate(source, format) {
+    const entries = doc_extract_entries(source)
+    match format {
+        "markdown" => doc_emit_markdown(entries),
+        "html" => doc_emit_html(entries),
+        "json" => doc_emit_json(entries),
+        _ => doc_emit_markdown(entries),
+    }
+}
+
+func doc_extract_entries(source) {
+    const lines = source.split("\n")
+    let entries = []
+    let current_doc = []
+    let i = 0
+
+    while i < len(lines) {
+        const line = lines[i]
+        const trimmed = line.trim()
+
+        // Collect consecutive /// lines
+        if trimmed.starts_with("///") {
+            const doc_text = trimmed[3..len(trimmed)].trim()
+            current_doc.push(doc_text)
+            i = i + 1
+            continue
+        }
+
+        // Check if a definition follows the doc comment
+        if len(current_doc) > 0 {
+            if trimmed.starts_with("func ") {
+                const entry = doc_parse_func(trimmed, current_doc, i + 1)
+                entries.push(entry)
+            } else if trimmed.starts_with("struct ") {
+                const entry = doc_parse_struct(trimmed, current_doc, i + 1, lines)
+                entries.push(entry)
+            } else if trimmed.starts_with("enum ") {
+                const entry = doc_parse_enum(trimmed, current_doc, i + 1, lines)
+                entries.push(entry)
+            } else if trimmed.starts_with("interface ") {
+                const entry = doc_parse_interface(trimmed, current_doc, i + 1, lines)
+                entries.push(entry)
+            } else if trimmed.starts_with("const ") || trimmed.starts_with("let ") {
+                const entry = doc_parse_variable(trimmed, current_doc, i + 1)
+                entries.push(entry)
+            } else if trimmed.starts_with("type ") {
+                const entry = doc_parse_type_alias(trimmed, current_doc, i + 1)
+                entries.push(entry)
+            }
+            current_doc = []
+        }
+
+        i = i + 1
+    }
+    entries
+}
+
+func doc_parse_func(line, doc_lines, line_num) {
+    // Extract: func name(params) -> ret
+    let name = ""
+    let params = ""
+    let ret_type = ""
+    const after_func = line[5..len(line)].trim()
+    const paren_start = after_func.index_of("(")
+    if paren_start >= 0 {
+        name = after_func[0..paren_start].trim()
+        const paren_end = after_func.index_of(")")
+        if paren_end > paren_start {
+            params = after_func[paren_start + 1..paren_end]
+        }
+        // Check for return type
+        const arrow = after_func.index_of("->")
+        if arrow >= 0 {
+            ret_type = after_func[arrow + 2..len(after_func)].trim()
+            // Strip trailing {
+            if ret_type.ends_with("{") {
+                ret_type = ret_type[0..len(ret_type) - 1].trim()
+            }
+        }
+    }
+
+    // Parse param docs from doc_lines: @param name description
+    let param_docs = []
+    let desc_lines = []
+    let return_doc = ""
+    let example_lines = []
+    let in_example = false
+
+    for dl in doc_lines {
+        if dl.starts_with("@param ") {
+            const rest = dl[7..len(dl)]
+            const space = rest.index_of(" ")
+            if space > 0 {
+                param_docs.push({"name": rest[0..space], "desc": rest[space + 1..len(rest)]})
+            } else {
+                param_docs.push({"name": rest, "desc": ""})
+            }
+        } else if dl.starts_with("@return ") || dl.starts_with("@returns ") {
+            const at_idx = dl.index_of(" ")
+            return_doc = dl[at_idx + 1..len(dl)]
+        } else if dl.starts_with("@example") {
+            in_example = true
+        } else if in_example {
+            example_lines.push(dl)
+        } else {
+            desc_lines.push(dl)
+        }
+    }
+
+    {
+        "kind": "function",
+        "name": name,
+        "params": params,
+        "return_type": ret_type,
+        "description": desc_lines.join("\n"),
+        "param_docs": param_docs,
+        "return_doc": return_doc,
+        "examples": example_lines,
+        "line": line_num,
+    }
+}
+
+func doc_parse_struct(line, doc_lines, line_num, all_lines) {
+    const after = line[7..len(line)].trim()
+    let name = after
+    const brace = after.index_of("{")
+    if brace >= 0 { name = after[0..brace].trim() }
+    const lt = name.index_of("<")
+    let type_params = ""
+    if lt >= 0 {
+        type_params = name[lt..len(name)]
+        name = name[0..lt]
+    }
+
+    // Extract fields
+    let fields = []
+    let j = line_num
+    while j < len(all_lines) {
+        const fl = all_lines[j].trim()
+        if fl == "}" { break }
+        if len(fl) > 0 && fl != "{" {
+            const colon = fl.index_of(":")
+            if colon > 0 {
+                let fname = fl[0..colon].trim()
+                let ftype = fl[colon + 1..len(fl)].trim()
+                if ftype.ends_with(",") { ftype = ftype[0..len(ftype) - 1].trim() }
+                fields.push({"name": fname, "type": ftype})
+            }
+        }
+        j = j + 1
+    }
+
+    {
+        "kind": "struct",
+        "name": name,
+        "type_params": type_params,
+        "description": doc_lines.join("\n"),
+        "fields": fields,
+        "line": line_num,
+    }
+}
+
+func doc_parse_enum(line, doc_lines, line_num, all_lines) {
+    const after = line[5..len(line)].trim()
+    let name = after
+    const brace = after.index_of("{")
+    if brace >= 0 { name = after[0..brace].trim() }
+
+    let variants = []
+    let j = line_num
+    while j < len(all_lines) {
+        const vl = all_lines[j].trim()
+        if vl == "}" { break }
+        if len(vl) > 0 && vl != "{" {
+            let vname = vl
+            if vname.ends_with(",") { vname = vname[0..len(vname) - 1] }
+            variants.push(vname)
+        }
+        j = j + 1
+    }
+
+    {
+        "kind": "enum",
+        "name": name,
+        "description": doc_lines.join("\n"),
+        "variants": variants,
+        "line": line_num,
+    }
+}
+
+func doc_parse_interface(line, doc_lines, line_num, all_lines) {
+    const after = line[10..len(line)].trim()
+    let name = after
+    const brace = after.index_of("{")
+    if brace >= 0 { name = after[0..brace].trim() }
+
+    let methods = []
+    let j = line_num
+    while j < len(all_lines) {
+        const ml = all_lines[j].trim()
+        if ml == "}" { break }
+        if ml.starts_with("func ") {
+            methods.push(ml)
+        }
+        j = j + 1
+    }
+
+    {
+        "kind": "interface",
+        "name": name,
+        "description": doc_lines.join("\n"),
+        "methods": methods,
+        "line": line_num,
+    }
+}
+
+func doc_parse_variable(line, doc_lines, line_num) {
+    let kind = "variable"
+    let rest = line
+    if line.starts_with("const ") {
+        kind = "constant"
+        rest = line[6..len(line)]
+    } else if line.starts_with("let ") {
+        rest = line[4..len(line)]
+    }
+    const eq = rest.index_of("=")
+    let name = if eq >= 0 { rest[0..eq].trim() } else { rest.trim() }
+
+    {
+        "kind": kind,
+        "name": name,
+        "description": doc_lines.join("\n"),
+        "line": line_num,
+    }
+}
+
+func doc_parse_type_alias(line, doc_lines, line_num) {
+    const after = line[5..len(line)].trim()
+    const eq = after.index_of("=")
+    let name = if eq >= 0 { after[0..eq].trim() } else { after }
+
+    {
+        "kind": "type",
+        "name": name,
+        "description": doc_lines.join("\n"),
+        "line": line_num,
+    }
+}
+
+// ── Markdown Emitter ────────────────────────────────────────────────
+
+func doc_emit_markdown(entries) {
+    let md = "# API Documentation\n\n"
+    md = md + "_Generated by MAGI doc_\n\n"
+
+    // Group by kind
+    let functions = []
+    let structs = []
+    let enums = []
+    let interfaces = []
+    let constants = []
+    let types = []
+
+    for entry in entries {
+        match entry["kind"] {
+            "function" => functions.push(entry),
+            "struct" => structs.push(entry),
+            "enum" => enums.push(entry),
+            "interface" => interfaces.push(entry),
+            "constant" => constants.push(entry),
+            "type" => types.push(entry),
+            _ => {},
+        }
+    }
+
+    // Table of contents
+    md = md + "## Table of Contents\n\n"
+    if len(types) > 0 { md = md + "- [Types](#types)\n" }
+    if len(structs) > 0 { md = md + "- [Structs](#structs)\n" }
+    if len(enums) > 0 { md = md + "- [Enums](#enums)\n" }
+    if len(interfaces) > 0 { md = md + "- [Interfaces](#interfaces)\n" }
+    if len(functions) > 0 { md = md + "- [Functions](#functions)\n" }
+    if len(constants) > 0 { md = md + "- [Constants](#constants)\n" }
+    md = md + "\n"
+
+    // Types
+    if len(types) > 0 {
+        md = md + "## Types\n\n"
+        for t in types {
+            md = md + f"### `{t[\"name\"]}`\n\n{t[\"description\"]}\n\n"
+        }
+    }
+
+    // Structs
+    if len(structs) > 0 {
+        md = md + "## Structs\n\n"
+        for s in structs {
+            md = md + f"### `{s[\"name\"]}`\n\n{s[\"description\"]}\n\n"
+            if s.has("fields") && len(s["fields"]) > 0 {
+                md = md + "| Field | Type |\n|-------|------|\n"
+                for field in s["fields"] {
+                    md = md + f"| `{field[\"name\"]}` | `{field[\"type\"]}` |\n"
+                }
+                md = md + "\n"
+            }
+        }
+    }
+
+    // Enums
+    if len(enums) > 0 {
+        md = md + "## Enums\n\n"
+        for e in enums {
+            md = md + f"### `{e[\"name\"]}`\n\n{e[\"description\"]}\n\n"
+            if e.has("variants") && len(e["variants"]) > 0 {
+                md = md + "Variants:\n"
+                for v in e["variants"] {
+                    md = md + f"- `{v}`\n"
+                }
+                md = md + "\n"
+            }
+        }
+    }
+
+    // Interfaces
+    if len(interfaces) > 0 {
+        md = md + "## Interfaces\n\n"
+        for iface in interfaces {
+            md = md + f"### `{iface[\"name\"]}`\n\n{iface[\"description\"]}\n\n"
+            if iface.has("methods") && len(iface["methods"]) > 0 {
+                md = md + "Methods:\n"
+                for m in iface["methods"] {
+                    md = md + f"- `{m}`\n"
+                }
+                md = md + "\n"
+            }
+        }
+    }
+
+    // Functions
+    if len(functions) > 0 {
+        md = md + "## Functions\n\n"
+        for f in functions {
+            const sig = f"func {f[\"name\"]}({f[\"params\"]})"
+            const ret = if f["return_type"] != "" { f" -> {f[\"return_type\"]}" } else { "" }
+            md = md + f"### `{f[\"name\"]}`\n\n```magi\n{sig}{ret}\n```\n\n"
+            md = md + f"{f[\"description\"]}\n\n"
+            if len(f["param_docs"]) > 0 {
+                md = md + "**Parameters:**\n\n"
+                for pd in f["param_docs"] {
+                    md = md + f"- `{pd[\"name\"]}` — {pd[\"desc\"]}\n"
+                }
+                md = md + "\n"
+            }
+            if f["return_doc"] != "" {
+                md = md + f"**Returns:** {f[\"return_doc\"]}\n\n"
+            }
+            if len(f["examples"]) > 0 {
+                md = md + "**Example:**\n\n```magi\n"
+                for ex in f["examples"] {
+                    md = md + ex + "\n"
+                }
+                md = md + "```\n\n"
+            }
+        }
+    }
+
+    // Constants
+    if len(constants) > 0 {
+        md = md + "## Constants\n\n"
+        for c in constants {
+            md = md + f"### `{c[\"name\"]}`\n\n{c[\"description\"]}\n\n"
+        }
+    }
+
+    md
+}
+
+// ── HTML Emitter ────────────────────────────────────────────────────
+
+func doc_emit_html(entries) {
+    let html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+    html = html + "<title>MAGI API Documentation</title>\n"
+    html = html + "<style>\n"
+    html = html + "body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; }\n"
+    html = html + "code { background: #f0f0f0; padding: 0.2em 0.4em; border-radius: 3px; }\n"
+    html = html + "pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }\n"
+    html = html + "h1 { border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }\n"
+    html = html + "h2 { border-bottom: 1px solid #eee; padding-bottom: 0.3rem; margin-top: 2rem; }\n"
+    html = html + "h3 { color: #333; }\n"
+    html = html + "table { border-collapse: collapse; width: 100%; }\n"
+    html = html + "th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }\n"
+    html = html + "th { background: #f6f8fa; }\n"
+    html = html + ".param { color: #0366d6; }\n"
+    html = html + ".nav { position: sticky; top: 0; background: white; border-bottom: 1px solid #eee; padding: 0.5rem; }\n"
+    html = html + "</style>\n</head>\n<body>\n"
+
+    html = html + "<h1>API Documentation</h1>\n"
+
+    for entry in entries {
+        const kind = entry["kind"]
+        const name = entry["name"]
+        const desc = html_escape_basic(entry["description"])
+        html = html + f"<h3 id=\"{name}\"><code>{name}</code> ({kind})</h3>\n"
+        html = html + f"<p>{desc}</p>\n"
+
+        if kind == "function" {
+            const sig = f"func {name}({entry[\"params\"]})"
+            html = html + f"<pre><code>{html_escape_basic(sig)}</code></pre>\n"
+        }
+
+        if kind == "struct" && entry.has("fields") {
+            html = html + "<table><tr><th>Field</th><th>Type</th></tr>\n"
+            for field in entry["fields"] {
+                html = html + f"<tr><td><code>{field[\"name\"]}</code></td><td><code>{field[\"type\"]}</code></td></tr>\n"
+            }
+            html = html + "</table>\n"
+        }
+    }
+
+    html = html + "</body>\n</html>"
+    html
+}
+
+func html_escape_basic(s) {
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+}
+
+// ── JSON Emitter ────────────────────────────────────────────────────
+
+func doc_emit_json(entries) {
+    let items = []
+    for entry in entries {
+        let item = f"  {{\"kind\": \"{entry[\"kind\"]}\", \"name\": \"{entry[\"name\"]}\""
+        item = item + f", \"description\": \"{entry[\"description\"].replace(\"\\\"\", \"\\\\\\\"\")}\""
+        if entry.has("params") {
+            item = item + f", \"params\": \"{entry[\"params\"]}\""
+        }
+        if entry.has("return_type") && entry["return_type"] != "" {
+            item = item + f", \"return_type\": \"{entry[\"return_type\"]}\""
+        }
+        item = item + "}"
+        items.push(item)
+    }
+    "[\n" + items.join(",\n") + "\n]"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Search Command (grep-like across project files)
+// ═══════════════════════════════════════════════════════════════════
+
+func cmd_search(pattern, path, options) {
+    const recursive = if options.has("recursive") { options["recursive"] } else { true }
+    const case_sensitive = if options.has("case_sensitive") { options["case_sensitive"] } else { true }
+    const file_pattern = if options.has("file_pattern") { options["file_pattern"] } else { "*.magi" }
+    const max_results = if options.has("max_results") { options["max_results"] } else { 200 }
+    const context_lines = if options.has("context") { options["context"] } else { 0 }
+    const show_line_numbers = if options.has("line_numbers") { options["line_numbers"] } else { true }
+
+    let results = []
+    let files_to_search = []
+
+    if fs_is_file(path) {
+        files_to_search.push(path)
+    } else if fs_is_dir(path) {
+        files_to_search = search_collect_files(path, file_pattern, recursive)
+    }
+
+    const search_pattern = if case_sensitive { pattern } else { pattern.to_lower() }
+
+    for file in files_to_search {
+        if len(results) >= max_results { break }
+        const content = fs_read(file)
+        if content == null { continue }
+        const lines = content.split("\n")
+        let line_num = 0
+        for line in lines {
+            if len(results) >= max_results { break }
+            const search_line = if case_sensitive { line } else { line.to_lower() }
+            if search_line.contains(search_pattern) {
+                let result = {"file": file, "line": line_num + 1, "text": line.trim()}
+                if context_lines > 0 {
+                    let before = []
+                    let after = []
+                    let ci = max(0, line_num - context_lines)
+                    while ci < line_num {
+                        before.push(lines[ci])
+                        ci = ci + 1
+                    }
+                    ci = line_num + 1
+                    while ci <= min(len(lines) - 1, line_num + context_lines) {
+                        after.push(lines[ci])
+                        ci = ci + 1
+                    }
+                    result["before"] = before
+                    result["after"] = after
+                }
+                results.push(result)
+            }
+            line_num = line_num + 1
+        }
+    }
+    results
+}
+
+func search_collect_files(dir, pattern, recursive) {
+    let files = []
+    const entries = fs_list(dir)
+    if entries == null { return files }
+    for entry in entries {
+        const full_path = dir + "/" + entry
+        if fs_is_dir(full_path) {
+            if recursive {
+                const sub = search_collect_files(full_path, pattern, true)
+                for f in sub { files.push(f) }
+            }
+        } else {
+            if search_matches_glob(entry, pattern) {
+                files.push(full_path)
+            }
+        }
+    }
+    files
+}
+
+func search_matches_glob(filename, pattern) {
+    if pattern == "*" { return true }
+    if pattern.starts_with("*.") {
+        const ext = pattern[1..len(pattern)]
+        return filename.ends_with(ext)
+    }
+    filename == pattern
+}
+
+func search_format_results(results, options) {
+    let output = ""
+    const colorize = if options.has("color") { options["color"] } else { true }
+    let last_file = ""
+
+    for r in results {
+        if r["file"] != last_file {
+            if last_file != "" { output = output + "\n" }
+            if colorize {
+                output = output + "\x1b[35m" + r["file"] + "\x1b[0m\n"
+            } else {
+                output = output + r["file"] + "\n"
+            }
+            last_file = r["file"]
+        }
+        const line_str = to_string(r["line"])
+        if r.has("before") {
+            for b in r["before"] {
+                output = output + "  " + b + "\n"
+            }
+        }
+        if colorize {
+            output = output + "\x1b[32m" + line_str + "\x1b[0m: " + r["text"] + "\n"
+        } else {
+            output = output + line_str + ": " + r["text"] + "\n"
+        }
+        if r.has("after") {
+            for a in r["after"] {
+                output = output + "  " + a + "\n"
+            }
+        }
+    }
+    output
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Expand Command (macro/template expansion)
+// ═══════════════════════════════════════════════════════════════════
+
+func cmd_expand(source) {
+    const program = parse(source)
+    let expanded_stmts = []
+    for stmt in program.statements {
+        const expanded = expand_stmt(stmt)
+        for s in expanded {
+            expanded_stmts.push(s)
+        }
+    }
+    const expanded_program = Program { statements: expanded_stmts, span: program.span }
+    format_program(expanded_program)
+}
+
+func expand_stmt(stmt) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SFuncDef(fd) => {
+            // Expand any template markers in function body
+            const expanded_body = expand_block(fd.body)
+            [Statement { kind: StmtKind::SFuncDef(FuncDef {
+                name: fd.name, type_params: fd.type_params, params: fd.params,
+                return_type: fd.return_type, body: expanded_body, span: fd.span,
+                is_getter: fd.is_getter, is_setter: fd.is_setter,
+            }), span: stmt.span }]
+        },
+        StmtKind::SExprStmt(expr) => {
+            // Check for macro-like calls
+            const expanded = expand_expr(expr)
+            if typeof(expanded) == "array" {
+                expanded
+            } else {
+                [Statement { kind: StmtKind::SExprStmt(expanded), span: stmt.span }]
+            }
+        },
+        _ => [stmt],
+    }
+}
+
+func expand_block(block) {
+    if block == null { return null }
+    let new_stmts = []
+    for stmt in block.statements {
+        const expanded = expand_stmt(stmt)
+        for s in expanded { new_stmts.push(s) }
+    }
+    Block { statements: new_stmts, span: block.span }
+}
+
+func expand_expr(expr) {
+    if expr == null { return null }
+    expr  // Base case: no expansion for simple expressions
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Tree Command (project file tree)
+// ═══════════════════════════════════════════════════════════════════
+
+func cmd_tree(path, options) {
+    const max_depth = if options.has("max_depth") { options["max_depth"] } else { 10 }
+    const show_hidden = if options.has("show_hidden") { options["show_hidden"] } else { false }
+    const file_filter = if options.has("filter") { options["filter"] } else { null }
+    const show_size = if options.has("size") { options["size"] } else { false }
+    const dirs_only = if options.has("dirs_only") { options["dirs_only"] } else { false }
+
+    let counts = {"files": 0, "dirs": 0}
+    const tree = tree_render(path, "", 0, max_depth, show_hidden, file_filter, dirs_only, show_size, counts)
+    const summary = f"\n{counts[\"dirs\"]} directories, {counts[\"files\"]} files"
+    tree + summary
+}
+
+func tree_render(path, prefix, depth, max_depth, show_hidden, filter, dirs_only, show_size, counts) {
+    if depth > max_depth { return "" }
+    let output = ""
+    const entries = fs_list(path)
+    if entries == null { return output }
+
+    // Sort entries: directories first, then files
+    let dirs = []
+    let files = []
+    for entry in entries {
+        if !show_hidden && entry.starts_with(".") { continue }
+        const full = path + "/" + entry
+        if fs_is_dir(full) {
+            dirs.push(entry)
+            counts["dirs"] = counts["dirs"] + 1
+        } else {
+            if !dirs_only {
+                if filter != null {
+                    if !search_matches_glob(entry, filter) { continue }
+                }
+                files.push(entry)
+                counts["files"] = counts["files"] + 1
+            }
+        }
+    }
+
+    let all = []
+    for d in sort(dirs) { all.push({"name": d, "is_dir": true}) }
+    for f in sort(files) { all.push({"name": f, "is_dir": false}) }
+
+    let i = 0
+    for item in all {
+        const is_last = i == len(all) - 1
+        const connector = if is_last { "└── " } else { "├── " }
+        const child_prefix = if is_last { "    " } else { "│   " }
+        const full_path = path + "/" + item["name"]
+
+        let line = prefix + connector + item["name"]
+        if show_size && !item["is_dir"] {
+            const stat = fs_stat(full_path)
+            if stat != null && stat.has("size") {
+                line = line + f" ({format_file_size(stat[\"size\"])})"
+            }
+        }
+        if item["is_dir"] {
+            line = line + "/"
+        }
+        output = output + line + "\n"
+
+        if item["is_dir"] {
+            output = output + tree_render(full_path, prefix + child_prefix, depth + 1, max_depth, show_hidden, filter, dirs_only, show_size, counts)
+        }
+        i = i + 1
+    }
+    output
+}
+
+func format_file_size(bytes) {
+    if bytes < 1024 { return f"{bytes}B" }
+    if bytes < 1024 * 1024 {
+        const kb = bytes / 1024
+        return f"{round(kb * 10) / 10}K"
+    }
+    if bytes < 1024 * 1024 * 1024 {
+        const mb = bytes / (1024 * 1024)
+        return f"{round(mb * 10) / 10}M"
+    }
+    const gb = bytes / (1024 * 1024 * 1024)
+    f"{round(gb * 10) / 10}G"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Fix Command (auto-fix lint warnings)
+// ═══════════════════════════════════════════════════════════════════
+
+func cmd_fix(source, options) {
+    const program = parse(source)
+    const warnings = lint(program)
+    if len(warnings) == 0 { return {"source": source, "fixed": 0} }
+
+    const fix_codes = if options.has("codes") { options["codes"] } else { null }
+    let fixed_source = source
+    let fix_count = 0
+
+    // Sort warnings by line number in reverse so edits don't shift later lines
+    let fixable = []
+    for w in warnings {
+        const fix = fix_get_auto_fix(w)
+        if fix != null {
+            if fix_codes == null || fix.has("code") && fix_codes.contains(fix["code"]) {
+                fixable.push(fix)
+            }
+        }
+    }
+
+    // Apply fixes in reverse line order
+    fixable = sort_by(fixable, f => 0 - f["line"])
+
+    for fix in fixable {
+        const applied = fix_apply(fixed_source, fix)
+        if applied != null {
+            fixed_source = applied
+            fix_count = fix_count + 1
+        }
+    }
+
+    {"source": fixed_source, "fixed": fix_count}
+}
+
+func fix_get_auto_fix(warning) {
+    // Parse warning format: "CODE: message at line N"
+    const parts = warning.split(":")
+    if len(parts) < 2 { return null }
+    const code = parts[0].trim()
+
+    match code {
+        "W001" => {
+            // Unused variable — prefix with underscore
+            const name = fix_extract_var_name(warning)
+            const line = fix_extract_line_num(warning)
+            if name != null && line != null {
+                return {"code": "W001", "line": line, "action": "rename", "old": name, "new": "_" + name}
+            }
+            null
+        },
+        "W002" => {
+            // Unused import — remove line
+            const line = fix_extract_line_num(warning)
+            if line != null {
+                return {"code": "W002", "line": line, "action": "delete_line"}
+            }
+            null
+        },
+        "W003" => {
+            // Dead code — remove line
+            const line = fix_extract_line_num(warning)
+            if line != null {
+                return {"code": "W003", "line": line, "action": "delete_line"}
+            }
+            null
+        },
+        "W200" => {
+            // Naming convention — convert to snake_case
+            const name = fix_extract_var_name(warning)
+            const line = fix_extract_line_num(warning)
+            if name != null && line != null {
+                const snake = to_snake_case_fix(name)
+                return {"code": "W200", "line": line, "action": "rename", "old": name, "new": snake}
+            }
+            null
+        },
+        _ => null,
+    }
+}
+
+func fix_extract_var_name(warning) {
+    const start = warning.index_of("'")
+    if start < 0 { return null }
+    const rest = warning[start + 1..len(warning)]
+    const end_q = rest.index_of("'")
+    if end_q < 0 { return null }
+    rest[0..end_q]
+}
+
+func fix_extract_line_num(warning) {
+    const at_idx = warning.index_of(" at line ")
+    if at_idx < 0 { return null }
+    const num_str = warning[at_idx + 9..len(warning)].trim()
+    parse_int(num_str)
+}
+
+func fix_apply(source, fix) {
+    const lines = source.split("\n")
+    const line_idx = fix["line"] - 1
+    if line_idx < 0 || line_idx >= len(lines) { return null }
+
+    match fix["action"] {
+        "delete_line" => {
+            let new_lines = []
+            let i = 0
+            for l in lines {
+                if i != line_idx { new_lines.push(l) }
+                i = i + 1
+            }
+            new_lines.join("\n")
+        },
+        "rename" => {
+            // Replace all occurrences in the file
+            source.replace(fix["old"], fix["new"])
+        },
+        _ => null,
+    }
+}
+
+func to_snake_case_fix(name) {
+    let result = ""
+    let i = 0
+    while i < len(name) {
+        const c = name[i]
+        if c >= "A" && c <= "Z" {
+            if i > 0 { result = result + "_" }
+            result = result + char_from_code(char_code_at(c, 0) + 32)
+        } else {
+            result = result + c
+        }
+        i = i + 1
+    }
+    result
+}
+
+func sort_by(arr, key_fn) {
+    // Simple insertion sort by key function
+    let sorted = []
+    for item in arr { sorted.push(item) }
+    let i = 1
+    while i < len(sorted) {
+        let j = i
+        while j > 0 {
+            const ka = key_fn(sorted[j])
+            const kb = key_fn(sorted[j - 1])
+            if ka < kb {
+                const tmp = sorted[j]
+                sorted[j] = sorted[j - 1]
+                sorted[j - 1] = tmp
+            }
+            j = j - 1
+        }
+        i = i + 1
+    }
+    sorted
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Workspace Commands
+// ═══════════════════════════════════════════════════════════════════
+
+func cmd_workspace_run(command, workspace_path) {
+    const config = workspace_load_config(workspace_path)
+    if config == null {
+        println("No magispace.toml found")
+        return null
+    }
+
+    const members = config["members"]
+    let results = {"__s": true}
+
+    for member in members {
+        const member_path = workspace_path + "/" + member
+        println(f"\n--- {member} ---")
+        const result = workspace_run_member(command, member_path)
+        results[member] = result
+    }
+    results
+}
+
+func workspace_load_config(path) {
+    const config_path = path + "/magispace.toml"
+    const content = fs_read(config_path)
+    if content == null { return null }
+    toml_parse(content)
+}
+
+func workspace_run_member(command, path) {
+    const main_file = path + "/main.magi"
+    if !fs_exists(main_file) {
+        const lib_file = path + "/lib.magi"
+        if !fs_exists(lib_file) {
+            return {"error": "no main.magi or lib.magi found"}
+        }
+    }
+
+    match command {
+        "check" => {
+            const source = fs_read(main_file)
+            if source == null { return {"error": "cannot read file"} }
+            check_source(source)
+        },
+        "lint" => {
+            const source = fs_read(main_file)
+            if source == null { return {"error": "cannot read file"} }
+            lint_source(source)
+        },
+        "fmt" => {
+            const source = fs_read(main_file)
+            if source == null { return {"error": "cannot read file"} }
+            const formatted = fmt_source(source)
+            fs_write(main_file, formatted)
+            {"formatted": true}
+        },
+        "test" => {
+            workspace_run_tests(path)
+        },
+        _ => {"error": f"unknown workspace command: {command}"},
+    }
+}
+
+func workspace_run_tests(path) {
+    let test_files = search_collect_files(path, "test_*.magi", true)
+    let test_results = []
+    for tf in test_files {
+        const source = fs_read(tf)
+        if source == null { continue }
+        const result = run_source(source)
+        test_results.push({"file": tf, "result": result})
+    }
+    test_results
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Shell Completion Generation
+// ═══════════════════════════════════════════════════════════════════
+
+func generate_completions(shell) {
+    match shell {
+        "bash" => generate_bash_completions(),
+        "zsh" => generate_zsh_completions(),
+        "fish" => generate_fish_completions(),
+        _ => f"Unknown shell: {shell}. Supported: bash, zsh, fish",
+    }
+}
+
+func generate_bash_completions() {
+    let comp = "# Bash completion for MAGI\n"
+    comp = comp + "_magi_completions() {\n"
+    comp = comp + "    local cur prev commands\n"
+    comp = comp + "    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n"
+    comp = comp + "    prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n"
+    comp = comp + "    commands=\"run check lint fmt eval version help doc search tree fix test bench\n"
+    comp = comp + "             compile compile-native run-bc run-wasm compilec runc lsp mcp\n"
+    comp = comp + "             debug repl expand init new add remove update publish install\"\n"
+    comp = comp + "\n"
+    comp = comp + "    case \"${prev}\" in\n"
+    comp = comp + "        run|check|lint|fmt|compile|compile-native|run-bc)\n"
+    comp = comp + "            COMPREPLY=($(compgen -f -X '!*.magi' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        run-wasm)\n"
+    comp = comp + "            COMPREPLY=($(compgen -f -X '!*.wasm' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        runc)\n"
+    comp = comp + "            COMPREPLY=($(compgen -f -X '!*.magc' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        doc)\n"
+    comp = comp + "            COMPREPLY=($(compgen -W '--format --output --title' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        search)\n"
+    comp = comp + "            COMPREPLY=($(compgen -W '--recursive --case-insensitive --context --max-results' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        tree)\n"
+    comp = comp + "            COMPREPLY=($(compgen -W '--depth --hidden --filter --size --dirs-only' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        fix)\n"
+    comp = comp + "            COMPREPLY=($(compgen -f -X '!*.magi' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        --format)\n"
+    comp = comp + "            COMPREPLY=($(compgen -W 'markdown html json' -- \"${cur}\"))\n"
+    comp = comp + "            return 0\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "    esac\n"
+    comp = comp + "\n"
+    comp = comp + "    if [ \"${COMP_CWORD}\" -eq 1 ]; then\n"
+    comp = comp + "        COMPREPLY=($(compgen -W \"${commands}\" -- \"${cur}\"))\n"
+    comp = comp + "    fi\n"
+    comp = comp + "}\n"
+    comp = comp + "complete -F _magi_completions magi\n"
+    comp
+}
+
+func generate_zsh_completions() {
+    let comp = "#compdef magi\n\n"
+    comp = comp + "_magi() {\n"
+    comp = comp + "    local -a commands\n"
+    comp = comp + "    commands=(\n"
+    comp = comp + "        'run:Run a MAGI program'\n"
+    comp = comp + "        'check:Type check a program'\n"
+    comp = comp + "        'lint:Lint a program'\n"
+    comp = comp + "        'fmt:Format a program'\n"
+    comp = comp + "        'eval:Evaluate an expression'\n"
+    comp = comp + "        'version:Print version'\n"
+    comp = comp + "        'help:Print help'\n"
+    comp = comp + "        'doc:Generate documentation'\n"
+    comp = comp + "        'search:Search across files'\n"
+    comp = comp + "        'tree:Show file tree'\n"
+    comp = comp + "        'fix:Auto-fix lint warnings'\n"
+    comp = comp + "        'test:Run tests'\n"
+    comp = comp + "        'bench:Run benchmarks'\n"
+    comp = comp + "        'compile:Compile to WASM'\n"
+    comp = comp + "        'compile-native:Compile to native binary'\n"
+    comp = comp + "        'compilec:Compile to .magc'\n"
+    comp = comp + "        'run-bc:Run with IR VM'\n"
+    comp = comp + "        'run-wasm:Run WASM binary'\n"
+    comp = comp + "        'runc:Run .magc classfile'\n"
+    comp = comp + "        'lsp:Start LSP server'\n"
+    comp = comp + "        'mcp:Start MCP server'\n"
+    comp = comp + "        'debug:Debug a program'\n"
+    comp = comp + "        'repl:Start REPL'\n"
+    comp = comp + "        'expand:Expand macros'\n"
+    comp = comp + "        'init:Initialize project'\n"
+    comp = comp + "        'new:Create new package'\n"
+    comp = comp + "        'add:Add dependency'\n"
+    comp = comp + "        'remove:Remove dependency'\n"
+    comp = comp + "        'update:Update dependencies'\n"
+    comp = comp + "        'publish:Publish package'\n"
+    comp = comp + "        'install:Install package'\n"
+    comp = comp + "    )\n\n"
+    comp = comp + "    _arguments -C \\\n"
+    comp = comp + "        '--help[Show help]' \\\n"
+    comp = comp + "        '--version[Show version]' \\\n"
+    comp = comp + "        '--verbose[Verbose output]' \\\n"
+    comp = comp + "        '--quiet[Suppress output]' \\\n"
+    comp = comp + "        '--color[Enable color output]' \\\n"
+    comp = comp + "        '--no-color[Disable color output]' \\\n"
+    comp = comp + "        '1:command:->commands' \\\n"
+    comp = comp + "        '*::arg:->args'\n\n"
+    comp = comp + "    case $state in\n"
+    comp = comp + "        commands)\n"
+    comp = comp + "            _describe 'command' commands\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "        args)\n"
+    comp = comp + "            case $words[1] in\n"
+    comp = comp + "                run|check|lint|fmt|fix|compile|compile-native|run-bc)\n"
+    comp = comp + "                    _files -g '*.magi'\n"
+    comp = comp + "                    ;;\n"
+    comp = comp + "                run-wasm)\n"
+    comp = comp + "                    _files -g '*.wasm'\n"
+    comp = comp + "                    ;;\n"
+    comp = comp + "                runc)\n"
+    comp = comp + "                    _files -g '*.magc'\n"
+    comp = comp + "                    ;;\n"
+    comp = comp + "                doc)\n"
+    comp = comp + "                    _arguments \\\n"
+    comp = comp + "                        '--format[Output format]:format:(markdown html json)' \\\n"
+    comp = comp + "                        '--output[Output file]:file:_files' \\\n"
+    comp = comp + "                        '*:file:_files -g \"*.magi\"'\n"
+    comp = comp + "                    ;;\n"
+    comp = comp + "                search)\n"
+    comp = comp + "                    _arguments \\\n"
+    comp = comp + "                        '--recursive[Search recursively]' \\\n"
+    comp = comp + "                        '--case-insensitive[Ignore case]' \\\n"
+    comp = comp + "                        '--context[Context lines]:lines:' \\\n"
+    comp = comp + "                        '*:pattern:'\n"
+    comp = comp + "                    ;;\n"
+    comp = comp + "            esac\n"
+    comp = comp + "            ;;\n"
+    comp = comp + "    esac\n"
+    comp = comp + "}\n\n"
+    comp = comp + "_magi \"$@\"\n"
+    comp
+}
+
+func generate_fish_completions() {
+    let comp = "# Fish completion for MAGI\n\n"
+    comp = comp + "# Disable file completion by default\n"
+    comp = comp + "complete -c magi -f\n\n"
+
+    const commands = [
+        ["run", "Run a MAGI program"],
+        ["check", "Type check a program"],
+        ["lint", "Lint a program"],
+        ["fmt", "Format a program"],
+        ["eval", "Evaluate an expression"],
+        ["version", "Print version"],
+        ["help", "Print help"],
+        ["doc", "Generate documentation"],
+        ["search", "Search across files"],
+        ["tree", "Show file tree"],
+        ["fix", "Auto-fix lint warnings"],
+        ["test", "Run tests"],
+        ["bench", "Run benchmarks"],
+        ["compile", "Compile to WASM"],
+        ["compile-native", "Compile to native binary"],
+        ["compilec", "Compile to classfile"],
+        ["run-bc", "Run with IR VM"],
+        ["run-wasm", "Run WASM binary"],
+        ["runc", "Run classfile"],
+        ["lsp", "Start LSP server"],
+        ["mcp", "Start MCP server"],
+        ["debug", "Debug a program"],
+        ["repl", "Start REPL"],
+        ["init", "Initialize project"],
+        ["new", "Create new package"],
+        ["add", "Add dependency"],
+        ["remove", "Remove dependency"],
+        ["update", "Update dependencies"],
+        ["publish", "Publish package"],
+        ["install", "Install package"],
+    ]
+
+    for cmd in commands {
+        comp = comp + f"complete -c magi -n '__fish_use_subcommand' -a '{cmd[0]}' -d '{cmd[1]}'\n"
+    }
+
+    comp = comp + "\n# File completions for commands that take files\n"
+    const file_commands = ["run", "check", "lint", "fmt", "fix", "compile", "compile-native", "run-bc"]
+    for cmd in file_commands {
+        comp = comp + f"complete -c magi -n '__fish_seen_subcommand_from {cmd}' -F -r\n"
+    }
+
+    comp = comp + "\n# Flags\n"
+    comp = comp + "complete -c magi -l help -d 'Show help'\n"
+    comp = comp + "complete -c magi -l version -d 'Show version'\n"
+    comp = comp + "complete -c magi -l verbose -d 'Verbose output'\n"
+    comp = comp + "complete -c magi -l quiet -d 'Suppress output'\n"
+    comp = comp + "complete -c magi -l color -d 'Enable color'\n"
+    comp = comp + "complete -c magi -l no-color -d 'Disable color'\n"
+
+    comp = comp + "\n# Doc format options\n"
+    comp = comp + "complete -c magi -n '__fish_seen_subcommand_from doc' -l format -xa 'markdown html json'\n"
+    comp = comp + "complete -c magi -n '__fish_seen_subcommand_from doc' -l output -rF\n"
+
+    comp = comp + "\n# Search options\n"
+    comp = comp + "complete -c magi -n '__fish_seen_subcommand_from search' -l recursive -d 'Search recursively'\n"
+    comp = comp + "complete -c magi -n '__fish_seen_subcommand_from search' -l case-insensitive -d 'Ignore case'\n"
+    comp = comp + "complete -c magi -n '__fish_seen_subcommand_from search' -l context -x -d 'Context lines'\n"
+    comp
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Full Progress Reporting for Long Operations
+// ═══════════════════════════════════════════════════════════════════
+
+let progress_total = 0
+let progress_current = 0
+let progress_label = ""
+let progress_start_time = 0
+
+func progress_begin(label, total) {
+    progress_label = label
+    progress_total = total
+    progress_current = 0
+    progress_start_time = time_now()
+    progress_render()
+}
+
+func progress_update(current) {
+    progress_current = current
+    progress_render()
+}
+
+func progress_increment() {
+    progress_current = progress_current + 1
+    progress_render()
+}
+
+func progress_end() {
+    progress_current = progress_total
+    progress_render()
+    println("")  // Final newline
+}
+
+func progress_render() {
+    const width = get_terminal_width() - 20
+    const bar_width = max(10, width - len(progress_label) - 15)
+    const pct = if progress_total > 0 { progress_current * 100 / progress_total } else { 0 }
+    const filled = pct * bar_width / 100
+    const empty = bar_width - filled
+
+    let bar = "["
+    let i = 0
+    while i < filled { bar = bar + "="; i = i + 1 }
+    if filled < bar_width { bar = bar + ">" }
+    i = filled + 1
+    while i < bar_width { bar = bar + " "; i = i + 1 }
+    bar = bar + "]"
+
+    const elapsed = time_now() - progress_start_time
+    let eta = ""
+    if pct > 0 && pct < 100 {
+        const remaining = elapsed * (100 - pct) / pct
+        eta = f" ETA {format_duration_ms(remaining)}"
+    }
+
+    // Use carriage return to overwrite
+    const status = f"\r{progress_label} {bar} {pct}%{eta}"
+    print(status)
+}
+
+func format_duration_ms(ms) {
+    if ms < 1000 { return f"{ms}ms" }
+    const secs = ms / 1000
+    if secs < 60 { return f"{secs}s" }
+    const mins = secs / 60
+    const remaining_secs = secs % 60
+    f"{mins}m{remaining_secs}s"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Incremental Compilation Cache
+// ═══════════════════════════════════════════════════════════════════
+
+let compile_cache = {"__s": true}  // file_path -> {hash, ast, timestamp}
+
+func cache_get(file_path) {
+    if !compile_cache.has(file_path) { return null }
+    const entry = compile_cache[file_path]
+    if entry == null { return null }
+    // Check if file has changed
+    const current_hash = cache_hash_file(file_path)
+    if current_hash != entry["hash"] { return null }
+    entry
+}
+
+func cache_put(file_path, ast) {
+    const hash = cache_hash_file(file_path)
+    compile_cache[file_path] = {
+        "hash": hash,
+        "ast": ast,
+        "timestamp": time_now(),
+    }
+}
+
+func cache_hash_file(file_path) {
+    const content = fs_read(file_path)
+    if content == null { return "" }
+    // Simple hash: sum of char codes with rotation
+    let hash = 0
+    let i = 0
+    while i < len(content) {
+        hash = ((hash * 31) + char_code_at(content, i)) % 2147483647
+        i = i + 1
+    }
+    to_string(hash)
+}
+
+func cache_invalidate(file_path) {
+    if compile_cache.has(file_path) {
+        compile_cache[file_path] = null
+    }
+}
+
+func cache_invalidate_all() {
+    compile_cache = {"__s": true}
+}
+
+func cache_stats() {
+    let count = 0
+    let valid = 0
+    for key in compile_cache.keys() {
+        if key == "__s" { continue }
+        count = count + 1
+        if compile_cache[key] != null { valid = valid + 1 }
+    }
+    {"total": count, "valid": valid, "expired": count - valid}
+}
+
+// Compile with caching: only re-parse/check if file changed
+func compile_cached(file_path) {
+    const cached = cache_get(file_path)
+    if cached != null {
+        return cached["ast"]
+    }
+
+    const source = fs_read(file_path)
+    if source == null { return null }
+    const program = parse(source)
+    const result = check(program)
+    const errors = result[0]
+    if len(errors) > 0 {
+        return {"errors": errors}
+    }
+    const optimized = optimize(program)
+    cache_put(file_path, optimized)
+    optimized
+}
+
+// Build entire workspace with caching
+func build_workspace_cached(workspace_path) {
+    const config = workspace_load_config(workspace_path)
+    if config == null {
+        println("No magispace.toml found")
+        return null
+    }
+
+    const members = config["members"]
+    progress_begin("Building", len(members))
+
+    let errors = []
+    let built = 0
+
+    for member in members {
+        const member_path = workspace_path + "/" + member + "/main.magi"
+        const result = compile_cached(member_path)
+        if result != null && typeof(result) == "map" && result.has("errors") {
+            for e in result["errors"] {
+                errors.push(f"{member}: {e}")
+            }
+        } else {
+            built = built + 1
+        }
+        progress_increment()
+    }
+
+    progress_end()
+
+    if len(errors) > 0 {
+        println(f"Build completed with {len(errors)} errors:")
+        for e in errors { println(f"  {e}") }
+    } else {
+        println(f"Build completed successfully: {built} packages")
+    }
+
+    {"built": built, "errors": errors}
+}
