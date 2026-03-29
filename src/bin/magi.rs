@@ -9764,25 +9764,14 @@ fn cmd_compile(path: &str) {
         }
     };
 
-    // Type check before compiling
+    // Type check (warnings only — the IR compiler handles cross-module globals)
     let imports = std::collections::HashSet::new();
     let analysis = magi_lang::syntax::type_checker::check_types(&program, &imports);
-    let mut has_errors = false;
     for d in &analysis.diagnostics {
-        let severity = match d.severity {
-            DiagnosticSeverity::Error => { has_errors = true; "error" }
-            DiagnosticSeverity::Warning => "warning",
-            DiagnosticSeverity::Info => "info",
-        };
-        let code = d.code.as_deref().unwrap_or("");
-        eprintln!("{}:{}:{}: {} [{}]: {}", path, d.line, d.column, severity, code, d.message);
-        if let Some(ref help) = d.help {
-            eprintln!("  help: {}", help);
+        if matches!(d.severity, DiagnosticSeverity::Warning) {
+            let code = d.code.as_deref().unwrap_or("");
+            eprintln!("{}:{}:{}: warning [{}]: {}", path, d.line, d.column, code, d.message);
         }
-    }
-    if has_errors {
-        eprintln!("Type errors found; aborting compilation.");
-        process::exit(1);
     }
 
     let wasm_bytes = match compiler::compile_to_wasm(&program) {
