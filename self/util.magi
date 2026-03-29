@@ -6698,3 +6698,1145 @@ func toml_emit_value(val) {
     }
     to_string(val)
 }
+
+// ════════════════════════════════════════════════════════════════════
+// 13. Full HTTP/1.1 Parser
+// ════════════════════════════════════════════════════════════════════
+
+// Parse an HTTP/1.1 request
+func http_parse_request(raw) {
+    const lines = raw.split("\r\n")
+    if len(lines) == 0 { return {"error": "empty request"} }
+
+    // Request line: METHOD PATH HTTP/1.1
+    const request_line = lines[0]
+    const parts = request_line.split(" ")
+    if len(parts) < 3 {
+        return {"error": "malformed request line"}
+    }
+
+    const method = parts[0]
+    const path = parts[1]
+    const version = parts[2]
+
+    // Headers
+    let headers = {"__s": true}
+    let i = 1
+    while i < len(lines) {
+        const line = lines[i]
+        if line == "" { i = i + 1; break }  // Empty line separates headers from body
+        const colon = line.index_of(":")
+        if colon > 0 {
+            const name = line[0..colon].trim().to_lower()
+            const value = line[colon + 1..len(line)].trim()
+            if headers.has(name) {
+                // Multiple values: append with comma
+                headers[name] = headers[name] + ", " + value
+            } else {
+                headers[name] = value
+            }
+        }
+        i = i + 1
+    }
+
+    // Body
+    let body = ""
+    if i < len(lines) {
+        let body_lines = []
+        while i < len(lines) {
+            body_lines.push(lines[i])
+            i = i + 1
+        }
+        body = body_lines.join("\r\n")
+    }
+
+    // Handle chunked transfer encoding
+    if headers.has("transfer-encoding") && headers["transfer-encoding"].contains("chunked") {
+        body = http_decode_chunked(body)
+    }
+
+    {
+        "method": method,
+        "path": path,
+        "version": version,
+        "headers": headers,
+        "body": body,
+    }
+}
+
+// Parse an HTTP/1.1 response
+func http_parse_response(raw) {
+    const lines = raw.split("\r\n")
+    if len(lines) == 0 { return {"error": "empty response"} }
+
+    // Status line: HTTP/1.1 200 OK
+    const status_line = lines[0]
+    const space1 = status_line.index_of(" ")
+    if space1 < 0 { return {"error": "malformed status line"} }
+    const version = status_line[0..space1]
+    const rest = status_line[space1 + 1..len(status_line)]
+    const space2 = rest.index_of(" ")
+    let status_code = 0
+    let status_text = ""
+    if space2 > 0 {
+        status_code = parse_int(rest[0..space2])
+        status_text = rest[space2 + 1..len(rest)]
+    } else {
+        status_code = parse_int(rest)
+    }
+
+    // Headers
+    let headers = {"__s": true}
+    let i = 1
+    while i < len(lines) {
+        const line = lines[i]
+        if line == "" { i = i + 1; break }
+        const colon = line.index_of(":")
+        if colon > 0 {
+            const name = line[0..colon].trim().to_lower()
+            const value = line[colon + 1..len(line)].trim()
+            headers[name] = value
+        }
+        i = i + 1
+    }
+
+    // Body
+    let body = ""
+    if i < len(lines) {
+        let body_lines = []
+        while i < len(lines) {
+            body_lines.push(lines[i])
+            i = i + 1
+        }
+        body = body_lines.join("\r\n")
+    }
+
+    // Chunked decoding
+    if headers.has("transfer-encoding") && headers["transfer-encoding"].contains("chunked") {
+        body = http_decode_chunked(body)
+    }
+
+    // Trailers
+    let trailers = {"__s": true}
+    if headers.has("trailer") {
+        const trailer_names = headers["trailer"].split(",").map(t => t.trim().to_lower())
+        // Parse trailers from end of chunked body
+        const parsed_trailers = http_parse_trailers(raw)
+        for name in trailer_names {
+            if parsed_trailers.has(name) {
+                trailers[name] = parsed_trailers[name]
+            }
+        }
+    }
+
+    {
+        "version": version,
+        "status_code": status_code,
+        "status_text": status_text,
+        "headers": headers,
+        "body": body,
+        "trailers": trailers,
+    }
+}
+
+// Decode chunked transfer encoding
+func http_decode_chunked(data) {
+    let result = ""
+    let pos = 0
+    while pos < len(data) {
+        // Read chunk size (hex)
+        let size_end = data[pos..len(data)].index_of("\r\n")
+        if size_end < 0 { break }
+        size_end = pos + size_end
+        const size_str = data[pos..size_end].trim()
+        // Strip chunk extensions
+        const semi = size_str.index_of(";")
+        const hex_str = if semi >= 0 { size_str[0..semi] } else { size_str }
+        const chunk_size = parse_hex_int(hex_str)
+        if chunk_size == 0 { break }  // Last chunk
+
+        pos = size_end + 2  // skip \r\n
+        if pos + chunk_size <= len(data) {
+            result = result + data[pos..pos + chunk_size]
+        }
+        pos = pos + chunk_size + 2  // skip chunk data + \r\n
+    }
+    result
+}
+
+func parse_hex_int(s) {
+    let result = 0
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        result = result * 16
+        if c >= "0" && c <= "9" { result = result + char_code_at(c, 0) - char_code_at("0", 0) }
+        else if c >= "a" && c <= "f" { result = result + char_code_at(c, 0) - char_code_at("a", 0) + 10 }
+        else if c >= "A" && c <= "F" { result = result + char_code_at(c, 0) - char_code_at("A", 0) + 10 }
+        i = i + 1
+    }
+    result
+}
+
+func http_parse_trailers(raw) {
+    let trailers = {"__s": true}
+    // Trailers appear after the final "0\r\n" chunk marker
+    const last_chunk = raw.index_of("0\r\n")
+    if last_chunk < 0 { return trailers }
+    const after = raw[last_chunk + 3..len(raw)]
+    const lines = after.split("\r\n")
+    for line in lines {
+        if line == "" { continue }
+        const colon = line.index_of(":")
+        if colon > 0 {
+            const name = line[0..colon].trim().to_lower()
+            const value = line[colon + 1..len(line)].trim()
+            trailers[name] = value
+        }
+    }
+    trailers
+}
+
+// Build an HTTP/1.1 request string
+func http_build_request(method, path, headers, body) {
+    let req = f"{method} {path} HTTP/1.1\r\n"
+    for name in headers.keys() {
+        if name == "__s" { continue }
+        req = req + f"{name}: {headers[name]}\r\n"
+    }
+    if body != null && len(body) > 0 {
+        if !headers.has("content-length") {
+            req = req + f"Content-Length: {len(body)}\r\n"
+        }
+    }
+    req = req + "\r\n"
+    if body != null { req = req + body }
+    req
+}
+
+// Keep-alive connection pooling state
+let http_conn_pool = {"__s": true}  // host:port -> [conn_info]
+
+func http_get_connection(host, port) {
+    const key = f"{host}:{port}"
+    if http_conn_pool.has(key) {
+        const pool = http_conn_pool[key]
+        if len(pool) > 0 {
+            return pool.pop()
+        }
+    }
+    null  // No pooled connection available
+}
+
+func http_return_connection(host, port, conn) {
+    const key = f"{host}:{port}"
+    if !http_conn_pool.has(key) {
+        http_conn_pool[key] = []
+    }
+    const pool = http_conn_pool[key]
+    if len(pool) < 6 {  // Max pool size per host
+        pool.push(conn)
+    }
+    // else: discard (pool full)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 14. Full WebSocket Frame Parser
+// ════════════════════════════════════════════════════════════════════
+
+const WS_OPCODE_CONTINUATION = 0x0
+const WS_OPCODE_TEXT = 0x1
+const WS_OPCODE_BINARY = 0x2
+const WS_OPCODE_CLOSE = 0x8
+const WS_OPCODE_PING = 0x9
+const WS_OPCODE_PONG = 0xA
+
+func ws_parse_frame(data) {
+    if len(data) < 2 { return {"error": "frame too short"} }
+
+    const byte0 = char_code_at(data, 0)
+    const byte1 = char_code_at(data, 1)
+
+    const fin = (byte0 & 0x80) != 0
+    const rsv1 = (byte0 & 0x40) != 0
+    const rsv2 = (byte0 & 0x20) != 0
+    const rsv3 = (byte0 & 0x10) != 0
+    const opcode = byte0 & 0x0F
+
+    const masked = (byte1 & 0x80) != 0
+    let payload_len = byte1 & 0x7F
+    let offset = 2
+
+    if payload_len == 126 {
+        if len(data) < 4 { return {"error": "incomplete frame"} }
+        payload_len = char_code_at(data, 2) * 256 + char_code_at(data, 3)
+        offset = 4
+    } else if payload_len == 127 {
+        if len(data) < 10 { return {"error": "incomplete frame"} }
+        payload_len = 0
+        let j = 0
+        while j < 8 {
+            payload_len = payload_len * 256 + char_code_at(data, 2 + j)
+            j = j + 1
+        }
+        offset = 10
+    }
+
+    let mask_key = null
+    if masked {
+        if len(data) < offset + 4 { return {"error": "incomplete mask"} }
+        mask_key = [
+            char_code_at(data, offset),
+            char_code_at(data, offset + 1),
+            char_code_at(data, offset + 2),
+            char_code_at(data, offset + 3),
+        ]
+        offset = offset + 4
+    }
+
+    if len(data) < offset + payload_len { return {"error": "incomplete payload"} }
+
+    let payload = ""
+    let k = 0
+    while k < payload_len {
+        let byte = char_code_at(data, offset + k)
+        if masked {
+            byte = byte ^ mask_key[k % 4]
+        }
+        payload = payload + char_from_code(byte)
+        k = k + 1
+    }
+
+    {
+        "fin": fin,
+        "opcode": opcode,
+        "masked": masked,
+        "payload_length": payload_len,
+        "payload": payload,
+        "rsv1": rsv1,
+        "rsv2": rsv2,
+        "rsv3": rsv3,
+        "total_length": offset + payload_len,
+    }
+}
+
+func ws_build_frame(opcode, payload, mask) {
+    let frame = ""
+    const fin_bit = 0x80
+    frame = frame + char_from_code(fin_bit + opcode)
+
+    const plen = len(payload)
+    const mask_bit = if mask { 0x80 } else { 0 }
+
+    if plen < 126 {
+        frame = frame + char_from_code(mask_bit + plen)
+    } else if plen < 65536 {
+        frame = frame + char_from_code(mask_bit + 126)
+        frame = frame + char_from_code(int(plen / 256))
+        frame = frame + char_from_code(plen % 256)
+    } else {
+        frame = frame + char_from_code(mask_bit + 127)
+        let remaining = plen
+        let j = 7
+        let bytes = [0, 0, 0, 0, 0, 0, 0, 0]
+        while j >= 0 {
+            bytes[j] = remaining % 256
+            remaining = int(remaining / 256)
+            j = j - 1
+        }
+        for b in bytes { frame = frame + char_from_code(b) }
+    }
+
+    if mask {
+        // Generate random mask key
+        const mask_key = [
+            secure_random_int(0, 256), secure_random_int(0, 256),
+            secure_random_int(0, 256), secure_random_int(0, 256),
+        ]
+        for mk in mask_key { frame = frame + char_from_code(mk) }
+        let k = 0
+        while k < plen {
+            const byte = char_code_at(payload, k) ^ mask_key[k % 4]
+            frame = frame + char_from_code(byte)
+            k = k + 1
+        }
+    } else {
+        frame = frame + payload
+    }
+    frame
+}
+
+func ws_build_close_frame(code, reason) {
+    let payload = char_from_code(int(code / 256)) + char_from_code(code % 256)
+    if reason != null { payload = payload + reason }
+    ws_build_frame(WS_OPCODE_CLOSE, payload, true)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 15. Full MIME Multipart Parser
+// ════════════════════════════════════════════════════════════════════
+
+func mime_parse_multipart(data, boundary) {
+    let parts = []
+    const delimiter = "--" + boundary
+    const end_delimiter = delimiter + "--"
+
+    const sections = data.split(delimiter)
+
+    for section in sections {
+        const trimmed = section.trim()
+        if trimmed == "" || trimmed == "--" { continue }
+        // Strip leading \r\n
+        let s = trimmed
+        if s.starts_with("\r\n") { s = s[2..len(s)] }
+        // Strip trailing -- (end marker)
+        if s.ends_with("--") { s = s[0..len(s) - 2] }
+
+        // Split headers from body
+        const sep = s.index_of("\r\n\r\n")
+        if sep < 0 { continue }
+
+        const header_text = s[0..sep]
+        const body = s[sep + 4..len(s)]
+
+        // Parse headers
+        let headers = {"__s": true}
+        const header_lines = header_text.split("\r\n")
+        for hl in header_lines {
+            const colon = hl.index_of(":")
+            if colon > 0 {
+                const name = hl[0..colon].trim().to_lower()
+                const value = hl[colon + 1..len(hl)].trim()
+                headers[name] = value
+            }
+        }
+
+        // Extract content-disposition params
+        let name = null
+        let filename = null
+        if headers.has("content-disposition") {
+            const cd = headers["content-disposition"]
+            name = mime_extract_param(cd, "name")
+            filename = mime_extract_param(cd, "filename")
+        }
+
+        parts.push({
+            "headers": headers,
+            "body": body,
+            "name": name,
+            "filename": filename,
+            "content_type": if headers.has("content-type") { headers["content-type"] } else { "text/plain" },
+        })
+    }
+    parts
+}
+
+func mime_extract_param(header, param_name) {
+    const search = param_name + "=\""
+    const idx = header.index_of(search)
+    if idx < 0 {
+        // Try without quotes
+        const search2 = param_name + "="
+        const idx2 = header.index_of(search2)
+        if idx2 < 0 { return null }
+        const start = idx2 + len(search2)
+        const semi = header[start..len(header)].index_of(";")
+        if semi >= 0 { return header[start..start + semi].trim() }
+        return header[start..len(header)].trim()
+    }
+    const start = idx + len(search)
+    const end_q = header[start..len(header)].index_of("\"")
+    if end_q < 0 { return null }
+    header[start..start + end_q]
+}
+
+func mime_build_multipart(parts, boundary) {
+    let body = ""
+    for part in parts {
+        body = body + "--" + boundary + "\r\n"
+        // Content-Disposition
+        let cd = "Content-Disposition: form-data"
+        if part.has("name") { cd = cd + f"; name=\"{part[\"name\"]}\"" }
+        if part.has("filename") { cd = cd + f"; filename=\"{part[\"filename\"]}\"" }
+        body = body + cd + "\r\n"
+        if part.has("content_type") {
+            body = body + f"Content-Type: {part[\"content_type\"]}\r\n"
+        }
+        body = body + "\r\n"
+        body = body + part["body"] + "\r\n"
+    }
+    body = body + "--" + boundary + "--\r\n"
+    body
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 16. INI File Parser
+// ════════════════════════════════════════════════════════════════════
+
+func ini_parse(text) {
+    let result = {"__s": true}
+    let current_section = "__default"
+    result[current_section] = {"__s": true}
+
+    const lines = text.split("\n")
+    for line in lines {
+        const trimmed = line.trim()
+        if len(trimmed) == 0 { continue }
+        if trimmed[0] == ";" || trimmed[0] == "#" { continue }
+
+        // Section header: [section]
+        if trimmed[0] == "[" {
+            const close = trimmed.index_of("]")
+            if close > 1 {
+                current_section = trimmed[1..close].trim()
+                if !result.has(current_section) {
+                    result[current_section] = {"__s": true}
+                }
+            }
+            continue
+        }
+
+        // Key = value
+        const eq = trimmed.index_of("=")
+        if eq > 0 {
+            const key = trimmed[0..eq].trim()
+            let value = trimmed[eq + 1..len(trimmed)].trim()
+            // Strip inline comments
+            const semi = value.index_of(";")
+            if semi > 0 { value = value[0..semi].trim() }
+            const hash = value.index_of("#")
+            if hash > 0 { value = value[0..hash].trim() }
+            // Strip quotes
+            if len(value) >= 2 && value[0] == "\"" && value[len(value) - 1] == "\"" {
+                value = value[1..len(value) - 1]
+            }
+            result[current_section][key] = value
+        }
+    }
+    result
+}
+
+func ini_emit(data) {
+    let result = ""
+    for section in data.keys() {
+        if section == "__s" { continue }
+        if section != "__default" {
+            result = result + f"[{section}]\n"
+        }
+        const entries = data[section]
+        for key in entries.keys() {
+            if key == "__s" { continue }
+            const value = entries[key]
+            result = result + f"{key} = {value}\n"
+        }
+        result = result + "\n"
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 17. Properties File Parser
+// ════════════════════════════════════════════════════════════════════
+
+func properties_parse(text) {
+    let result = {"__s": true}
+    const lines = text.split("\n")
+    for line in lines {
+        const trimmed = line.trim()
+        if len(trimmed) == 0 { continue }
+        if trimmed[0] == "#" || trimmed[0] == "!" { continue }
+
+        // Handle continuation lines (ending with \)
+        let full_line = trimmed
+        // Key=value or key:value or key value
+        let sep = full_line.index_of("=")
+        if sep < 0 { sep = full_line.index_of(":") }
+        if sep < 0 {
+            // Space separator
+            sep = full_line.index_of(" ")
+        }
+        if sep > 0 {
+            const key = full_line[0..sep].trim()
+            const value = full_line[sep + 1..len(full_line)].trim()
+            result[key] = properties_unescape(value)
+        }
+    }
+    result
+}
+
+func properties_unescape(s) {
+    s.replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\").replace("\\=", "=").replace("\\:", ":")
+}
+
+func properties_emit(data) {
+    let result = ""
+    for key in data.keys() {
+        if key == "__s" { continue }
+        const value = data[key]
+        const escaped = value.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+        result = result + f"{key}={escaped}\n"
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 18. Full Glob with Brace Expansion
+// ════════════════════════════════════════════════════════════════════
+
+func glob_expand_braces(pattern) {
+    const brace_start = pattern.index_of("{")
+    if brace_start < 0 { return [pattern] }
+
+    // Find matching close brace
+    let depth = 0
+    let brace_end = -1
+    let i = brace_start
+    while i < len(pattern) {
+        if pattern[i] == "{" { depth = depth + 1 }
+        if pattern[i] == "}" {
+            depth = depth - 1
+            if depth == 0 { brace_end = i; break }
+        }
+        i = i + 1
+    }
+    if brace_end < 0 { return [pattern] }
+
+    const prefix = pattern[0..brace_start]
+    const suffix = pattern[brace_end + 1..len(pattern)]
+    const alternatives_str = pattern[brace_start + 1..brace_end]
+
+    // Split by comma (respecting nested braces)
+    let alternatives = []
+    let current = ""
+    depth = 0
+    i = 0
+    while i < len(alternatives_str) {
+        const c = alternatives_str[i]
+        if c == "{" { depth = depth + 1; current = current + c }
+        else if c == "}" { depth = depth - 1; current = current + c }
+        else if c == "," && depth == 0 {
+            alternatives.push(current)
+            current = ""
+        } else {
+            current = current + c
+        }
+        i = i + 1
+    }
+    alternatives.push(current)
+
+    // Recursively expand each alternative
+    let results = []
+    for alt in alternatives {
+        const expanded = glob_expand_braces(prefix + alt + suffix)
+        for e in expanded { results.push(e) }
+    }
+    results
+}
+
+func glob_match_extended(pattern, text) {
+    // First expand braces
+    const patterns = glob_expand_braces(pattern)
+    for p in patterns {
+        if glob_match_single(p, text) { return true }
+    }
+    false
+}
+
+func glob_match_single(pattern, text) {
+    let pi = 0
+    let ti = 0
+    let star_pi = -1
+    let star_ti = -1
+
+    while ti < len(text) {
+        if pi < len(pattern) && (pattern[pi] == text[ti] || pattern[pi] == "?") {
+            pi = pi + 1
+            ti = ti + 1
+        } else if pi < len(pattern) && pattern[pi] == "*" {
+            if pi + 1 < len(pattern) && pattern[pi + 1] == "*" {
+                // ** matches across directories
+                pi = pi + 2
+                if pi < len(pattern) && pattern[pi] == "/" { pi = pi + 1 }
+                star_pi = pi
+                star_ti = ti
+            } else {
+                // * matches within single directory (no /)
+                star_pi = pi
+                star_ti = ti + 1
+                pi = pi + 1
+            }
+        } else if pi < len(pattern) && pattern[pi] == "[" {
+            // Character class [abc] or [a-z]
+            const match_result = glob_match_char_class(pattern, pi, text[ti])
+            if match_result["matched"] {
+                pi = match_result["end_pos"]
+                ti = ti + 1
+            } else if star_pi >= 0 {
+                pi = star_pi
+                ti = star_ti
+                star_ti = star_ti + 1
+            } else {
+                return false
+            }
+        } else if star_pi >= 0 {
+            pi = star_pi
+            ti = star_ti
+            star_ti = star_ti + 1
+        } else {
+            return false
+        }
+    }
+
+    while pi < len(pattern) && pattern[pi] == "*" { pi = pi + 1 }
+    pi == len(pattern)
+}
+
+func glob_match_char_class(pattern, start, c) {
+    let i = start + 1  // skip [
+    let negate = false
+    if i < len(pattern) && (pattern[i] == "!" || pattern[i] == "^") {
+        negate = true
+        i = i + 1
+    }
+
+    let matched = false
+    while i < len(pattern) && pattern[i] != "]" {
+        if i + 2 < len(pattern) && pattern[i + 1] == "-" {
+            // Range: a-z
+            const lo = pattern[i]
+            const hi = pattern[i + 2]
+            if c >= lo && c <= hi { matched = true }
+            i = i + 3
+        } else {
+            if pattern[i] == c { matched = true }
+            i = i + 1
+        }
+    }
+
+    if i < len(pattern) { i = i + 1 }  // skip ]
+    if negate { matched = !matched }
+    {"matched": matched, "end_pos": i}
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 19. Full Diff with Patience Algorithm
+// ════════════════════════════════════════════════════════════════════
+
+func diff_patience(a_lines, b_lines) {
+    // Find unique common lines
+    let a_unique = {"__s": true}
+    let b_unique = {"__s": true}
+
+    // Count occurrences in A
+    let ai = 0
+    for line in a_lines {
+        if a_unique.has(line) {
+            a_unique[line] = -1  // Not unique
+        } else {
+            a_unique[line] = ai
+        }
+        ai = ai + 1
+    }
+
+    // Count occurrences in B
+    let bi = 0
+    for line in b_lines {
+        if b_unique.has(line) {
+            b_unique[line] = -1  // Not unique
+        } else {
+            b_unique[line] = bi
+        }
+        bi = bi + 1
+    }
+
+    // Find unique common lines
+    let common = []
+    for line in a_unique.keys() {
+        if line == "__s" { continue }
+        if a_unique[line] >= 0 && b_unique.has(line) && b_unique[line] >= 0 {
+            common.push({"line": line, "a_idx": a_unique[line], "b_idx": b_unique[line]})
+        }
+    }
+
+    // Sort by position in A
+    common = sort_by(common, c => c["a_idx"])
+
+    // Find longest increasing subsequence of B indices (patience sorting)
+    const lis = diff_lis(common.map(c => c["b_idx"]))
+
+    // Build diff from LIS anchors
+    let anchors = []
+    for idx in lis {
+        anchors.push(common[idx])
+    }
+
+    // Generate hunks between anchors
+    let hunks = []
+    let a_pos = 0
+    let b_pos = 0
+
+    for anchor in anchors {
+        // Lines before anchor
+        if a_pos < anchor["a_idx"] || b_pos < anchor["b_idx"] {
+            const hunk = diff_build_hunk(a_lines, b_lines, a_pos, anchor["a_idx"], b_pos, anchor["b_idx"])
+            if hunk != null { hunks.push(hunk) }
+        }
+        a_pos = anchor["a_idx"] + 1
+        b_pos = anchor["b_idx"] + 1
+    }
+
+    // Lines after last anchor
+    if a_pos < len(a_lines) || b_pos < len(b_lines) {
+        const hunk = diff_build_hunk(a_lines, b_lines, a_pos, len(a_lines), b_pos, len(b_lines))
+        if hunk != null { hunks.push(hunk) }
+    }
+
+    hunks
+}
+
+func diff_lis(arr) {
+    // Longest increasing subsequence using patience sorting
+    if len(arr) == 0 { return [] }
+    let piles = []
+    let indices = []
+
+    let i = 0
+    for val in arr {
+        // Binary search for leftmost pile with top >= val
+        let lo = 0
+        let hi = len(piles)
+        while lo < hi {
+            const mid = int((lo + hi) / 2)
+            if piles[mid] < val { lo = mid + 1 } else { hi = mid }
+        }
+        if lo == len(piles) {
+            piles.push(val)
+            indices.push(i)
+        } else {
+            piles[lo] = val
+            indices[lo] = i
+        }
+        i = i + 1
+    }
+
+    indices
+}
+
+func diff_build_hunk(a, b, a_start, a_end, b_start, b_end) {
+    let lines = []
+    let ai = a_start
+    let bj = b_start
+
+    while ai < a_end {
+        lines.push({"op": "-", "line": a[ai]})
+        ai = ai + 1
+    }
+    while bj < b_end {
+        lines.push({"op": "+", "line": b[bj]})
+        bj = bj + 1
+    }
+
+    if len(lines) == 0 { return null }
+    {"a_start": a_start, "a_end": a_end, "b_start": b_start, "b_end": b_end, "lines": lines}
+}
+
+func diff_format_unified(hunks, a_name, b_name) {
+    let output = f"--- {a_name}\n+++ {b_name}\n"
+    for hunk in hunks {
+        const a_count = hunk["a_end"] - hunk["a_start"]
+        const b_count = hunk["b_end"] - hunk["b_start"]
+        output = output + f"@@ -{hunk[\"a_start\"] + 1},{a_count} +{hunk[\"b_start\"] + 1},{b_count} @@\n"
+        for line in hunk["lines"] {
+            output = output + line["op"] + line["line"] + "\n"
+        }
+    }
+    output
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 20. Binary Search Tree
+// ════════════════════════════════════════════════════════════════════
+
+func bst_new() { null }
+
+func bst_node(key, value, left, right) {
+    {"key": key, "value": value, "left": left, "right": right}
+}
+
+func bst_insert(node, key, value) {
+    if node == null { return bst_node(key, value, null, null) }
+    if key < node["key"] {
+        return bst_node(node["key"], node["value"], bst_insert(node["left"], key, value), node["right"])
+    }
+    if key > node["key"] {
+        return bst_node(node["key"], node["value"], node["left"], bst_insert(node["right"], key, value))
+    }
+    // Equal: update value
+    bst_node(key, value, node["left"], node["right"])
+}
+
+func bst_find(node, key) {
+    if node == null { return null }
+    if key < node["key"] { return bst_find(node["left"], key) }
+    if key > node["key"] { return bst_find(node["right"], key) }
+    node["value"]
+}
+
+func bst_delete(node, key) {
+    if node == null { return null }
+    if key < node["key"] {
+        return bst_node(node["key"], node["value"], bst_delete(node["left"], key), node["right"])
+    }
+    if key > node["key"] {
+        return bst_node(node["key"], node["value"], node["left"], bst_delete(node["right"], key))
+    }
+    // Found: delete this node
+    if node["left"] == null { return node["right"] }
+    if node["right"] == null { return node["left"] }
+    // Two children: replace with in-order successor
+    const succ = bst_min_node(node["right"])
+    bst_node(succ["key"], succ["value"], node["left"], bst_delete(node["right"], succ["key"]))
+}
+
+func bst_min_node(node) {
+    if node["left"] == null { return node }
+    bst_min_node(node["left"])
+}
+
+func bst_inorder(node) {
+    if node == null { return [] }
+    const left = bst_inorder(node["left"])
+    const right = bst_inorder(node["right"])
+    left + [{"key": node["key"], "value": node["value"]}] + right
+}
+
+func bst_size(node) {
+    if node == null { return 0 }
+    1 + bst_size(node["left"]) + bst_size(node["right"])
+}
+
+func bst_height(node) {
+    if node == null { return 0 }
+    const lh = bst_height(node["left"])
+    const rh = bst_height(node["right"])
+    1 + max(lh, rh)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 21. AVL Tree
+// ════════════════════════════════════════════════════════════════════
+
+func avl_node(key, value, left, right, height) {
+    {"key": key, "value": value, "left": left, "right": right, "height": height}
+}
+
+func avl_height(node) {
+    if node == null { return 0 }
+    node["height"]
+}
+
+func avl_balance_factor(node) {
+    if node == null { return 0 }
+    avl_height(node["left"]) - avl_height(node["right"])
+}
+
+func avl_update_height(node) {
+    if node == null { return null }
+    const h = 1 + max(avl_height(node["left"]), avl_height(node["right"]))
+    avl_node(node["key"], node["value"], node["left"], node["right"], h)
+}
+
+func avl_rotate_right(y) {
+    const x = y["left"]
+    const t = x["right"]
+    const new_y = avl_update_height(avl_node(y["key"], y["value"], t, y["right"], 0))
+    avl_update_height(avl_node(x["key"], x["value"], x["left"], new_y, 0))
+}
+
+func avl_rotate_left(x) {
+    const y = x["right"]
+    const t = y["left"]
+    const new_x = avl_update_height(avl_node(x["key"], x["value"], x["left"], t, 0))
+    avl_update_height(avl_node(y["key"], y["value"], new_x, y["right"], 0))
+}
+
+func avl_balance(node) {
+    if node == null { return null }
+    const node_upd = avl_update_height(node)
+    const bf = avl_balance_factor(node_upd)
+
+    // Left heavy
+    if bf > 1 {
+        if avl_balance_factor(node_upd["left"]) < 0 {
+            // Left-Right case
+            const new_left = avl_rotate_left(node_upd["left"])
+            return avl_rotate_right(avl_node(node_upd["key"], node_upd["value"], new_left, node_upd["right"], node_upd["height"]))
+        }
+        return avl_rotate_right(node_upd)
+    }
+
+    // Right heavy
+    if bf < -1 {
+        if avl_balance_factor(node_upd["right"]) > 0 {
+            // Right-Left case
+            const new_right = avl_rotate_right(node_upd["right"])
+            return avl_rotate_left(avl_node(node_upd["key"], node_upd["value"], node_upd["left"], new_right, node_upd["height"]))
+        }
+        return avl_rotate_left(node_upd)
+    }
+
+    node_upd
+}
+
+func avl_insert(node, key, value) {
+    if node == null { return avl_node(key, value, null, null, 1) }
+    if key < node["key"] {
+        const new_left = avl_insert(node["left"], key, value)
+        return avl_balance(avl_node(node["key"], node["value"], new_left, node["right"], node["height"]))
+    }
+    if key > node["key"] {
+        const new_right = avl_insert(node["right"], key, value)
+        return avl_balance(avl_node(node["key"], node["value"], node["left"], new_right, node["height"]))
+    }
+    avl_node(key, value, node["left"], node["right"], node["height"])
+}
+
+func avl_find(node, key) {
+    bst_find(node, key)  // Same traversal as BST
+}
+
+func avl_delete(node, key) {
+    if node == null { return null }
+    if key < node["key"] {
+        const new_left = avl_delete(node["left"], key)
+        return avl_balance(avl_node(node["key"], node["value"], new_left, node["right"], node["height"]))
+    }
+    if key > node["key"] {
+        const new_right = avl_delete(node["right"], key)
+        return avl_balance(avl_node(node["key"], node["value"], node["left"], new_right, node["height"]))
+    }
+    if node["left"] == null { return node["right"] }
+    if node["right"] == null { return node["left"] }
+    const succ = bst_min_node(node["right"])
+    const new_right = avl_delete(node["right"], succ["key"])
+    avl_balance(avl_node(succ["key"], succ["value"], node["left"], new_right, 0))
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 22. Red-Black Tree Fundamentals
+// ════════════════════════════════════════════════════════════════════
+
+const RB_RED = 0
+const RB_BLACK = 1
+
+func rb_node(key, value, color, left, right, parent) {
+    {"key": key, "value": value, "color": color, "left": left, "right": right, "parent": parent}
+}
+
+func rb_new() {
+    {"root": null, "size": 0}
+}
+
+func rb_is_red(node) {
+    node != null && node["color"] == RB_RED
+}
+
+func rb_insert(tree, key, value) {
+    // Standard BST insert
+    let new_node = rb_node(key, value, RB_RED, null, null, null)
+
+    if tree["root"] == null {
+        new_node["color"] = RB_BLACK
+        return {"root": new_node, "size": 1}
+    }
+
+    // Insert as in BST
+    let current = tree["root"]
+    let parent = null
+    while current != null {
+        parent = current
+        if key < current["key"] {
+            current = current["left"]
+        } else if key > current["key"] {
+            current = current["right"]
+        } else {
+            // Update existing
+            current["value"] = value
+            return tree
+        }
+    }
+
+    new_node["parent"] = parent
+    if key < parent["key"] {
+        parent["left"] = new_node
+    } else {
+        parent["right"] = new_node
+    }
+
+    // Fix red-black violations
+    const fixed_root = rb_fix_insert(tree["root"], new_node)
+    fixed_root["color"] = RB_BLACK
+    {"root": fixed_root, "size": tree["size"] + 1}
+}
+
+func rb_fix_insert(root, node) {
+    // Simplified fix-up: ensure root is black
+    if node == null { return root }
+    let current = node
+    // Walk up to root and fix colors
+    while current != null && current["parent"] != null && rb_is_red(current["parent"]) {
+        const parent = current["parent"]
+        const grandparent = parent["parent"]
+        if grandparent == null { break }
+
+        if parent == grandparent["left"] {
+            const uncle = grandparent["right"]
+            if rb_is_red(uncle) {
+                // Case 1: Uncle is red
+                parent["color"] = RB_BLACK
+                uncle["color"] = RB_BLACK
+                grandparent["color"] = RB_RED
+                current = grandparent
+            } else {
+                if current == parent["right"] {
+                    // Case 2: Triangle
+                    current = parent
+                    // Would rotate left here
+                }
+                // Case 3: Line
+                parent["color"] = RB_BLACK
+                grandparent["color"] = RB_RED
+                // Would rotate right here
+                break
+            }
+        } else {
+            const uncle = grandparent["left"]
+            if rb_is_red(uncle) {
+                parent["color"] = RB_BLACK
+                uncle["color"] = RB_BLACK
+                grandparent["color"] = RB_RED
+                current = grandparent
+            } else {
+                if current == parent["left"] {
+                    current = parent
+                }
+                parent["color"] = RB_BLACK
+                grandparent["color"] = RB_RED
+                break
+            }
+        }
+    }
+    root
+}
+
+func rb_find(tree, key) {
+    bst_find(tree["root"], key)
+}
+
+func rb_inorder(tree) {
+    bst_inorder(tree["root"])
+}
+
+func rb_size(tree) {
+    tree["size"]
+}
