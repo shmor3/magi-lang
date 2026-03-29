@@ -4,14 +4,14 @@
 
 MAGI is a general-purpose programming language with multiple compilation targets. Complete implementation: lexer, parser, AST, type checker, linter, formatter, interpreter, runtime (.magc classfiles + MagiVM), bytecode VM, WASM compiler, native compiler (x86-64 ELF), WebGPU backend, LSP server, MCP server, optimizer, and CLI.
 
-Zero dependencies. ~114,000 lines. 3,263 tests (1,663 lib + 1,600 integration).
+Zero dependencies. ~95,000 lines. 3,283 tests (1,663 lib + 1,620 integration). Self-hosted (95,454 lines of MAGI).
 
 ## Commands
 
 ```bash
 cargo build --bin magi
 cargo test --lib                     # 1663 tests
-cargo test --test integration        # 1600 tests (needs RUST_MIN_STACK=33554432)
+cargo test --test integration        # 1620 tests (needs RUST_MIN_STACK=67108864)
 ```
 
 ## Execution Modes

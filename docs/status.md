@@ -15,9 +15,10 @@
 | Error codes (E) | 27 |
 | CLI commands | 40+ |
 | Lib tests | 1,663 |
-| Integration tests | 1,600 |
-| Source lines | ~93,000 |
-| Total lines (with tests) | ~114,000 |
+| Integration tests | 1,620 |
+| Source lines | ~95,000 |
+| Self-hosted lines | ~95,000 |
+| Total lines (with tests) | ~196,000 |
 
 ## Execution Modes
 
