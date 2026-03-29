@@ -34,3 +34,5 @@ Issues discovered during Doom engine development.
 - **No demo playback**: LMP demo format not parsed.
 - **No animated textures**: ANIMATED lump not loaded; switches don't animate.
 - **No intermission map animations**: The episode map dot progression not rendered.
+
+- **for-in loop on arrays broken in compiled mode**: `for x in array { ... }` loops infinitely. Use `while i < len(arr)` instead.
