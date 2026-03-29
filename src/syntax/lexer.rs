@@ -104,6 +104,7 @@ pub enum TokenKind {
     Plus,             // +
     Minus,            // -
     Star,             // *
+    StarStar,         // **
     Slash,            // /
     Percent,          // %
     EqEq,             // ==
@@ -172,7 +173,7 @@ impl TokenKind {
         !matches!(self,
             TokenKind::Ident | TokenKind::IntLiteral | TokenKind::FloatLiteral
             | TokenKind::StringLiteral | TokenKind::FStringStart | TokenKind::Label
-            | TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash
+            | TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::StarStar | TokenKind::Slash
             | TokenKind::Percent | TokenKind::Eq | TokenKind::EqEq | TokenKind::NotEq
             | TokenKind::Gt | TokenKind::Lt | TokenKind::GtEq | TokenKind::LtEq
             | TokenKind::PipePipe | TokenKind::AndAnd | TokenKind::Bang
@@ -252,6 +253,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Plus => "+",
             TokenKind::Minus => "-",
             TokenKind::Star => "*",
+            TokenKind::StarStar => "**",
             TokenKind::Slash => "/",
             TokenKind::Percent => "%",
             TokenKind::EqEq => "==",
@@ -618,6 +620,14 @@ impl<'a> Lexer<'a> {
             }
             b'*' => {
                 self.advance();
+                if self.peek() == Some(b'*') {
+                    self.advance();
+                    return Ok(Token {
+                        kind: TokenKind::StarStar,
+                        span: self.span_range(start_line, start_col, self.line, self.col - 1),
+                        text: "**".to_string(),
+                    });
+                }
                 if self.peek() == Some(b'=') {
                     self.advance();
                     return Ok(Token {

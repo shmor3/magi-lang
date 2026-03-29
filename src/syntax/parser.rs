@@ -2247,12 +2247,11 @@ impl Parser {
     /// (if/while/for conditions, match guards) and `=>` is a match arm separator.
     fn parse_expression_no_struct(&mut self) -> Result<Expression, SyntaxError> {
         let saved = self.no_struct_literal;
-        let saved_arrow = self.no_arrow_fn;
         self.no_struct_literal = true;
-        self.no_arrow_fn = true;
+        // Keep arrow functions enabled — they're needed in if conditions
+        // e.g., `if !arr.any(r => r.x == y) { ... }`
         let result = self.parse_expression();
         self.no_struct_literal = saved;
-        self.no_arrow_fn = saved_arrow;
         result
     }
 
@@ -2342,6 +2341,7 @@ impl Parser {
                 TokenKind::Plus => BinOp::Add,
                 TokenKind::Minus => BinOp::Sub,
                 TokenKind::Star => BinOp::Mul,
+                TokenKind::StarStar => BinOp::Pow,
                 TokenKind::Slash => BinOp::Div,
                 TokenKind::Percent => BinOp::Mod,
                 TokenKind::In => BinOp::In,
@@ -3190,10 +3190,10 @@ impl Parser {
     }
 
     fn is_map_literal(&self) -> bool {
-        // Look ahead: `{` then StringLiteral then `:` means map
+        // Look ahead: `{` then (StringLiteral | Ident) then `:` means map
         if self.pos + 2 < self.tokens.len() {
             self.tokens[self.pos].kind == TokenKind::LBrace
-                && self.tokens[self.pos + 1].kind == TokenKind::StringLiteral
+                && matches!(self.tokens[self.pos + 1].kind, TokenKind::StringLiteral | TokenKind::Ident)
                 && self.tokens[self.pos + 2].kind == TokenKind::Colon
         } else {
             false
@@ -3211,7 +3211,12 @@ impl Parser {
             });
         }
 
-        let key_tok = self.expect(&TokenKind::StringLiteral)?;
+        // Key can be a string literal or an identifier (computed key)
+        let key_tok = if self.at(&TokenKind::StringLiteral) {
+            self.advance().clone()
+        } else {
+            self.expect_identifier()?
+        };
         self.expect(&TokenKind::Colon)?;
         let first_value = self.parse_expression()?;
 
@@ -3248,7 +3253,13 @@ impl Parser {
             if self.at(&TokenKind::RBrace) {
                 break;
             }
-            let key_tok = self.expect(&TokenKind::StringLiteral)?;
+            let key_tok = if self.at(&TokenKind::StringLiteral) {
+                self.advance().clone()
+            } else if self.at(&TokenKind::Ident) || self.peek_kind().is_keyword() {
+                self.advance().clone()
+            } else {
+                self.expect(&TokenKind::StringLiteral)?
+            };
             self.expect(&TokenKind::Colon)?;
             let value = self.parse_expression()?;
             entries.push((key_tok.text, value));

@@ -1652,6 +1652,10 @@ impl Compiler {
                 let name_idx = self.module.intern_string("__in");
                 self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
+            BinOp::Pow => {
+                let name_idx = self.module.intern_string("__pow");
+                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
+            }
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AndNot => {
                 let op_name = match op {
                     BinOp::BitAnd => "__bit_and", BinOp::BitOr => "__bit_or",

@@ -90,19 +90,23 @@ fn emit_native(
     }
 
     // ── Declare functions ───────────────────────────────────
+    // Use Vec indexed by IR function index to handle name collisions (lambdas)
+    let mut fns_by_idx: Vec<FunctionValue> = Vec::new();
     let mut fns: HashMap<String, FunctionValue> = HashMap::new();
     for func in &ir_mod.functions {
         let params: Vec<BasicMetadataTypeEnum> = (0..func.param_count).map(|_| i64_t.into()).collect();
         let ft = i64_t.fn_type(&params, false);
-        fns.insert(func.name.clone(), module.add_function(&func.name, ft, None));
+        let lf = module.add_function(&func.name, ft, None);
+        fns_by_idx.push(lf);
+        fns.insert(func.name.clone(), lf);
     }
 
     // ── Compile function bodies ─────────────────────────────
     let mut str_cache: HashMap<u32, PointerValue> = HashMap::new();
 
-    for func in &ir_mod.functions {
-        let lf = *fns.get(&func.name).unwrap();
-        compile_fn(&ctx, &module, &b, ir_mod, &fns, &rt, &globals, &mut str_cache, func, lf)?;
+    for (idx, func) in ir_mod.functions.iter().enumerate() {
+        let lf = fns_by_idx[idx];
+        compile_fn(&ctx, &module, &b, ir_mod, &fns_by_idx, &rt, &globals, &mut str_cache, func, lf)?;
     }
 
     // ── Function pointer table for indirect calls ─────────
@@ -120,7 +124,7 @@ fn emit_native(
         b.position_at_end(entry);
 
         let args_ptr = wrapper.get_nth_param(0).unwrap().into_pointer_value();
-        let original = *fns.get(&func.name).unwrap();
+        let original = fns_by_idx[idx];
         let pc = func.param_count as usize;
         let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
         for i in 0..pc {
@@ -289,7 +293,7 @@ fn compile_fn<'ctx>(
     module: &Module<'ctx>,
     b: &Builder<'ctx>,
     ir: &IrModule,
-    fns: &HashMap<String, FunctionValue<'ctx>>,
+    fns: &[FunctionValue<'ctx>],
     rt: &HashMap<&str, FunctionValue<'ctx>>,
     globals: &[PointerValue<'ctx>],
     str_cache: &mut HashMap<u32, PointerValue<'ctx>>,
@@ -560,14 +564,14 @@ fn compile_fn<'ctx>(
             // ── Function calls ─────────────────────────
             Instruction::Call(fi) => {
                 let tf = &ir.functions[*fi as usize];
-                if let Some(tlf) = fns.get(&tf.name).copied() {
-                    let ac = tf.param_count as usize;
-                    let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
-                    for _ in 0..ac { args.push(stack.pop().unwrap_or(cnull(ctx)).into()); }
-                    args.reverse();
-                    let r = b.build_call(tlf, &args, "c").unwrap();
-                    if let Some(v) = r.try_as_basic_value().left() { stack.push(v.into_int_value()); }
-                }
+                // Use index-based lookup to handle name collisions (lambdas)
+                let tlf = fns[*fi as usize];
+                let ac = tf.param_count as usize;
+                let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+                for _ in 0..ac { args.push(stack.pop().unwrap_or(cnull(ctx)).into()); }
+                args.reverse();
+                let r = b.build_call(tlf, &args, "c").unwrap();
+                if let Some(v) = r.try_as_basic_value().left() { stack.push(v.into_int_value()); }
             }
             Instruction::CallIndirect(type_idx) => {
                 // Indirect call: function index is on the stack, then args

@@ -8638,14 +8638,16 @@ func i_array_method(obj, method, args) {
         "index_of" => {
             const target = args[0]
             let i = 0
-            for item in obj { if item == target { return i }; i = i + 1 }
+            for item in obj { if item == target { return i }
+            i = i + 1 }
             -1
         },
         "last_index_of" => {
             const target = args[0]
             let result = -1
             let i = 0
-            for item in obj { if item == target { result = i }; i = i + 1 }
+            for item in obj { if item == target { result = i }
+            i = i + 1 }
             result
         },
         "sort" => {
@@ -8712,7 +8714,8 @@ func i_array_method(obj, method, args) {
             if len(obj) == 0 { return [] }
             let result = [obj[0]]
             let i = 1
-            while i < len(obj) { if obj[i] != obj[i - 1] { result.push(obj[i]) }; i = i + 1 }
+            while i < len(obj) { if obj[i] != obj[i - 1] { result.push(obj[i]) }
+            i = i + 1 }
             result
         },
         "chunk" => {
@@ -8810,8 +8813,10 @@ func i_array_method(obj, method, args) {
             }
             best
         },
-        "sum" => { let t = 0; for item in obj { t = t + item }; t },
-        "product" => { let t = 1; for item in obj { t = t * item }; t },
+        "sum" => { let t = 0; for item in obj { t = t + item }
+            t },
+        "product" => { let t = 1; for item in obj { t = t * item }
+            t },
         "average" => {
             if len(obj) == 0 { return 0.0 }
             let t = 0.0
@@ -8869,7 +8874,8 @@ func i_array_method(obj, method, args) {
         "combinations" => { i_array_combinations(obj, op_to_i64(args[0])) },
         "cartesian" => { i_array_cartesian(obj, args[0]) },
         "to_string" => { i_display(obj) },
-        "clone" => { let r = []; for item in obj { r.push(item) }; r },
+        "clone" => { let r = []; for item in obj { r.push(item) }
+            r },
         "fill" => {
             const val = args[0]
             let result = []
@@ -9064,7 +9070,8 @@ func i_map_method(obj, method, args) {
             }
             false
         },
-        "clone" => { let r = {}; for k in obj.keys() { r[k] = obj[k] }; r },
+        "clone" => { let r = {}; for k in obj.keys() { r[k] = obj[k] }
+            r },
         "to_string" => i_display(obj),
         "to_json" => i_to_json(obj),
         "to_array" => {
@@ -9178,7 +9185,8 @@ func i_bytes_equals(a, b) {
     const bd = b["__data"]
     if len(ad) != len(bd) { return false }
     let i = 0
-    while i < len(ad) { if ad[i] != bd[i] { return false }; i = i + 1 }
+    while i < len(ad) { if ad[i] != bd[i] { return false }
+            i = i + 1 }
     true
 }
 
@@ -9259,7 +9267,8 @@ func i_tuple_get(tup, idx) {
     elements[idx]
 }
 func i_tuple_len(tup) { len(tup["__elements"]) }
-func i_tuple_to_array(tup) { let r = []; for item in tup["__elements"] { r.push(item) }; r }
+func i_tuple_to_array(tup) { let r = []; for item in tup["__elements"] { r.push(item) }
+            r }
 
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 57: Future/Promise State Handling
@@ -9288,7 +9297,8 @@ func i_future_reject(future, error) {
 func i_future_is_pending(f) { f["__state"] == "pending" }
 func i_future_is_resolved(f) { f["__state"] == "resolved" }
 func i_future_is_rejected(f) { f["__state"] == "rejected" }
-func i_future_value(f) { if f["__state"] != "resolved" { panic("not resolved") }; f["__value"] }
+func i_future_value(f) { if f["__state"] != "resolved" { panic("not resolved") }
+    f["__value"] }
 func i_future_error(f) { if f["__state"] != "rejected" { panic("not rejected") }; f["__error"] }
 
 func i_future_then(future, callback) {
@@ -10003,7 +10013,8 @@ func eval_call_stdlib(name, args) {
 
     // ── Sync primitives stubs ─────────────────────────────────
     if name == "mutex_new" || name == "new_mutex" { return {"__type": "mutex", "locked": false} }
-    if name == "mutex_lock" { if len(args) > 0 { args[0]["locked"] = true }; return null }
+    if name == "mutex_lock" { if len(args) > 0 { args[0]["locked"] = true }
+        return null }
     if name == "mutex_unlock" { if len(args) > 0 { args[0]["locked"] = false }; return null }
     if name == "rwlock_new" || name == "new_rwlock" { return {"__type": "rwlock"} }
     if name == "rwlock_read_lock" || name == "rwlock_write_lock" { return null }
@@ -18452,23 +18463,23 @@ func eval_generator_next(gen, value) {
     // Execute generator body to collect yields
     if gen["__state"] == "suspended" {
         gen["__state"] = "executing"
-        const fn = gen["__fn"]
+        const gen_fn = gen["__fn"]
 
         // Set up scope with captured variables and parameters
         i_push_scope()
-        for k in fn["captured"].keys() {
+        for k in gen_fn["captured"].keys() {
             if k == "__s" { continue }
-            i_scopes[len(i_scopes) - 1][k] = fn["captured"][k]
+            i_scopes[len(i_scopes) - 1][k] = gen_fn["captured"][k]
         }
         let pi = 0
-        while pi < len(fn["params"]) && pi < len(gen["__args"]) {
-            i_set(fn["params"][pi], gen["__args"][pi], false)
+        while pi < len(gen_fn["params"]) && pi < len(gen["__args"]) {
+            i_set(gen_fn["params"][pi], gen["__args"][pi], false)
             pi = pi + 1
         }
 
         // Execute body, collecting yields
         let yields = []
-        const result = eval_generator_body(fn["body"], yields)
+        const result = eval_generator_body(gen_fn["body"], yields)
         i_pop_scope()
 
         gen["__yielded"] = yields

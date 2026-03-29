@@ -2804,7 +2804,8 @@ func tc_lint_w225_constant_condition(cond, line) {
         ExprKind::ELiteral(lit) => {
             match lit {
                 Literal::BoolLit(v) => {
-                    tc_warn_at(line, f"condition is always {v} — if branch is {'always' if v else 'never'} taken (W225)")
+                    const taken = if v { "always" } else { "never" }
+                    tc_warn_at(line, f"condition is always {v} — if branch is {taken} taken (W225)")
                 },
                 _ => {}
             }

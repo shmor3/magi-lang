@@ -8758,7 +8758,7 @@ func stream_map(stream, cb) {
 // Lazy filter
 func stream_filter(stream, cb) {
     let new_stream = stream_clone(stream)
-    new_stream["__ops"].push({"type": "filter", "fn": fn})
+    new_stream["__ops"].push({"type": "filter", "fn": cb})
     new_stream
 }
 

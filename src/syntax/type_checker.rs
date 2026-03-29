@@ -3366,6 +3366,7 @@ impl TypeChecker {
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AndNot => {
                 ChannelType::Int64
             }
+            BinOp::Pow => ChannelType::Float64,
         }
     }
 

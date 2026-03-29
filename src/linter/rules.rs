@@ -567,6 +567,7 @@ fn op_symbol(op: &BinOp) -> &'static str {
         BinOp::Shl => "<<",
         BinOp::Shr => ">>",
         BinOp::AndNot => "&^",
+        BinOp::Pow => "**",
     }
 }
 

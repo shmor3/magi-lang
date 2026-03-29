@@ -556,6 +556,7 @@ pub enum BinOp {
     Shl,
     Shr,
     AndNot,
+    Pow,
 }
 
 impl BinOp {
@@ -582,6 +583,7 @@ impl BinOp {
             BinOp::Shl => "bit_shift_left",
             BinOp::Shr => "bit_shift_right",
             BinOp::AndNot => "bit_and_not",
+            BinOp::Pow => "power",
         }
     }
 
@@ -596,6 +598,7 @@ impl BinOp {
             BinOp::BitAnd => "__band__", BinOp::BitOr => "__bor__",
             BinOp::BitXor => "__bxor__", BinOp::Shl => "__shl__",
             BinOp::Shr => "__shr__", BinOp::AndNot => "__bandnot__",
+            BinOp::Pow => "__pow__",
         }
     }
 
@@ -612,6 +615,7 @@ impl BinOp {
             BinOp::Shl | BinOp::Shr => 5,
             BinOp::Add | BinOp::Sub => 5,
             BinOp::Mul | BinOp::Div | BinOp::Mod => 6,
+            BinOp::Pow => 7,
         }
     }
 }
@@ -639,6 +643,7 @@ impl fmt::Display for BinOp {
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
             BinOp::AndNot => "&^",
+            BinOp::Pow => "**",
         };
         write!(f, "{}", s)
     }

@@ -2815,7 +2815,8 @@ func lint_format_json_full(warnings, source_path) {
         let item = f"    {{\n"
         item = item + f"      \"code\": \"{code}\",\n"
         item = item + f"      \"severity\": \"{severity}\",\n"
-        item = item + f"      \"message\": \"{message.replace(\"\\\"\", \"\\\\\\\"\")}\",\n"
+        const escaped_msg = message.replace('"', '\\"')
+        item = item + "      \"message\": \"" + escaped_msg + "\",\n"
         item = item + f"      \"line\": {line}"
         if source_path != null {
             item = item + f",\n      \"file\": \"{source_path}\""
