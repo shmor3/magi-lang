@@ -1553,10 +1553,20 @@ impl<'a> Lexer<'a> {
                 Some(b'\\') => {
                     // Inside interpolation: keep backslash escapes verbatim
                     // so the inner tokenizer can process them.
+                    // Exception: \" must become " (it's escaping the f-string delimiter,
+                    // not meant for the inner expression tokenizer).
                     self.advance();
-                    value.push('\\');
-                    if let Some(ch) = self.advance_char() {
-                        value.push(ch);
+                    match self.peek() {
+                        Some(b'"') => {
+                            self.advance();
+                            value.push('"');
+                        }
+                        _ => {
+                            value.push('\\');
+                            if let Some(ch) = self.advance_char() {
+                                value.push(ch);
+                            }
+                        }
                     }
                 }
                 Some(q @ b'"') | Some(q @ b'\'') if brace_depth > 0 => {
@@ -1763,7 +1773,9 @@ impl<'a> Lexer<'a> {
             "return" => TokenKind::Return,
             "match" => TokenKind::Match,
             "use" => TokenKind::Use,
-            "mod" => TokenKind::Mod,
+            // "mod" is context-sensitive: treated as keyword only at statement level.
+            // The parser checks for identifier "mod" to start module declarations.
+            // This allows using 'mod' as a variable name in expression context.
             "const" => TokenKind::Const,
             "type" => TokenKind::Type,
             "as" => TokenKind::As,
@@ -1815,6 +1827,19 @@ impl<'a> Lexer<'a> {
                 Some(b'\\') => { self.advance(); b'\\' as u32 }
                 Some(b'0') => { self.advance(); 0 }
                 Some(b'\'') => { self.advance(); b'\'' as u32 }
+                Some(b'"') => { self.advance(); b'"' as u32 }
+                Some(b'x') => {
+                    // \xHH in char literal
+                    self.advance();
+                    let mut hex = String::with_capacity(2);
+                    for _ in 0..2 {
+                        match self.advance() {
+                            Some(ch) if (ch as char).is_ascii_hexdigit() => hex.push(ch as char),
+                            _ => return Err(SyntaxError { line: start_line as usize, column: start_col as usize, message: "Expected hex digits after \\x in char literal".to_string(), code: None }),
+                        }
+                    }
+                    u32::from_str_radix(&hex, 16).unwrap_or(0)
+                }
                 _ => {
                     return Err(SyntaxError {
                         line: start_line as usize,

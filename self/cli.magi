@@ -7958,7 +7958,7 @@ func toml_encode_kv(key, value) {
 
 func toml_encode_value(value) {
     match typeof(value) {
-        "string" => f"\"{value.replace('\\', '\\\\').replace('\"', '\\\"')}\"",
+        "string" => "\"" + value.replace('\\', '\\\\').replace('"', '\\"') + "\"",
         "int64" | "int32" | "uint32" | "uint64" => to_string(value),
         "float64" | "float32" => to_string(value),
         "bool" => if value { "true" } else { "false" },
@@ -8598,7 +8598,8 @@ func doc_emit_json(entries) {
     let items = []
     for entry in entries {
         let item = f"  {{\"kind\": \"{entry[\"kind\"]}\", \"name\": \"{entry[\"name\"]}\""
-        item = item + f", \"description\": \"{entry[\"description\"].replace(\"\\\"\", \"\\\\\\\"\")}\""
+        const desc_escaped = entry["description"].replace('"', '\\"')
+        item = item + ", \"description\": \"" + desc_escaped + "\""
         if entry.has("params") {
             item = item + f", \"params\": \"{entry[\"params\"]}\""
         }
@@ -8699,38 +8700,38 @@ func search_matches_glob(filename, pattern) {
 }
 
 func search_format_results(results, options) {
-    let output = ""
+    let out_str = ""
     const colorize = if options.has("color") { options["color"] } else { true }
     let last_file = ""
 
     for r in results {
         if r["file"] != last_file {
-            if last_file != "" { output = output + "\n" }
+            if last_file != "" { out_str = out_str + "\n" }
             if colorize {
-                output = output + "\x1b[35m" + r["file"] + "\x1b[0m\n"
+                out_str = out_str + "\x1b[35m" + r["file"] + "\x1b[0m\n"
             } else {
-                output = output + r["file"] + "\n"
+                out_str = out_str + r["file"] + "\n"
             }
             last_file = r["file"]
         }
         const line_str = to_string(r["line"])
         if r.has("before") {
             for b in r["before"] {
-                output = output + "  " + b + "\n"
+                out_str = out_str + "  " + b + "\n"
             }
         }
         if colorize {
-            output = output + "\x1b[32m" + line_str + "\x1b[0m: " + r["text"] + "\n"
+            out_str = out_str + "\x1b[32m" + line_str + "\x1b[0m: " + r["text"] + "\n"
         } else {
-            output = output + line_str + ": " + r["text"] + "\n"
+            out_str = out_str + line_str + ": " + r["text"] + "\n"
         }
         if r.has("after") {
             for a in r["after"] {
-                output = output + "  " + a + "\n"
+                out_str = out_str + "  " + a + "\n"
             }
         }
     }
-    output
+    out_str
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -8809,9 +8810,9 @@ func cmd_tree(path, options) {
 
 func tree_render(path, prefix, depth, max_depth, show_hidden, filter, dirs_only, show_size, counts) {
     if depth > max_depth { return "" }
-    let output = ""
+    let out_str = ""
     const entries = fs_list(path)
-    if entries == null { return output }
+    if entries == null { return out_str }
 
     // Sort entries: directories first, then files
     let dirs = []
@@ -8854,14 +8855,14 @@ func tree_render(path, prefix, depth, max_depth, show_hidden, filter, dirs_only,
         if item["is_dir"] {
             line = line + "/"
         }
-        output = output + line + "\n"
+        out_str = out_str + line + "\n"
 
         if item["is_dir"] {
-            output = output + tree_render(full_path, prefix + child_prefix, depth + 1, max_depth, show_hidden, filter, dirs_only, show_size, counts)
+            out_str = out_str + tree_render(full_path, prefix + child_prefix, depth + 1, max_depth, show_hidden, filter, dirs_only, show_size, counts)
         }
         i = i + 1
     }
-    output
+    out_str
 }
 
 func format_file_size(bytes) {
@@ -9099,7 +9100,7 @@ func workspace_run_member(command, path) {
         "test" => {
             workspace_run_tests(path)
         },
-        _ => {"error": f"unknown workspace command: {command}"},
+        _ => { const m = {"error": f"unknown workspace command: {command}"}; m },
     }
 }
 
@@ -10166,7 +10167,7 @@ func cmd_profile(args) {
     }
 
     const file_path = args[0]
-    const output = find_flag_value(args, "--output")
+    const out_path = find_flag_value(args, "--output")
     const format = find_flag_value(args, "--format")
     const format_type = if format != null { format } else { "text" }
 
@@ -10683,7 +10684,7 @@ func cmd_compile_cross(args) {
 
     let target = "native"
     let file_path = null
-    let output = null
+    let out_flag = null
 
     let i = 0
     while i < len(args) {
@@ -10692,7 +10693,7 @@ func cmd_compile_cross(args) {
             i = i + 2
         } else if args[i] == "--output" || args[i] == "-o" {
             if i + 1 < len(args) {
-                output = args[i + 1]
+                out_flag = args[i + 1]
                 i = i + 2
             } else { i = i + 1 }
         } else {
@@ -10734,14 +10735,14 @@ func cmd_compile_cross(args) {
         "native" | "x86_64-linux" | "x86_64-macos" | "aarch64-linux" | "aarch64-macos" => {
             println(f"Emitting native binary for {target}...")
             // Delegate to native backend
-            const out_path = if output != null { output } else {
+            const out_path = if out_flag != null { out_flag } else {
                 file_path.replace(".magi", "")
             }
             println(f"Output: {out_path}")
         },
         "wasm32-wasip1" | "wasm32-unknown-unknown" => {
             println(f"Emitting WASM for {target}...")
-            const out_path = if output != null { output } else {
+            const out_path = if out_flag != null { out_flag } else {
                 file_path.replace(".magi", ".wasm")
             }
             println(f"Output: {out_path}")
@@ -10751,7 +10752,7 @@ func cmd_compile_cross(args) {
         },
     }
 
-    {"target": target, "file": file_path, "output": output}
+    {"target": target, "file": file_path, "output": out_flag}
 }
 
 // ══════════════════════════════════════════════════════════════════════

@@ -27,6 +27,10 @@ pub struct Compiler {
     deferred_exprs: Vec<Expression>,
     /// Source map: maps WASM instruction index → source line:col.
     pub source_map: Vec<SourceMapping>,
+    /// Global variable name → global index (for top-level let/const accessed across functions).
+    global_vars: HashMap<String, u32>,
+    /// Whether we're compiling the top-level __main function.
+    in_top_level: bool,
 }
 
 /// A single source map entry mapping a compiled instruction to source location.
@@ -129,6 +133,8 @@ impl Compiler {
             block_depth: 0,
             deferred_exprs: Vec::new(),
             source_map: Vec::new(),
+            global_vars: HashMap::new(),
+            in_top_level: false,
         }
     }
 
@@ -172,7 +178,9 @@ impl Compiler {
 
         // Second pass: compile top-level code into __main.
         self.begin_function("__main", true);
+        self.in_top_level = true;
         self.compile_statements(&program.statements)?;
+        self.in_top_level = false;
         // Return null if no explicit return.
         self.emit(Instruction::PushNull);
         self.emit(Instruction::Return);
@@ -457,6 +465,21 @@ impl Compiler {
         self.current_fn.as_ref()?.resolve_local(name)
     }
 
+    fn define_global(&mut self, name: &str, mutable: bool) -> u32 {
+        if let Some(&idx) = self.global_vars.get(name) {
+            return idx;
+        }
+        let idx = self.module.globals.len() as u32;
+        self.module.globals.push(IrGlobal {
+            name: name.to_string(),
+            val_type: ValType::Tagged,
+            mutable,
+            init: vec![Instruction::PushNull],
+        });
+        self.global_vars.insert(name.to_string(), idx);
+        idx
+    }
+
     /// Compile a nested function (lambda, test, etc.) while preserving the
     /// outer compilation context. Saves and restores `current_fn`,
     /// `block_depth`, and `loop_stack` even if the inner compilation fails,
@@ -497,12 +520,23 @@ impl Compiler {
                 self.compile_expr(value)?;
                 let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
+                // Also register as global so nested functions can access it
+                if self.in_top_level {
+                    let gidx = self.define_global(name, false);
+                    self.emit(Instruction::LocalGet(idx));
+                    self.emit(Instruction::GlobalSet(gidx));
+                }
             }
 
             StatementKind::LetMut { name, value, .. } => {
                 self.compile_expr(value)?;
                 let idx = self.define_local(name, ValType::Tagged, true)?;
                 self.emit(Instruction::LocalSet(idx));
+                if self.in_top_level {
+                    let gidx = self.define_global(name, true);
+                    self.emit(Instruction::LocalGet(idx));
+                    self.emit(Instruction::GlobalSet(gidx));
+                }
             }
 
             StatementKind::LetDestructure { pattern, value, mutable, .. } => {
@@ -514,6 +548,8 @@ impl Compiler {
                 self.compile_expr(value)?;
                 if let Some(idx) = self.resolve_local(name) {
                     self.emit(Instruction::LocalSet(idx));
+                } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
+                    self.emit(Instruction::GlobalSet(gidx));
                 } else {
                     return Err(CompileError::at(
                         stmt.span.start_line,
@@ -610,6 +646,28 @@ impl Compiler {
                                     // Final MapSet produced the updated root map; store in variable.
                                     self.emit(Instruction::LocalSet(var_idx));
                                 }
+                            } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
+                                if chain.is_empty() {
+                                    self.emit(Instruction::GlobalGet(gidx));
+                                    let key = self.module.intern_string(field);
+                                    self.emit(Instruction::PushString(key));
+                                    self.compile_expr(value)?;
+                                    self.emit(Instruction::MapSet);
+                                    self.emit(Instruction::GlobalSet(gidx));
+                                } else {
+                                    // For nested global field assignment, just compile the full expression path
+                                    self.emit(Instruction::GlobalGet(gidx));
+                                    chain.reverse();
+                                    for f in &chain {
+                                        let k = self.module.intern_string(f);
+                                        self.emit(Instruction::PushString(k));
+                                        self.emit(Instruction::MapGet);
+                                    }
+                                    let k = self.module.intern_string(field);
+                                    self.emit(Instruction::PushString(k));
+                                    self.compile_expr(value)?;
+                                    self.emit(Instruction::MapSet);
+                                }
                             } else {
                                 return Err(CompileError::at(
                                     stmt.span.start_line,
@@ -644,6 +702,12 @@ impl Compiler {
                             self.compile_expr(value)?;
                             self.emit(Instruction::ArraySet);
                             self.emit(Instruction::LocalSet(idx));
+                        } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
+                            self.emit(Instruction::GlobalGet(gidx));
+                            self.compile_expr(index)?;
+                            self.compile_expr(value)?;
+                            self.emit(Instruction::ArraySet);
+                            self.emit(Instruction::GlobalSet(gidx));
                         } else {
                             return Err(CompileError::at(
                                 stmt.span.start_line,
@@ -952,12 +1016,13 @@ impl Compiler {
             ExpressionKind::Variable(name) => {
                 if let Some(idx) = self.resolve_local(name) {
                     self.emit(Instruction::LocalGet(idx));
+                } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
+                    self.emit(Instruction::GlobalGet(gidx));
                 } else if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
                     // Function reference — push index as i64 for indirect calls.
                     self.emit(Instruction::PushI64(fn_idx as i64));
                 } else {
                     // Unresolved variable — may be a runtime/closure capture.
-                    // Emit a runtime lookup instead of erroring.
                     let name_idx = self.module.intern_string(name);
                     self.emit(Instruction::RuntimeCall {
                         name: name_idx,

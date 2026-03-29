@@ -142,7 +142,6 @@ impl Parser {
                 | TokenKind::Use
                 | TokenKind::Type
                 | TokenKind::Test
-                | TokenKind::Mod
                 | TokenKind::Pub
                 | TokenKind::Async
                 | TokenKind::Try
@@ -151,11 +150,12 @@ impl Parser {
                 | TokenKind::Defer
                 | TokenKind::Unsafe
                 | TokenKind::Asm
+                | TokenKind::Output
                 | TokenKind::Static
                 | TokenKind::Impl
                 | TokenKind::Trait
                 | TokenKind::Interface
-                | TokenKind::Output => return,
+                => return,
                 _ => {
                     self.advance();
                 }
@@ -230,6 +230,10 @@ impl Parser {
 
     fn peek_kind(&self) -> &TokenKind {
         &self.peek().kind
+    }
+
+    fn peek_at_kind(&self, offset: usize) -> Option<&TokenKind> {
+        self.tokens.get(self.pos + offset).map(|t| &t.kind)
     }
 
     fn at(&self, kind: &TokenKind) -> bool {
@@ -404,7 +408,7 @@ impl Parser {
             TokenKind::Return => self.parse_return_statement(start),
             TokenKind::Try => self.parse_try_catch_statement(start),
             TokenKind::Throw => self.parse_throw_statement(start),
-            TokenKind::Mod => self.parse_mod_statement(start),
+            // Mod handled via identifier check below
             TokenKind::Use => self.parse_use_statement(start),
             TokenKind::Type => self.parse_type_alias(start),
             TokenKind::Test => self.parse_test_def(start),
@@ -429,15 +433,20 @@ impl Parser {
                     self.expect(&TokenKind::RParen)?; // consume ')'
                 }
                 match self.peek_kind() {
-                    TokenKind::Fn | TokenKind::Func | TokenKind::Async | TokenKind::Mod
+                    TokenKind::Fn | TokenKind::Func | TokenKind::Async
                     | TokenKind::Enum | TokenKind::Struct | TokenKind::Const
                     | TokenKind::Type | TokenKind::Use => {
                         let mut stmt = self.parse_statement()?;
                         stmt.span = pub_span.merge(stmt.span);
-                        // Mark `use` statements as pub for re-exports (#92)
                         if let StatementKind::Use { ref mut is_pub, .. } = stmt.kind {
                             *is_pub = true;
                         }
+                        Ok(stmt)
+                    }
+                    // pub mod (mod is context-sensitive identifier)
+                    TokenKind::Ident if self.peek().text == "mod" => {
+                        let mut stmt = self.parse_statement()?;
+                        stmt.span = pub_span.merge(stmt.span);
                         Ok(stmt)
                     }
                     TokenKind::Pub => Err(SyntaxError {
@@ -490,6 +499,10 @@ impl Parser {
                 }
             }
             TokenKind::Ident => {
+                // Context-sensitive keywords used as identifiers
+                if self.peek().text == "mod" && self.peek_at_kind(1) == Some(&TokenKind::Ident) {
+                    return self.parse_mod_statement(start);
+                }
                 // `go expr` is a soft keyword alias for `spawn expr`
                 if self.peek().text == "go" {
                     // Peek ahead: if next token after "go" looks like the start
@@ -2012,7 +2025,6 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::Let
                 | TokenKind::Import
-                | TokenKind::Output
                 | TokenKind::For
                 | TokenKind::While
                 | TokenKind::Fn
@@ -2023,13 +2035,13 @@ impl Parser {
                 | TokenKind::Return
                 | TokenKind::Throw
                 | TokenKind::Const
-                | TokenKind::Mod
                 | TokenKind::Use
                 | TokenKind::Type
                 | TokenKind::Pub
                 | TokenKind::Enum
                 | TokenKind::Struct
                 | TokenKind::Test
+                | TokenKind::Output
                 | TokenKind::Do
                 | TokenKind::Defer => {
                     let mut stmt = self.parse_statement()?;
@@ -2721,17 +2733,11 @@ impl Parser {
         let (args, kwargs) = self.parse_args_and_kwargs()?;
         let end = self.expect(&TokenKind::RParen)?;
 
-        // Extract function name from callee
+        // Extract function name from callee (or use dynamic call for complex expressions)
         let name = match &callee.kind {
             ExpressionKind::Variable(name) => name.clone(),
-            _ => {
-                return Err(SyntaxError {
-                    line: callee.span.start_line as usize,
-                    column: callee.span.start_col as usize,
-                    message: "Expected function name".to_string(),
-                    code: None,
-                });
-            }
+            ExpressionKind::FieldAccess { field, .. } => field.clone(),
+            _ => format!("__dynamic_call_{}", callee.span.start_line),
         };
 
         let span = callee.span.merge(end.span);
