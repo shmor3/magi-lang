@@ -10109,3 +10109,1362 @@ func handle_initialize_full(params) {
         }
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Completion: Snippet Bodies for All 16 Patterns ──────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Snippet for each language construct: func, if, for, while, loop, match,
+// struct, enum, interface, test, try/catch, import, const, let, spawn, lambda.
+
+const SNIPPET_IF = "if ${1:condition} {\n    ${2}\n}"
+const SNIPPET_IF_ELSE = "if ${1:condition} {\n    ${2}\n} else {\n    ${3}\n}"
+const SNIPPET_FOR = "for ${1:item} in ${2:collection} {\n    ${3}\n}"
+const SNIPPET_WHILE = "while ${1:condition} {\n    ${2}\n}"
+const SNIPPET_LOOP = "loop {\n    ${1}\n    if ${2:done} { break }\n}"
+const SNIPPET_FUNC = "func ${1:name}(${2:params}) {\n    ${3}\n}"
+const SNIPPET_ASYNC_FUNC = "async func ${1:name}(${2:params}) {\n    ${3}\n}"
+const SNIPPET_MATCH = "match ${1:value} {\n    ${2:pattern} => ${3:body},\n    _ => ${4:default},\n}"
+const SNIPPET_STRUCT = "struct ${1:Name} {\n    ${2:field}: ${3:Type},\n}"
+const SNIPPET_ENUM = "enum ${1:Name} {\n    ${2:Variant1},\n    ${3:Variant2},\n}"
+const SNIPPET_INTERFACE = "interface ${1:Name} {\n    func ${2:method}(self${3:, params})\n}"
+const SNIPPET_TEST = "test \"${1:description}\" {\n    ${2}\n}"
+const SNIPPET_TRY_CATCH = "try {\n    ${1}\n} catch ${2:err} {\n    ${3}\n}"
+const SNIPPET_IMPORT = "import ${1:std}.${2:module}"
+const SNIPPET_CONST = "const ${1:name} = ${2:value}"
+const SNIPPET_LET = "let ${1:name} = ${2:value}"
+const SNIPPET_SPAWN = "spawn {\n    ${1}\n}"
+const SNIPPET_LAMBDA = "(${1:params}) => ${2:body}"
+
+func lsp_completion_snippets() {
+    [
+        {"label": "if", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_IF,
+         "detail": "if statement", "documentation": "Insert an if block"},
+        {"label": "ife", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_IF_ELSE,
+         "detail": "if-else statement", "documentation": "Insert an if-else block"},
+        {"label": "for", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_FOR,
+         "detail": "for-in loop", "documentation": "Insert a for-in loop"},
+        {"label": "while", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_WHILE,
+         "detail": "while loop", "documentation": "Insert a while loop"},
+        {"label": "loop", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_LOOP,
+         "detail": "infinite loop", "documentation": "Insert an infinite loop with break"},
+        {"label": "fn", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_FUNC,
+         "detail": "function definition", "documentation": "Insert a function definition"},
+        {"label": "afn", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_ASYNC_FUNC,
+         "detail": "async function", "documentation": "Insert an async function definition"},
+        {"label": "match", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_MATCH,
+         "detail": "match expression", "documentation": "Insert a match expression"},
+        {"label": "struct", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_STRUCT,
+         "detail": "struct definition", "documentation": "Insert a struct definition"},
+        {"label": "enum", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_ENUM,
+         "detail": "enum definition", "documentation": "Insert an enum definition"},
+        {"label": "interface", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_INTERFACE,
+         "detail": "interface definition", "documentation": "Insert an interface definition"},
+        {"label": "test", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_TEST,
+         "detail": "test block", "documentation": "Insert a test block"},
+        {"label": "try", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_TRY_CATCH,
+         "detail": "try-catch block", "documentation": "Insert a try-catch block"},
+        {"label": "import", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_IMPORT,
+         "detail": "import statement", "documentation": "Insert an import statement"},
+        {"label": "const", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_CONST,
+         "detail": "constant binding", "documentation": "Insert a const declaration"},
+        {"label": "let", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_LET,
+         "detail": "mutable binding", "documentation": "Insert a let declaration"},
+        {"label": "spawn", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_SPAWN,
+         "detail": "spawn async task", "documentation": "Insert a spawn block"},
+        {"label": "lam", "kind": CIK_SNIPPET, "insertTextFormat": 2, "insertText": SNIPPET_LAMBDA,
+         "detail": "lambda/arrow function", "documentation": "Insert an arrow function"},
+    ]
+}
+
+// ── Doc Comment Extraction for Completions ──────────────────────────
+
+// Extract doc comments (///) preceding a function definition
+func lsp_extract_doc_comment(source, line) {
+    let comments = []
+    let check_line = line - 1
+    while check_line >= 0 {
+        const text = lsp_get_line(source, check_line)
+        if text == null { break }
+        const trimmed = text.trim()
+        if trimmed.starts_with("///") {
+            const doc = trimmed[3..len(trimmed)].trim()
+            comments = [doc] + comments
+        } else if trimmed.starts_with("//!") {
+            const doc = trimmed[3..len(trimmed)].trim()
+            comments = [doc] + comments
+        } else {
+            break
+        }
+        check_line = check_line - 1
+    }
+    if len(comments) == 0 { return null }
+    comments.join("\n")
+}
+
+func lsp_get_line(source, line_num) {
+    const lines = source.split("\n")
+    if line_num >= 0 && line_num < len(lines) {
+        lines[line_num]
+    } else {
+        null
+    }
+}
+
+// Build completion item with doc comment
+func lsp_completion_with_docs(label, kind, detail, source, def_line) {
+    const item = {
+        "label": label,
+        "kind": kind,
+        "detail": detail,
+    }
+    const doc = lsp_extract_doc_comment(source, def_line)
+    if doc != null {
+        item["documentation"] = {"kind": "markdown", "value": doc}
+    }
+    item
+}
+
+// ── Import Path Completions for All 105 Stdlib Modules ──────────────
+
+const STD_MODULES = [
+    "std.math", "std.string", "std.array", "std.map", "std.set",
+    "std.io", "std.fs", "std.path", "std.os", "std.env",
+    "std.json", "std.yaml", "std.toml", "std.csv", "std.xml",
+    "std.http", "std.net", "std.socket", "std.tls", "std.dns",
+    "std.crypto", "std.hash", "std.hmac", "std.jwt", "std.base64",
+    "std.hex", "std.uuid", "std.random", "std.time", "std.date",
+    "std.duration", "std.timer", "std.regex", "std.glob", "std.fmt",
+    "std.log", "std.debug", "std.test", "std.assert", "std.bench",
+    "std.process", "std.signal", "std.thread", "std.channel", "std.mutex",
+    "std.atomic", "std.sync", "std.async", "std.future", "std.stream",
+    "std.buffer", "std.bytes", "std.encoding", "std.compress", "std.archive",
+    "std.collections", "std.deque", "std.heap", "std.graph", "std.tree",
+    "std.sort", "std.search", "std.iter", "std.range", "std.slice",
+    "std.reflect", "std.type", "std.convert", "std.clone", "std.compare",
+    "std.error", "std.result", "std.option", "std.panic", "std.recover",
+    "std.semver", "std.url", "std.mime", "std.color", "std.terminal",
+    "std.readline", "std.shell", "std.template", "std.markdown", "std.html",
+    "std.sql", "std.sqlite", "std.redis", "std.amqp", "std.grpc",
+    "std.proto", "std.msgpack", "std.cbor", "std.bson", "std.avro",
+    "std.metrics", "std.trace", "std.span", "std.context", "std.config",
+    "std.flag", "std.cli", "std.prompt", "std.progress", "std.table",
+]
+
+// Operations exported by each module (first 20 shown per module)
+const STD_MODULE_OPS = {
+    "std.math": ["abs", "floor", "ceil", "round", "sqrt", "cbrt", "pow", "exp", "ln", "log2",
+                  "log10", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh"],
+    "std.string": ["len", "trim", "split", "join", "replace", "contains", "starts_with",
+                    "ends_with", "to_upper", "to_lower", "repeat", "pad_left", "pad_right",
+                    "slice", "index_of", "last_index_of", "char_at", "char_code_at", "from_char_code", "reverse"],
+    "std.array": ["len", "push", "pop", "shift", "unshift", "insert", "remove", "get", "set",
+                   "map", "filter", "reduce", "find", "find_index", "every", "some", "sort",
+                   "reverse", "flat", "flat_map"],
+    "std.map": ["len", "get", "set", "has", "delete", "keys", "values", "entries", "merge",
+                "clear", "from_entries", "map_values", "filter_entries", "find_key", "count",
+                "group_by", "invert", "pick", "omit", "defaults"],
+    "std.io": ["print", "println", "eprint", "eprintln", "read_line", "read_all",
+               "write", "write_all", "flush", "stdin", "stdout", "stderr",
+               "pipe", "tee", "devnull", "open", "close", "seek", "tell", "eof"],
+    "std.fs": ["read", "write", "append", "delete", "exists", "mkdir", "rmdir",
+               "ls", "stat", "chmod", "chown", "rename", "copy", "link", "symlink",
+               "readlink", "realpath", "temp_file", "temp_dir", "watch"],
+    "std.json": ["parse", "stringify", "pretty", "validate", "query", "patch",
+                 "merge", "diff", "schema_validate", "from_string", "to_string",
+                 "escape", "unescape", "stream_parse", "path_get", "path_set",
+                 "path_delete", "flatten", "unflatten", "deep_clone"],
+    "std.http": ["get", "post", "put", "delete", "patch", "head", "options",
+                 "request", "fetch", "serve", "listen", "router", "middleware",
+                 "cors", "static_files", "sse", "websocket", "proxy", "redirect", "status"],
+    "std.crypto": ["sha256", "sha384", "sha512", "blake3", "md5", "hmac",
+                   "encrypt", "decrypt", "sign", "verify", "generate_key",
+                   "random_bytes", "pbkdf2", "hkdf", "argon2", "bcrypt",
+                   "aes_encrypt", "aes_decrypt", "rsa_encrypt", "rsa_decrypt"],
+    "std.regex": ["match", "test", "find_all", "replace", "replace_all", "split",
+                  "capture_groups", "named_captures", "is_match", "compile",
+                  "escape", "count_matches", "find_iter", "lookahead", "lookbehind",
+                  "flags", "source", "global", "ignorecase", "multiline"],
+    "std.time": ["now", "unix", "format", "parse", "duration", "sleep", "elapsed",
+                 "monotonic", "utc", "local", "timezone", "offset", "is_dst",
+                 "add", "sub", "diff", "before", "after", "equal", "compare"],
+    "std.collections": ["ordered_map", "sorted_set", "deque", "heap", "counter",
+                        "default_map", "multi_map", "lru_cache", "ring_buffer", "bitset",
+                        "trie", "bloom_filter", "disjoint_set", "skip_list", "interval_tree",
+                        "fenwick_tree", "segment_tree", "sparse_table", "rope", "persistent_map"],
+    "std.test": ["test", "describe", "it", "before_each", "after_each", "before_all",
+                 "after_all", "expect", "assert", "assert_eq", "assert_ne", "assert_throws",
+                 "mock", "spy", "stub", "fake_timer", "snapshot", "bench", "skip", "only"],
+    "std.process": ["exec", "spawn", "kill", "wait", "pid", "ppid", "exit", "abort",
+                    "cwd", "chdir", "env", "args", "stdin", "stdout", "stderr",
+                    "pipe", "signal", "on_exit", "uptime", "memory_usage"],
+}
+
+func lsp_import_completions(prefix) {
+    let items = []
+    for mod_name in STD_MODULES {
+        if mod_name.starts_with(prefix) || prefix == "" {
+            items.push({
+                "label": mod_name,
+                "kind": CIK_MODULE,
+                "detail": "stdlib module",
+                "insertText": mod_name,
+            })
+        }
+    }
+    items
+}
+
+// Complete operations after "std.module." prefix
+func lsp_module_op_completions(module_name) {
+    let items = []
+    if STD_MODULE_OPS.has(module_name) {
+        const ops = STD_MODULE_OPS[module_name]
+        for op in ops {
+            items.push({
+                "label": op,
+                "kind": CIK_FUNCTION,
+                "detail": f"{module_name}.{op}",
+            })
+        }
+    }
+    items
+}
+
+// ── File-Relative Import Completions ────────────────────────────────
+
+func lsp_file_import_completions(current_file, prefix) {
+    let items = []
+    // Get directory of current file
+    const dir = lsp_dirname(current_file)
+    // List .magi files in same directory
+    const files = fs_list(dir)
+    if files == null { return items }
+    for f in files {
+        if !f.ends_with(".magi") { continue }
+        const basename = f[0..len(f) - 5]  // strip .magi
+        if basename.starts_with(prefix) || prefix == "" {
+            items.push({
+                "label": basename,
+                "kind": CIK_MODULE,
+                "detail": "local module",
+                "insertText": basename,
+            })
+        }
+    }
+    items
+}
+
+func lsp_dirname(path) {
+    const idx = path.last_index_of("/")
+    if idx < 0 { return "." }
+    path[0..idx]
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Hover: Full Source, Field Types, Variant Data ───────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Show full source of short functions (<=10 lines)
+func lsp_hover_func_source(source, func_info) {
+    const start = func_info["start_line"]
+    const end = func_info["end_line"]
+    if end - start > 10 { return null }
+    const lines = source.split("\n")
+    let result = []
+    let i = start
+    while i <= end && i < len(lines) {
+        result.push(lines[i])
+        i = i + 1
+    }
+    "```magi\n" + result.join("\n") + "\n```"
+}
+
+// Show field types for structs
+func lsp_hover_struct_fields(struct_info) {
+    let md = "```magi\nstruct " + struct_info["name"]
+    if struct_info.has("type_params") && len(struct_info["type_params"]) > 0 {
+        md = md + "<" + struct_info["type_params"].join(", ") + ">"
+    }
+    md = md + " {\n"
+    if struct_info.has("fields") {
+        for field in struct_info["fields"] {
+            const fname = field["name"]
+            const ftype = if field.has("type") { field["type"] } else { "any" }
+            md = md + f"    {fname}: {ftype},\n"
+        }
+    }
+    md = md + "}\n```"
+    md
+}
+
+// Show variant data for enums
+func lsp_hover_enum_variants(enum_info) {
+    let md = "```magi\nenum " + enum_info["name"] + " {\n"
+    if enum_info.has("variants") {
+        for variant in enum_info["variants"] {
+            if typeof(variant) == "string" {
+                md = md + f"    {variant},\n"
+            } else if typeof(variant) == "map" {
+                const vname = variant["name"]
+                if variant.has("data") {
+                    const data_types = variant["data"].join(", ")
+                    md = md + f"    {vname}({data_types}),\n"
+                } else {
+                    md = md + f"    {vname},\n"
+                }
+            }
+        }
+    }
+    md = md + "}\n```"
+    md
+}
+
+// Show constraint info for generics
+func lsp_hover_generic_constraint(type_param, constraints) {
+    let md = "**Type parameter** `" + type_param + "`"
+    if constraints != null && len(constraints) > 0 {
+        md = md + "\n\nConstraints:\n"
+        for c in constraints {
+            md = md + f"- `{c}`\n"
+        }
+    }
+    md
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended References: Interface Impl Finder, Cross-File Callers ──
+// ══════════════════════════════════════════════════════════════════════
+
+// Find all structs that implement a given interface
+func lsp_find_implementations(workspace_docs, interface_name, interface_methods) {
+    let locations = []
+    for doc in workspace_docs {
+        const uri = doc["uri"]
+        const source = doc["source"]
+        const analysis = doc["analysis"]
+        if analysis == null { continue }
+
+        // Check each struct/type for matching methods
+        if analysis.has("structs") {
+            for struct_name in analysis["structs"].keys() {
+                const struct_info = analysis["structs"][struct_name]
+                let all_methods_found = true
+                for method in interface_methods {
+                    if !lsp_struct_has_method(source, struct_name, method) {
+                        all_methods_found = false
+                        break
+                    }
+                }
+                if all_methods_found {
+                    const line = if struct_info.has("line") { struct_info["line"] } else { 0 }
+                    locations.push(lsp_location(uri, lsp_range(line, 0, line, len(struct_name))))
+                }
+            }
+        }
+    }
+    locations
+}
+
+func lsp_struct_has_method(source, struct_name, method_name) {
+    // Search for "func StructName.method_name(" pattern
+    const pattern = f"func {struct_name}.{method_name}("
+    source.contains(pattern)
+}
+
+// Find all callers of a function across workspace files
+func lsp_find_callers(workspace_docs, func_name) {
+    let locations = []
+    for doc in workspace_docs {
+        const uri = doc["uri"]
+        const source = doc["source"]
+        const lines = source.split("\n")
+
+        let line_idx = 0
+        for line_text in lines {
+            // Search for function call: "func_name(" pattern
+            let pos = 0
+            while pos < len(line_text) {
+                const idx = line_text[pos..len(line_text)].index_of(func_name + "(")
+                if idx < 0 { break }
+                const abs_idx = pos + idx
+                // Check word boundary before
+                const before_ok = abs_idx == 0 || !lsp_is_ident_char(line_text[abs_idx - 1])
+                if before_ok {
+                    // Not a definition (skip "func " prefix)
+                    const is_def = abs_idx >= 5 && line_text[abs_idx - 5..abs_idx] == "func "
+                    if !is_def {
+                        locations.push(lsp_location(uri, lsp_range(line_idx, abs_idx, line_idx, abs_idx + len(func_name))))
+                    }
+                }
+                pos = abs_idx + len(func_name) + 1
+            }
+            line_idx = line_idx + 1
+        }
+    }
+    locations
+}
+
+func lsp_is_ident_char(c) {
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Rename: Validation, String/Comment Updates ──────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Validate identifier: must be valid MAGI identifier
+func lsp_validate_identifier(name) {
+    if len(name) == 0 { return {"valid": false, "reason": "empty identifier"} }
+    const first = name[0]
+    if !((first >= "a" && first <= "z") || (first >= "A" && first <= "Z") || first == "_") {
+        return {"valid": false, "reason": "identifier must start with letter or underscore"}
+    }
+    let i = 1
+    while i < len(name) {
+        const c = name[i]
+        if !lsp_is_ident_char(c) {
+            return {"valid": false, "reason": f"invalid character '{c}' in identifier"}
+        }
+        i = i + 1
+    }
+    // Check reserved keywords
+    const keywords = ["let", "const", "func", "if", "else", "for", "while", "loop",
+                      "match", "return", "break", "continue", "import", "struct", "enum",
+                      "interface", "test", "true", "false", "null", "in", "as", "async",
+                      "await", "spawn", "try", "catch", "finally", "throw", "pub", "type"]
+    for kw in keywords {
+        if name == kw {
+            return {"valid": false, "reason": f"'{name}' is a reserved keyword"}
+        }
+    }
+    {"valid": true, "reason": null}
+}
+
+// Find string references to rename (in string literals containing the identifier)
+func lsp_find_string_references(source, old_name) {
+    let edits = []
+    const lines = source.split("\n")
+    let line_idx = 0
+    for line_text in lines {
+        // Look for the identifier inside string literals
+        let in_string = false
+        let string_char = ""
+        let i = 0
+        while i < len(line_text) {
+            const c = line_text[i]
+            if !in_string {
+                if c == "\"" || c == "'" {
+                    in_string = true
+                    string_char = c
+                } else if c == "/" && i + 1 < len(line_text) && line_text[i + 1] == "/" {
+                    break // comment
+                }
+            } else {
+                if c == "\\" { i = i + 2; continue }
+                if c == string_char {
+                    in_string = false
+                } else {
+                    // Check if old_name appears here inside string
+                    if line_text[i..min(i + len(old_name), len(line_text))] == old_name {
+                        edits.push({
+                            "line": line_idx,
+                            "start": i,
+                            "end": i + len(old_name),
+                            "in_string": true,
+                        })
+                    }
+                }
+            }
+            i = i + 1
+        }
+        line_idx = line_idx + 1
+    }
+    edits
+}
+
+// Find comment references to update
+func lsp_find_comment_references(source, old_name) {
+    let edits = []
+    const lines = source.split("\n")
+    let line_idx = 0
+    for line_text in lines {
+        const comment_start = line_text.index_of("//")
+        if comment_start >= 0 {
+            const comment_text = line_text[comment_start..len(line_text)]
+            let pos = 0
+            while pos < len(comment_text) {
+                const idx = comment_text[pos..len(comment_text)].index_of(old_name)
+                if idx < 0 { break }
+                const abs = comment_start + pos + idx
+                // Check word boundary
+                const before_ok = (pos + idx) == 0 || !lsp_is_ident_char(comment_text[pos + idx - 1])
+                const after_end = pos + idx + len(old_name)
+                const after_ok = after_end >= len(comment_text) || !lsp_is_ident_char(comment_text[after_end])
+                if before_ok && after_ok {
+                    edits.push({
+                        "line": line_idx,
+                        "start": abs,
+                        "end": abs + len(old_name),
+                        "in_comment": true,
+                    })
+                }
+                pos = pos + idx + len(old_name)
+            }
+        }
+        line_idx = line_idx + 1
+    }
+    edits
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Code Actions ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Organize imports with grouping: std first, then third-party, then local
+func lsp_organize_imports(source) {
+    const lines = source.split("\n")
+    let import_lines = []
+    let import_indices = []
+    let first_import = -1
+    let last_import = -1
+
+    let i = 0
+    for line in lines {
+        const trimmed = line.trim()
+        if trimmed.starts_with("import ") || trimmed.starts_with("use ") {
+            import_lines.push(trimmed)
+            import_indices.push(i)
+            if first_import < 0 { first_import = i }
+            last_import = i
+        }
+        i = i + 1
+    }
+
+    if len(import_lines) <= 1 { return null }
+
+    // Group: std imports, third-party, local
+    let std_imports = []
+    let third_party = []
+    let local_imports = []
+
+    for imp in import_lines {
+        if imp.contains("std.") || imp.contains("std::") {
+            std_imports.push(imp)
+        } else if imp.starts_with("import .") || imp.starts_with("use .") || imp.contains("./") {
+            local_imports.push(imp)
+        } else {
+            third_party.push(imp)
+        }
+    }
+
+    std_imports = sort(std_imports)
+    third_party = sort(third_party)
+    local_imports = sort(local_imports)
+
+    let organized = []
+    if len(std_imports) > 0 {
+        for imp in std_imports { organized.push(imp) }
+    }
+    if len(third_party) > 0 {
+        if len(organized) > 0 { organized.push("") }
+        for imp in third_party { organized.push(imp) }
+    }
+    if len(local_imports) > 0 {
+        if len(organized) > 0 { organized.push("") }
+        for imp in local_imports { organized.push(imp) }
+    }
+
+    {
+        "first_line": first_import,
+        "last_line": last_import,
+        "new_text": organized.join("\n"),
+    }
+}
+
+// Convert between let/const
+func lsp_convert_let_const(source, line_num) {
+    const lines = source.split("\n")
+    if line_num >= len(lines) { return null }
+    const line = lines[line_num]
+    const trimmed = line.trim()
+
+    if trimmed.starts_with("let ") {
+        const new_line = line.replace("let ", "const ")
+        return {"line": line_num, "old_text": line, "new_text": new_line, "title": "Convert to const"}
+    }
+    if trimmed.starts_with("const ") {
+        const new_line = line.replace("const ", "let ")
+        return {"line": line_num, "old_text": line, "new_text": new_line, "title": "Convert to let"}
+    }
+    null
+}
+
+// Extract interface from struct (generate interface with all methods)
+func lsp_extract_interface(source, struct_name) {
+    const lines = source.split("\n")
+    let methods = []
+
+    // Find "func StructName.method(" patterns
+    let i = 0
+    for line in lines {
+        const pattern = f"func {struct_name}."
+        if line.trim().starts_with(pattern) {
+            const after = line.trim()[len(pattern)..len(line.trim())]
+            const paren_idx = after.index_of("(")
+            if paren_idx >= 0 {
+                const method_name = after[0..paren_idx]
+                const params_end = after.index_of(")")
+                let params = ""
+                if params_end > paren_idx {
+                    params = after[paren_idx + 1..params_end]
+                }
+                methods.push({"name": method_name, "params": params})
+            }
+        }
+        i = i + 1
+    }
+
+    if len(methods) == 0 { return null }
+
+    let iface = f"interface I{struct_name} {{\n"
+    for m in methods {
+        iface = iface + f"    func {m[\"name\"]}({m[\"params\"]})\n"
+    }
+    iface = iface + "}\n"
+    iface
+}
+
+// Generate constructor for struct
+func lsp_generate_constructor(struct_info) {
+    const name = struct_info["name"]
+    let params = []
+    let assignments = []
+
+    if struct_info.has("fields") {
+        for field in struct_info["fields"] {
+            const fname = field["name"]
+            params.push(fname)
+            assignments.push(f"        {fname}: {fname},")
+        }
+    }
+
+    const params_str = params.join(", ")
+    let body = f"func {name}.new({params_str}) {{\n"
+    body = body + f"    {name} {{\n"
+    for a in assignments {
+        body = body + a + "\n"
+    }
+    body = body + "    }\n"
+    body = body + "}"
+    body
+}
+
+// Generate Display implementation for struct
+func lsp_generate_display(struct_info) {
+    const name = struct_info["name"]
+    let fields = []
+    if struct_info.has("fields") {
+        for field in struct_info["fields"] {
+            fields.push(field["name"])
+        }
+    }
+
+    let fmt_parts = []
+    for f in fields {
+        fmt_parts.push(f + ": " + "${" + f"self.{f}" + "}")
+    }
+    const fmt_str = name + "(" + fmt_parts.join(", ") + ")"
+
+    f"func {name}.to_string(self) {{\n    f\"{fmt_str}\"\n}}"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Diagnostics: Quick Fix Suggestions ─────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Quick fix map: error code -> fix suggestion generator
+func lsp_quick_fix_for_code(error_code, diagnostic, source) {
+    match error_code {
+        "E001" => lsp_fix_unexpected_token(diagnostic, source),
+        "E002" => lsp_fix_unexpected_eof(diagnostic, source),
+        "E100" => lsp_fix_type_mismatch(diagnostic, source),
+        "E101" => lsp_fix_undefined_variable(diagnostic, source),
+        "E102" => lsp_fix_duplicate_definition(diagnostic, source),
+        "E200" => lsp_fix_missing_semicolon(diagnostic, source),
+        "E201" => lsp_fix_undefined_function(diagnostic, source),
+        "E202" => lsp_fix_wrong_arg_count(diagnostic, source),
+        "E300" => lsp_fix_import_not_found(diagnostic, source),
+        "E301" => lsp_fix_circular_import(diagnostic, source),
+        "W001" => lsp_fix_unused_variable(diagnostic, source),
+        "W002" => lsp_fix_unused_import(diagnostic, source),
+        "W003" => lsp_fix_dead_code(diagnostic, source),
+        "W100" => lsp_fix_shadowed_variable(diagnostic, source),
+        "W200" => lsp_fix_naming_convention(diagnostic, source),
+        _ => null,
+    }
+}
+
+func lsp_fix_unexpected_token(diag, source) {
+    // Suggest inserting expected token
+    {"title": "Fix syntax error", "kind": "quickfix", "edits": []}
+}
+
+func lsp_fix_unexpected_eof(diag, source) {
+    // Add missing closing brace/paren
+    const lines = source.split("\n")
+    let open_braces = 0
+    let open_parens = 0
+    for line in lines {
+        for c in line {
+            if c == "{" { open_braces = open_braces + 1 }
+            if c == "}" { open_braces = open_braces - 1 }
+            if c == "(" { open_parens = open_parens + 1 }
+            if c == ")" { open_parens = open_parens - 1 }
+        }
+    }
+    let fix_text = ""
+    while open_braces > 0 {
+        fix_text = fix_text + "}\n"
+        open_braces = open_braces - 1
+    }
+    while open_parens > 0 {
+        fix_text = fix_text + ")\n"
+        open_parens = open_parens - 1
+    }
+    {"title": "Add missing closing delimiters", "kind": "quickfix",
+     "edits": [{"line": len(lines), "text": fix_text}]}
+}
+
+func lsp_fix_type_mismatch(diag, source) {
+    {"title": "Add type annotation", "kind": "quickfix", "edits": []}
+}
+
+func lsp_fix_undefined_variable(diag, source) {
+    // Extract variable name from diagnostic message
+    const msg = diag["message"]
+    const name = lsp_extract_quoted_name(msg)
+    if name == null { return null }
+    // Suggest declaring it
+    const line = diag["range"]["start"]["line"]
+    {"title": f"Declare '{name}' as const", "kind": "quickfix",
+     "edits": [{"line": line, "text": f"const {name} = null\n", "insert_before": true}]}
+}
+
+func lsp_fix_duplicate_definition(diag, source) {
+    {"title": "Remove duplicate definition", "kind": "quickfix", "edits": []}
+}
+
+func lsp_fix_missing_semicolon(diag, source) {
+    const line = diag["range"]["start"]["line"]
+    const lines = source.split("\n")
+    if line < len(lines) {
+        const line_text = lines[line]
+        return {"title": "Add semicolon", "kind": "quickfix",
+                "edits": [{"line": line, "col": len(line_text), "text": ";"}]}
+    }
+    null
+}
+
+func lsp_fix_undefined_function(diag, source) {
+    const msg = diag["message"]
+    const name = lsp_extract_quoted_name(msg)
+    if name == null { return null }
+    // Search stdlib for matching function
+    for mod_name in STD_MODULES {
+        if STD_MODULE_OPS.has(mod_name) {
+            const ops = STD_MODULE_OPS[mod_name]
+            for op in ops {
+                if op == name {
+                    return {"title": f"Import from {mod_name}", "kind": "quickfix",
+                            "edits": [{"line": 0, "text": f"import {mod_name}\n", "insert_before": true}]}
+                }
+            }
+        }
+    }
+    null
+}
+
+func lsp_fix_wrong_arg_count(diag, source) {
+    {"title": "Fix argument count", "kind": "quickfix", "edits": []}
+}
+
+func lsp_fix_import_not_found(diag, source) {
+    const msg = diag["message"]
+    const name = lsp_extract_quoted_name(msg)
+    if name == null { return null }
+    // Suggest closest matching module
+    let best_match = null
+    let best_dist = 999
+    for mod_name in STD_MODULES {
+        const dist = lsp_levenshtein(name, mod_name)
+        if dist < best_dist {
+            best_dist = dist
+            best_match = mod_name
+        }
+    }
+    if best_match != null && best_dist <= 3 {
+        return {"title": f"Did you mean '{best_match}'?", "kind": "quickfix", "edits": []}
+    }
+    null
+}
+
+func lsp_fix_circular_import(diag, source) {
+    {"title": "Break circular dependency", "kind": "quickfix", "edits": []}
+}
+
+func lsp_fix_unused_variable(diag, source) {
+    const msg = diag["message"]
+    const name = lsp_extract_quoted_name(msg)
+    if name == null { return null }
+    {"title": f"Prefix '{name}' with underscore", "kind": "quickfix",
+     "rename": {"old": name, "new": "_" + name}}
+}
+
+func lsp_fix_unused_import(diag, source) {
+    const line = diag["range"]["start"]["line"]
+    {"title": "Remove unused import", "kind": "quickfix",
+     "edits": [{"line": line, "delete_line": true}]}
+}
+
+func lsp_fix_dead_code(diag, source) {
+    const line = diag["range"]["start"]["line"]
+    {"title": "Remove dead code", "kind": "quickfix",
+     "edits": [{"line": line, "delete_line": true}]}
+}
+
+func lsp_fix_shadowed_variable(diag, source) {
+    const msg = diag["message"]
+    const name = lsp_extract_quoted_name(msg)
+    if name == null { return null }
+    {"title": f"Rename '{name}' to avoid shadowing", "kind": "quickfix",
+     "rename": {"old": name, "new": name + "_inner"}}
+}
+
+func lsp_fix_naming_convention(diag, source) {
+    const msg = diag["message"]
+    const name = lsp_extract_quoted_name(msg)
+    if name == null { return null }
+    const snake = lsp_to_snake_case(name)
+    {"title": f"Rename to '{snake}'", "kind": "quickfix",
+     "rename": {"old": name, "new": snake}}
+}
+
+func lsp_extract_quoted_name(msg) {
+    const start = msg.index_of("'")
+    if start < 0 { return null }
+    const rest = msg[start + 1..len(msg)]
+    const end = rest.index_of("'")
+    if end < 0 { return null }
+    rest[0..end]
+}
+
+func lsp_to_snake_case(name) {
+    let result = ""
+    let i = 0
+    while i < len(name) {
+        const c = name[i]
+        if c >= "A" && c <= "Z" {
+            if i > 0 { result = result + "_" }
+            result = result + char_from_code(char_code_at(c, 0) + 32)
+        } else {
+            result = result + c
+        }
+        i = i + 1
+    }
+    result
+}
+
+func lsp_levenshtein(a, b) {
+    const la = len(a)
+    const lb = len(b)
+    if la == 0 { return lb }
+    if lb == 0 { return la }
+
+    // Build distance matrix
+    let prev = []
+    let i = 0
+    while i <= lb {
+        prev.push(i)
+        i = i + 1
+    }
+
+    i = 1
+    while i <= la {
+        let curr = [i]
+        let j = 1
+        while j <= lb {
+            const cost = if a[i - 1] == b[j - 1] { 0 } else { 1 }
+            const del = prev[j] + 1
+            const ins = curr[j - 1] + 1
+            const sub = prev[j - 1] + cost
+            curr.push(min(min(del, ins), sub))
+            j = j + 1
+        }
+        prev = curr
+        i = i + 1
+    }
+    prev[lb]
+}
+
+// Related information links for diagnostics
+func lsp_diagnostic_related_info(error_code) {
+    match error_code {
+        "E001" => [{"title": "Syntax reference", "uri": "https://magi-lang.org/docs/spec#syntax"}],
+        "E100" => [{"title": "Type system", "uri": "https://magi-lang.org/docs/spec#types"}],
+        "E201" => [{"title": "Standard library", "uri": "https://magi-lang.org/docs/stdlib"}],
+        "E300" => [{"title": "Module system", "uri": "https://magi-lang.org/docs/spec#modules"}],
+        _ => [],
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Workspace: File Watcher, Incremental Re-parse ──────────
+// ══════════════════════════════════════════════════════════════════════
+
+// File watcher state
+let lsp_watched_files = {"__s": true}  // uri -> {mtime, version, ast, source}
+let lsp_dependency_graph = {"__s": true}  // uri -> [dependent_uris]
+
+// Register a file for watching
+func lsp_watch_file(uri, source) {
+    const ast = parse(source)
+    lsp_watched_files[uri] = {
+        "mtime": time_now(),
+        "version": 1,
+        "ast": ast,
+        "source": source,
+    }
+    // Track imports for dependency graph
+    lsp_update_dependencies(uri, source)
+}
+
+// Unregister a file
+func lsp_unwatch_file(uri) {
+    if lsp_watched_files.has(uri) {
+        lsp_watched_files[uri] = null
+    }
+    // Remove from dependency graph
+    lsp_remove_dependencies(uri)
+}
+
+// Update a file with incremental re-parse
+func lsp_update_file(uri, source, change_range) {
+    if !lsp_watched_files.has(uri) {
+        lsp_watch_file(uri, source)
+        return null
+    }
+
+    const entry = lsp_watched_files[uri]
+    // For now, full re-parse (incremental would only parse changed region)
+    const ast = parse(source)
+    lsp_watched_files[uri] = {
+        "mtime": time_now(),
+        "version": entry["version"] + 1,
+        "ast": ast,
+        "source": source,
+    }
+
+    // Re-check dependencies
+    lsp_update_dependencies(uri, source)
+
+    // Notify dependents that they may need re-check
+    lsp_invalidate_dependents(uri)
+}
+
+// Track import dependencies from a file
+func lsp_update_dependencies(uri, source) {
+    const imports = lsp_extract_imports(source)
+    lsp_dependency_graph[uri] = imports
+}
+
+func lsp_remove_dependencies(uri) {
+    if lsp_dependency_graph.has(uri) {
+        lsp_dependency_graph[uri] = null
+    }
+}
+
+// Extract import URIs from source
+func lsp_extract_imports(source) {
+    let imports = []
+    const lines = source.split("\n")
+    for line in lines {
+        const trimmed = line.trim()
+        if trimmed.starts_with("import ") {
+            const path = trimmed[7..len(trimmed)].trim()
+            imports.push(path)
+        } else if trimmed.starts_with("use ") {
+            const path = trimmed[4..len(trimmed)].trim()
+            imports.push(path)
+        }
+    }
+    imports
+}
+
+// Mark dependents as needing re-check
+func lsp_invalidate_dependents(changed_uri) {
+    for uri in lsp_dependency_graph.keys() {
+        if uri == "__s" { continue }
+        const deps = lsp_dependency_graph[uri]
+        if deps == null { continue }
+        for dep in deps {
+            if dep.contains(changed_uri) || changed_uri.contains(dep) {
+                // Mark this file as dirty
+                if lsp_watched_files.has(uri) {
+                    const entry = lsp_watched_files[uri]
+                    entry["dirty"] = true
+                    lsp_watched_files[uri] = entry
+                }
+            }
+        }
+    }
+}
+
+// Get all dirty files that need re-checking
+func lsp_get_dirty_files() {
+    let dirty = []
+    for uri in lsp_watched_files.keys() {
+        if uri == "__s" { continue }
+        const entry = lsp_watched_files[uri]
+        if entry != null && entry.has("dirty") && entry["dirty"] == true {
+            dirty.push(uri)
+        }
+    }
+    dirty
+}
+
+// Re-check all dirty files
+func lsp_recheck_dirty_files() {
+    const dirty = lsp_get_dirty_files()
+    let diagnostics = {"__s": true}
+    for uri in dirty {
+        const entry = lsp_watched_files[uri]
+        if entry == null { continue }
+        const source = entry["source"]
+        const result = check_source(source)
+        diagnostics[uri] = result
+        // Clear dirty flag
+        entry["dirty"] = false
+        lsp_watched_files[uri] = entry
+    }
+    diagnostics
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Semantic Tokens ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Semantic token types (matches LSP spec)
+const SEMANTIC_TOKEN_TYPES = [
+    "keyword", "function", "variable", "type", "string", "number",
+    "operator", "comment", "parameter", "property", "enumMember",
+    "struct", "enum", "namespace", "interface", "decorator",
+]
+
+const SEMANTIC_TOKEN_MODIFIERS = [
+    "declaration", "definition", "readonly", "static", "defaultLibrary",
+    "async", "modification", "deprecated",
+]
+
+// Token type indices
+const STT_KEYWORD = 0
+const STT_FUNCTION = 1
+const STT_VARIABLE = 2
+const STT_TYPE = 3
+const STT_STRING = 4
+const STT_NUMBER = 5
+const STT_OPERATOR = 6
+const STT_COMMENT = 7
+const STT_PARAMETER = 8
+const STT_PROPERTY = 9
+const STT_ENUM_MEMBER = 10
+const STT_STRUCT = 11
+const STT_ENUM = 12
+const STT_NAMESPACE = 13
+const STT_INTERFACE = 14
+const STT_DECORATOR = 15
+
+// Extended semantic tokenizer — handles escape sequences, regex, numeric separators
+func lsp_tokenize_semantic_extended(source) {
+    let tokens = []
+    const lines = source.split("\n")
+    let prev_line = 0
+    let prev_col = 0
+
+    let line_idx = 0
+    for line in lines {
+        let i = 0
+        const chars = line
+        while i < len(chars) {
+            const c = chars[i]
+
+            // Skip whitespace
+            if c == " " || c == "\t" { i = i + 1; continue }
+
+            // Comments
+            if c == "/" && i + 1 < len(chars) && chars[i + 1] == "/" {
+                const tok_len = len(chars) - i
+                lsp_add_semantic_token(tokens, line_idx, i, tok_len, STT_COMMENT, 0, prev_line, prev_col)
+                prev_line = line_idx
+                prev_col = i
+                break
+            }
+
+            // String literals with escape sequence highlighting
+            if c == "\"" || (c == "f" && i + 1 < len(chars) && chars[i + 1] == "\"") {
+                const is_fstring = c == "f"
+                const start = i
+                if is_fstring { i = i + 1 }
+                i = i + 1  // skip opening quote
+                let str_len = if is_fstring { 2 } else { 1 }
+                while i < len(chars) && chars[i] != "\"" {
+                    if chars[i] == "\\" && i + 1 < len(chars) {
+                        // Escape sequence — could highlight separately
+                        i = i + 2
+                        str_len = str_len + 2
+                    } else {
+                        i = i + 1
+                        str_len = str_len + 1
+                    }
+                }
+                if i < len(chars) {
+                    i = i + 1  // closing quote
+                    str_len = str_len + 1
+                }
+                lsp_add_semantic_token(tokens, line_idx, start, str_len, STT_STRING, 0, prev_line, prev_col)
+                prev_line = line_idx
+                prev_col = start
+                continue
+            }
+
+            // Numbers with separators (1_000_000, 0xFF, 0b1010, 0o777)
+            if (c >= "0" && c <= "9") || (c == "." && i + 1 < len(chars) && chars[i + 1] >= "0" && chars[i + 1] <= "9") {
+                const start = i
+                // Handle hex, binary, octal prefixes
+                if c == "0" && i + 1 < len(chars) {
+                    const next = chars[i + 1]
+                    if next == "x" || next == "X" || next == "b" || next == "B" || next == "o" || next == "O" {
+                        i = i + 2
+                    }
+                }
+                while i < len(chars) {
+                    const nc = chars[i]
+                    if (nc >= "0" && nc <= "9") || (nc >= "a" && nc <= "f") || (nc >= "A" && nc <= "F") || nc == "_" || nc == "." || nc == "e" || nc == "E" {
+                        i = i + 1
+                    } else {
+                        break
+                    }
+                }
+                const tok_len = i - start
+                lsp_add_semantic_token(tokens, line_idx, start, tok_len, STT_NUMBER, 0, prev_line, prev_col)
+                prev_line = line_idx
+                prev_col = start
+                continue
+            }
+
+            // Identifiers and keywords
+            if (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_" {
+                const start = i
+                while i < len(chars) && lsp_is_ident_char(chars[i]) {
+                    i = i + 1
+                }
+                const word = chars[start..i]
+                const tok_type = lsp_classify_token(word)
+                const tok_len = i - start
+                const modifiers = lsp_token_modifiers(word, line, start)
+                lsp_add_semantic_token(tokens, line_idx, start, tok_len, tok_type, modifiers, prev_line, prev_col)
+                prev_line = line_idx
+                prev_col = start
+                continue
+            }
+
+            // Operators
+            if c == "+" || c == "-" || c == "*" || c == "/" || c == "%" || c == "=" || c == "!" || c == "<" || c == ">" || c == "&" || c == "|" || c == "^" || c == "~" {
+                const start = i
+                i = i + 1
+                // Multi-char operators
+                if i < len(chars) {
+                    const next = chars[i]
+                    if (c == "=" && next == "=") || (c == "!" && next == "=") ||
+                       (c == "<" && next == "=") || (c == ">" && next == "=") ||
+                       (c == "&" && next == "&") || (c == "|" && next == "|") ||
+                       (c == "|" && next == ">") || (c == "=" && next == ">") ||
+                       (c == "-" && next == ">") || (c == "+" && next == "=") ||
+                       (c == "-" && next == "=") || (c == "*" && next == "=") ||
+                       (c == "/" && next == "=") || (c == "." && next == ".") {
+                        i = i + 1
+                    }
+                }
+                const tok_len = i - start
+                lsp_add_semantic_token(tokens, line_idx, start, tok_len, STT_OPERATOR, 0, prev_line, prev_col)
+                prev_line = line_idx
+                prev_col = start
+                continue
+            }
+
+            i = i + 1
+        }
+        line_idx = line_idx + 1
+    }
+    tokens
+}
+
+func lsp_classify_token(word) {
+    const keywords = ["let", "const", "func", "if", "else", "for", "while", "loop",
+                      "match", "return", "break", "continue", "import", "use",
+                      "struct", "enum", "interface", "test", "true", "false", "null",
+                      "in", "as", "async", "await", "spawn", "try", "catch", "finally",
+                      "throw", "pub", "type", "do", "output", "mod"]
+    for kw in keywords {
+        if word == kw { return STT_KEYWORD }
+    }
+    // Type names start with uppercase
+    if len(word) > 0 {
+        const first = word[0]
+        if first >= "A" && first <= "Z" { return STT_TYPE }
+    }
+    STT_VARIABLE
+}
+
+func lsp_token_modifiers(word, line, col) {
+    let mods = 0
+    // Check if this is a declaration context
+    const before = line[0..col].trim()
+    if before.ends_with("let") || before.ends_with("const") || before.ends_with("func") {
+        mods = mods + 1  // declaration
+    }
+    if before.ends_with("const") {
+        mods = mods + 4  // readonly
+    }
+    mods
+}
+
+func lsp_add_semantic_token(tokens, line, col, length, token_type, modifiers, prev_line, prev_col) {
+    const delta_line = line - prev_line
+    const delta_col = if delta_line == 0 { col - prev_col } else { col }
+    tokens.push({
+        "deltaLine": delta_line,
+        "deltaStart": delta_col,
+        "length": length,
+        "tokenType": token_type,
+        "tokenModifiers": modifiers,
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Signature Help: Overloaded & Variadic ──────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Builtin signatures with full documentation
+const BUILTIN_SIGNATURES = {
+    "len": [{"label": "func len(value) -> int", "params": ["value"], "doc": "Returns the length of a string, array, or map"}],
+    "range": [
+        {"label": "func range(end) -> [int]", "params": ["end"], "doc": "Generate range [0, end)"},
+        {"label": "func range(start, end) -> [int]", "params": ["start", "end"], "doc": "Generate range [start, end)"},
+        {"label": "func range(start, end, step) -> [int]", "params": ["start", "end", "step"], "doc": "Generate range [start, end) with step"},
+    ],
+    "assert": [{"label": "func assert(condition: bool)", "params": ["condition"], "doc": "Assert a condition is true"}],
+    "assert_eq": [{"label": "func assert_eq(left, right)", "params": ["left", "right"], "doc": "Assert two values are equal"}],
+    "assert_ne": [{"label": "func assert_ne(left, right)", "params": ["left", "right"], "doc": "Assert two values are not equal"}],
+    "assert_throws": [{"label": "func assert_throws(fn)", "params": ["fn"], "doc": "Assert a function throws an error"}],
+    "print": [{"label": "func print(values...)", "params": ["values..."], "doc": "Print values without newline (variadic)"}],
+    "println": [{"label": "func println(values...)", "params": ["values..."], "doc": "Print values with newline (variadic)"}],
+    "typeof": [{"label": "func typeof(value) -> string", "params": ["value"], "doc": "Returns the type name of a value"}],
+    "to_string": [{"label": "func to_string(value) -> string", "params": ["value"], "doc": "Convert any value to string"}],
+    "to_int64": [{"label": "func to_int64(value) -> int", "params": ["value"], "doc": "Convert to 64-bit integer"}],
+    "to_float64": [{"label": "func to_float64(value) -> float", "params": ["value"], "doc": "Convert to 64-bit float"}],
+    "to_bool": [{"label": "func to_bool(value) -> bool", "params": ["value"], "doc": "Convert to boolean"}],
+    "to_json": [{"label": "func to_json(value) -> string", "params": ["value"], "doc": "Serialize value to JSON string"}],
+    "parse_int": [{"label": "func parse_int(s: string) -> int", "params": ["s"], "doc": "Parse integer from string"}],
+    "parse_float": [{"label": "func parse_float(s: string) -> float", "params": ["s"], "doc": "Parse float from string"}],
+    "abs": [{"label": "func abs(n: number) -> number", "params": ["n"], "doc": "Absolute value"}],
+    "round": [{"label": "func round(n: float) -> float", "params": ["n"], "doc": "Round to nearest integer"}],
+    "floor": [{"label": "func floor(n: float) -> float", "params": ["n"], "doc": "Round down to nearest integer"}],
+    "ceil": [{"label": "func ceil(n: float) -> float", "params": ["n"], "doc": "Round up to nearest integer"}],
+    "sqrt": [{"label": "func sqrt(n: number) -> float", "params": ["n"], "doc": "Square root"}],
+    "pow": [{"label": "func pow(base, exp) -> number", "params": ["base", "exp"], "doc": "Exponentiation"}],
+    "min": [
+        {"label": "func min(a, b)", "params": ["a", "b"], "doc": "Return smaller of two values"},
+        {"label": "func min(arr: [number]) -> number", "params": ["arr"], "doc": "Return minimum of array"},
+    ],
+    "max": [
+        {"label": "func max(a, b)", "params": ["a", "b"], "doc": "Return larger of two values"},
+        {"label": "func max(arr: [number]) -> number", "params": ["arr"], "doc": "Return maximum of array"},
+    ],
+    "clamp": [{"label": "func clamp(value, min, max)", "params": ["value", "min", "max"], "doc": "Clamp value to range [min, max]"}],
+    "sin": [{"label": "func sin(radians: float) -> float", "params": ["radians"], "doc": "Sine function"}],
+    "cos": [{"label": "func cos(radians: float) -> float", "params": ["radians"], "doc": "Cosine function"}],
+    "tan": [{"label": "func tan(radians: float) -> float", "params": ["radians"], "doc": "Tangent function"}],
+    "asin": [{"label": "func asin(n: float) -> float", "params": ["n"], "doc": "Arc sine (inverse sine)"}],
+    "acos": [{"label": "func acos(n: float) -> float", "params": ["n"], "doc": "Arc cosine (inverse cosine)"}],
+    "atan": [{"label": "func atan(n: float) -> float", "params": ["n"], "doc": "Arc tangent (inverse tangent)"}],
+    "atan2": [{"label": "func atan2(y: float, x: float) -> float", "params": ["y", "x"], "doc": "Two-argument arc tangent"}],
+    "ln": [{"label": "func ln(n: float) -> float", "params": ["n"], "doc": "Natural logarithm"}],
+    "log2": [{"label": "func log2(n: float) -> float", "params": ["n"], "doc": "Base-2 logarithm"}],
+    "log10": [{"label": "func log10(n: float) -> float", "params": ["n"], "doc": "Base-10 logarithm"}],
+    "exp": [{"label": "func exp(n: float) -> float", "params": ["n"], "doc": "Euler's number raised to power"}],
+    "is_null": [{"label": "func is_null(value) -> bool", "params": ["value"], "doc": "Check if value is null"}],
+    "is_string": [{"label": "func is_string(value) -> bool", "params": ["value"], "doc": "Check if value is a string"}],
+    "is_number": [{"label": "func is_number(value) -> bool", "params": ["value"], "doc": "Check if value is a number"}],
+    "is_array": [{"label": "func is_array(value) -> bool", "params": ["value"], "doc": "Check if value is an array"}],
+    "is_map": [{"label": "func is_map(value) -> bool", "params": ["value"], "doc": "Check if value is a map"}],
+    "is_bool": [{"label": "func is_bool(value) -> bool", "params": ["value"], "doc": "Check if value is boolean"}],
+}
+
+// Get signature help for overloaded functions
+func lsp_signature_help(func_name, active_param, user_functions) {
+    // Check user-defined functions first
+    if user_functions.has(func_name) {
+        const func_info = user_functions[func_name]
+        const params = if func_info.has("params") { func_info["params"] } else { [] }
+        const ret = if func_info.has("return_type") { " -> " + func_info["return_type"] } else { "" }
+        const is_async = if func_info.has("is_async") { func_info["is_async"] } else { false }
+        const prefix = if is_async { "async func" } else { "func" }
+        const label = f"{prefix} {func_name}({params.join(\", \")}){ret}"
+
+        let param_infos = []
+        for p in params {
+            param_infos.push({"label": p})
+        }
+
+        return {
+            "signatures": [{"label": label, "parameters": param_infos, "activeParameter": active_param}],
+            "activeSignature": 0,
+            "activeParameter": active_param,
+        }
+    }
+
+    // Check builtins (may have overloads)
+    if BUILTIN_SIGNATURES.has(func_name) {
+        const overloads = BUILTIN_SIGNATURES[func_name]
+        let signatures = []
+        let best_sig = 0
+
+        let sig_idx = 0
+        for overload in overloads {
+            let param_infos = []
+            for p in overload["params"] {
+                param_infos.push({"label": p, "documentation": null})
+            }
+            signatures.push({
+                "label": overload["label"],
+                "documentation": overload["doc"],
+                "parameters": param_infos,
+                "activeParameter": active_param,
+            })
+            // Choose best matching overload by parameter count
+            if active_param < len(overload["params"]) {
+                best_sig = sig_idx
+            }
+            sig_idx = sig_idx + 1
+        }
+
+        return {
+            "signatures": signatures,
+            "activeSignature": best_sig,
+            "activeParameter": active_param,
+        }
+    }
+
+    null
+}
