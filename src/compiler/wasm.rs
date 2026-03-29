@@ -140,6 +140,17 @@ impl WasmCodegen {
                 (offset.saturating_add(size)) as i32
             }),
         );
+        // Auto-captured globals from IR compiler (i64 tagged values)
+        for _g in &ir.globals {
+            globals.global(
+                GlobalType {
+                    val_type: WasmValType::I64,
+                    mutable: true,
+                    shared: false,
+                },
+                &ConstExpr::i64_const(0),
+            );
+        }
         module.section(&globals);
 
         // ── Export section ────────────────────────────────────
@@ -488,10 +499,11 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::LocalTee(*idx));
             }
             Instruction::GlobalGet(idx) => {
-                f.instruction(&WasmInst::GlobalGet(*idx));
+                // Global 0 is heap pointer; IR globals start at index 1
+                f.instruction(&WasmInst::GlobalGet(*idx + 1));
             }
             Instruction::GlobalSet(idx) => {
-                f.instruction(&WasmInst::GlobalSet(*idx));
+                f.instruction(&WasmInst::GlobalSet(*idx + 1));
             }
 
             // ── Arithmetic (i64) ─────────────────────────
