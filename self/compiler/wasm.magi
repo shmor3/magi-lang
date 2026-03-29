@@ -526,8 +526,8 @@ func compile_to_wasm(module) {
 
 // ── NaN-Boxing Tag Constants ────────────────────────────────────────────
 
-const NANBOX_MASK = 0xFFF8000000000000
-const NANBOX_SIG  = 0xFFF8000000000000
+const NANBOX_MASK = -2251799813685248
+const NANBOX_SIG  = -2251799813685248
 const CANON_NAN   = 0x7FF8000000000000
 
 const TAG_NULL   = 0
