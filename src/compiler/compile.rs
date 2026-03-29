@@ -804,6 +804,11 @@ impl Compiler {
                 self.compile_expr(value)?;
                 let idx = self.define_local(name, ValType::Tagged, false)?;
                 self.emit(Instruction::LocalSet(idx));
+                if self.in_top_level {
+                    let gidx = self.define_global(name, false);
+                    self.emit(Instruction::LocalGet(idx));
+                    self.emit(Instruction::GlobalSet(gidx));
+                }
             }
 
             StatementKind::TryCatch {
