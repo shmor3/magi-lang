@@ -276,7 +276,7 @@ fn emit_native(
     link_args.push("-lm".into());
     link_args.push("-O2".into());
     if is_windows { link_args.push("-mwindows".into()); }
-    if is_macos {
+    if is_macos && std::env::consts::OS == "macos" {
         for fw in &["Cocoa", "IOKit", "CoreVideo", "CoreAudio", "AudioToolbox", "Carbon", "ForceFeedback"] {
             link_args.push("-framework".into());
             link_args.push(fw.to_string());
