@@ -290,8 +290,11 @@ fn emit_native(
     link_args.push(output_path.into());
     link_args.push("-lm".into());
     link_args.push("-O2".into());
-    // Windows: use console subsystem so printf works; SDL2 creates its own window
-    if is_windows { link_args.push("-mconsole".into()); }
+    // Windows: console subsystem + 8MB stack (default 1MB too small for deep RuntimeCall chains)
+    if is_windows {
+        link_args.push("-mconsole".into());
+        link_args.push("-Wl,--stack,8388608".into());
+    }
     if is_macos && std::env::consts::OS == "macos" {
         for fw in &["Cocoa", "IOKit", "CoreVideo", "CoreAudio", "AudioToolbox", "Carbon", "ForceFeedback"] {
             link_args.push("-framework".into());
@@ -313,17 +316,21 @@ fn emit_native(
 
 fn find_native_packages() -> Vec<String> {
     let mut dirs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let search_paths = ["packages", "../packages", "../../packages",
         "/home/dev/workspace/magi/magi-lang/packages"];
     for base in &search_paths {
         if let Ok(entries) = std::fs::read_dir(base) {
             for entry in entries.flatten() {
-                let pkg_dir = entry.path();
+                let pkg_dir = entry.path().canonicalize().unwrap_or(entry.path());
                 let toml = pkg_dir.join("magi.toml");
                 if toml.exists() {
                     if let Ok(content) = std::fs::read_to_string(&toml) {
                         if content.contains("[native]") {
-                            dirs.push(pkg_dir.to_string_lossy().to_string());
+                            let key = pkg_dir.to_string_lossy().to_string();
+                            if seen.insert(key.clone()) {
+                                dirs.push(key);
+                            }
                         }
                     }
                 }

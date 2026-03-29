@@ -667,8 +667,9 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     if (strcmp(name, "__bit_and") == 0) return magi_make_int(magi_as_int(a) & magi_as_int(b));
     if (strcmp(name, "__bit_or") == 0) return magi_make_int(magi_as_int(a) | magi_as_int(b));
     if (strcmp(name, "__bit_xor") == 0) return magi_make_int(magi_as_int(a) ^ magi_as_int(b));
-    if (strcmp(name, "__shl") == 0) return magi_make_int(magi_as_int(a) << (magi_as_int(b) & 63));
-    if (strcmp(name, "__shr") == 0) return magi_make_int(magi_as_int(a) >> (magi_as_int(b) & 63));
+    if (strcmp(name, "__shl") == 0 || strcmp(name, "__bit_shl") == 0) return magi_make_int(magi_as_int(a) << (magi_as_int(b) & 63));
+    if (strcmp(name, "__shr") == 0 || strcmp(name, "__bit_shr") == 0) return magi_make_int(magi_as_int(a) >> (magi_as_int(b) & 63));
+    if (strcmp(name, "__bit_andnot") == 0) return magi_make_int(magi_as_int(a) & ~magi_as_int(b));
     if (strcmp(name, "__bit_not") == 0) return magi_make_int(~magi_as_int(a));
 
     // Range
