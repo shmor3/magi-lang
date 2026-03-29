@@ -58,3 +58,98 @@ func platform_arch() { env_get("MAGI_BUILD_TARGET") ?? "unknown" }
 func platform_is_linux() { platform_os() == "linux" }
 func platform_is_macos() { platform_os() == "macos" }
 func platform_is_windows() { platform_os() == "windows" }
+
+// ── Terminal Dimensions ─────────────────────────────────────────────
+
+func platform_terminal_width() {
+    // Default 80 columns — stage 0 uses ioctl TIOCGWINSZ
+    const cols = env_get("COLUMNS")
+    if cols != null { return parse_int(cols) ?? 80 }
+    80
+}
+
+func platform_terminal_height() {
+    const rows = env_get("LINES")
+    if rows != null { return parse_int(rows) ?? 24 }
+    24
+}
+
+func platform_terminal_size() {
+    { "width": platform_terminal_width(), "height": platform_terminal_height() }
+}
+
+func platform_is_tty() {
+    // Check if stdout is a terminal
+    env_get("TERM") != null
+}
+
+func platform_supports_color() {
+    if env_get("NO_COLOR") != null { return false }
+    if env_get("MAGI_NO_COLOR") != null { return false }
+    const term = env_get("TERM") ?? ""
+    term.contains("color") || term.contains("xterm") || term.contains("screen") || term.contains("256")
+}
+
+// ── Environment Helpers ─────────────────────────────────────────────
+
+func platform_home_dir() {
+    env_get("HOME") ?? env_get("USERPROFILE") ?? "/"
+}
+
+func platform_temp_dir() {
+    env_get("TMPDIR") ?? env_get("TEMP") ?? env_get("TMP") ?? "/tmp"
+}
+
+func platform_path_separator() {
+    if platform_is_windows() { "\\" } else { "/" }
+}
+
+func platform_line_ending() {
+    if platform_is_windows() { "\r\n" } else { "\n" }
+}
+
+func platform_exe_extension() {
+    if platform_is_windows() { ".exe" } else { "" }
+}
+
+func platform_shared_lib_extension() {
+    if platform_is_macos() { ".dylib" }
+    else if platform_is_windows() { ".dll" }
+    else { ".so" }
+}
+
+// ── Process Info ────────────────────────────────────────────────────
+
+func platform_pid() { pid() }
+func platform_cwd() { cwd() }
+
+func platform_env_get(key) { env_get(key) }
+func platform_env_set(key, value) { env_set(key, value) }
+func platform_env_has(key) { env_has(key) }
+func platform_env_keys() { env_keys() }
+
+// ── SDL2 Scancode Constants ─────────────────────────────────────────
+
+const SCANCODE_A = 4
+const SCANCODE_B = 5
+const SCANCODE_C = 6
+const SCANCODE_D = 7
+const SCANCODE_W = 26
+const SCANCODE_S = 22
+const SCANCODE_SPACE = 44
+const SCANCODE_ESCAPE = 41
+const SCANCODE_RETURN = 40
+const SCANCODE_UP = 82
+const SCANCODE_DOWN = 81
+const SCANCODE_LEFT = 80
+const SCANCODE_RIGHT = 79
+const SCANCODE_LSHIFT = 225
+const SCANCODE_LCTRL = 224
+const SCANCODE_TAB = 43
+const SCANCODE_BACKSPACE = 42
+const SCANCODE_DELETE = 76
+const SCANCODE_F1 = 58
+const SCANCODE_F2 = 59
+const SCANCODE_F3 = 60
+const SCANCODE_F4 = 61
+const SCANCODE_F5 = 62
