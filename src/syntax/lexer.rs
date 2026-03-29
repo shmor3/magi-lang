@@ -990,7 +990,25 @@ impl<'a> Lexer<'a> {
 
         // Label: 'identifier (e.g. 'outer for labeled loops)
         if ch == b'\'' && self.peek_at(1).is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') {
+            // Could be a label OR a single-quoted string starting with a letter.
+            // Distinguish: if there's a closing ' before newline, it's a string.
+            let mut scan = 1;
+            let mut found_close = false;
+            while let Some(c) = self.peek_at(scan) {
+                if c == b'\'' { found_close = true; break; }
+                if c == b'\n' { break; }
+                scan += 1;
+            }
+            if found_close && scan > 2 {
+                // Multi-char content between quotes → single-quoted string
+                return self.lex_single_quote_string(start_line, start_col);
+            }
             return self.lex_label(start_line, start_col);
+        }
+
+        // Single-quoted string: 'hello world'
+        if ch == b'\'' {
+            return self.lex_single_quote_string(start_line, start_col);
         }
 
         if ch.is_ascii_alphabetic() || ch == b'_' {
@@ -1159,6 +1177,48 @@ impl<'a> Lexer<'a> {
                     });
                 }
                 Some(b'"') => { self.advance(); break; }
+                Some(b'\\') => {
+                    self.advance(); // consume backslash
+                    let ch = self.parse_escape_sequence()?;
+                    value.push(ch);
+                }
+                _ => {
+                    if let Some(ch) = self.advance_char() {
+                        value.push(ch);
+                    }
+                }
+            }
+            if value.len() > MAX_STRING_LEN {
+                return Err(SyntaxError {
+                    line: start_line as usize,
+                    column: start_col as usize,
+                    message: "String literal exceeds 10MB limit".to_string(),
+                    code: None,
+                });
+            }
+        }
+        Ok(Token {
+            kind: TokenKind::StringLiteral,
+            span: self.span_range(start_line, start_col, self.line, self.col - 1),
+            text: value,
+        })
+    }
+
+    fn lex_single_quote_string(&mut self, start_line: u32, start_col: u32) -> Result<Token, SyntaxError> {
+        const MAX_STRING_LEN: usize = 10_000_000;
+        self.advance(); // consume opening '
+        let mut value = String::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(SyntaxError {
+                        line: start_line as usize,
+                        column: start_col as usize,
+                        message: "Unterminated string literal".to_string(),
+                        code: None,
+                    });
+                }
+                Some(b'\'') => { self.advance(); break; }
                 Some(b'\\') => {
                     self.advance(); // consume backslash
                     let ch = self.parse_escape_sequence()?;
@@ -1449,22 +1509,32 @@ impl<'a> Lexer<'a> {
                 Some(b'"') if brace_depth == 0 => { self.advance(); break; }
                 Some(b'{') => {
                     self.advance();
-                    brace_depth += 1;
-                    value.push('{');
+                    // {{ is an escaped literal brace
+                    if brace_depth == 0 && self.peek() == Some(b'{') {
+                        self.advance();
+                        value.push('\u{FFF0}'); // sentinel for literal {
+                    } else {
+                        brace_depth += 1;
+                        value.push('{');
+                    }
                 }
                 Some(b'}') => {
                     self.advance();
                     if brace_depth > 0 {
                         brace_depth -= 1;
+                        value.push('}');
+                    } else if self.peek() == Some(b'}') {
+                        // }} is an escaped literal brace
+                        self.advance();
+                        value.push('\u{FFF1}'); // sentinel for literal }
                     } else {
                         return Err(SyntaxError {
                             line: self.line as usize,
                             column: self.col as usize,
-                            message: "Unmatched '}' in f-string; use '\\}' for a literal brace".to_string(),
+                            message: "Unmatched '}' in f-string; use '}}' for a literal brace".to_string(),
                             code: None,
                         });
                     }
-                    value.push('}');
                 }
                 Some(b'\\') if brace_depth == 0 => {
                     self.advance(); // consume backslash

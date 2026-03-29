@@ -3907,6 +3907,8 @@ impl Parser {
                 // Collect until matching '}', respecting string literals
                 let mut expr_str = String::new();
                 let mut depth = 1;
+                let mut format_spec = String::new();
+                let mut in_format_spec = false;
                 while let Some(inner) = chars.next() {
                     if inner == '\n' {
                         cur_line += 1;
@@ -3916,13 +3918,16 @@ impl Parser {
                     }
                     if inner == '{' {
                         depth += 1;
-                        expr_str.push(inner);
+                        if in_format_spec { format_spec.push(inner); } else { expr_str.push(inner); }
                     } else if inner == '}' {
                         depth -= 1;
                         if depth == 0 {
                             break;
                         }
-                        expr_str.push(inner);
+                        if in_format_spec { format_spec.push(inner); } else { expr_str.push(inner); }
+                    } else if !in_format_spec && inner == ':' && depth == 1 {
+                        // Format specifier: {expr:spec} — strip the spec, keep the expr
+                        in_format_spec = true;
                     } else if inner == '"' || inner == '\'' {
                         // Skip over string literals so braces inside don't affect depth
                         let quote = inner;
@@ -3950,7 +3955,7 @@ impl Parser {
                             }
                         }
                     } else {
-                        expr_str.push(inner);
+                        if in_format_spec { format_spec.push(inner); } else { expr_str.push(inner); }
                     }
                 }
                 if depth > 0 {
