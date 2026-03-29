@@ -6808,8 +6808,8 @@ func tc_check_enum_construct(enum_name, variant_name, args, line) {
 // SECTION: Integer Overflow Detection
 // ═══════════════════════════════════════════════════════════════════
 
-const MAX_SAFE_INT = 140737488355327
-const MIN_SAFE_INT = -140737488355327
+const MAX_SAFE_INT = 9007199254740991
+const MIN_SAFE_INT = -9007199254740991
 
 func tc_check_integer_overflow(val, line) {
     if typeof(val) == "int64" {

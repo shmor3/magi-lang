@@ -1533,14 +1533,6 @@ impl Compiler {
     fn compile_literal(&mut self, lit: &Literal) -> Result<(), CompileError> {
         match lit {
             Literal::Int64(n) => {
-                const MAX_I48: i64 = (1 << 47) - 1;
-                const MIN_I48: i64 = -(1 << 47);
-                if *n > MAX_I48 || *n < MIN_I48 {
-                    return Err(CompileError::Internal(format!(
-                        "integer literal {} exceeds WASM NaN-boxing 48-bit range [{}, {}]",
-                        n, MIN_I48, MAX_I48
-                    )));
-                }
                 self.emit(Instruction::PushI64(*n));
             }
             Literal::Float64(n) => self.emit(Instruction::PushF64(*n)),
