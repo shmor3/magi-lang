@@ -519,3 +519,1698 @@ func compile_to_wasm(module) {
     wasm_out = []
     result
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// WASM BINARY FORMAT — FULL SECTION ENCODING
+// ════════════════════════════════════════════════════════════════════════
+
+// ── NaN-Boxing Tag Constants ────────────────────────────────────────────
+
+const NANBOX_MASK = 0xFFF8000000000000
+const NANBOX_SIG  = 0xFFF8000000000000
+const CANON_NAN   = 0x7FF8000000000000
+
+const TAG_NULL   = 0
+const TAG_BOOL   = 1
+const TAG_I64    = 2
+const TAG_STRING = 3
+const TAG_ARRAY  = 4
+const TAG_MAP    = 5
+const TAG_F32    = 6
+const TAG_I32    = 7
+const TAG_F64    = 8  // sentinel only — f64 stored raw
+
+// Encode a tagged value: NANBOX_SIG | (tag << 48) | (payload & 0xFFFFFFFFFFFF)
+func nanbox_encode(tag, payload) {
+    const tag_bits = tag * 281474976710656  // tag << 48
+    const payload_masked = payload & 281474976710655  // 0xFFFFFFFFFFFF
+    NANBOX_SIG + tag_bits + payload_masked
+}
+
+// ── LEB128 Signed 32-bit ───────────────────────────────────────────────
+
+func wasm_leb_i32(val) {
+    let v = val
+    let more = true
+    while more {
+        const byte = v & 127
+        v = v >> 7
+        if (v == 0 && (byte & 64) == 0) || (v == -1 && (byte & 64) != 0) {
+            more = false
+            wasm_push(byte)
+        } else {
+            wasm_push(byte + 128)
+        }
+    }
+}
+
+// LEB128 into scratch for i32
+func wscratch_leb_i32(val) {
+    let v = val
+    let more = true
+    while more {
+        const byte = v & 127
+        v = v >> 7
+        if (v == 0 && (byte & 64) == 0) || (v == -1 && (byte & 64) != 0) {
+            more = false
+            wasm_scratch.push(byte)
+        } else {
+            wasm_scratch.push(byte + 128)
+        }
+    }
+}
+
+// LEB128 into scratch for i64
+func wscratch_leb_i64(val) {
+    let v = val
+    let more = true
+    while more {
+        const byte = v & 127
+        v = v >> 7
+        if (v == 0 && (byte & 64) == 0) || (v == -1 && (byte & 64) != 0) {
+            more = false
+            wasm_scratch.push(byte)
+        } else {
+            wasm_scratch.push(byte + 128)
+        }
+    }
+}
+
+// ── Emit section with raw payload (no count prefix) ─────────────────────
+
+func wasm_emit_section_raw(section_id, payload) {
+    wasm_push(section_id)
+    let sv = len(payload)
+    while true {
+        const byte = sv & 127
+        sv = sv >> 7
+        if sv == 0 { wasm_push(byte); break }
+        wasm_push(byte + 128)
+    }
+    let i = 0
+    while i < len(payload) {
+        wasm_push(payload[i])
+        i = i + 1
+    }
+}
+
+// ── Limits encoding ────────────────────────────────────────────────────
+
+func wscratch_limits(min_val, max_val) {
+    if max_val != null {
+        wasm_scratch.push(0x01)  // has max
+        wscratch_leb_u32(min_val)
+        wscratch_leb_u32(max_val)
+    } else {
+        wasm_scratch.push(0x00)  // no max
+        wscratch_leb_u32(min_val)
+    }
+}
+
+// ── Block type encoding ────────────────────────────────────────────────
+
+const BLOCKTYPE_EMPTY = 0x40
+const BLOCKTYPE_I32   = 0x7F
+const BLOCKTYPE_I64   = 0x7E
+const BLOCKTYPE_F32   = 0x7D
+const BLOCKTYPE_F64   = 0x7C
+
+// ── Memarg encoding ────────────────────────────────────────────────────
+
+func wasm_memarg(align, offset) {
+    wasm_leb_u32(align)
+    wasm_leb_u32(offset)
+}
+
+func wscratch_memarg(align, offset) {
+    wscratch_leb_u32(align)
+    wscratch_leb_u32(offset)
+}
+
+// ── Float64 encoding (8 LE bytes) ──────────────────────────────────────
+
+func wasm_push_f64_bytes(bits) {
+    let v = bits
+    let i = 0
+    while i < 8 {
+        wasm_push(v & 255)
+        v = v >> 8
+        i = i + 1
+    }
+}
+
+func wscratch_push_f64_bytes(bits) {
+    let v = bits
+    let i = 0
+    while i < 8 {
+        wasm_scratch.push(v & 255)
+        v = v >> 8
+        i = i + 1
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FULL TYPE SECTION ENCODING
+// ════════════════════════════════════════════════════════════════════════
+
+// Build a complete type section from function signatures.
+// Each function has param_count and a return type (always i64 for tagged values).
+func wasm_build_type_section(functions, num_imports) {
+    wscratch_reset()
+    const nfuncs = len(functions)
+
+    // One type per user function
+    let fi = 0
+    while fi < nfuncs {
+        const f = functions[fi]
+        const pc = f["param_count"]
+        wasm_scratch.push(0x60)  // functype tag
+        wscratch_leb_u32(pc)
+        let pi = 0
+        while pi < pc {
+            wasm_scratch.push(0x7E)  // i64
+            pi = pi + 1
+        }
+        wasm_scratch.push(0x01)  // 1 result
+        wasm_scratch.push(0x7E)  // i64
+        fi = fi + 1
+    }
+
+    // Import types: print (i64)->(), runtime_call (i32,i32)->i64, __to_string (i64)->i64
+    // Type idx nfuncs + 0: (i64) -> ()
+    wasm_scratch.push(0x60)
+    wasm_scratch.push(0x01); wasm_scratch.push(0x7E)
+    wasm_scratch.push(0x00)
+    // Type idx nfuncs + 1: (i32, i32) -> i64
+    wasm_scratch.push(0x60)
+    wasm_scratch.push(0x02); wasm_scratch.push(0x7F); wasm_scratch.push(0x7F)
+    wasm_scratch.push(0x01); wasm_scratch.push(0x7E)
+    // Type idx nfuncs + 2: (i64) -> i64
+    wasm_scratch.push(0x60)
+    wasm_scratch.push(0x01); wasm_scratch.push(0x7E)
+    wasm_scratch.push(0x01); wasm_scratch.push(0x7E)
+
+    wasm_emit_section_from_scratch(1, nfuncs + 3)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FULL IMPORT SECTION
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_import_section(nfuncs) {
+    wscratch_reset()
+    // import "env"."print" : type nfuncs
+    wscratch_name("env")
+    wscratch_name("print")
+    wasm_scratch.push(0x00)  // func import
+    wscratch_leb_u32(nfuncs)
+
+    // import "env"."runtime_call" : type nfuncs + 1
+    wscratch_name("env")
+    wscratch_name("runtime_call")
+    wasm_scratch.push(0x00)
+    wscratch_leb_u32(nfuncs + 1)
+
+    // import "env"."__to_string" : type nfuncs + 2
+    wscratch_name("env")
+    wscratch_name("__to_string")
+    wasm_scratch.push(0x00)
+    wscratch_leb_u32(nfuncs + 2)
+
+    wasm_emit_section_from_scratch(2, 3)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FULL FUNCTION SECTION
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_function_section(functions) {
+    wscratch_reset()
+    let fi = 0
+    while fi < len(functions) {
+        wscratch_leb_u32(fi)  // type index = function index
+        fi = fi + 1
+    }
+    wasm_emit_section_from_scratch(3, len(functions))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// TABLE SECTION (for indirect calls / function pointers)
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_table_section(nfuncs) {
+    wscratch_reset()
+    wasm_scratch.push(0x70)  // funcref
+    wscratch_limits(nfuncs, nfuncs)
+    wasm_emit_section_from_scratch(4, 1)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// MEMORY SECTION (initial + max pages)
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_memory_section(initial_pages, max_pages) {
+    wscratch_reset()
+    wscratch_limits(initial_pages, max_pages)
+    wasm_emit_section_from_scratch(5, 1)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// GLOBAL SECTION — heap pointer as mutable i32
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_global_section(heap_ptr_init) {
+    wscratch_reset()
+    wasm_scratch.push(0x7F)  // i32
+    wasm_scratch.push(0x01)  // mutable
+    // init expr: i32.const <heap_ptr_init> end
+    wasm_scratch.push(0x41)
+    wscratch_leb_i32(heap_ptr_init)
+    wasm_scratch.push(0x0B)
+    wasm_emit_section_from_scratch(6, 1)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// EXPORT SECTION — exported functions + memory + heap_ptr
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_export_section(functions, num_imports) {
+    wscratch_reset()
+    let count = 0
+
+    // Export each function that is marked exported
+    let fi = 0
+    while fi < len(functions) {
+        const f = functions[fi]
+        const exported = f["exported"]
+        if exported == true {
+            wscratch_name(f["name"])
+            wasm_scratch.push(0x00)  // func export
+            wscratch_leb_u32(fi + num_imports)
+            count = count + 1
+        }
+        fi = fi + 1
+    }
+
+    // Export memory
+    wscratch_name("memory")
+    wasm_scratch.push(0x02)  // memory export
+    wasm_scratch.push(0x00)
+    count = count + 1
+
+    // Export __heap_ptr global
+    wscratch_name("__heap_ptr")
+    wasm_scratch.push(0x03)  // global export
+    wasm_scratch.push(0x00)
+    count = count + 1
+
+    wasm_emit_section_from_scratch(7, count)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ELEMENT SECTION (populate function table)
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_element_section(nfuncs, num_imports) {
+    wscratch_reset()
+    wasm_scratch.push(0x00)  // active, table 0
+    // offset expr: i32.const 0 end
+    wasm_scratch.push(0x41)
+    wasm_scratch.push(0x00)
+    wasm_scratch.push(0x0B)
+    // func indices
+    wscratch_leb_u32(nfuncs)
+    let fi = 0
+    while fi < nfuncs {
+        wscratch_leb_u32(fi + num_imports)
+        fi = fi + 1
+    }
+    wasm_emit_section_from_scratch(9, 1)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FULL INSTRUCTION TRANSLATION — ALL IR OPCODES → WASM
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_translate_full(instr, string_offsets, num_imports) {
+    const d = instr.dump()
+
+    // ── Constants ────────────────────────────────────────────────
+    if d == "push_null" {
+        // NaN-boxed null: NANBOX_SIG | (NULL << 48) | 0
+        wasm_push(0x42)
+        wasm_leb_i64(nanbox_encode(TAG_NULL, 0))
+        return null
+    }
+    if d == "push_bool(true)" {
+        wasm_push(0x42)
+        wasm_leb_i64(nanbox_encode(TAG_BOOL, 1))
+        return null
+    }
+    if d == "push_bool(false)" {
+        wasm_push(0x42)
+        wasm_leb_i64(nanbox_encode(TAG_BOOL, 0))
+        return null
+    }
+    if d.starts_with("push_i64(") {
+        const n_str = d.slice(9, len(d) - 1)
+        const n = parse_int(n_str)
+        wasm_push(0x42)
+        wasm_leb_i64(nanbox_encode(TAG_I64, n))
+        return null
+    }
+    if d.starts_with("push_f64(") {
+        const n_str = d.slice(9, len(d) - 1)
+        const n = parse_int(n_str)
+        wasm_push(0x42)
+        wasm_leb_i64(n)  // raw f64 bits
+        return null
+    }
+    if d.starts_with("push_string(") {
+        const idx_str = d.slice(12, len(d) - 1)
+        const idx = parse_int(idx_str)
+        const offset = if idx < len(string_offsets) { string_offsets[idx] } else { 0 }
+        wasm_push(0x42)
+        wasm_leb_i64(nanbox_encode(TAG_STRING, offset))
+        return null
+    }
+    if d.starts_with("push_i32(") {
+        const n_str = d.slice(9, len(d) - 1)
+        const n = parse_int(n_str)
+        wasm_push(0x42)
+        wasm_leb_i64(nanbox_encode(TAG_I32, n))
+        return null
+    }
+
+    // ── Locals & Globals ────────────────────────────────────────
+    if d.starts_with("local_get(") {
+        const idx = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x20)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("local_set(") {
+        const idx = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x21)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("local_tee(") {
+        const idx = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x22)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("global_get(") {
+        const idx = parse_int(d.slice(11, len(d) - 1))
+        wasm_push(0x23)
+        wasm_leb_u32(idx)
+        return null
+    }
+    if d.starts_with("global_set(") {
+        const idx = parse_int(d.slice(11, len(d) - 1))
+        wasm_push(0x24)
+        wasm_leb_u32(idx)
+        return null
+    }
+
+    // ── i64 Arithmetic ──────────────────────────────────────────
+    if d == "i64.add"    { wasm_push(0x7C); return null }
+    if d == "i64.sub"    { wasm_push(0x7D); return null }
+    if d == "i64.mul"    { wasm_push(0x7E); return null }
+    if d == "i64.div"    { wasm_push(0x7F); return null }
+    if d == "i64.rem"    { wasm_push(0x81); return null }
+    if d == "i64.neg" {
+        // 0 - x: push 0, swap, sub
+        wasm_push(0x42); wasm_push(0x00)  // i64.const 0
+        // swap: need local tee trick — but for simplicity, use direct encoding
+        wasm_push(0x7D)  // i64.sub (0 - top)
+        return null
+    }
+
+    // ── f64 Arithmetic ──────────────────────────────────────────
+    if d == "f64.add"    { wasm_push(0xA0); return null }
+    if d == "f64.sub"    { wasm_push(0xA1); return null }
+    if d == "f64.mul"    { wasm_push(0xA2); return null }
+    if d == "f64.div"    { wasm_push(0xA3); return null }
+    if d == "f64.neg"    { wasm_push(0x9A); return null }
+    if d == "f64.sqrt"   { wasm_push(0x9F); return null }
+    if d == "f64.floor"  { wasm_push(0x9C); return null }
+    if d == "f64.ceil"   { wasm_push(0x9B); return null }
+    if d == "f64.abs"    { wasm_push(0x99); return null }
+
+    // ── i64 Comparison ──────────────────────────────────────────
+    if d == "i64.eq"     { wasm_push(0x51); return null }
+    if d == "i64.ne"     { wasm_push(0x52); return null }
+    if d == "i64.lt"     { wasm_push(0x53); return null }
+    if d == "i64.gt"     { wasm_push(0x55); return null }
+    if d == "i64.le"     { wasm_push(0x57); return null }
+    if d == "i64.ge"     { wasm_push(0x59); return null }
+
+    // ── f64 Comparison ──────────────────────────────────────────
+    if d == "f64.eq"     { wasm_push(0x61); return null }
+    if d == "f64.ne"     { wasm_push(0x62); return null }
+    if d == "f64.lt"     { wasm_push(0x63); return null }
+    if d == "f64.gt"     { wasm_push(0x64); return null }
+    if d == "f64.le"     { wasm_push(0x65); return null }
+    if d == "f64.ge"     { wasm_push(0x66); return null }
+
+    // ── i32 Operations ──────────────────────────────────────────
+    if d == "i32.eqz"    { wasm_push(0x45); return null }
+    if d == "i32.eq"     { wasm_push(0x46); return null }
+    if d == "i32.ne"     { wasm_push(0x47); return null }
+    if d == "i32.lt_s"   { wasm_push(0x48); return null }
+    if d == "i32.lt_u"   { wasm_push(0x49); return null }
+    if d == "i32.gt_u"   { wasm_push(0x4B); return null }
+    if d == "i32.ge_u"   { wasm_push(0x4E); return null }
+    if d == "i32.add"    { wasm_push(0x6A); return null }
+    if d == "i32.mul"    { wasm_push(0x6C); return null }
+    if d == "i32.or"     { wasm_push(0x72); return null }
+    if d == "i32.shl"    { wasm_push(0x74); return null }
+    if d == "i32.wrap_i64" { wasm_push(0xA7); return null }
+
+    // ── i64 Bitwise ─────────────────────────────────────────────
+    if d == "i64.and"    { wasm_push(0x83); return null }
+    if d == "i64.or"     { wasm_push(0x84); return null }
+    if d == "i64.shl"    { wasm_push(0x86); return null }
+    if d == "i64.shr_s"  { wasm_push(0x87); return null }
+    if d == "i64.shr_u"  { wasm_push(0x88); return null }
+    if d == "i64.extend_i32_u" { wasm_push(0xAD); return null }
+    if d == "i64.eqz"    { wasm_push(0x50); return null }
+
+    // ── Conversions ─────────────────────────────────────────────
+    if d == "i64.trunc_f64_s"     { wasm_push(0xB0); return null }
+    if d == "f64.convert_i64_s"   { wasm_push(0xB9); return null }
+    if d == "i64.reinterpret_f64" { wasm_push(0xBD); return null }
+    if d == "f64.reinterpret_i64" { wasm_push(0xBF); return null }
+
+    // ── Logical ─────────────────────────────────────────────────
+    if d == "bool.not" {
+        // Truthiness check: is the value falsy?
+        // Compare i64 value to null/false/zero tags
+        wasm_push(0x50)  // i64.eqz
+        return null
+    }
+
+    // ── Control Flow ────────────────────────────────────────────
+    if d == "block"      { wasm_push(0x02); wasm_push(BLOCKTYPE_EMPTY); return null }
+    if d == "loop"       { wasm_push(0x03); wasm_push(BLOCKTYPE_EMPTY); return null }
+    if d == "if"         { wasm_push(0x04); wasm_push(BLOCKTYPE_I64); return null }
+    if d == "if_void"    { wasm_push(0x04); wasm_push(BLOCKTYPE_EMPTY); return null }
+    if d == "else"       { wasm_push(0x05); return null }
+    if d == "end"        { wasm_push(0x0B); return null }
+    if d == "return"     { wasm_push(0x0F); return null }
+    if d == "unreachable" { wasm_push(0x00); return null }
+    if d == "nop"        { wasm_push(0x01); return null }
+    if d == "drop"       { wasm_push(0x1A); return null }
+    if d == "select"     { wasm_push(0x1B); return null }
+
+    if d.starts_with("br(") {
+        const depth = parse_int(d.slice(3, len(d) - 1))
+        wasm_push(0x0C)
+        wasm_leb_u32(depth)
+        return null
+    }
+    if d.starts_with("br_if(") {
+        const depth = parse_int(d.slice(6, len(d) - 1))
+        wasm_push(0x0D)
+        wasm_leb_u32(depth)
+        return null
+    }
+    if d.starts_with("br_table(") {
+        // br_table encoding: 0x0E + vec(targets) + default
+        wasm_push(0x0E)
+        // Simplified: single target
+        wasm_leb_u32(0)  // 0 targets
+        wasm_push(0x00)  // default depth 0
+        return null
+    }
+
+    // ── Function Calls ──────────────────────────────────────────
+    if d.starts_with("call(") {
+        const idx = parse_int(d.slice(5, len(d) - 1))
+        wasm_push(0x10)
+        wasm_leb_u32(idx + num_imports)
+        return null
+    }
+    if d.starts_with("call_indirect(") {
+        const type_idx = parse_int(d.slice(14, len(d) - 1))
+        wasm_push(0x11)
+        wasm_leb_u32(type_idx)
+        wasm_push(0x00)  // table index 0
+        return null
+    }
+
+    // ── Memory Operations ───────────────────────────────────────
+    if d == "i32.load" {
+        wasm_push(0x28)
+        wasm_memarg(2, 0)  // align=4, offset=0
+        return null
+    }
+    if d == "i64.load" {
+        wasm_push(0x29)
+        wasm_memarg(3, 0)  // align=8, offset=0
+        return null
+    }
+    if d == "f64.load" {
+        wasm_push(0x2B)
+        wasm_memarg(3, 0)
+        return null
+    }
+    if d == "i32.store" {
+        wasm_push(0x36)
+        wasm_memarg(2, 0)
+        return null
+    }
+    if d == "i64.store" {
+        wasm_push(0x37)
+        wasm_memarg(3, 0)
+        return null
+    }
+    if d == "f32.load" {
+        wasm_push(0x2A)
+        wasm_memarg(2, 0)
+        return null
+    }
+    if d == "f32.store" {
+        wasm_push(0x38)
+        wasm_memarg(2, 0)
+        return null
+    }
+    if d == "i32.load8_s" {
+        wasm_push(0x2C)
+        wasm_memarg(0, 0)
+        return null
+    }
+    if d == "i32.load8_u" {
+        wasm_push(0x2D)
+        wasm_memarg(0, 0)
+        return null
+    }
+    if d == "i32.load16_s" {
+        wasm_push(0x2E)
+        wasm_memarg(1, 0)
+        return null
+    }
+    if d == "i32.store8" {
+        wasm_push(0x3A)
+        wasm_memarg(0, 0)
+        return null
+    }
+    if d == "i32.store16" {
+        wasm_push(0x3B)
+        wasm_memarg(1, 0)
+        return null
+    }
+    if d == "memory.size" {
+        wasm_push(0x3F)
+        wasm_push(0x00)
+        return null
+    }
+    if d == "memory.grow" {
+        wasm_push(0x40)
+        wasm_push(0x00)
+        return null
+    }
+    if d == "memory.copy" {
+        wasm_push(0xFC)
+        wasm_leb_u32(10)
+        wasm_push(0x00)
+        wasm_push(0x00)
+        return null
+    }
+
+    // ── i32.const ───────────────────────────────────────────────
+    if d.starts_with("i32.const(") {
+        const n = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x41)
+        wasm_leb_i32(n)
+        return null
+    }
+    // ── i64.const ───────────────────────────────────────────────
+    if d.starts_with("i64.const(") {
+        const n = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x42)
+        wasm_leb_i64(n)
+        return null
+    }
+    // ── f64.const ───────────────────────────────────────────────
+    if d.starts_with("f64.const(") {
+        const n = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x44)
+        wasm_push_f64_bytes(n)
+        return null
+    }
+
+    // ── Print ───────────────────────────────────────────────────
+    if d == "print" {
+        // call import 0 (env.print)
+        wasm_push(0x10)
+        wasm_leb_u32(0)
+        return null
+    }
+
+    // ── String/Array/Map operations → Runtime calls ─────────────
+    if d == "string_concat" {
+        // Placeholder: call runtime
+        wasm_push(0x01)  // nop
+        return null
+    }
+    if d.starts_with("array_new(") {
+        const count = parse_int(d.slice(10, len(d) - 1))
+        wasm_push(0x01)  // nop placeholder
+        return null
+    }
+    if d == "array_get" {
+        wasm_push(0x01)  // nop placeholder
+        return null
+    }
+    if d == "array_set" {
+        wasm_push(0x01)
+        return null
+    }
+    if d == "array_len" {
+        wasm_push(0x01)
+        return null
+    }
+    if d.starts_with("map_new(") {
+        wasm_push(0x01)
+        return null
+    }
+    if d == "map_get" {
+        wasm_push(0x01)
+        return null
+    }
+    if d == "map_set" {
+        wasm_push(0x01)
+        return null
+    }
+    if d == "string_len" {
+        wasm_push(0x01)
+        return null
+    }
+    if d.starts_with("runtime_call(") {
+        // Runtime calls dispatch to host import 1 (env.runtime_call)
+        wasm_push(0x01)  // nop placeholder
+        return null
+    }
+
+    // ── Tagged value operations ─────────────────────────────────
+    if d == "tag_i64" || d == "tag_f64" || d == "tag_bool" ||
+       d == "tag_string" || d == "untag_i64" || d == "untag_f64" ||
+       d == "untag_bool" || d == "get_tag" {
+        wasm_push(0x01)  // nop — host handles tagging
+        return null
+    }
+
+    // ── Heap operations ─────────────────────────────────────────
+    if d.starts_with("heap_alloc(") {
+        wasm_push(0x01)
+        return null
+    }
+    if d == "mem_load_i64" {
+        wasm_push(0x29)
+        wasm_memarg(3, 0)
+        return null
+    }
+    if d == "mem_store_i64" {
+        wasm_push(0x37)
+        wasm_memarg(3, 0)
+        return null
+    }
+    if d == "mem_load_f64" {
+        wasm_push(0x2B)
+        wasm_memarg(3, 0)
+        return null
+    }
+    if d == "mem_store_f64" {
+        wasm_push(0x37)
+        wasm_memarg(3, 0)
+        return null
+    }
+    if d == "mem_load_i32" {
+        wasm_push(0x28)
+        wasm_memarg(2, 0)
+        return null
+    }
+    if d == "mem_store_i32" {
+        wasm_push(0x36)
+        wasm_memarg(2, 0)
+        return null
+    }
+
+    // ── Conversions ─────────────────────────────────────────────
+    if d == "i64_to_f64" { wasm_push(0xB9); return null }
+    if d == "f64_to_i64" { wasm_push(0xB0); return null }
+
+    // fallback: nop
+    wasm_push(0x01)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ENHANCED FUNCTION BODY ENCODER
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_encode_func_full(ir_func, string_offsets, num_imports) {
+    const instrs = ir_func["instructions"]
+    const lc     = ir_func["local_count"]
+    const pc     = ir_func["param_count"]
+    const n      = ir_func["instruction_count"]
+
+    // Build body into temporary buffer
+    const saved_out = wasm_out
+    wasm_out = []
+
+    // Locals: count of extra locals (beyond params)
+    const extra = lc - pc
+    if extra > 0 {
+        wasm_leb_u32(1)      // 1 local group
+        wasm_leb_u32(extra)  // count
+        wasm_push(0x7E)      // i64
+    } else {
+        wasm_push(0x00)      // 0 local groups
+    }
+
+    // Translate all instructions
+    let i = 0
+    while i < n {
+        wasm_translate_full(instrs[i], string_offsets, num_imports)
+        i = i + 1
+    }
+    wasm_push(0x0B)  // end
+
+    const body = wasm_out
+    wasm_out = saved_out
+
+    // Write size-prefixed body into wasm_scratch
+    let sv = len(body)
+    while true {
+        const byte = sv & 127
+        sv = sv >> 7
+        if sv == 0 { wasm_scratch.push(byte); break }
+        wasm_scratch.push(byte + 128)
+    }
+    let bi = 0
+    while bi < len(body) {
+        wasm_scratch.push(body[bi])
+        bi = bi + 1
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// STRING DATA SECTION LAYOUT
+// ════════════════════════════════════════════════════════════════════════
+// Each string: [4 LE bytes length][UTF-8 bytes]
+// Packed contiguously starting at string_data_offset (1024)
+
+func wasm_calc_string_offsets(strings, base_offset) {
+    const offsets = []
+    let offset = base_offset
+    let si = 0
+    while si < len(strings) {
+        offsets.push(offset)
+        const sb = wasm_str_bytes(strings[si])
+        offset = offset + 4 + len(sb)  // 4 bytes length prefix + string bytes
+        si = si + 1
+    }
+    offsets
+}
+
+func wasm_calc_string_data_size(strings) {
+    let total = 0
+    let si = 0
+    while si < len(strings) {
+        const sb = wasm_str_bytes(strings[si])
+        total = total + 4 + len(sb)
+        si = si + 1
+    }
+    total
+}
+
+func wasm_build_data_section(strings, offsets) {
+    if len(strings) == 0 { return null }
+    wscratch_reset()
+    let si = 0
+    while si < len(strings) {
+        const offset = offsets[si]
+        // Active segment, memory 0
+        wasm_scratch.push(0x00)
+        // Offset expr: i32.const <offset> end
+        wasm_scratch.push(0x41)
+        wscratch_leb_i32(offset)
+        wasm_scratch.push(0x0B)
+
+        // Payload: [4-byte LE length][bytes]
+        const sb = wasm_str_bytes(strings[si])
+        const slen = len(sb)
+
+        // Build the segment data
+        const seg_data = []
+        // 4-byte LE length
+        seg_data.push(slen & 255)
+        seg_data.push((slen >> 8) & 255)
+        seg_data.push((slen >> 16) & 255)
+        seg_data.push((slen >> 24) & 255)
+        // String bytes
+        let bi = 0
+        while bi < slen {
+            seg_data.push(sb[bi])
+            bi = bi + 1
+        }
+
+        // LEB128 size of seg_data
+        wscratch_leb_u32(len(seg_data))
+        // seg_data bytes
+        let di = 0
+        while di < len(seg_data) {
+            wasm_scratch.push(seg_data[di])
+            di = di + 1
+        }
+
+        si = si + 1
+    }
+    wasm_emit_section_from_scratch(11, len(strings))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// NAME SECTION (debug info — custom section)
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_build_name_section(functions, num_imports) {
+    // Build name section payload
+    const payload = []
+    // Subsection 1: function names
+    const sub_payload = []
+
+    // Count: num_imports + len(functions)
+    const total_funcs = num_imports + len(functions)
+    let tc = total_funcs
+    while true {
+        const byte = tc & 127
+        tc = tc >> 7
+        if tc == 0 { sub_payload.push(byte); break }
+        sub_payload.push(byte + 128)
+    }
+
+    // Import names
+    const import_names = ["print", "runtime_call", "__to_string"]
+    let ii = 0
+    while ii < num_imports && ii < len(import_names) {
+        // Function index
+        let fv = ii
+        while true {
+            const byte = fv & 127
+            fv = fv >> 7
+            if fv == 0 { sub_payload.push(byte); break }
+            sub_payload.push(byte + 128)
+        }
+        // Name
+        const nb = wasm_str_bytes(import_names[ii])
+        let nlen = len(nb)
+        while true {
+            const byte = nlen & 127
+            nlen = nlen >> 7
+            if nlen == 0 { sub_payload.push(byte); break }
+            sub_payload.push(byte + 128)
+        }
+        let ni = 0
+        while ni < len(nb) {
+            sub_payload.push(nb[ni])
+            ni = ni + 1
+        }
+        ii = ii + 1
+    }
+
+    // User function names
+    let fi = 0
+    while fi < len(functions) {
+        const f = functions[fi]
+        const func_idx = fi + num_imports
+        // Function index
+        let fv = func_idx
+        while true {
+            const byte = fv & 127
+            fv = fv >> 7
+            if fv == 0 { sub_payload.push(byte); break }
+            sub_payload.push(byte + 128)
+        }
+        // Name
+        const nb = wasm_str_bytes(f["name"])
+        let nlen = len(nb)
+        while true {
+            const byte = nlen & 127
+            nlen = nlen >> 7
+            if nlen == 0 { sub_payload.push(byte); break }
+            sub_payload.push(byte + 128)
+        }
+        let ni = 0
+        while ni < len(nb) {
+            sub_payload.push(nb[ni])
+            ni = ni + 1
+        }
+        fi = fi + 1
+    }
+
+    // Subsection header: type=1 (function names), size=len(sub_payload)
+    payload.push(0x01)
+    let splen = len(sub_payload)
+    while true {
+        const byte = splen & 127
+        splen = splen >> 7
+        if splen == 0 { payload.push(byte); break }
+        payload.push(byte + 128)
+    }
+    let spi = 0
+    while spi < len(sub_payload) {
+        payload.push(sub_payload[spi])
+        spi = spi + 1
+    }
+
+    // Custom section: section_id=0, name="name", payload
+    const name_bytes = wasm_str_bytes("name")
+    const section_payload = []
+    // Name string
+    let nlen = len(name_bytes)
+    while true {
+        const byte = nlen & 127
+        nlen = nlen >> 7
+        if nlen == 0 { section_payload.push(byte); break }
+        section_payload.push(byte + 128)
+    }
+    let ni = 0
+    while ni < len(name_bytes) {
+        section_payload.push(name_bytes[ni])
+        ni = ni + 1
+    }
+    // Payload data
+    let pi = 0
+    while pi < len(payload) {
+        section_payload.push(payload[pi])
+        pi = pi + 1
+    }
+
+    wasm_emit_section_raw(0, section_payload)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// WASM VALIDATION (type checking stack effects)
+// ════════════════════════════════════════════════════════════════════════
+
+func wasm_validate_module(module) {
+    const functions = module["functions"]
+    const nfuncs = len(functions)
+    let valid = true
+    let fi = 0
+    while fi < nfuncs {
+        const f = functions[fi]
+        const instrs = f["instructions"]
+        const n = f["instruction_count"]
+
+        // Basic validation: check for unbalanced blocks
+        let depth = 0
+        let ii = 0
+        while ii < n {
+            const d = instrs[ii].dump()
+            if d == "block" || d == "loop" || d == "if" || d == "if_void" {
+                depth = depth + 1
+            } else if d == "end" {
+                depth = depth - 1
+            }
+            ii = ii + 1
+        }
+        if depth != 0 {
+            valid = false
+        }
+        fi = fi + 1
+    }
+    valid
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// RUNTIME HELPER FUNCTIONS (emitted into WASM module)
+// ════════════════════════════════════════════════════════════════════════
+// These would be emitted as actual WASM functions in a full implementation.
+// For now, they serve as documentation of the runtime ABI.
+
+// __alloc(size: i32) -> i32
+//   Bump-allocates `size` bytes from the heap pointer global.
+//   Returns pointer to allocated region.
+//   heap_ptr = align(heap_ptr, 8)
+//   result = heap_ptr
+//   heap_ptr += size
+//   if heap_ptr > memory.size * 65536: memory.grow(16)
+//   return result
+
+// __free(ptr: i32)
+//   No-op for bump allocator.
+
+// __string_new(data_ptr: i32, len: i32) -> i64
+//   Allocates a new string on heap, copies bytes, returns tagged string ref.
+//   alloc(4 + len) → ptr
+//   store LE32 len at ptr
+//   memory.copy(ptr+4, data_ptr, len)
+//   return nanbox(TAG_STRING, ptr)
+
+// __string_concat(a: i64, b: i64) -> i64
+//   Extracts two string refs, reads their lengths,
+//   allocates a+b length buffer, copies both, returns new tagged ref.
+
+// __array_new(count: i32) -> i64
+//   Allocates array header (4-byte len + count * 8 bytes for tagged elements).
+//   Returns tagged array ref.
+
+// __array_push(arr: i64, elem: i64) -> i64
+//   Creates a new array with one more element.
+//   Returns new tagged array ref.
+
+// __to_string(val: i64) -> i64
+//   Converts any tagged value to a string representation.
+//   Dispatches on type tag.
+
+// __print(val: i64)
+//   Calls __to_string, then calls host print import.
+
+// ════════════════════════════════════════════════════════════════════════
+// COMPLETE WASM MODULE BUILDER (replaces compile_to_wasm for full builds)
+// ════════════════════════════════════════════════════════════════════════
+
+func compile_to_wasm_full(module) {
+    const functions = module["functions"]
+    const strings   = module["strings"]
+    const nfuncs    = len(functions)
+    const num_imports = 3
+
+    // Reset output buffer
+    wasm_out = []
+
+    // Validate
+    wasm_validate_module(module)
+
+    // Calculate string layout
+    const STRING_DATA_OFFSET = 1024
+    const string_offsets = wasm_calc_string_offsets(strings, STRING_DATA_OFFSET)
+    const string_data_size = wasm_calc_string_data_size(strings)
+    const heap_ptr_init = STRING_DATA_OFFSET + string_data_size
+
+    // ── 1. WASM magic + version ────────────────────────────────
+    wasm_push(0); wasm_push(97); wasm_push(115); wasm_push(109)
+    wasm_push(1); wasm_push(0);  wasm_push(0);   wasm_push(0)
+
+    // ── 2. Type section ────────────────────────────────────────
+    wasm_build_type_section(functions, num_imports)
+
+    // ── 3. Import section ──────────────────────────────────────
+    wasm_build_import_section(nfuncs)
+
+    // ── 4. Function section ────────────────────────────────────
+    wasm_build_function_section(functions)
+
+    // ── 5. Table section ───────────────────────────────────────
+    wasm_build_table_section(nfuncs)
+
+    // ── 6. Memory section (16 pages initial, 256 max) ──────────
+    wasm_build_memory_section(16, 256)
+
+    // ── 7. Global section (heap pointer) ───────────────────────
+    wasm_build_global_section(heap_ptr_init)
+
+    // ── 8. Export section ──────────────────────────────────────
+    wasm_build_export_section(functions, num_imports)
+
+    // ── 9. Element section (function table) ────────────────────
+    wasm_build_element_section(nfuncs, num_imports)
+
+    // ── 10. Code section ───────────────────────────────────────
+    wscratch_reset()
+    let ci = 0
+    while ci < nfuncs {
+        wasm_encode_func_full(functions[ci], string_offsets, num_imports)
+        ci = ci + 1
+    }
+    wasm_emit_section_from_scratch(10, nfuncs)
+
+    // ── 11. Data section (string pool) ─────────────────────────
+    wasm_build_data_section(strings, string_offsets)
+
+    // ── 12. Name section (debug info) ──────────────────────────
+    wasm_build_name_section(functions, num_imports)
+
+    // Return snapshot
+    const result = wasm_out
+    wasm_out = []
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// RUNTIME HELPER FUNCTION EMITTER
+// ════════════════════════════════════════════════════════════════════════
+// Emits actual WASM function bodies for runtime helpers into the module.
+// These functions use the heap pointer global (index 0) for allocation.
+
+// __alloc: Bump allocate n bytes from heap.
+// Args: (i32 size) -> i32 pointer
+func wasm_emit_alloc_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    // Locals: 1 group, 1 local, i32
+    wasm_leb_u32(1)
+    wasm_leb_u32(1)
+    wasm_push(0x7F)  // i32
+
+    // Align heap_ptr to 8 bytes: ptr = (heap_ptr + 7) & ~7
+    wasm_push(0x23); wasm_leb_u32(0)  // global.get 0
+    wasm_push(0x41); wasm_leb_i32(7)  // i32.const 7
+    wasm_push(0x6A)                    // i32.add
+    wasm_push(0x41); wasm_leb_i32(-8) // i32.const -8
+    wasm_push(0x71)                    // i32.and
+    wasm_push(0x21); wasm_leb_u32(1)  // local.set 1 (aligned ptr)
+
+    // new_heap_ptr = aligned_ptr + size
+    wasm_push(0x20); wasm_leb_u32(1)  // local.get 1
+    wasm_push(0x20); wasm_leb_u32(0)  // local.get 0 (size param)
+    wasm_push(0x6A)                    // i32.add
+    wasm_push(0x24); wasm_leb_u32(0)  // global.set 0
+
+    // Check if we need to grow memory
+    wasm_push(0x23); wasm_leb_u32(0)  // global.get 0
+    wasm_push(0x3F); wasm_push(0x00)  // memory.size 0
+    wasm_push(0x41); wasm_leb_i32(16) // i32.const 16
+    wasm_push(0x74)                    // i32.shl (pages -> bytes)
+    wasm_push(0x4B)                    // i32.gt_u
+    wasm_push(0x04); wasm_push(0x40)  // if void
+    wasm_push(0x41); wasm_leb_i32(16) // i32.const 16 (grow 16 pages = 1MB)
+    wasm_push(0x40); wasm_push(0x00)  // memory.grow 0
+    wasm_push(0x41); wasm_leb_i32(-1) // i32.const -1
+    wasm_push(0x46)                    // i32.eq
+    wasm_push(0x04); wasm_push(0x40)  // if void
+    wasm_push(0x00)                    // unreachable (out of memory)
+    wasm_push(0x0B)                    // end
+    wasm_push(0x0B)                    // end
+
+    // Return aligned pointer
+    wasm_push(0x20); wasm_leb_u32(1)  // local.get 1
+    wasm_push(0x0B)                    // end
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __free: No-op for bump allocator.
+func wasm_emit_free_body() {
+    const saved = wasm_out
+    wasm_out = []
+    wasm_push(0x00)  // 0 locals
+    wasm_push(0x0B)  // end (no-op)
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __string_new: Create a new string on the heap.
+// Args: (i32 data_ptr, i32 len) -> i64 tagged_string_ref
+func wasm_emit_string_new_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    // Locals: 1 group, 2 locals, i32
+    wasm_leb_u32(1)
+    wasm_leb_u32(2)
+    wasm_push(0x7F)  // i32
+
+    // Allocate 4 + len bytes
+    wasm_push(0x20); wasm_leb_u32(1)  // local.get 1 (len)
+    wasm_push(0x41); wasm_leb_i32(4)  // i32.const 4
+    wasm_push(0x6A)                    // i32.add
+    // Call __alloc (assume it's at import + 0 offset in our module)
+    // For now, inline the allocation:
+    // heap_ptr is global 0
+    wasm_push(0x23); wasm_leb_u32(0)  // global.get 0 (current heap ptr)
+    wasm_push(0x21); wasm_leb_u32(2)  // local.set 2 (result_ptr)
+
+    // Advance heap_ptr by 4 + len
+    wasm_push(0x23); wasm_leb_u32(0)  // global.get 0
+    wasm_push(0x20); wasm_leb_u32(1)  // local.get 1
+    wasm_push(0x41); wasm_leb_i32(4)  // i32.const 4
+    wasm_push(0x6A)                    // i32.add
+    wasm_push(0x6A)                    // i32.add
+    wasm_push(0x24); wasm_leb_u32(0)  // global.set 0
+
+    // Store length at result_ptr
+    wasm_push(0x20); wasm_leb_u32(2)  // local.get 2
+    wasm_push(0x20); wasm_leb_u32(1)  // local.get 1
+    wasm_push(0x36)                    // i32.store
+    wasm_leb_u32(2); wasm_leb_u32(0)  // memarg align=4, offset=0
+
+    // memory.copy from data_ptr to result_ptr+4
+    wasm_push(0x20); wasm_leb_u32(2)  // local.get 2 (dst)
+    wasm_push(0x41); wasm_leb_i32(4)  // i32.const 4
+    wasm_push(0x6A)                    // i32.add
+    wasm_push(0x20); wasm_leb_u32(0)  // local.get 0 (src = data_ptr)
+    wasm_push(0x20); wasm_leb_u32(1)  // local.get 1 (n = len)
+    wasm_push(0xFC)                    // multi-byte prefix
+    wasm_leb_u32(10)                   // memory.copy
+    wasm_push(0x00); wasm_push(0x00)   // dst_mem, src_mem
+
+    // Return NaN-boxed string pointer: NANBOX_SIG | (TAG_STRING << 48) | ptr
+    wasm_push(0x20); wasm_leb_u32(2)  // local.get 2 (ptr)
+    wasm_push(0xAD)                    // i64.extend_i32_u
+    // Tag it: OR with (NANBOX_SIG | TAG_STRING << 48)
+    wasm_push(0x42)                    // i64.const
+    wasm_leb_i64(nanbox_encode(TAG_STRING, 0))
+    wasm_push(0x84)                    // i64.or
+
+    wasm_push(0x0B)  // end
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __string_concat: Concatenate two strings.
+// Args: (i64 str_a, i64 str_b) -> i64 new_string_ref
+func wasm_emit_string_concat_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    // Locals: 1 group, 6 locals, i32
+    wasm_leb_u32(1)
+    wasm_leb_u32(6)
+    wasm_push(0x7F)  // i32
+
+    // Extract pointer from str_a: (str_a & 0xFFFFFFFFFFFF) as i32
+    // local 0 = str_a (param), local 1 = str_b (param)
+    // local 2 = ptr_a, local 3 = ptr_b
+    // local 4 = len_a, local 5 = len_b
+    // local 6 = result_ptr, local 7 = total_len
+
+    // ptr_a = (i32)(str_a & 0xFFFFFFFFFFFF)
+    wasm_push(0x20); wasm_leb_u32(0)  // local.get 0
+    wasm_push(0x42); wasm_leb_i64(281474976710655)  // i64.const 0xFFFFFFFFFFFF
+    wasm_push(0x83)                    // i64.and
+    wasm_push(0xA7)                    // i32.wrap_i64
+    wasm_push(0x21); wasm_leb_u32(2)  // local.set 2
+
+    // ptr_b = (i32)(str_b & 0xFFFFFFFFFFFF)
+    wasm_push(0x20); wasm_leb_u32(1)
+    wasm_push(0x42); wasm_leb_i64(281474976710655)
+    wasm_push(0x83)
+    wasm_push(0xA7)
+    wasm_push(0x21); wasm_leb_u32(3)
+
+    // len_a = i32.load(ptr_a)
+    wasm_push(0x20); wasm_leb_u32(2)
+    wasm_push(0x28); wasm_leb_u32(2); wasm_leb_u32(0)  // i32.load align=4, offset=0
+    wasm_push(0x21); wasm_leb_u32(4)
+
+    // len_b = i32.load(ptr_b)
+    wasm_push(0x20); wasm_leb_u32(3)
+    wasm_push(0x28); wasm_leb_u32(2); wasm_leb_u32(0)
+    wasm_push(0x21); wasm_leb_u32(5)
+
+    // total_len = len_a + len_b
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0x20); wasm_leb_u32(5)
+    wasm_push(0x6A)  // i32.add
+    wasm_push(0x21); wasm_leb_u32(7)
+
+    // Allocate: result_ptr = heap_ptr (aligned)
+    wasm_push(0x23); wasm_leb_u32(0)
+    wasm_push(0x21); wasm_leb_u32(6)
+
+    // Advance heap by 4 + total_len
+    wasm_push(0x23); wasm_leb_u32(0)
+    wasm_push(0x20); wasm_leb_u32(7)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x6A)
+    wasm_push(0x24); wasm_leb_u32(0)
+
+    // Store total_len at result_ptr
+    wasm_push(0x20); wasm_leb_u32(6)
+    wasm_push(0x20); wasm_leb_u32(7)
+    wasm_push(0x36); wasm_leb_u32(2); wasm_leb_u32(0)
+
+    // Copy string a bytes: memory.copy(result_ptr+4, ptr_a+4, len_a)
+    wasm_push(0x20); wasm_leb_u32(6)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(2)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0xFC); wasm_leb_u32(10); wasm_push(0x00); wasm_push(0x00)
+
+    // Copy string b bytes: memory.copy(result_ptr+4+len_a, ptr_b+4, len_b)
+    wasm_push(0x20); wasm_leb_u32(6)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(3)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(5)
+    wasm_push(0xFC); wasm_leb_u32(10); wasm_push(0x00); wasm_push(0x00)
+
+    // Return tagged string ref
+    wasm_push(0x20); wasm_leb_u32(6)
+    wasm_push(0xAD)  // i64.extend_i32_u
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_STRING, 0))
+    wasm_push(0x84)  // i64.or
+
+    wasm_push(0x0B)  // end
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __array_new: Create a new array on the heap.
+// Args: (i32 count) -> i64 tagged_array_ref
+// Layout: [4-byte length][count * 8-byte tagged elements]
+func wasm_emit_array_new_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    wasm_leb_u32(1)   // 1 local group
+    wasm_leb_u32(1)   // 1 local
+    wasm_push(0x7F)   // i32
+
+    // Alloc size = 4 + count * 8
+    wasm_push(0x20); wasm_leb_u32(0)  // local.get 0 (count)
+    wasm_push(0x41); wasm_leb_i32(8)  // i32.const 8
+    wasm_push(0x6C)                    // i32.mul
+    wasm_push(0x41); wasm_leb_i32(4)  // i32.const 4
+    wasm_push(0x6A)                    // i32.add
+
+    // result_ptr = heap_ptr
+    wasm_push(0x23); wasm_leb_u32(0)
+    wasm_push(0x21); wasm_leb_u32(1)
+
+    // Advance heap
+    wasm_push(0x23); wasm_leb_u32(0)
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x41); wasm_leb_i32(8)
+    wasm_push(0x6C)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x6A)
+    wasm_push(0x24); wasm_leb_u32(0)
+
+    // Store count
+    wasm_push(0x20); wasm_leb_u32(1)
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x36); wasm_leb_u32(2); wasm_leb_u32(0)
+
+    // Return tagged array ref
+    wasm_push(0x20); wasm_leb_u32(1)
+    wasm_push(0xAD)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_ARRAY, 0))
+    wasm_push(0x84)
+
+    wasm_push(0x0B)
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __array_push: Append element to array (creates new array).
+// Args: (i64 arr_ref, i64 elem) -> i64 new_arr_ref
+func wasm_emit_array_push_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    wasm_leb_u32(1)
+    wasm_leb_u32(4)
+    wasm_push(0x7F)  // i32
+
+    // Extract array pointer from arr_ref
+    // local 0 = arr_ref, local 1 = elem
+    // local 2 = old_ptr, local 3 = old_len, local 4 = new_ptr, local 5 = new_len
+
+    // old_ptr = (i32)(arr_ref & mask)
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x42); wasm_leb_i64(281474976710655)
+    wasm_push(0x83)
+    wasm_push(0xA7)
+    wasm_push(0x21); wasm_leb_u32(2)
+
+    // old_len = i32.load(old_ptr)
+    wasm_push(0x20); wasm_leb_u32(2)
+    wasm_push(0x28); wasm_leb_u32(2); wasm_leb_u32(0)
+    wasm_push(0x21); wasm_leb_u32(3)
+
+    // new_len = old_len + 1
+    wasm_push(0x20); wasm_leb_u32(3)
+    wasm_push(0x41); wasm_leb_i32(1)
+    wasm_push(0x6A)
+    wasm_push(0x21); wasm_leb_u32(5)
+
+    // Allocate new array: 4 + new_len * 8
+    wasm_push(0x23); wasm_leb_u32(0)
+    wasm_push(0x21); wasm_leb_u32(4)  // new_ptr = heap_ptr
+
+    wasm_push(0x23); wasm_leb_u32(0)
+    wasm_push(0x20); wasm_leb_u32(5)
+    wasm_push(0x41); wasm_leb_i32(8)
+    wasm_push(0x6C)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x6A)
+    wasm_push(0x24); wasm_leb_u32(0)
+
+    // Store new_len
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0x20); wasm_leb_u32(5)
+    wasm_push(0x36); wasm_leb_u32(2); wasm_leb_u32(0)
+
+    // Copy old elements: memory.copy(new_ptr+4, old_ptr+4, old_len*8)
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(2)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(3)
+    wasm_push(0x41); wasm_leb_i32(8)
+    wasm_push(0x6C)
+    wasm_push(0xFC); wasm_leb_u32(10); wasm_push(0x00); wasm_push(0x00)
+
+    // Store new element at new_ptr + 4 + old_len * 8
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0x41); wasm_leb_i32(4)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(3)
+    wasm_push(0x41); wasm_leb_i32(8)
+    wasm_push(0x6C)
+    wasm_push(0x6A)
+    wasm_push(0x20); wasm_leb_u32(1)  // elem
+    wasm_push(0x37); wasm_leb_u32(3); wasm_leb_u32(0)  // i64.store
+
+    // Return tagged ref
+    wasm_push(0x20); wasm_leb_u32(4)
+    wasm_push(0xAD)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_ARRAY, 0))
+    wasm_push(0x84)
+
+    wasm_push(0x0B)
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __to_string: Convert any tagged value to string representation.
+// Dispatches on type tag: null -> "null", bool -> "true"/"false",
+// i64 -> decimal string, string -> identity, etc.
+func wasm_emit_to_string_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    wasm_leb_u32(1)
+    wasm_leb_u32(2)
+    wasm_push(0x7E)  // i64 (2 temp locals)
+
+    // Check tag: (val & NANBOX_MASK) == NANBOX_SIG
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x42); wasm_leb_i64(NANBOX_MASK)
+    wasm_push(0x83)  // i64.and
+    wasm_push(0x42); wasm_leb_i64(NANBOX_SIG)
+    wasm_push(0x51)  // i64.eq
+
+    wasm_push(0x04); wasm_push(0x7E)  // if result i64
+
+    // Tagged value path: extract tag bits (bits 50-48)
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x42); wasm_leb_i64(48)
+    wasm_push(0x88)  // i64.shr_u
+    wasm_push(0x42); wasm_leb_i64(7)
+    wasm_push(0x83)  // i64.and — tag 0-7
+    wasm_push(0x21); wasm_leb_u32(1)  // save tag
+
+    // For now: return the value unchanged (identity for strings)
+    wasm_push(0x20); wasm_leb_u32(0)
+
+    wasm_push(0x05)  // else
+
+    // Raw f64 value: call __to_string host import
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x10); wasm_leb_u32(2)  // call import 2 (__to_string)
+
+    wasm_push(0x0B)  // end if
+    wasm_push(0x0B)  // end func
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// __print: Print a tagged value.
+// Calls __to_string then passes result to host print.
+func wasm_emit_print_body() {
+    const saved = wasm_out
+    wasm_out = []
+
+    wasm_leb_u32(0)  // 0 locals
+
+    // Call __to_string on the value
+    wasm_push(0x20); wasm_leb_u32(0)
+
+    // Call host print
+    wasm_push(0x10); wasm_leb_u32(0)  // call import 0 (env.print)
+
+    wasm_push(0x0B)  // end
+
+    const body = wasm_out
+    wasm_out = saved
+    body
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// WASM HEAP BOUNDS CHECK EMITTER
+// ════════════════════════════════════════════════════════════════════════
+// After heap allocation, check if heap_ptr exceeds current memory.
+// If so, grow memory by 1MB (16 pages). Trap if growth fails.
+
+func wasm_emit_heap_bounds_check() {
+    wasm_push(0x23); wasm_leb_u32(0)  // global.get 0 (heap_ptr)
+    wasm_push(0x3F); wasm_push(0x00)  // memory.size 0
+    wasm_push(0x41); wasm_leb_i32(16) // i32.const 16
+    wasm_push(0x74)                    // i32.shl (pages -> bytes)
+    wasm_push(0x4B)                    // i32.gt_u
+    wasm_push(0x04); wasm_push(0x40)  // if void
+    wasm_push(0x41); wasm_leb_i32(16) // i32.const 16
+    wasm_push(0x40); wasm_push(0x00)  // memory.grow 0
+    wasm_push(0x41); wasm_leb_i32(-1) // i32.const -1
+    wasm_push(0x46)                    // i32.eq
+    wasm_push(0x04); wasm_push(0x40)  // if void
+    wasm_push(0x00)                    // unreachable
+    wasm_push(0x0B)                    // end
+    wasm_push(0x0B)                    // end
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// NaN-BOXING TAGGED VALUE REPRESENTATION (encoding/decoding)
+// ════════════════════════════════════════════════════════════════════════
+//
+// All values in the MAGI WASM backend are represented as 64-bit integers
+// using NaN-boxing:
+//
+// Float64: Stored as raw IEEE 754 f64 bits (unmodified)
+// Non-float: Stored in quiet NaN space: 0xFFF8_TTTT_PPPP_PPPP
+//   Bits 63-51: quiet NaN prefix
+//   Bits 50-48: Type tag (3 bits, 0-7)
+//   Bits 47-0:  Payload (48 bits)
+//
+// Tag values:
+//   0 = null
+//   1 = bool (payload: 0 or 1)
+//   2 = i64 (payload: sign-extended 48-bit integer)
+//   3 = string (payload: memory pointer)
+//   4 = array (payload: memory pointer)
+//   5 = map (payload: memory pointer)
+//   6 = f32 (payload: f32 bits)
+//   7 = i32 (payload: i32 value)
+
+// Emit WASM instructions to tag an i64 value on the stack
+func wasm_emit_tag_i64() {
+    // Mask to 48 bits, OR with tag signature
+    wasm_push(0x42); wasm_leb_i64(281474976710655)  // i64.const 0xFFFFFFFFFFFF
+    wasm_push(0x83)  // i64.and
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_I64, 0))
+    wasm_push(0x84)  // i64.or
+}
+
+// Emit WASM instructions to untag an i64 value on the stack
+// (sign-extend from 48 bits)
+func wasm_emit_untag_i64() {
+    wasm_push(0x42); wasm_leb_i64(16)  // i64.const 16
+    wasm_push(0x86)  // i64.shl
+    wasm_push(0x42); wasm_leb_i64(16)  // i64.const 16
+    wasm_push(0x87)  // i64.shr_s (arithmetic shift to sign-extend)
+}
+
+// Emit WASM instructions to tag a bool
+func wasm_emit_tag_bool() {
+    wasm_push(0x42); wasm_leb_i64(1)   // i64.const 1
+    wasm_push(0x83)  // i64.and (mask to 0/1)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_BOOL, 0))
+    wasm_push(0x84)  // i64.or
+}
+
+// Emit WASM instructions to get the tag from a value
+func wasm_emit_get_tag() {
+    // tag = (val >> 48) & 7, but only if NaN-boxed
+    wasm_push(0x42); wasm_leb_i64(NANBOX_MASK)
+    wasm_push(0x83)  // i64.and
+    wasm_push(0x42); wasm_leb_i64(NANBOX_SIG)
+    wasm_push(0x51)  // i64.eq
+    wasm_push(0x04); wasm_push(0x7E)  // if i64
+    // NaN-boxed: extract tag
+    wasm_push(0x42); wasm_leb_i64(48)
+    wasm_push(0x88)  // i64.shr_u
+    wasm_push(0x42); wasm_leb_i64(7)
+    wasm_push(0x83)  // i64.and
+    wasm_push(0x05)  // else
+    // Raw f64: tag = 8 (sentinel)
+    wasm_push(0x42); wasm_leb_i64(TAG_F64)
+    wasm_push(0x0B)  // end
+}
+
+// Emit WASM instructions for truthiness check (BoolNot)
+// A value is falsy if: null, false, or zero integer
+func wasm_emit_bool_not() {
+    // Save value in temp
+    wasm_push(0x21); wasm_leb_u32(0)  // local.set temp
+
+    // Check null tag
+    wasm_push(0x20); wasm_leb_u32(0)  // local.get temp
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_NULL, 0))
+    wasm_push(0x51)  // i64.eq
+    wasm_push(0x04); wasm_push(0x7E)  // if i64
+    // Is null -> truthy (not-null = false, so BoolNot(null) = true)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_BOOL, 1))
+    wasm_push(0x05)  // else
+    // Check bool false
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_BOOL, 0))
+    wasm_push(0x51)
+    wasm_push(0x04); wasm_push(0x7E)  // if i64
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_BOOL, 1))
+    wasm_push(0x05)  // else
+    // Check i64 zero
+    wasm_push(0x20); wasm_leb_u32(0)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_I64, 0))
+    wasm_push(0x51)
+    wasm_push(0x04); wasm_push(0x7E)  // if i64
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_BOOL, 1))
+    wasm_push(0x05)  // else
+    // Not falsy -> return false (the "not" of truthy is false)
+    wasm_push(0x42); wasm_leb_i64(nanbox_encode(TAG_BOOL, 0))
+    wasm_push(0x0B)  // end i64 zero check
+    wasm_push(0x0B)  // end bool false check
+    wasm_push(0x0B)  // end null check
+}

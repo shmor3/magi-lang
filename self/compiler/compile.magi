@@ -478,18 +478,1473 @@ func compile_to_ir(program) {
     cc_param_count = 0
     cc_func_name = "__main"
     cc_saved_stack = []
+    cc_loop_stack = []
+    cc_block_depth = 0
+    cc_lambda_counter = 0
+    cc_deferred = []
 
-    // Compile all top-level statements
+    // First pass: register all function definitions
+    cc_register_functions(program)
+
+    // Second pass: compile top-level code into __main
     const stmts = program.statements
     let i = 0
     while i < len(stmts) {
         cc_compile_stmt(stmts[i])
         i = i + 1
     }
+    cc_emit(Instruction::PushNull)
     cc_emit(Instruction::Return)
 
     // Finalize __main
     cc_finish_func()
 
+    // Third pass: compile function bodies
+    let fi = 0
+    while fi < len(stmts) {
+        const stmt = stmts[fi]
+        const kind = stmt.kind
+        match kind {
+            StmtKind::SFuncDef(fdef) => {
+                cc_compile_function_def(fdef)
+            },
+            _ => {},
+        }
+        fi = fi + 1
+    }
+
     ir_snapshot()
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// EXTENDED COMPILER STATE
+// ════════════════════════════════════════════════════════════════════════
+
+// Loop context stack for break/continue
+let cc_loop_stack = []    // each: { "break_depth", "continue_depth" }
+let cc_block_depth = 0    // WASM structured block nesting depth
+let cc_lambda_counter = 0 // counter for generating unique lambda names
+let cc_deferred = []      // deferred expressions (from defer statements)
+
+// Function index map (name -> index)
+let cc_fn_index = {}
+
+// ── Block depth tracking ────────────────────────────────────────────
+
+func cc_emit_tracked(instr) {
+    const d = instr.dump()
+    if d == "block" || d == "loop" || d == "if" || d == "if_void" {
+        cc_block_depth = cc_block_depth + 1
+    } else if d == "end" {
+        if cc_block_depth > 0 {
+            cc_block_depth = cc_block_depth - 1
+        }
+    }
+    cc_emit(instr)
+}
+
+// ── Function Registration (Pass 1) ─────────────────────────────────
+
+func cc_register_functions(program) {
+    // Reserve index 0 for __main
+    cc_fn_index["__main"] = 0
+    let next_idx = 1
+
+    // Register builtins
+    const builtins = ["println", "print", "len", "typeof", "assert",
+                      "assert_eq", "to_string", "parse_int", "parse_float",
+                      "push", "array_push", "pop", "range", "debug_log",
+                      "map_get", "map_set", "map_from_entries"]
+    let bi = 0
+    while bi < len(builtins) {
+        const bname = builtins[bi]
+        if cc_fn_index[bname] == null {
+            cc_fn_index[bname] = next_idx
+            next_idx = next_idx + 1
+        }
+        bi = bi + 1
+    }
+
+    // Register user-defined functions
+    const stmts = program.statements
+    let i = 0
+    while i < len(stmts) {
+        const stmt = stmts[i]
+        const kind = stmt.kind
+        match kind {
+            StmtKind::SFuncDef(fdef) => {
+                if cc_fn_index[fdef.name] == null {
+                    cc_fn_index[fdef.name] = next_idx
+                    next_idx = next_idx + 1
+                }
+            },
+            _ => {},
+        }
+        i = i + 1
+    }
+}
+
+// ── Compile full function definition ────────────────────────────────
+
+func cc_compile_function_def(fdef) {
+    cc_save_func()
+    cc_instrs = []
+    cc_locals = []
+    cc_param_count = len(fdef.params)
+    cc_func_name = fdef.name
+    cc_block_depth = 0
+    cc_loop_stack = []
+
+    // Register params as locals
+    let pi = 0
+    while pi < len(fdef.params) {
+        const param = fdef.params[pi]
+        cc_define_local(param.name)
+        pi = pi + 1
+    }
+
+    // Compile body
+    const body = fdef.body
+    cc_compile_block(body)
+
+    // Emit deferred before implicit return
+    if len(cc_deferred) > 0 {
+        cc_emit_deferred()
+    }
+
+    cc_emit(Instruction::Return)
+    cc_finish_func()
+    cc_restore_func()
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// COMPILE BLOCK
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_block(block) {
+    const stmts = block.stmts
+    let i = 0
+    while i < len(stmts) {
+        cc_compile_stmt(stmts[i])
+        i = i + 1
+    }
+    if block.tail_expr != null {
+        cc_compile_expr(block.tail_expr)
+    } else {
+        cc_emit(Instruction::PushNull)
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FULL EXPRESSION COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_expr_full(expr) {
+    const kind = expr.kind
+    match kind {
+        ExprKind::ELiteral(lit) => cc_compile_literal(lit),
+        ExprKind::EVariable(name) => cc_compile_variable_full(name),
+        ExprKind::EBinaryOp(op, left, right) => cc_compile_binop_full(op, left, right),
+        ExprKind::EUnaryOp(op, operand) => cc_compile_unaryop(op, operand),
+        ExprKind::ECall(name, args, _) => cc_compile_call_full(name, args),
+        ExprKind::EMethodCall(obj, method, args, _) => cc_compile_method_call_full(obj, method, args),
+        ExprKind::EIfElse(cond, then_b, else_b) => cc_compile_if_else_expr(cond, then_b, else_b),
+        ExprKind::EBlock(block) => cc_compile_block(block),
+        ExprKind::EStringInterp(parts) => cc_compile_string_interp(parts),
+        ExprKind::EIndex(obj, idx) => cc_compile_index(obj, idx),
+        ExprKind::EFieldAccess(obj, field) => cc_compile_field_access(obj, field),
+        ExprKind::ERange(start, end_val, inclusive) => cc_compile_range(start, end_val, inclusive),
+        ExprKind::ELambda(params, body) => cc_compile_lambda(params, body),
+        ExprKind::EPipe(left, right) => cc_compile_pipe(left, right),
+        ExprKind::EMatch(value, arms) => cc_compile_match(value, arms),
+        ExprKind::ENullCoalesce(left, right) => cc_compile_null_coalesce(left, right),
+        ExprKind::EOptionalChain(obj, field) => cc_compile_optional_chain(obj, field),
+        ExprKind::ESpread(inner) => cc_compile_expr(inner),
+        ExprKind::ETryCatchExpr(try_b, var, catch_b, finally_b) => {
+            cc_compile_try_catch_expr(try_b, var, catch_b, finally_b)
+        },
+        ExprKind::EListComprehension(expr_inner, pattern, iterable, cond) => {
+            cc_compile_list_comprehension(expr_inner, pattern, iterable, cond)
+        },
+        ExprKind::EEnumConstruct(name, variant, args) => {
+            cc_compile_enum_construct(name, variant, args)
+        },
+        ExprKind::EStructConstruct(name, fields) => {
+            cc_compile_struct_construct(name, fields)
+        },
+        ExprKind::ETupleLiteral(exprs) => {
+            let i = 0
+            while i < len(exprs) {
+                cc_compile_expr(exprs[i])
+                i = i + 1
+            }
+            cc_emit(Instruction::ArrayNew(len(exprs)))
+        },
+        ExprKind::ELoop(_, body) => cc_compile_infinite_loop(body),
+        ExprKind::EAwait(inner) => cc_compile_expr(inner),
+        ExprKind::ESpawn(inner) => cc_compile_expr(inner),
+        ExprKind::EPlaceholder => cc_emit(Instruction::PushNull),
+        ExprKind::ERef(inner) => cc_compile_expr(inner),
+        ExprKind::EMoveClosure(params, body) => cc_compile_lambda(params, body),
+        _ => cc_emit(Instruction::PushNull),
+    }
+}
+
+// ── Variable with function resolution ───────────────────────────────
+
+func cc_compile_variable_full(name) {
+    const local_idx = cc_resolve_local(name)
+    if local_idx >= 0 {
+        cc_emit(Instruction::LocalGet(local_idx))
+    } else if cc_fn_index[name] != null {
+        // Function reference — push index for indirect calls
+        cc_emit(Instruction::PushI64(cc_fn_index[name]))
+    } else {
+        const gi = cc_resolve_global(name)
+        if gi >= 0 {
+            cc_emit(Instruction::GlobalGet(gi))
+        } else {
+            cc_emit(Instruction::PushNull)
+        }
+    }
+}
+
+// ── Binary operation with short-circuit ─────────────────────────────
+
+func cc_compile_binop_full(op, left, right) {
+    match op {
+        BinOp::And => {
+            // Short-circuit &&: evaluate left; if falsy, use left; else evaluate right
+            cc_compile_expr(left)
+            const temp = cc_define_local("__and_temp")
+            cc_emit(Instruction::LocalSet(temp))
+            cc_emit_tracked(Instruction::Block)
+            cc_emit_tracked(Instruction::Block)
+            cc_emit(Instruction::LocalGet(temp))
+            cc_emit(Instruction::BoolNot)
+            cc_emit(Instruction::BrIf(0))
+            cc_compile_expr(right)
+            cc_emit(Instruction::LocalSet(temp))
+            cc_emit_tracked(Instruction::End)
+            cc_emit_tracked(Instruction::End)
+            cc_emit(Instruction::LocalGet(temp))
+        },
+        BinOp::Or => {
+            // Short-circuit ||: evaluate left; if truthy, use left; else evaluate right
+            cc_compile_expr(left)
+            const temp = cc_define_local("__or_temp")
+            cc_emit(Instruction::LocalSet(temp))
+            cc_emit_tracked(Instruction::Block)
+            cc_emit_tracked(Instruction::Block)
+            cc_emit(Instruction::LocalGet(temp))
+            cc_emit(Instruction::BrIf(0))
+            cc_compile_expr(right)
+            cc_emit(Instruction::LocalSet(temp))
+            cc_emit_tracked(Instruction::End)
+            cc_emit_tracked(Instruction::End)
+            cc_emit(Instruction::LocalGet(temp))
+        },
+        _ => {
+            cc_compile_expr(left)
+            cc_compile_expr(right)
+            cc_compile_binop(op, left, right)
+        },
+    }
+}
+
+// ── Call with function index resolution ─────────────────────────────
+
+func cc_compile_call_full(name, args) {
+    let i = 0
+    while i < len(args) {
+        cc_compile_expr(args[i])
+        i = i + 1
+    }
+
+    if cc_fn_index[name] != null {
+        cc_emit(Instruction::Call(name, len(args)))
+    } else {
+        cc_emit(Instruction::Call(name, len(args)))
+    }
+}
+
+// ── Method call compilation ─────────────────────────────────────────
+
+func cc_compile_method_call_full(obj, method, args) {
+    cc_compile_expr(obj)
+    let i = 0
+    while i < len(args) {
+        cc_compile_expr(args[i])
+        i = i + 1
+    }
+    cc_emit(Instruction::Call(method, len(args) + 1))
+}
+
+// ── Index access ────────────────────────────────────────────────────
+
+func cc_compile_index(obj, idx) {
+    cc_compile_expr(obj)
+    cc_compile_expr(idx)
+    cc_emit(Instruction::ArrayGet)
+}
+
+// ── Field access → map get ──────────────────────────────────────────
+
+func cc_compile_field_access(obj, field) {
+    cc_compile_expr(obj)
+    const key = cc_intern(field)
+    cc_emit(Instruction::PushString(key))
+    cc_emit(Instruction::Call("map_get", 2))
+}
+
+// ── Range expression ────────────────────────────────────────────────
+
+func cc_compile_range(start, end_val, inclusive) {
+    cc_compile_expr(start)
+    cc_compile_expr(end_val)
+    if inclusive {
+        cc_emit(Instruction::PushBool(true))
+    } else {
+        cc_emit(Instruction::PushBool(false))
+    }
+    cc_emit(Instruction::Call("__range", 3))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// CLOSURE / LAMBDA COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_lambda(params, body) {
+    const lambda_name = "__lambda_" + to_string(cc_lambda_counter)
+    cc_lambda_counter = cc_lambda_counter + 1
+
+    // Save current context
+    cc_save_func()
+    cc_instrs = []
+    cc_locals = []
+    cc_param_count = len(params)
+    cc_func_name = lambda_name
+    cc_block_depth = 0
+
+    // Register params
+    let pi = 0
+    while pi < len(params) {
+        cc_define_local(params[pi].name)
+        pi = pi + 1
+    }
+
+    // Compile lambda body
+    cc_compile_expr(body)
+    cc_emit(Instruction::Return)
+    cc_finish_func()
+    cc_restore_func()
+
+    // Push function reference
+    cc_emit(Instruction::PushI64(cc_fn_index[lambda_name]))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// STRING INTERPOLATION COMPILATION (concat segments)
+// ════════════════════════════════════════════════════════════════════════
+
+// (Already implemented above, keeping the existing cc_compile_string_interp)
+
+// ════════════════════════════════════════════════════════════════════════
+// MATCH EXPRESSION COMPILATION (decision tree)
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_match(value, arms) {
+    cc_compile_expr(value)
+    const val_local = cc_define_local("__match_val")
+    cc_emit(Instruction::LocalSet(val_local))
+
+    let if_count = 0
+    let ai = 0
+    while ai < len(arms) {
+        const arm = arms[ai]
+        const is_last = ai == len(arms) - 1
+        const pattern = arm.pattern
+        const body = arm.body
+        const guard = arm.guard
+
+        match pattern {
+            MatchPattern::Wildcard => {
+                cc_compile_block(body)
+            },
+            MatchPattern::Variable(name) => {
+                cc_emit(Instruction::LocalGet(val_local))
+                const idx = cc_define_local(name)
+                cc_emit(Instruction::LocalSet(idx))
+                cc_compile_block(body)
+            },
+            MatchPattern::LiteralPat(lit) => {
+                cc_emit(Instruction::LocalGet(val_local))
+                cc_compile_literal(lit)
+                cc_emit(Instruction::I64Eq)
+                if guard != null {
+                    cc_emit(Instruction::If)
+                    if_count = if_count + 1
+                    cc_compile_expr(guard)
+                    cc_emit(Instruction::If)
+                    if_count = if_count + 1
+                    cc_compile_block(body)
+                    cc_emit(Instruction::Else)
+                    if is_last { cc_emit(Instruction::PushNull) }
+                    cc_emit(Instruction::End)
+                    if_count = if_count - 1
+                    cc_emit(Instruction::Else)
+                    if is_last { cc_emit(Instruction::PushNull) }
+                } else {
+                    cc_emit(Instruction::If)
+                    if_count = if_count + 1
+                    cc_compile_block(body)
+                    cc_emit(Instruction::Else)
+                    if is_last { cc_emit(Instruction::PushNull) }
+                }
+            },
+            _ => {
+                // Complex pattern: runtime matching fallback
+                cc_emit(Instruction::LocalGet(val_local))
+                cc_emit(Instruction::Call("__match_pattern", 1))
+                cc_emit(Instruction::If)
+                if_count = if_count + 1
+                cc_compile_block(body)
+                cc_emit(Instruction::Else)
+                if is_last { cc_emit(Instruction::PushNull) }
+            },
+        }
+        ai = ai + 1
+    }
+
+    // Close all open if blocks
+    let ci = 0
+    while ci < if_count {
+        cc_emit(Instruction::End)
+        ci = ci + 1
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// STRUCT / ENUM CONSTRUCTION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_enum_construct(enum_name, variant, args) {
+    // Build map: {"__enum": name, "__variant": variant, "__data": [args]}
+    const enum_key = cc_intern("__enum")
+    const variant_key = cc_intern("__variant")
+    const data_key = cc_intern("__data")
+    const enum_val = cc_intern(enum_name)
+    const variant_val = cc_intern(variant)
+
+    cc_emit(Instruction::PushString(enum_key))
+    cc_emit(Instruction::PushString(enum_val))
+    cc_emit(Instruction::PushString(variant_key))
+    cc_emit(Instruction::PushString(variant_val))
+    cc_emit(Instruction::PushString(data_key))
+
+    let i = 0
+    while i < len(args) {
+        cc_compile_expr(args[i])
+        i = i + 1
+    }
+    cc_emit(Instruction::ArrayNew(len(args)))
+    // MapNew expects 3 pairs already on stack
+    cc_emit(Instruction::Call("__map_new", 3))
+}
+
+func cc_compile_struct_construct(name, fields) {
+    // Build map: {"__struct": name, field1: val1, ...}
+    const struct_key = cc_intern("__struct")
+    const struct_val = cc_intern(name)
+    cc_emit(Instruction::PushString(struct_key))
+    cc_emit(Instruction::PushString(struct_val))
+
+    let i = 0
+    while i < len(fields) {
+        const field = fields[i]
+        const key = cc_intern(field[0])
+        cc_emit(Instruction::PushString(key))
+        cc_compile_expr(field[1])
+        i = i + 1
+    }
+
+    cc_emit(Instruction::Call("__map_new", len(fields) + 1))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// PIPE OPERATOR COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_pipe(left, right) {
+    cc_compile_expr(left)
+    const pipe_local = cc_define_local("__pipe")
+    cc_emit(Instruction::LocalSet(pipe_local))
+
+    const rk = right.kind
+    match rk {
+        ExprKind::ECall(name, args, _) => {
+            // Check for placeholder
+            let has_placeholder = false
+            let ai = 0
+            while ai < len(args) {
+                const ak = args[ai].kind
+                match ak {
+                    ExprKind::EPlaceholder => { has_placeholder = true },
+                    _ => {},
+                }
+                ai = ai + 1
+            }
+
+            if has_placeholder {
+                ai = 0
+                while ai < len(args) {
+                    const ak = args[ai].kind
+                    match ak {
+                        ExprKind::EPlaceholder => {
+                            cc_emit(Instruction::LocalGet(pipe_local))
+                        },
+                        _ => {
+                            cc_compile_expr(args[ai])
+                        },
+                    }
+                    ai = ai + 1
+                }
+                cc_emit(Instruction::Call(name, len(args)))
+            } else {
+                // No placeholder: pipe value is first argument
+                cc_emit(Instruction::LocalGet(pipe_local))
+                ai = 0
+                while ai < len(args) {
+                    cc_compile_expr(args[ai])
+                    ai = ai + 1
+                }
+                cc_emit(Instruction::Call(name, len(args) + 1))
+            }
+        },
+        _ => {
+            // General case: compile right as function, call with left as arg
+            cc_emit(Instruction::LocalGet(pipe_local))
+            cc_compile_expr(right)
+            cc_emit(Instruction::Call("__call_indirect", 2))
+        },
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// SPREAD OPERATOR COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_spread_array(elems) {
+    // Check if any element has spread
+    let has_spread = false
+    let ei = 0
+    while ei < len(elems) {
+        const ek = elems[ei].kind
+        match ek {
+            ExprKind::ESpread(_) => { has_spread = true },
+            _ => {},
+        }
+        ei = ei + 1
+    }
+
+    if has_spread {
+        // Build incrementally: start empty, append each
+        cc_emit(Instruction::ArrayNew(0))
+        const arr_local = cc_define_local("__spread_arr")
+        cc_emit(Instruction::LocalSet(arr_local))
+
+        ei = 0
+        while ei < len(elems) {
+            const ek = elems[ei].kind
+            match ek {
+                ExprKind::ESpread(inner) => {
+                    cc_emit(Instruction::LocalGet(arr_local))
+                    cc_compile_expr(inner)
+                    cc_emit(Instruction::Call("__array_spread", 2))
+                    cc_emit(Instruction::LocalSet(arr_local))
+                },
+                _ => {
+                    cc_emit(Instruction::LocalGet(arr_local))
+                    cc_compile_expr(elems[ei])
+                    cc_emit(Instruction::Call("array_push", 2))
+                    cc_emit(Instruction::LocalSet(arr_local))
+                },
+            }
+            ei = ei + 1
+        }
+        cc_emit(Instruction::LocalGet(arr_local))
+    } else {
+        // No spread: compile normally
+        ei = 0
+        while ei < len(elems) {
+            cc_compile_expr(elems[ei])
+            ei = ei + 1
+        }
+        cc_emit(Instruction::ArrayNew(len(elems)))
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// COMPREHENSION COMPILATION (desugar to loop + push)
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_list_comprehension(expr_inner, pattern, iterable, condition) {
+    // Desugar: [expr for pattern in iterable if condition]
+    // → result = []; for pattern in iterable { if condition { result.push(expr) } }; result
+
+    cc_emit(Instruction::ArrayNew(0))
+    const result_local = cc_define_local("__comp_result")
+    cc_emit(Instruction::LocalSet(result_local))
+
+    // Evaluate iterable
+    cc_compile_expr(iterable)
+    const iter_local = cc_define_local("__comp_iter")
+    cc_emit(Instruction::LocalSet(iter_local))
+
+    // Counter
+    cc_emit(Instruction::PushI64(0))
+    const counter_local = cc_define_local("__comp_i")
+    cc_emit(Instruction::LocalSet(counter_local))
+
+    // Loop
+    cc_emit_tracked(Instruction::Loop)
+
+    // Check: counter >= len(iter)
+    cc_emit(Instruction::LocalGet(counter_local))
+    cc_emit(Instruction::LocalGet(iter_local))
+    cc_emit(Instruction::RuntimeCall("array_len"))
+    cc_emit(Instruction::I64Ge)
+    cc_emit(Instruction::BrIf(1))
+
+    // Bind pattern variable
+    cc_emit(Instruction::LocalGet(iter_local))
+    cc_emit(Instruction::LocalGet(counter_local))
+    cc_emit(Instruction::ArrayGet)
+
+    match pattern {
+        ForPattern::Single(name) => {
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        _ => {
+            const idx = cc_define_local("__comp_elem")
+            cc_emit(Instruction::LocalSet(idx))
+        },
+    }
+
+    // Apply condition if present
+    if condition != null {
+        cc_compile_expr(condition)
+        cc_emit_tracked(Instruction::IfVoid)
+    }
+
+    // Compile expression and push to result
+    cc_emit(Instruction::LocalGet(result_local))
+    cc_compile_expr(expr_inner)
+    cc_emit(Instruction::Call("array_push", 2))
+    cc_emit(Instruction::LocalSet(result_local))
+
+    if condition != null {
+        cc_emit_tracked(Instruction::End)
+    }
+
+    // Increment counter
+    cc_emit(Instruction::LocalGet(counter_local))
+    cc_emit(Instruction::PushI64(1))
+    cc_emit(Instruction::I64Add)
+    cc_emit(Instruction::LocalSet(counter_local))
+
+    // Loop back
+    cc_emit(Instruction::Br(0))
+    cc_emit_tracked(Instruction::End)
+
+    cc_emit(Instruction::LocalGet(result_local))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// NULL COALESCE COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_null_coalesce(left, right) {
+    cc_compile_expr(left)
+    const temp = cc_define_local("__coalesce_temp")
+    cc_emit(Instruction::LocalSet(temp))
+    cc_emit(Instruction::LocalGet(temp))
+    // Check if null: compare with null tag
+    cc_emit(Instruction::PushNull)
+    cc_emit(Instruction::I64Eq)
+    cc_emit(Instruction::If)
+    cc_compile_expr(right)
+    cc_emit(Instruction::Else)
+    cc_emit(Instruction::LocalGet(temp))
+    cc_emit(Instruction::End)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// OPTIONAL CHAINING COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_optional_chain(obj, field) {
+    cc_compile_expr(obj)
+    const temp = cc_define_local("__chain_temp")
+    cc_emit(Instruction::LocalSet(temp))
+    cc_emit(Instruction::LocalGet(temp))
+    cc_emit(Instruction::PushNull)
+    cc_emit(Instruction::I64Eq)
+    cc_emit(Instruction::If)
+    cc_emit(Instruction::PushNull)
+    cc_emit(Instruction::Else)
+    cc_emit(Instruction::LocalGet(temp))
+    const key = cc_intern(field)
+    cc_emit(Instruction::PushString(key))
+    cc_emit(Instruction::Call("map_get", 2))
+    cc_emit(Instruction::End)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// TRY-CATCH EXPRESSION COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_try_catch_expr(try_block, catch_var, catch_block, finally_block) {
+    // WASM has no exception handling — compile try as primary path
+    cc_compile_block(try_block)
+    const result_local = cc_define_local("__try_result")
+    cc_emit(Instruction::LocalSet(result_local))
+
+    // Dead code branch for catch
+    cc_emit(Instruction::PushBool(false))
+    cc_emit_tracked(Instruction::IfVoid)
+    if catch_var != null {
+        cc_emit(Instruction::PushNull)
+        const catch_idx = cc_define_local(catch_var)
+        cc_emit(Instruction::LocalSet(catch_idx))
+    }
+    cc_compile_block(catch_block)
+    cc_emit(Instruction::LocalSet(result_local))
+    cc_emit_tracked(Instruction::End)
+
+    // Finally block if present
+    if finally_block != null {
+        cc_compile_block(finally_block)
+        cc_emit(Instruction::Drop)
+    }
+
+    cc_emit(Instruction::LocalGet(result_local))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// INFINITE LOOP COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_infinite_loop(body) {
+    cc_emit_tracked(Instruction::Block)
+    const break_depth = cc_block_depth
+    cc_emit_tracked(Instruction::Loop)
+    const continue_depth = cc_block_depth
+
+    cc_loop_stack.push({ "break_depth": break_depth, "continue_depth": continue_depth })
+
+    cc_compile_block(body)
+    cc_emit(Instruction::Drop)
+
+    const continue_offset = cc_block_depth - continue_depth
+    cc_emit(Instruction::Br(continue_offset))
+    cc_emit_tracked(Instruction::End)
+    cc_emit_tracked(Instruction::End)
+
+    cc_loop_stack = cc_loop_stack.slice(0, len(cc_loop_stack) - 1)
+    cc_emit(Instruction::PushNull)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// DEFER COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_emit_deferred() {
+    let i = len(cc_deferred) - 1
+    while i >= 0 {
+        cc_compile_expr(cc_deferred[i])
+        cc_emit(Instruction::Drop)
+        i = i - 1
+    }
+    cc_deferred = []
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FULL STATEMENT COMPILATION (all statement types)
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_stmt_full(stmt) {
+    const kind = stmt.kind
+    match kind {
+        StmtKind::SOutput(expr) => {
+            cc_compile_expr(expr)
+            cc_emit(Instruction::Print)
+        },
+        StmtKind::SLet(name, expr) => {
+            cc_compile_expr(expr)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SLetMut(name, expr) => {
+            cc_compile_expr(expr)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SConst(name, expr) => {
+            cc_compile_expr(expr)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SAssignment(name, expr) => {
+            cc_compile_expr(expr)
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalSet(local_idx))
+            } else {
+                let gi = cc_resolve_global(name)
+                if gi < 0 {
+                    ir_globals.push(name)
+                    gi = len(ir_globals) - 1
+                }
+                cc_emit(Instruction::GlobalSet(gi))
+            }
+        },
+        StmtKind::SCompoundAssign(name, op, expr) => {
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalGet(local_idx))
+                cc_compile_expr(expr)
+                match op {
+                    BinOp::Add => cc_emit(Instruction::I64Add),
+                    BinOp::Sub => cc_emit(Instruction::I64Sub),
+                    BinOp::Mul => cc_emit(Instruction::I64Mul),
+                    BinOp::Div => cc_emit(Instruction::I64Div),
+                    BinOp::Mod => cc_emit(Instruction::I64Rem),
+                    _ => {},
+                }
+                cc_emit(Instruction::LocalSet(local_idx))
+            }
+        },
+        StmtKind::SReturn(expr) => {
+            if expr != null {
+                cc_compile_expr(expr)
+            } else {
+                cc_emit(Instruction::PushNull)
+            }
+            // Emit deferred before return
+            if len(cc_deferred) > 0 {
+                cc_emit_deferred()
+            }
+            cc_emit(Instruction::Return)
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            cc_emit_tracked(Instruction::Block)
+            const break_depth = cc_block_depth
+            cc_emit_tracked(Instruction::Loop)
+            const continue_depth = cc_block_depth
+            cc_loop_stack.push({ "break_depth": break_depth, "continue_depth": continue_depth })
+            cc_compile_expr(cond)
+            cc_emit(Instruction::BoolNot)
+            const cond_offset = cc_block_depth - break_depth
+            cc_emit(Instruction::BrIf(cond_offset))
+            const bstmts = body.stmts
+            let wi = 0
+            while wi < len(bstmts) {
+                cc_compile_stmt(bstmts[wi])
+                wi = wi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            const cont_offset = cc_block_depth - continue_depth
+            cc_emit(Instruction::Br(cont_offset))
+            cc_emit_tracked(Instruction::End)
+            cc_emit_tracked(Instruction::End)
+            cc_loop_stack = cc_loop_stack.slice(0, len(cc_loop_stack) - 1)
+        },
+        StmtKind::SForLoop(var_name, iterable, body, _) => {
+            cc_compile_expr(iterable)
+            const iter_idx = cc_define_local("__iter_arr")
+            cc_emit(Instruction::LocalSet(iter_idx))
+            cc_emit(Instruction::PushI64(0))
+            const i_idx = cc_define_local("__iter_i")
+            cc_emit(Instruction::LocalSet(i_idx))
+            const var_idx = cc_define_local(var_name)
+            cc_emit(Instruction::PushNull)
+            cc_emit(Instruction::LocalSet(var_idx))
+            cc_emit_tracked(Instruction::Block)
+            const break_depth = cc_block_depth
+            cc_emit_tracked(Instruction::Loop)
+            const continue_depth = cc_block_depth
+            cc_loop_stack.push({ "break_depth": break_depth, "continue_depth": continue_depth })
+            cc_emit(Instruction::LocalGet(i_idx))
+            cc_emit(Instruction::LocalGet(iter_idx))
+            cc_emit(Instruction::RuntimeCall("array_len"))
+            cc_emit(Instruction::I64Ge)
+            const cond_offset = cc_block_depth - break_depth
+            cc_emit(Instruction::BrIf(cond_offset))
+            cc_emit(Instruction::LocalGet(iter_idx))
+            cc_emit(Instruction::LocalGet(i_idx))
+            cc_emit(Instruction::ArrayGet)
+            cc_emit(Instruction::LocalSet(var_idx))
+            const fstmts = body.stmts
+            let fi = 0
+            while fi < len(fstmts) {
+                cc_compile_stmt(fstmts[fi])
+                fi = fi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            cc_emit(Instruction::LocalGet(i_idx))
+            cc_emit(Instruction::PushI64(1))
+            cc_emit(Instruction::I64Add)
+            cc_emit(Instruction::LocalSet(i_idx))
+            const cont_offset = cc_block_depth - continue_depth
+            cc_emit(Instruction::Br(cont_offset))
+            cc_emit_tracked(Instruction::End)
+            cc_emit_tracked(Instruction::End)
+            cc_loop_stack = cc_loop_stack.slice(0, len(cc_loop_stack) - 1)
+        },
+        StmtKind::SIf(cond, then_b, else_b) => {
+            cc_compile_expr(cond)
+            cc_emit_tracked(Instruction::IfVoid)
+            const tstmts = then_b.stmts
+            let ti = 0
+            while ti < len(tstmts) {
+                cc_compile_stmt(tstmts[ti])
+                ti = ti + 1
+            }
+            if then_b.tail_expr != null {
+                cc_compile_expr(then_b.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            if else_b != null {
+                cc_emit(Instruction::Else)
+                const estmts = else_b.stmts
+                let ei = 0
+                while ei < len(estmts) {
+                    cc_compile_stmt(estmts[ei])
+                    ei = ei + 1
+                }
+                if else_b.tail_expr != null {
+                    cc_compile_expr(else_b.tail_expr)
+                    cc_emit(Instruction::Drop)
+                }
+            }
+            cc_emit_tracked(Instruction::End)
+        },
+        StmtKind::SFuncDef(fdef) => {
+            // Already compiled in third pass
+        },
+        StmtKind::SExprStmt(expr) => {
+            cc_compile_expr(expr)
+            cc_emit(Instruction::Drop)
+        },
+        StmtKind::SIncrement(name) => {
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalGet(local_idx))
+                cc_emit(Instruction::PushI64(1))
+                cc_emit(Instruction::I64Add)
+                cc_emit(Instruction::LocalSet(local_idx))
+            }
+        },
+        StmtKind::SDecrement(name) => {
+            const local_idx = cc_resolve_local(name)
+            if local_idx >= 0 {
+                cc_emit(Instruction::LocalGet(local_idx))
+                cc_emit(Instruction::PushI64(1))
+                cc_emit(Instruction::I64Sub)
+                cc_emit(Instruction::LocalSet(local_idx))
+            }
+        },
+        StmtKind::SBreak(_, value) => {
+            if value != null {
+                cc_compile_expr(value)
+                cc_emit(Instruction::Drop)
+            }
+            const n = len(cc_loop_stack)
+            if n > 0 {
+                const ctx = cc_loop_stack[n - 1]
+                const br_label = cc_block_depth - ctx["break_depth"]
+                cc_emit(Instruction::Br(br_label))
+            }
+        },
+        StmtKind::SContinue(_) => {
+            const n = len(cc_loop_stack)
+            if n > 0 {
+                const ctx = cc_loop_stack[n - 1]
+                const br_label = cc_block_depth - ctx["continue_depth"]
+                cc_emit(Instruction::Br(br_label))
+            }
+        },
+        StmtKind::SDefer(expr) => {
+            cc_deferred.push(expr)
+        },
+        StmtKind::SThrow(expr) => {
+            cc_compile_expr(expr)
+            cc_emit(Instruction::Drop)
+            cc_emit(Instruction::PushNull)  // Unreachable placeholder
+        },
+        StmtKind::STryCatch(try_b, var, catch_b, finally_b) => {
+            cc_compile_block(try_b)
+            cc_emit(Instruction::Drop)
+            cc_emit(Instruction::PushBool(false))
+            cc_emit_tracked(Instruction::IfVoid)
+            if var != null {
+                cc_emit(Instruction::PushNull)
+                const catch_idx = cc_define_local(var)
+                cc_emit(Instruction::LocalSet(catch_idx))
+            }
+            cc_compile_block(catch_b)
+            cc_emit(Instruction::Drop)
+            cc_emit_tracked(Instruction::End)
+            if finally_b != null {
+                cc_compile_block(finally_b)
+                cc_emit(Instruction::Drop)
+            }
+        },
+        StmtKind::SFieldAssign(obj, field, value) => {
+            cc_compile_expr(obj)
+            const key = cc_intern(field)
+            cc_emit(Instruction::PushString(key))
+            cc_compile_expr(value)
+            cc_emit(Instruction::Call("map_set", 3))
+            cc_emit(Instruction::Drop)
+        },
+        StmtKind::SIndexAssign(obj, idx, value) => {
+            cc_compile_expr(obj)
+            cc_compile_expr(idx)
+            cc_compile_expr(value)
+            cc_emit(Instruction::Call("array_set", 3))
+            cc_emit(Instruction::Drop)
+        },
+        StmtKind::SDoWhile(body, cond, _) => {
+            cc_emit_tracked(Instruction::Block)
+            const break_depth = cc_block_depth
+            cc_emit_tracked(Instruction::Loop)
+            const continue_depth = cc_block_depth
+            cc_loop_stack.push({ "break_depth": break_depth, "continue_depth": continue_depth })
+            const bstmts = body.stmts
+            let bi = 0
+            while bi < len(bstmts) {
+                cc_compile_stmt(bstmts[bi])
+                bi = bi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            cc_compile_expr(cond)
+            cc_emit(Instruction::BoolNot)
+            const cond_offset = cc_block_depth - break_depth
+            cc_emit(Instruction::BrIf(cond_offset))
+            const cont_offset = cc_block_depth - continue_depth
+            cc_emit(Instruction::Br(cont_offset))
+            cc_emit_tracked(Instruction::End)
+            cc_emit_tracked(Instruction::End)
+            cc_loop_stack = cc_loop_stack.slice(0, len(cc_loop_stack) - 1)
+        },
+        StmtKind::SCStyleFor(init, cond, update, body) => {
+            cc_compile_stmt(init)
+            cc_emit_tracked(Instruction::Block)
+            const break_depth = cc_block_depth
+            cc_emit_tracked(Instruction::Loop)
+            const continue_depth = cc_block_depth
+            cc_loop_stack.push({ "break_depth": break_depth, "continue_depth": continue_depth })
+            cc_compile_expr(cond)
+            cc_emit(Instruction::BoolNot)
+            const cond_offset = cc_block_depth - break_depth
+            cc_emit(Instruction::BrIf(cond_offset))
+            const bstmts = body.stmts
+            let bi = 0
+            while bi < len(bstmts) {
+                cc_compile_stmt(bstmts[bi])
+                bi = bi + 1
+            }
+            if body.tail_expr != null {
+                cc_compile_expr(body.tail_expr)
+                cc_emit(Instruction::Drop)
+            }
+            cc_compile_stmt(update)
+            const cont_offset = cc_block_depth - continue_depth
+            cc_emit(Instruction::Br(cont_offset))
+            cc_emit_tracked(Instruction::End)
+            cc_emit_tracked(Instruction::End)
+            cc_loop_stack = cc_loop_stack.slice(0, len(cc_loop_stack) - 1)
+        },
+        StmtKind::STupleAssign(names, value) => {
+            cc_compile_expr(value)
+            const tmp = cc_define_local("__tuple_assign")
+            cc_emit(Instruction::LocalSet(tmp))
+            let ni = 0
+            while ni < len(names) {
+                cc_emit(Instruction::LocalGet(tmp))
+                cc_emit(Instruction::PushI64(ni))
+                cc_emit(Instruction::ArrayGet)
+                const local_idx = cc_resolve_local(names[ni])
+                if local_idx >= 0 {
+                    cc_emit(Instruction::LocalSet(local_idx))
+                }
+                ni = ni + 1
+            }
+        },
+        StmtKind::SStaticDef(name, value) => {
+            cc_compile_expr(value)
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        StmtKind::SImport(_) => {},
+        StmtKind::STypeAlias(_, _) => {},
+        StmtKind::SModuleDef(_, body) => {
+            cc_compile_block(body)
+            cc_emit(Instruction::Drop)
+        },
+        StmtKind::STestDef(name, body) => {
+            // Compile test as separate function
+            const test_name = "__test_" + name
+            cc_save_func()
+            cc_instrs = []
+            cc_locals = []
+            cc_param_count = 0
+            cc_func_name = test_name
+            cc_compile_block(body)
+            cc_emit(Instruction::Drop)
+            cc_emit(Instruction::PushNull)
+            cc_emit(Instruction::Return)
+            cc_finish_func()
+            cc_restore_func()
+        },
+        StmtKind::SEnumDef(name, variants, _) => {
+            // Intern variant names for runtime
+            let vi = 0
+            while vi < len(variants) {
+                cc_intern(name + "::" + variants[vi].name)
+                vi = vi + 1
+            }
+        },
+        StmtKind::SStructDef(name, fields, _) => {
+            let fi = 0
+            while fi < len(fields) {
+                cc_intern(name + "::" + fields[fi].name)
+                fi = fi + 1
+            }
+        },
+        _ => {
+            // Declarations and unsupported — emit nothing
+        },
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// MULTIPLE RETURN VALUE HANDLING
+// ════════════════════════════════════════════════════════════════════════
+// Multi-return is handled by returning an array:
+// let a, b = func() → func returns [a, b] as array
+
+func cc_compile_multi_return(exprs) {
+    let i = 0
+    while i < len(exprs) {
+        cc_compile_expr(exprs[i])
+        i = i + 1
+    }
+    cc_emit(Instruction::ArrayNew(len(exprs)))
+    cc_emit(Instruction::Return)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// GENERIC FUNCTION INSTANTIATION
+// ════════════════════════════════════════════════════════════════════════
+// Generics are monomorphized at compile time. Each instantiation creates
+// a new function with a mangled name.
+
+func cc_mangle_generic(base_name, type_args) {
+    let name = base_name
+    let i = 0
+    while i < len(type_args) {
+        name = name + "__" + to_string(type_args[i])
+        i = i + 1
+    }
+    name
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// LOOP LABEL TRACKING FOR BREAK/CONTINUE
+// ════════════════════════════════════════════════════════════════════════
+// Labels are tracked in cc_loop_stack. Each entry has:
+//   break_depth: absolute block depth for break target
+//   continue_depth: absolute block depth for continue target
+// Break/continue resolve label by searching cc_loop_stack by name.
+
+func cc_find_loop_context(label) {
+    if label == null {
+        // No label: use innermost loop
+        const n = len(cc_loop_stack)
+        if n > 0 { return cc_loop_stack[n - 1] }
+        return null
+    }
+    // Named label: search from innermost out
+    let i = len(cc_loop_stack) - 1
+    while i >= 0 {
+        const ctx = cc_loop_stack[i]
+        if ctx["label"] == label {
+            return ctx
+        }
+        i = i - 1
+    }
+    null
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// DESTRUCTURING PATTERNS
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_destructure(pattern, is_mutable) {
+    // Value is on top of stack. Destructure into locals.
+    match pattern {
+        DestructurePattern::ArrayDestructure(elements) => {
+            const temp = cc_define_local("__destr_arr")
+            cc_emit(Instruction::LocalSet(temp))
+            let i = 0
+            while i < len(elements) {
+                const elem = elements[i]
+                match elem {
+                    DestructureElement::Name(name) => {
+                        cc_emit(Instruction::LocalGet(temp))
+                        cc_emit(Instruction::PushI64(i))
+                        cc_emit(Instruction::ArrayGet)
+                        const idx = cc_define_local(name)
+                        cc_emit(Instruction::LocalSet(idx))
+                    },
+                    DestructureElement::Rest(name) => {
+                        cc_emit(Instruction::LocalGet(temp))
+                        cc_emit(Instruction::PushI64(i))
+                        cc_emit(Instruction::LocalGet(temp))
+                        cc_emit(Instruction::RuntimeCall("array_len"))
+                        cc_emit(Instruction::PushBool(false))
+                        cc_emit(Instruction::Call("__slice", 4))
+                        const idx = cc_define_local(name)
+                        cc_emit(Instruction::LocalSet(idx))
+                    },
+                    DestructureElement::Skip => {},
+                    _ => {},
+                }
+                i = i + 1
+            }
+        },
+        DestructurePattern::MapDestructure(entries) => {
+            const temp = cc_define_local("__destr_map")
+            cc_emit(Instruction::LocalSet(temp))
+            let i = 0
+            while i < len(entries) {
+                const entry = entries[i]
+                const key = entry[0]
+                const alias = entry[1]
+                cc_emit(Instruction::LocalGet(temp))
+                const key_idx = cc_intern(key)
+                cc_emit(Instruction::PushString(key_idx))
+                cc_emit(Instruction::Call("map_get", 2))
+                const bind_name = if alias != null { alias } else { key }
+                const idx = cc_define_local(bind_name)
+                cc_emit(Instruction::LocalSet(idx))
+                i = i + 1
+            }
+        },
+        _ => {
+            cc_emit(Instruction::Drop)
+        },
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// FIELD ASSIGNMENT COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_field_assign(obj_expr, field_chain, value) {
+    // For simple var.field = value:
+    //   get var, set field, store back
+
+    // For nested var.a.b.c = value:
+    //   get var, get a, get b, set c on b, set b on a, set a on var
+
+    if len(field_chain) == 1 {
+        // Simple case
+        cc_compile_expr(obj_expr)
+        const key = cc_intern(field_chain[0])
+        cc_emit(Instruction::PushString(key))
+        cc_compile_expr(value)
+        cc_emit(Instruction::Call("map_set", 3))
+    } else {
+        // Nested case: collect intermediate values
+        cc_compile_expr(obj_expr)
+        const temps = []
+        let i = 0
+        while i < len(field_chain) - 1 {
+            const key = cc_intern(field_chain[i])
+            cc_emit(Instruction::PushString(key))
+            cc_emit(Instruction::Call("map_get", 2))
+            const temp = cc_define_local("__nest_" + to_string(i))
+            cc_emit(Instruction::LocalSet(temp))
+            cc_emit(Instruction::LocalGet(temp))
+            temps.push(temp)
+            i = i + 1
+        }
+
+        // Set the leaf field
+        const leaf_key = cc_intern(field_chain[len(field_chain) - 1])
+        cc_emit(Instruction::PushString(leaf_key))
+        cc_compile_expr(value)
+        cc_emit(Instruction::Call("map_set", 3))
+
+        // Store back up the chain
+        i = len(field_chain) - 2
+        while i >= 0 {
+            const upd_temp = cc_define_local("__nest_upd_" + to_string(i))
+            cc_emit(Instruction::LocalSet(upd_temp))
+            if i == 0 {
+                cc_compile_expr(obj_expr)
+            } else {
+                cc_emit(Instruction::LocalGet(temps[i - 1]))
+            }
+            const parent_key = cc_intern(field_chain[i])
+            cc_emit(Instruction::PushString(parent_key))
+            cc_emit(Instruction::LocalGet(upd_temp))
+            cc_emit(Instruction::Call("map_set", 3))
+            i = i - 1
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// MAP COMPREHENSION COMPILATION
+// ════════════════════════════════════════════════════════════════════════
+
+func cc_compile_map_comprehension(key_expr, value_expr, pattern, iterable, condition) {
+    // Desugar: {k: v for pattern in iterable if condition}
+    // → result = {}; for pattern in iterable { if condition { result[k] = v } }; result
+
+    cc_emit(Instruction::Call("__map_new", 0))
+    const result_local = cc_define_local("__mcomp_result")
+    cc_emit(Instruction::LocalSet(result_local))
+
+    cc_compile_expr(iterable)
+    const iter_local = cc_define_local("__mcomp_iter")
+    cc_emit(Instruction::LocalSet(iter_local))
+
+    cc_emit(Instruction::PushI64(0))
+    const counter_local = cc_define_local("__mcomp_i")
+    cc_emit(Instruction::LocalSet(counter_local))
+
+    cc_emit_tracked(Instruction::Loop)
+
+    cc_emit(Instruction::LocalGet(counter_local))
+    cc_emit(Instruction::LocalGet(iter_local))
+    cc_emit(Instruction::RuntimeCall("array_len"))
+    cc_emit(Instruction::I64Ge)
+    cc_emit(Instruction::BrIf(1))
+
+    // Bind pattern
+    cc_emit(Instruction::LocalGet(iter_local))
+    cc_emit(Instruction::LocalGet(counter_local))
+    cc_emit(Instruction::ArrayGet)
+
+    match pattern {
+        ForPattern::Single(name) => {
+            const idx = cc_define_local(name)
+            cc_emit(Instruction::LocalSet(idx))
+        },
+        _ => {
+            const idx = cc_define_local("__mcomp_elem")
+            cc_emit(Instruction::LocalSet(idx))
+        },
+    }
+
+    if condition != null {
+        cc_compile_expr(condition)
+        cc_emit_tracked(Instruction::IfVoid)
+    }
+
+    // Set key/value in result map
+    cc_emit(Instruction::LocalGet(result_local))
+    cc_compile_expr(key_expr)
+    cc_compile_expr(value_expr)
+    cc_emit(Instruction::Call("map_set", 3))
+    cc_emit(Instruction::LocalSet(result_local))
+
+    if condition != null {
+        cc_emit_tracked(Instruction::End)
+    }
+
+    cc_emit(Instruction::LocalGet(counter_local))
+    cc_emit(Instruction::PushI64(1))
+    cc_emit(Instruction::I64Add)
+    cc_emit(Instruction::LocalSet(counter_local))
+    cc_emit(Instruction::Br(0))
+    cc_emit_tracked(Instruction::End)
+
+    cc_emit(Instruction::LocalGet(result_local))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// SCOPE MANAGEMENT
+// ════════════════════════════════════════════════════════════════════════
+
+let cc_scope_depths = []  // stack of scope boundary indices
+
+func cc_push_scope() {
+    cc_scope_depths.push(len(cc_locals))
+}
+
+func cc_pop_scope() {
+    const n = len(cc_scope_depths)
+    if n > 0 {
+        cc_scope_depths = cc_scope_depths.slice(0, n - 1)
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// TEMP LOCAL MANAGEMENT
+// ════════════════════════════════════════════════════════════════════════
+
+let cc_temp_local_idx = -1
+
+func cc_ensure_temp_local() {
+    if cc_temp_local_idx < 0 {
+        cc_temp_local_idx = cc_define_local("__temp")
+    }
+    cc_temp_local_idx
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// SOURCE MAP GENERATION
+// ════════════════════════════════════════════════════════════════════════
+
+let cc_source_map = []  // each: { "func", "offset", "line", "col" }
+
+func cc_record_source_mapping(line, col) {
+    cc_source_map.push({
+        "func": cc_func_name,
+        "offset": len(cc_instrs),
+        "line": line,
+        "col": col,
+    })
+}
+
+func cc_generate_source_map_json(source_file) {
+    let entries = []
+    let i = 0
+    while i < len(cc_source_map) {
+        const m = cc_source_map[i]
+        entries.push("{\"fn\":\"" + m["func"] + "\",\"offset\":" +
+                     to_string(m["offset"]) + ",\"line\":" +
+                     to_string(m["line"]) + ",\"col\":" +
+                     to_string(m["col"]) + "}")
+        i = i + 1
+    }
+    "{\"version\":3,\"file\":\"" + source_file + "\",\"mappings\":[" +
+    entries.join(",") + "]}"
 }
