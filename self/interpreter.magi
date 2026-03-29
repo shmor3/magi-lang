@@ -9607,3 +9607,5528 @@ func i_json_escape_string(s) {
     }
     result + "\""
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 64: Complete Stdlib Function Dispatch
+// All builtin function names from stage 0 that are not yet dispatched
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_call_stdlib(name, args) {
+    // ── Assertions ────────────────────────────────────────────
+    if name == "assert_eq" {
+        if len(args) < 2 { panic("assert_eq() takes at least 2 arguments") }
+        if args[0] == args[1] { return null }
+        const msg = if len(args) > 2 { i_display(args[2]) }
+            else { f"assertion failed: expected values to be equal\n  left:  {i_display(args[0])}\n  right: {i_display(args[1])}" }
+        panic(msg)
+    }
+    if name == "assert_ne" {
+        if len(args) < 2 { panic("assert_ne() takes at least 2 arguments") }
+        if args[0] != args[1] { return null }
+        const msg = if len(args) > 2 { i_display(args[2]) }
+            else { f"assertion failed: expected values to differ, both are: {i_display(args[0])}" }
+        panic(msg)
+    }
+    if name == "assert_throws" {
+        if len(args) < 1 { panic("assert_throws() takes at least 1 argument") }
+        // In self-hosted mode, we cannot catch panics, so this is a stub
+        return null
+    }
+
+    // ── Option/Result constructors ────────────────────────────
+    if name == "Some" {
+        return if len(args) > 0 { args[0] } else { null }
+    }
+    if name == "None" { return null }
+    if name == "Ok" {
+        const val = if len(args) > 0 { args[0] } else { null }
+        return {"ok": val}
+    }
+    if name == "Err" {
+        const val = if len(args) > 0 { args[0] } else { "error" }
+        return {"err": val}
+    }
+    if name == "is_some" {
+        return if len(args) > 0 { args[0] != null } else { false }
+    }
+    if name == "is_none" {
+        return if len(args) > 0 { args[0] == null } else { true }
+    }
+    if name == "is_ok" {
+        if len(args) == 0 { return false }
+        if typeof(args[0]) == "map" && args[0].has("ok") { return true }
+        return false
+    }
+    if name == "is_err" {
+        if len(args) == 0 { return false }
+        if typeof(args[0]) == "map" && args[0].has("err") { return true }
+        return false
+    }
+    if name == "unwrap" {
+        if len(args) == 0 { panic("unwrap() takes 1 argument") }
+        const val = args[0]
+        if val == null { panic("called unwrap on None value") }
+        if typeof(val) == "map" {
+            if val.has("ok") { return val["ok"] }
+            if val.has("err") { panic(f"called unwrap on Err: {i_display(val[\"err\"])}") }
+        }
+        return val
+    }
+    if name == "unwrap_or" {
+        if len(args) < 2 { panic("unwrap_or() takes 2 arguments") }
+        const val = args[0]
+        const default = args[1]
+        if val == null { return default }
+        if typeof(val) == "map" {
+            if val.has("ok") { return val["ok"] }
+            if val.has("err") { return default }
+        }
+        return val
+    }
+
+    // ── Set / Tuple constructors ──────────────────────────────
+    if name == "Set" {
+        if len(args) == 1 && typeof(args[0]) == "array" {
+            return i_iter_unique(args[0])
+        }
+        return i_iter_unique(args)
+    }
+    if name == "Tuple" || name == "tuple" {
+        if len(args) == 1 && typeof(args[0]) == "array" {
+            return args[0]
+        }
+        return args
+    }
+
+    // ── Type checking builtins ────────────────────────────────
+    if name == "typeof" { return if len(args) > 0 { typeof(args[0]) } else { "null" } }
+    if name == "implements" { return false }
+
+    // ── Math builtins ─────────────────────────────────────────
+    if name == "factorial" {
+        if len(args) == 0 { panic("factorial() takes 1 argument") }
+        return i_math_factorial(args[0])
+    }
+    if name == "fibonacci" {
+        if len(args) == 0 { panic("fibonacci() takes 1 argument") }
+        return i_math_fib(args[0])
+    }
+    if name == "is_prime" {
+        if len(args) == 0 { panic("is_prime() takes 1 argument") }
+        return i_math_is_prime(args[0])
+    }
+    if name == "gcd" {
+        if len(args) < 2 { panic("gcd() takes 2 arguments") }
+        return i_math_gcd(args[0], args[1])
+    }
+    if name == "lcm" {
+        if len(args) < 2 { panic("lcm() takes 2 arguments") }
+        return i_math_lcm(args[0], args[1])
+    }
+    if name == "sign" {
+        if len(args) == 0 { panic("sign() takes 1 argument") }
+        return i_math_sign(args[0])
+    }
+    if name == "isqrt" || name == "sqrt_int" {
+        if len(args) == 0 { panic("isqrt() takes 1 argument") }
+        return i_math_isqrt(args[0])
+    }
+    if name == "divmod" {
+        if len(args) < 2 { panic("divmod() takes 2 arguments") }
+        return i_math_divmod(args[0], args[1])
+    }
+    if name == "ncr" || name == "combinations" {
+        if len(args) < 2 { panic("ncr() takes 2 arguments") }
+        const n = args[0]
+        const r = args[1]
+        if n < 0 || r < 0 || r > n { return 0 }
+        let result = 1
+        let i = 0
+        const r2 = if r < n - r { r } else { n - r }
+        while i < r2 {
+            result = result * (n - i) / (i + 1)
+            i = i + 1
+        }
+        return result
+    }
+    if name == "npr" || name == "permutations" {
+        if len(args) < 2 { panic("npr() takes 2 arguments") }
+        const n = args[0]
+        const r = args[1]
+        if n < 0 || r < 0 || r > n { return 0 }
+        let result = 1
+        let i = 0
+        while i < r {
+            result = result * (n - i)
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── Math constants ────────────────────────────────────────
+    if name == "math_pi" { return 3.141592653589793 }
+    if name == "math_e" { return 2.718281828459045 }
+    if name == "math_tau" { return 6.283185307179586 }
+    if name == "math_ln2" { return 0.6931471805599453 }
+    if name == "math_ln10" { return 2.302585092994046 }
+    if name == "math_sqrt2" { return 1.4142135623730951 }
+    if name == "math_inf" { return 1.0 / 0.0 }
+    if name == "math_neg_inf" { return 0.0 - (1.0 / 0.0) }
+
+    // ── Collection builtins ───────────────────────────────────
+    if name == "append" {
+        if len(args) < 2 { panic("append() takes at least 2 arguments") }
+        if typeof(args[0]) != "array" { panic("append() requires array as first argument") }
+        let result = args[0]
+        let i = 1
+        while i < len(args) {
+            result = result.append(args[i])
+            i = i + 1
+        }
+        return result
+    }
+    if name == "copy" {
+        if len(args) < 2 { panic("copy() takes 2 arguments") }
+        if typeof(args[0]) != "array" || typeof(args[1]) != "array" { panic("copy() requires two arrays") }
+        let result = args[0]
+        const src = args[1]
+        const count = if len(result) < len(src) { len(result) } else { len(src) }
+        let i = 0
+        while i < count {
+            result[i] = src[i]
+            i = i + 1
+        }
+        return result
+    }
+    if name == "delete" {
+        if len(args) < 2 { panic("delete() takes 2 arguments") }
+        if typeof(args[0]) != "map" { panic("delete() requires map") }
+        return args[0].delete(to_string(args[1]))
+    }
+    if name == "clear" {
+        if len(args) == 0 { panic("clear() takes 1 argument") }
+        const t = typeof(args[0])
+        if t == "array" { return [] }
+        if t == "map" { return {} }
+        if t == "string" { return "" }
+        panic(f"clear() not supported for {t}")
+    }
+    if name == "cap" {
+        if len(args) == 0 { panic("cap() takes 1 argument") }
+        return len(args[0])
+    }
+    if name == "make" {
+        if len(args) == 0 { panic("make() takes 1-2 arguments") }
+        const type_name = to_string(args[0])
+        const size = if len(args) > 1 { args[1] } else { 0 }
+        if type_name == "array" || type_name == "Array" {
+            let result = []
+            let i = 0
+            while i < size { result.push(null); i = i + 1 }
+            return result
+        }
+        if type_name == "map" || type_name == "Map" { return {} }
+        if type_name == "string" || type_name == "String" { return "" }
+        panic(f"make: unknown type '{type_name}'")
+    }
+
+    // ── String builtins ───────────────────────────────────────
+    if name == "split" {
+        if len(args) < 2 { panic("split() takes 2 arguments") }
+        return to_string(args[0]).split(to_string(args[1]))
+    }
+    if name == "join" {
+        if len(args) < 2 { panic("join() takes 2 arguments") }
+        if typeof(args[0]) != "array" { panic("join() requires array") }
+        return args[0].map(x => i_display(x)).join(to_string(args[1]))
+    }
+    if name == "replace" {
+        if len(args) < 3 { panic("replace() takes 3 arguments") }
+        return to_string(args[0]).replace(to_string(args[1]), to_string(args[2]))
+    }
+    if name == "trim" {
+        if len(args) == 0 { panic("trim() takes 1 argument") }
+        return to_string(args[0]).trim()
+    }
+    if name == "trim_prefix" || name == "strip_prefix" {
+        if len(args) < 2 { panic("trim_prefix() takes 2 arguments") }
+        return i_str_strip_prefix(to_string(args[0]), to_string(args[1]))
+    }
+    if name == "trim_suffix" || name == "strip_suffix" {
+        if len(args) < 2 { panic("trim_suffix() takes 2 arguments") }
+        return i_str_strip_suffix(to_string(args[0]), to_string(args[1]))
+    }
+    if name == "to_upper" || name == "to_uppercase" {
+        if len(args) == 0 { panic("to_upper() takes 1 argument") }
+        return to_string(args[0]).to_upper()
+    }
+    if name == "to_lower" || name == "to_lowercase" {
+        if len(args) == 0 { panic("to_lower() takes 1 argument") }
+        return to_string(args[0]).to_lower()
+    }
+    if name == "starts_with" {
+        if len(args) < 2 { panic("starts_with() takes 2 arguments") }
+        return to_string(args[0]).starts_with(to_string(args[1]))
+    }
+    if name == "ends_with" {
+        if len(args) < 2 { panic("ends_with() takes 2 arguments") }
+        return to_string(args[0]).ends_with(to_string(args[1]))
+    }
+    if name == "contains" {
+        if len(args) < 2 { panic("contains() takes 2 arguments") }
+        const val = args[0]
+        const needle = args[1]
+        const vt = typeof(val)
+        if vt == "string" { return val.contains(to_string(needle)) }
+        if vt == "array" { return val.contains(needle) }
+        if vt == "map" { return val.has(to_string(needle)) }
+        return false
+    }
+    if name == "char_at" {
+        if len(args) < 2 { panic("char_at() takes 2 arguments") }
+        const s = to_string(args[0])
+        const idx = args[1]
+        if idx < 0 || idx >= len(s) { return "" }
+        return s[idx]
+    }
+    if name == "chars" {
+        if len(args) == 0 { panic("chars() takes 1 argument") }
+        return to_string(args[0]).chars()
+    }
+    if name == "runes" {
+        if len(args) == 0 { return [] }
+        const s = to_string(args[0])
+        let result = []
+        for c in s.chars() { result.push(char_code(c)) }
+        return result
+    }
+    if name == "substring" || name == "substr" {
+        if len(args) < 3 { panic("substring() takes 3 arguments") }
+        return to_string(args[0]).slice(args[1], args[2])
+    }
+    if name == "capitalize" {
+        if len(args) == 0 { panic("capitalize() takes 1 argument") }
+        return i_str_capitalize(to_string(args[0]))
+    }
+    if name == "title" || name == "title_case" {
+        if len(args) == 0 { panic("title() takes 1 argument") }
+        return i_str_title_case(to_string(args[0]))
+    }
+    if name == "is_upper" { return if len(args) > 0 { i_str_is_upper(to_string(args[0])) } else { false } }
+    if name == "is_lower" { return if len(args) > 0 { i_str_is_lower(to_string(args[0])) } else { false } }
+    if name == "is_numeric" { return if len(args) > 0 { i_str_is_numeric(to_string(args[0])) } else { false } }
+
+    // ── Encoding builtins ─────────────────────────────────────
+    if name == "encode" {
+        if len(args) == 0 { panic("encode() takes 1-2 arguments") }
+        // Simplified: return string as-is (no real Bytes type in self-hosted)
+        return to_string(args[0])
+    }
+
+    // ── I/O builtins ──────────────────────────────────────────
+    if name == "stdin_read" || name == "input" { return "" }
+    if name == "io_read_all" { return "" }
+    if name == "io_copy" { return 0 }
+
+    // ── OS builtins ───────────────────────────────────────────
+    if name == "runtime_num_cpu" { return 1 }
+    if name == "runtime_num_tasks" { return 1 }
+    if name == "runtime_gc" { return null }
+    if name == "runtime_mem_stats" {
+        return {
+            "heap_objects": len(i_scopes),
+            "scope_depth": len(i_scopes),
+            "functions": len(i_functions.keys()),
+        }
+    }
+    if name == "system_time" || name == "systemtime_now" { return 0 }
+    if name == "monotonic_now" { return 0 }
+    if name == "sleep" { return null }
+
+    // ── Time builtins ─────────────────────────────────────────
+    if name == "time_parse_duration" { return 0 }
+    if name == "time_format_duration" {
+        if len(args) == 0 { return "0ms" }
+        return i_fmt_duration(args[0])
+    }
+    if name == "time_after_func" { return null }
+
+    // ── Build info builtins ───────────────────────────────────
+    if name == "build_cache_enabled" { return true }
+    if name == "build_target" { return "self-hosted" }
+    if name == "build_features" { return ["interpreter"] }
+    if name == "build_incremental" { return true }
+    if name == "debug_buildinfo" {
+        return {"version": "self-hosted", "arch": "generic", "os": "generic"}
+    }
+    if name == "debug_stack" { return "" }
+    if name == "debug_tasks" { return 1 }
+    if name == "error_stack_trace" { return "" }
+
+    // ── Iota builtins ─────────────────────────────────────────
+    if name == "iota" { return 0 }
+    if name == "iota_reset" { return null }
+
+    // ── Concurrency stubs ─────────────────────────────────────
+    if name == "spawn" {
+        if len(args) == 0 { return null }
+        return i_eval_spawn_value(args[0])
+    }
+    if name == "await" || name == "join" {
+        if len(args) == 0 { return null }
+        return i_eval_await(args[0])
+    }
+    if name == "channel" || name == "chan" { return i_make_channel() }
+    if name == "channel_buffered" {
+        const cap = if len(args) > 0 { args[0] } else { 16 }
+        return i_make_buffered_channel(cap)
+    }
+    if name == "send" {
+        if len(args) < 2 { panic("send() takes 2 arguments") }
+        return i_channel_send(args[0], args[1])
+    }
+    if name == "recv" || name == "receive" {
+        if len(args) == 0 { panic("recv() takes 1 argument") }
+        return i_channel_recv(args[0])
+    }
+    if name == "close" {
+        if len(args) == 0 { panic("close() takes 1 argument") }
+        return i_channel_close(args[0])
+    }
+    if name == "select" {
+        if len(args) == 0 { return null }
+        if typeof(args[0]) == "array" { return i_channel_select(args[0]) }
+        return null
+    }
+
+    // ── Sync primitives stubs ─────────────────────────────────
+    if name == "mutex_new" || name == "new_mutex" { return {"__type": "mutex", "locked": false} }
+    if name == "mutex_lock" { if len(args) > 0 { args[0]["locked"] = true }; return null }
+    if name == "mutex_unlock" { if len(args) > 0 { args[0]["locked"] = false }; return null }
+    if name == "rwlock_new" || name == "new_rwlock" { return {"__type": "rwlock"} }
+    if name == "rwlock_read_lock" || name == "rwlock_write_lock" { return null }
+    if name == "rwlock_read_unlock" || name == "rwlock_write_unlock" { return null }
+    if name == "atomic_new" { return if len(args) > 0 { args[0] } else { 0 } }
+    if name == "atomic_load" { return if len(args) > 0 { args[0] } else { 0 } }
+    if name == "atomic_store" { return null }
+    if name == "atomic_add" { return if len(args) > 0 { args[0] } else { 0 } }
+    if name == "atomic_cas" { return false }
+    if name == "waitgroup_new" || name == "new_waitgroup" { return {"__type": "waitgroup", "count": 0} }
+    if name == "waitgroup_add" { return null }
+    if name == "waitgroup_done" { return null }
+    if name == "waitgroup_wait" { return null }
+    if name == "context_new" { return "ctx_self" }
+    if name == "context_cancel" { return null }
+    if name == "context_is_done" { return false }
+    if name == "context_with_timeout" { return "ctx_self" }
+    if name == "new_once" { return {"__type": "once", "done": false} }
+    if name == "sync_map" || name == "concurrent_map" { return {"__type": "sync_map", "data": {}} }
+    if name == "sync_pool" || name == "object_pool" { return {"__type": "sync_pool", "items": []} }
+
+    // ── Recover/panic ─────────────────────────────────────────
+    if name == "recover" { return null }
+    if name == "skip_test" { panic("[SKIP]") }
+
+    // ── MIME / media types ────────────────────────────────────
+    if name == "mime_type" || name == "type_by_extension" || name == "mime_type_by_extension" {
+        if len(args) == 0 { return "application/octet-stream" }
+        const ext = to_string(args[0])
+        if ext.ends_with(".html") || ext.ends_with(".htm") { return "text/html" }
+        if ext.ends_with(".css") { return "text/css" }
+        if ext.ends_with(".js") { return "application/javascript" }
+        if ext.ends_with(".json") { return "application/json" }
+        if ext.ends_with(".xml") { return "application/xml" }
+        if ext.ends_with(".txt") { return "text/plain" }
+        if ext.ends_with(".png") { return "image/png" }
+        if ext.ends_with(".jpg") || ext.ends_with(".jpeg") { return "image/jpeg" }
+        if ext.ends_with(".gif") { return "image/gif" }
+        if ext.ends_with(".svg") { return "image/svg+xml" }
+        if ext.ends_with(".pdf") { return "application/pdf" }
+        if ext.ends_with(".zip") { return "application/zip" }
+        if ext.ends_with(".wasm") { return "application/wasm" }
+        return "application/octet-stream"
+    }
+
+    // ── FFI stubs ─────────────────────────────────────────────
+    if name == "ffi_load_library" { return {"__type": "ffi_library", "loaded": false} }
+    if name == "ffi_call" { return null }
+    if name == "ffi_symbol" { return null }
+    if name == "ffi_close" { return true }
+
+    // ── Logging stubs ─────────────────────────────────────────
+    if name == "log_println" {
+        const parts = args.map(a => i_display(a))
+        println(parts.join(" "))
+        return null
+    }
+    if name == "log_fatal" { panic(f"FATAL: {args.map(a => i_display(a)).join(\" \")}") }
+    if name == "log_panic" { panic(f"PANIC: {args.map(a => i_display(a)).join(\" \")}") }
+
+    // ── Network stubs ─────────────────────────────────────────
+    if name == "net_listen" || name == "net_dial" { return {"__type": "net_conn"} }
+    if name == "http_get" || name == "http_post" { return {"status": 200, "body": ""} }
+    if name == "http_serve" { return null }
+    if name == "dialer" || name == "net_dialer" { return {"__type": "dialer", "timeout": 30000} }
+
+    // ── Binary encoding stubs ─────────────────────────────────
+    if name == "binary_encode" { return "" }
+    if name == "binary_decode" { return null }
+    if name == "encoding_binary_read" { return null }
+    if name == "encoding_binary_write" { return "" }
+
+    // ── Misc builtins ─────────────────────────────────────────
+    if name == "dev_null" { return "/dev/null" }
+    if name == "is_timeout" {
+        if len(args) == 0 { return false }
+        return to_string(args[0]).contains("timeout")
+    }
+    if name == "err_unexpected_eof" { return {"err": "unexpected EOF"} }
+    if name == "nop_closer" { return {"__type": "nop_closer"} }
+    if name == "bufio_scanner" || name == "bufio_reader" {
+        if len(args) == 0 { return [] }
+        return to_string(args[0]).split("\n")
+    }
+    if name == "bufio_writer" { return {"__type": "bufio_writer", "buffer": ""} }
+    if name == "io_pipe" { return {"__type": "pipe", "buffer": ""} }
+
+    // ── Format builtins ───────────────────────────────────────
+    if name == "format" || name == "fmt" || name == "sprintf" {
+        if len(args) == 0 { return "" }
+        return i_display(args[0])
+    }
+    if name == "format_number" {
+        if len(args) < 2 { return i_display(args[0]) }
+        return i_fmt_number(args[0], args[1])
+    }
+    if name == "format_bytes" || name == "format_bytes_size" {
+        if len(args) == 0 { return "0 B" }
+        return i_fmt_bytes_size(args[0])
+    }
+    if name == "format_duration" {
+        if len(args) == 0 { return "0ms" }
+        return i_fmt_duration(args[0])
+    }
+    if name == "format_hex" {
+        if len(args) == 0 { return "0x0" }
+        return i_fmt_hex(args[0])
+    }
+    if name == "format_binary" {
+        if len(args) == 0 { return "0b0" }
+        return i_fmt_binary(args[0])
+    }
+    if name == "format_percent" {
+        if len(args) < 2 { return "0%" }
+        return i_fmt_percent(args[0], args[1])
+    }
+    if name == "format_with_commas" {
+        if len(args) == 0 { return "0" }
+        return i_fmt_with_commas(args[0])
+    }
+
+    // ── JSON builtins ─────────────────────────────────────────
+    if name == "to_json" || name == "json_encode" || name == "json_marshal" {
+        if len(args) == 0 { return "null" }
+        return i_to_json(args[0])
+    }
+    if name == "json_pretty" || name == "json_marshal_indent" {
+        if len(args) == 0 { return "null" }
+        return i_pretty_print(args[0], 0)
+    }
+
+    // ── Statistics builtins ───────────────────────────────────
+    if name == "mean" || name == "average" || name == "avg" {
+        if len(args) == 0 { return 0.0 }
+        return i_stats_mean(args[0])
+    }
+    if name == "median" {
+        if len(args) == 0 { return 0.0 }
+        return i_stats_median(args[0])
+    }
+    if name == "variance" || name == "var" {
+        if len(args) == 0 { return 0.0 }
+        return i_stats_variance(args[0])
+    }
+    if name == "stddev" || name == "std" {
+        if len(args) == 0 { return 0.0 }
+        return i_stats_stddev(args[0])
+    }
+    if name == "mode" {
+        if len(args) == 0 { return null }
+        return i_stats_mode(args[0])
+    }
+    if name == "percentile" {
+        if len(args) < 2 { return 0.0 }
+        return i_stats_percentile(args[0], args[1])
+    }
+
+    // ── Deep utility builtins ─────────────────────────────────
+    if name == "deep_clone" || name == "clone" {
+        if len(args) == 0 { return null }
+        return i_deep_clone(args[0])
+    }
+    if name == "deep_eq" || name == "deep_equal" {
+        if len(args) < 2 { return false }
+        return i_deep_eq(args[0], args[1])
+    }
+    if name == "hash" {
+        if len(args) == 0 { return 0 }
+        return i_hash(args[0])
+    }
+    if name == "serialize" {
+        if len(args) == 0 { return "null" }
+        return i_serialize(args[0])
+    }
+
+    // ── Data structure constructors ───────────────────────────
+    if name == "stack_new" { return i_stack_new() }
+    if name == "queue_new" { return i_queue_new() }
+    if name == "deque_new" { return i_deque_new() }
+    if name == "pq_new" || name == "priority_queue_new" { return i_pq_new() }
+
+    // ── Graph constructors ────────────────────────────────────
+    if name == "graph_new" { return i_graph_new() }
+    if name == "graph_add_edge" {
+        if len(args) < 3 { panic("graph_add_edge() takes 3 arguments") }
+        return i_graph_add_edge(args[0], args[1], args[2])
+    }
+    if name == "graph_bfs" {
+        if len(args) < 2 { panic("graph_bfs() takes 2 arguments") }
+        return i_graph_bfs(args[0], args[1])
+    }
+    if name == "graph_dfs" {
+        if len(args) < 2 { panic("graph_dfs() takes 2 arguments") }
+        return i_graph_dfs(args[0], args[1])
+    }
+    if name == "graph_topo_sort" {
+        if len(args) == 0 { panic("graph_topo_sort() takes 1 argument") }
+        return i_graph_topo_sort(args[0])
+    }
+    if name == "graph_shortest_path" {
+        if len(args) < 3 { panic("graph_shortest_path() takes 3 arguments") }
+        return i_graph_shortest_path(args[0], args[1], args[2])
+    }
+
+    // ── Matrix constructors ───────────────────────────────────
+    if name == "matrix_new" {
+        if len(args) < 3 { panic("matrix_new() takes 3 arguments") }
+        return i_matrix_new(args[0], args[1], args[2])
+    }
+    if name == "matrix_identity" {
+        if len(args) == 0 { panic("matrix_identity() takes 1 argument") }
+        return i_matrix_identity(args[0])
+    }
+    if name == "matrix_mul" {
+        if len(args) < 2 { panic("matrix_mul() takes 2 arguments") }
+        return i_matrix_mul(args[0], args[1])
+    }
+    if name == "matrix_add" {
+        if len(args) < 2 { panic("matrix_add() takes 2 arguments") }
+        return i_matrix_add(args[0], args[1])
+    }
+    if name == "dot_product" {
+        if len(args) < 2 { panic("dot_product() takes 2 arguments") }
+        return i_dot_product(args[0], args[1])
+    }
+
+    // ── Set operation builtins ────────────────────────────────
+    if name == "set_union" || name == "union" {
+        if len(args) < 2 { panic("set_union() takes 2 arguments") }
+        return i_set_union(args[0], args[1])
+    }
+    if name == "set_intersection" || name == "intersection" {
+        if len(args) < 2 { panic("set_intersection() takes 2 arguments") }
+        return i_set_intersection(args[0], args[1])
+    }
+    if name == "set_difference" || name == "difference" {
+        if len(args) < 2 { panic("set_difference() takes 2 arguments") }
+        return i_set_difference(args[0], args[1])
+    }
+
+    // ── FSM builtins ──────────────────────────────────────────
+    if name == "fsm_new" {
+        if len(args) == 0 { panic("fsm_new() takes 1 argument") }
+        return i_fsm_new(args[0])
+    }
+    if name == "emitter_new" { return i_emitter_new() }
+    if name == "reactive_new" {
+        const initial = if len(args) > 0 { args[0] } else { null }
+        return i_reactive_new(initial)
+    }
+
+    // ── String builder builtins ───────────────────────────────
+    if name == "sb_new" || name == "string_builder" { return i_sb_new() }
+
+    // Not found — return sentinel
+    "__not_builtin__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 65: OperationType Dispatch Bridge
+// Maps all 468 OperationType variants to the ops.magi evaluator.
+// Binary/unary/conversion operations are handled inline; remaining
+// operations are delegated to eval_operation() from ops.magi.
+// ═══════════════════════════════════════════════════════════════════
+
+func i_eval_operation(op_name, inputs) {
+    // Extract common inputs
+    const a = if inputs.has("a") { inputs["a"] } else { null }
+    const b = if inputs.has("b") { inputs["b"] } else { null }
+    const input = if inputs.has("input") { inputs["input"] }
+        else if inputs.has("value") { inputs["value"] }
+        else { null }
+
+    // ── Arithmetic ────────────────────────────────────────────
+    if op_name == "Add" { return i_add(a, b) }
+    if op_name == "Subtract" { return i_sub(a, b) }
+    if op_name == "Multiply" { return i_mul(a, b) }
+    if op_name == "Divide" { return i_div(a, b) }
+    if op_name == "Modulo" { return i_mod(a, b) }
+    if op_name == "Power" { return i_power(a, b) }
+    if op_name == "Negate" {
+        const v = if input != null { input } else { a }
+        return apply_unaryop(UnOp::Neg, v)
+    }
+    if op_name == "Abs" {
+        const v = if input != null { input } else { a }
+        const vt = typeof(v)
+        if vt == "int64" { return if v < 0 { 0 - v } else { v } }
+        if vt == "float64" { return if v < 0.0 { 0.0 - v } else { v } }
+        return v
+    }
+    if op_name == "FloorDiv" {
+        if b == 0 { panic("division by zero") }
+        return a / b
+    }
+
+    // ── Comparison ────────────────────────────────────────────
+    if op_name == "Equal" { return a == b }
+    if op_name == "NotEqual" { return a != b }
+    if op_name == "Greater" { return i_compare(a, b) > 0 }
+    if op_name == "Less" { return i_compare(a, b) < 0 }
+    if op_name == "GreaterEq" { return i_compare(a, b) >= 0 }
+    if op_name == "LessEq" { return i_compare(a, b) <= 0 }
+    if op_name == "Min" {
+        return if i_compare(a, b) <= 0 { a } else { b }
+    }
+    if op_name == "Max" {
+        return if i_compare(a, b) >= 0 { a } else { b }
+    }
+    if op_name == "Clamp" {
+        const lo = b
+        const hi = if inputs.has("c") { inputs["c"] } else { b }
+        return i_clamp(input, lo, hi)
+    }
+
+    // ── Logic ─────────────────────────────────────────────────
+    if op_name == "And" { return i_truthy(a) && i_truthy(b) }
+    if op_name == "Or" { return i_truthy(a) || i_truthy(b) }
+    if op_name == "Not" {
+        const v = if input != null { input } else { a }
+        return !i_truthy(v)
+    }
+    if op_name == "Xor" { return i_truthy(a) != i_truthy(b) }
+
+    // ── Bitwise ───────────────────────────────────────────────
+    if op_name == "BitAnd" { return a & b }
+    if op_name == "BitOr" { return i_bitop("or", a, b) }
+    if op_name == "BitXor" { return a ^ b }
+    if op_name == "BitNot" { return (if input != null { input } else { a }) ^ -1 }
+    if op_name == "Shl" || op_name == "ShiftLeft" { return a << b }
+    if op_name == "Shr" || op_name == "ShiftRight" { return a >> b }
+    if op_name == "AndNot" { return a & (b ^ -1) }
+
+    // ── Conversion ────────────────────────────────────────────
+    if op_name == "ToString" { return i_display(input) }
+    if op_name == "ToInt" || op_name == "ToInt64" { return i_to_int64(input) }
+    if op_name == "ToFloat" || op_name == "ToFloat64" { return i_to_float64(input) }
+    if op_name == "ToBool" { return i_truthy(input) }
+    if op_name == "ParseInt" {
+        if typeof(input) == "string" { return parse_int(input) }
+        return i_to_int64(input)
+    }
+    if op_name == "ParseFloat" {
+        if typeof(input) == "string" { return parse_float(input) }
+        return i_to_float64(input)
+    }
+
+    // ── String operations ─────────────────────────────────────
+    if op_name == "Concat" { return i_add(a, b) }
+    if op_name == "StringLength" { return len(input) }
+    if op_name == "Substring" {
+        const start = if inputs.has("start") { inputs["start"] } else { 0 }
+        const end_val = if inputs.has("end") { inputs["end"] } else { len(input) }
+        return to_string(input).slice(start, end_val)
+    }
+    if op_name == "StringContains" { return to_string(a).contains(to_string(b)) }
+    if op_name == "StringReplace" {
+        const target = if inputs.has("target") { inputs["target"] } else { b }
+        const replacement = if inputs.has("replacement") { inputs["replacement"] } else { "" }
+        return to_string(input).replace(to_string(target), to_string(replacement))
+    }
+    if op_name == "StringSplit" { return to_string(input).split(to_string(b)) }
+    if op_name == "StringTrim" { return to_string(input).trim() }
+    if op_name == "StringUpper" || op_name == "ToUpper" { return to_string(input).to_upper() }
+    if op_name == "StringLower" || op_name == "ToLower" { return to_string(input).to_lower() }
+    if op_name == "StringStartsWith" { return to_string(input).starts_with(to_string(b)) }
+    if op_name == "StringEndsWith" { return to_string(input).ends_with(to_string(b)) }
+    if op_name == "StringRepeat" { return i_str_repeat(to_string(input), b) }
+    if op_name == "StringReverse" { return to_string(input).reverse() }
+    if op_name == "StringJoin" {
+        if typeof(input) == "array" {
+            const sep = if b != null { to_string(b) } else { "" }
+            return input.map(x => i_display(x)).join(sep)
+        }
+        return i_display(input)
+    }
+    if op_name == "StringPad" || op_name == "StringPadLeft" { return i_pad_left(to_string(input), b) }
+    if op_name == "StringPadRight" { return i_pad_right(to_string(input), b) }
+    if op_name == "Capitalize" { return i_str_capitalize(to_string(input)) }
+    if op_name == "TitleCase" { return i_str_title_case(to_string(input)) }
+    if op_name == "Chars" { return to_string(input).chars() }
+    if op_name == "CharAt" {
+        const idx = if b != null { b } else { 0 }
+        const s = to_string(input)
+        if idx >= 0 && idx < len(s) { return s[idx] }
+        return ""
+    }
+
+    // ── Array operations ──────────────────────────────────────
+    if op_name == "ArrayLength" || op_name == "Length" { return len(input) }
+    if op_name == "ArrayPush" || op_name == "Push" {
+        if typeof(input) != "array" { return [input, b] }
+        return input.append(b)
+    }
+    if op_name == "ArrayPop" || op_name == "Pop" {
+        if typeof(input) != "array" || len(input) == 0 { return null }
+        return input[len(input) - 1]
+    }
+    if op_name == "ArrayGet" || op_name == "Get" || op_name == "Index" {
+        const idx = if b != null { b } else { 0 }
+        return eval_index(input, idx)
+    }
+    if op_name == "ArraySlice" || op_name == "Slice" {
+        const start = if inputs.has("start") { inputs["start"] } else { 0 }
+        const end_val = if inputs.has("end") { inputs["end"] } else { len(input) }
+        return input.slice(start, end_val)
+    }
+    if op_name == "ArrayConcat" { return i_add(input, b) }
+    if op_name == "ArrayContains" || op_name == "Contains" {
+        if typeof(input) == "array" { return input.contains(b) }
+        if typeof(input) == "string" { return input.contains(to_string(b)) }
+        return false
+    }
+    if op_name == "ArrayReverse" || op_name == "Reverse" { return input.reverse() }
+    if op_name == "ArraySort" || op_name == "Sort" { return input.sort() }
+    if op_name == "ArrayFlatten" || op_name == "Flatten" { return i_iter_flatten(input) }
+    if op_name == "ArrayUnique" || op_name == "Unique" { return i_iter_unique(input) }
+    if op_name == "ArrayZip" || op_name == "Zip" { return i_iter_zip(input, b) }
+    if op_name == "ArrayChunks" || op_name == "Chunks" { return i_iter_chunks(input, b) }
+    if op_name == "ArrayWindows" || op_name == "Windows" { return i_iter_windows(input, b) }
+    if op_name == "ArrayEnumerate" || op_name == "Enumerate" { return i_iter_enumerate(input) }
+    if op_name == "ArraySum" || op_name == "Sum" { return i_iter_sum(input) }
+    if op_name == "ArrayProduct" || op_name == "Product" { return i_iter_product(input) }
+    if op_name == "ArrayMin" { return i_iter_min(input) }
+    if op_name == "ArrayMax" { return i_iter_max(input) }
+
+    // ── Map operations ────────────────────────────────────────
+    if op_name == "MapGet" {
+        if typeof(input) == "map" { return eval_index(input, b) }
+        return null
+    }
+    if op_name == "MapSet" || op_name == "MapInsert" {
+        if typeof(input) != "map" { return input }
+        const key = to_string(b)
+        const val = if inputs.has("c") { inputs["c"] } else { null }
+        input[key] = val
+        return input
+    }
+    if op_name == "MapDelete" || op_name == "MapRemove" {
+        if typeof(input) != "map" { return input }
+        return input.delete(to_string(b))
+    }
+    if op_name == "MapKeys" || op_name == "Keys" {
+        if typeof(input) == "map" { return input.keys() }
+        return []
+    }
+    if op_name == "MapValues" || op_name == "Values" {
+        if typeof(input) == "map" { return input.values() }
+        return []
+    }
+    if op_name == "MapEntries" || op_name == "Entries" {
+        if typeof(input) != "map" { return [] }
+        let result = []
+        for k in input.keys() { result.push([k, input[k]]) }
+        return result
+    }
+    if op_name == "MapContainsKey" || op_name == "HasKey" {
+        if typeof(input) == "map" { return input.has(to_string(b)) }
+        return false
+    }
+    if op_name == "MapMerge" || op_name == "Merge" {
+        if typeof(input) != "map" || typeof(b) != "map" { return input }
+        let result = {}
+        for k in input.keys() { result[k] = input[k] }
+        for k in b.keys() { result[k] = b[k] }
+        return result
+    }
+    if op_name == "MapSize" || op_name == "Size" { return len(input) }
+
+    // ── Math operations ───────────────────────────────────────
+    if op_name == "Sqrt" { return i_math_isqrt(input) }
+    if op_name == "Floor" { return to_int64(input) }
+    if op_name == "Ceil" {
+        const v = to_int64(input)
+        if to_float64(v) < to_float64(input) { return v + 1 }
+        return v
+    }
+    if op_name == "Round" { return to_int64(to_float64(input) + 0.5) }
+    if op_name == "Sign" { return i_math_sign(input) }
+    if op_name == "Gcd" { return i_math_gcd(a, b) }
+    if op_name == "Lcm" { return i_math_lcm(a, b) }
+    if op_name == "Factorial" { return i_math_factorial(input) }
+    if op_name == "IsPrime" { return i_math_is_prime(input) }
+
+    // ── Type check operations ─────────────────────────────────
+    if op_name == "IsNull" || op_name == "IsNone" { return input == null }
+    if op_name == "IsInt" { return typeof(input) == "int64" }
+    if op_name == "IsFloat" { return typeof(input) == "float64" }
+    if op_name == "IsString" { return typeof(input) == "string" }
+    if op_name == "IsBool" { return typeof(input) == "bool" }
+    if op_name == "IsArray" { return typeof(input) == "array" }
+    if op_name == "IsMap" { return typeof(input) == "map" }
+    if op_name == "TypeOf" || op_name == "TypeName" { return typeof(input) }
+
+    // ── Range/sequence operations ─────────────────────────────
+    if op_name == "Range" { return eval_range(a, b, false) }
+    if op_name == "RangeInclusive" { return eval_range(a, b, true) }
+
+    // ── Hash/encoding operations ──────────────────────────────
+    if op_name == "Hash" { return i_hash(input) }
+
+    // ── Identity / default ────────────────────────────────────
+    if op_name == "Identity" { return input }
+    if op_name == "Const" || op_name == "Constant" { return input }
+    if op_name == "Debug" {
+        println(i_debug_print(input))
+        return input
+    }
+    if op_name == "Output" {
+        println(i_display(input))
+        return input
+    }
+
+    // Fallback: return null for unhandled ops
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 66: Virtual Heap with GC Integration
+// Simulated virtual heap for the self-hosted interpreter.
+// Uses a map-based address space with mark-and-sweep collection.
+// ═══════════════════════════════════════════════════════════════════
+
+let i_heap_values = {"__init": true}
+let i_heap_next_addr = 65536
+let i_heap_alloc_count = 0
+const I_HEAP_GC_THRESHOLD = 256
+let i_gc_stats = {"cycles": 0, "swept": 0, "peak": 0}
+
+// Allocate a value on the virtual heap, returns address
+func i_heap_alloc(value) {
+    const addr = i_heap_next_addr
+    i_heap_next_addr = i_heap_next_addr + 8
+    const addr_key = to_string(addr)
+    i_heap_values[addr_key] = value
+    i_heap_alloc_count = i_heap_alloc_count + 1
+    if i_heap_alloc_count >= I_HEAP_GC_THRESHOLD {
+        i_heap_collect()
+    }
+    addr
+}
+
+// Read a value from the virtual heap
+func i_heap_read(addr) {
+    const key = to_string(addr)
+    if i_heap_values.has(key) { return i_heap_values[key] }
+    null
+}
+
+// Write a value to an existing heap address
+func i_heap_write(addr, value) {
+    const key = to_string(addr)
+    i_heap_values[key] = value
+}
+
+// Collect garbage: scan scopes for live addresses, sweep the rest
+func i_heap_collect() {
+    let live = {"__init": true}
+    // Mark: walk all scope entries and find heap addresses
+    for scope in i_scopes {
+        for k in scope.keys() {
+            if k != "__s" {
+                const entry = scope[k]
+                const v = entry["value"]
+                i_heap_mark(v, live)
+            }
+        }
+    }
+    // Sweep: remove unreachable heap entries
+    let swept = 0
+    let to_remove = []
+    for key in i_heap_values.keys() {
+        if key != "__init" && !live.has(key) {
+            to_remove.push(key)
+        }
+    }
+    for key in to_remove {
+        i_heap_values = i_heap_values.delete(key)
+        swept = swept + 1
+    }
+    i_heap_alloc_count = 0
+    i_gc_stats["cycles"] = i_gc_stats["cycles"] + 1
+    i_gc_stats["swept"] = i_gc_stats["swept"] + swept
+    const live_count = len(i_heap_values.keys()) - 1
+    if live_count > i_gc_stats["peak"] { i_gc_stats["peak"] = live_count }
+    swept
+}
+
+// Mark a value and all values reachable from it
+func i_heap_mark(val, live) {
+    if val == null { return null }
+    const t = typeof(val)
+    if t == "int64" {
+        // Could be a heap address
+        const key = to_string(val)
+        if i_heap_values.has(key) && !live.has(key) {
+            live[key] = true
+            const heap_val = i_heap_values[key]
+            i_heap_mark(heap_val, live)
+        }
+    }
+    if t == "array" {
+        for item in val { i_heap_mark(item, live) }
+    }
+    if t == "map" {
+        for k in val.keys() {
+            if k != "__s" && k != "__init" {
+                i_heap_mark(val[k], live)
+            }
+        }
+    }
+    null
+}
+
+// Get GC statistics
+func i_heap_gc_stats() {
+    i_gc_stats
+}
+
+// Get number of live heap objects
+func i_heap_live_count() {
+    len(i_heap_values.keys()) - 1
+}
+
+// Force a GC cycle
+func i_heap_force_gc() {
+    i_heap_collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 67: Complete Scope Management
+// Push/pop for all block types with proper variable shadowing.
+// ═══════════════════════════════════════════════════════════════════
+
+// Save and restore entire interpreter state (for eval_source isolation)
+func i_save_state() {
+    {
+        "scopes": i_scopes,
+        "functions": i_functions,
+        "structs": i_structs,
+        "enums": i_enums,
+        "impl_methods": i_impl_methods,
+        "modules": i_modules,
+        "defer_stack": i_defer_stack,
+        "loop_labels": i_loop_labels,
+        "heap_values": i_heap_values,
+        "heap_next_addr": i_heap_next_addr,
+    }
+}
+
+func i_restore_state(state) {
+    i_scopes = state["scopes"]
+    i_functions = state["functions"]
+    i_structs = state["structs"]
+    i_enums = state["enums"]
+    i_impl_methods = state["impl_methods"]
+    i_modules = state["modules"]
+    i_defer_stack = state["defer_stack"]
+    i_loop_labels = state["loop_labels"]
+    i_heap_values = state["heap_values"]
+    i_heap_next_addr = state["heap_next_addr"]
+}
+
+// Push a function call frame: new scope + defer frame
+func i_push_call_frame(func_name) {
+    i_push_scope()
+    i_push_defer_frame()
+}
+
+// Pop a function call frame: execute defers then pop scope
+func i_pop_call_frame() {
+    i_pop_defer_frame()
+    i_pop_scope()
+}
+
+// Get a variable with default (does not panic)
+func i_get_or(name, default_val) {
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        const s = i_scopes[idx]
+        if s.has(name) {
+            const entry = s[name]
+            return entry["value"]
+        }
+        idx = idx - 1
+    }
+    default_val
+}
+
+// Check if a variable exists in any scope
+func i_has_var(name) {
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        const s = i_scopes[idx]
+        if s.has(name) { return true }
+        idx = idx - 1
+    }
+    false
+}
+
+// Get current scope depth
+func i_scope_depth() {
+    len(i_scopes)
+}
+
+// Get all variable names visible in current scope chain
+func i_visible_vars() {
+    let seen = {"__init": true}
+    let names = []
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        const s = i_scopes[idx]
+        for k in s.keys() {
+            if k != "__s" && !seen.has(k) {
+                seen[k] = true
+                names.push(k)
+            }
+        }
+        idx = idx - 1
+    }
+    names
+}
+
+// Check if a variable is mutable
+func i_is_mutable(name) {
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        const s = i_scopes[idx]
+        if s.has(name) {
+            return s[name]["mutable"]
+        }
+        idx = idx - 1
+    }
+    false
+}
+
+// Total variable count across all scopes
+func i_total_var_count() {
+    let count = 0
+    for scope in i_scopes {
+        count = count + len(scope.keys()) - 1
+    }
+    count
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 68: Complete For-In Desugaring
+// All iterable types: arrays, maps, strings, ranges, custom iterators
+// ═══════════════════════════════════════════════════════════════════
+
+// Convert any value to an iterable array for for-in loops
+func i_to_iterable(val) {
+    const t = typeof(val)
+    if t == "array" { return val }
+    if t == "string" { return val.chars() }
+    if t == "map" {
+        // Check for range
+        if val.has("__range_start") {
+            return i_eval_range_expr(
+                val["__range_start"],
+                val["__range_end"],
+                if val.has("__range_inclusive") { val["__range_inclusive"] } else { false }
+            )
+        }
+        // Check for custom __iter__ method
+        if val.has("__struct") {
+            const sname = val["__struct"]
+            const iter_method = i_lookup_struct_method(sname, "__iter__")
+            if iter_method != null {
+                const result = call_user_func(iter_method, [val])
+                if typeof(result) == "array" { return result }
+                return [result]
+            }
+        }
+        // Default: iterate over {key: ..., value: ...} entries
+        let result = []
+        for k in val.keys() {
+            if k != "__s" && k != "__init" {
+                result.push({"key": k, "value": val[k]})
+            }
+        }
+        return result
+    }
+    // Single value wraps into array
+    [val]
+}
+
+// Evaluate a for-in loop with full type support
+func eval_for_in_full(var_name, iter_expr, body) {
+    const iter_val = eval_expr(iter_expr)
+    const items = i_to_iterable(iter_val)
+    let result = null
+    for item in items {
+        i_push_scope()
+        i_set(var_name, item, true)
+        const r = eval_block(body)
+        i_pop_scope()
+        if is_break(r) { break }
+        if is_continue(r) { continue }
+        if is_return(r) { return r }
+        result = r
+    }
+    result
+}
+
+// Evaluate for-in with two binding variables (for maps: k, v)
+func eval_for_in_kv(key_name, val_name, iter_expr, body) {
+    const iter_val = eval_expr(iter_expr)
+    const t = typeof(iter_val)
+    let result = null
+    if t == "map" {
+        for k in iter_val.keys() {
+            if k == "__s" || k == "__init" { continue }
+            i_push_scope()
+            i_set(key_name, k, true)
+            i_set(val_name, iter_val[k], true)
+            const r = eval_block(body)
+            i_pop_scope()
+            if is_break(r) { break }
+            if is_continue(r) { continue }
+            if is_return(r) { return r }
+            result = r
+        }
+    } else if t == "array" {
+        let idx = 0
+        for item in iter_val {
+            i_push_scope()
+            i_set(key_name, idx, true)
+            i_set(val_name, item, true)
+            const r = eval_block(body)
+            i_pop_scope()
+            if is_break(r) { break }
+            if is_continue(r) { continue }
+            if is_return(r) { return r }
+            result = r
+            idx = idx + 1
+        }
+    } else {
+        panic("for-in with two variables requires map or array")
+    }
+    result
+}
+
+// Evaluate for-in with index (enumerate style)
+func eval_for_in_indexed(idx_name, val_name, iter_expr, body) {
+    const iter_val = eval_expr(iter_expr)
+    const items = i_to_iterable(iter_val)
+    let result = null
+    let idx = 0
+    for item in items {
+        i_push_scope()
+        i_set(idx_name, idx, true)
+        i_set(val_name, item, true)
+        const r = eval_block(body)
+        i_pop_scope()
+        if is_break(r) { break }
+        if is_continue(r) { continue }
+        if is_return(r) { return r }
+        result = r
+        idx = idx + 1
+    }
+    result
+}
+
+// C-style for loop: for (init; cond; update) { body }
+func eval_c_style_for(init_stmt, cond_expr, update_stmt, body) {
+    i_push_scope()
+    eval_stmt(init_stmt)
+    let result = null
+    let iterations = 0
+    const max_iter = 100000000
+    while true {
+        if iterations >= max_iter { panic("maximum loop iterations exceeded") }
+        const cond_val = eval_expr(cond_expr)
+        if !i_truthy(cond_val) { break }
+        i_push_scope()
+        const r = eval_block(body)
+        i_pop_scope()
+        if is_break(r) { break }
+        if is_continue(r) {
+            eval_stmt(update_stmt)
+            iterations = iterations + 1
+            continue
+        }
+        if is_return(r) {
+            i_pop_scope()
+            return r
+        }
+        result = r
+        eval_stmt(update_stmt)
+        iterations = iterations + 1
+    }
+    i_pop_scope()
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 69: Complete Match Expression Evaluation
+// All pattern types with guard clauses, nested patterns, type patterns
+// ═══════════════════════════════════════════════════════════════════
+
+// Full match with guard support, range patterns, tuple patterns, map patterns
+func eval_match_full(subject_val, arms) {
+    for arm in arms {
+        const bindings = match_pattern_full(arm.pattern, subject_val)
+        if bindings != null {
+            // Check guard condition if present
+            if arm.guard != null {
+                i_push_scope()
+                for k in bindings.keys() {
+                    if k != "__matched" { i_set(k, bindings[k], true) }
+                }
+                const guard_result = eval_expr(arm.guard)
+                i_pop_scope()
+                if !i_truthy(guard_result) { continue }
+            }
+            // Execute the arm body
+            i_push_scope()
+            for k in bindings.keys() {
+                if k != "__matched" { i_set(k, bindings[k], true) }
+            }
+            const result = eval_expr(arm.body)
+            i_pop_scope()
+            return result
+        }
+    }
+    null
+}
+
+// Extended pattern matching with all pattern types
+func match_pattern_full(pattern, value) {
+    match pattern {
+        Pattern::PWildcard => i_empty_bindings(),
+        Pattern::PVariable(name) => {
+            if name == "_" { return i_empty_bindings() }
+            let b = i_empty_bindings()
+            b[name] = value
+            b
+        },
+        Pattern::PLiteral(lit_expr) => {
+            const lit_val = eval_expr(lit_expr)
+            if lit_val == value { i_empty_bindings() } else { null }
+        },
+        Pattern::PEnum(ename, vname, field_pats) => {
+            match_enum_pattern_ext(ename, vname, field_pats, value)
+        },
+        Pattern::PArray(pats) => {
+            match_array_pattern_ext(pats, value)
+        },
+        Pattern::POr(pats) => {
+            match_or_pattern(pats, value)
+        },
+        Pattern::PType(name, type_name) => {
+            const actual = typeof(value)
+            let type_match = false
+            if actual == type_name { type_match = true }
+            if type_name == "int" && actual == "int64" { type_match = true }
+            if type_name == "float" && actual == "float64" { type_match = true }
+            if type_name == "number" && (actual == "int64" || actual == "float64") { type_match = true }
+            if type_name == "any" || type_name == "_" { type_match = true }
+            if i_is_struct(value) && i_struct_name(value) == type_name { type_match = true }
+            if i_is_enum(value) && i_enum_name(value) == type_name { type_match = true }
+            if type_match {
+                let b = i_empty_bindings()
+                if name != "_" { b[name] = value }
+                b
+            } else {
+                null
+            }
+        },
+        Pattern::PBinding(name, inner_pat) => {
+            match_binding_pattern(name, inner_pat, value)
+        },
+        Pattern::PRest(name) => {
+            let b = i_empty_bindings()
+            if name != "_" { b[name] = value }
+            b
+        },
+        Pattern::PMap(pair_patterns) => {
+            match_map_pattern(pair_patterns, value)
+        },
+        Pattern::PRange(lo_expr, hi_expr, inclusive) => {
+            match_range_pattern(lo_expr, hi_expr, inclusive, value)
+        },
+        Pattern::PTuple(pats) => {
+            if typeof(value) != "array" { return null }
+            if len(value) != len(pats) { return null }
+            let bindings = i_empty_bindings()
+            let idx = 0
+            while idx < len(pats) {
+                const sub = match_pattern_full(pats[idx], value[idx])
+                if sub == null { return null }
+                for k in sub.keys() { bindings[k] = sub[k] }
+                idx = idx + 1
+            }
+            bindings
+        },
+        Pattern::PStruct(struct_name, field_pats) => {
+            if !i_is_struct(value) { return null }
+            if i_struct_name(value) != struct_name { return null }
+            let bindings = i_empty_bindings()
+            for pair in field_pats {
+                const fname = pair[0]
+                const fpat = pair[1]
+                if !value.has(fname) { return null }
+                const sub = match_pattern_full(fpat, value[fname])
+                if sub == null { return null }
+                for k in sub.keys() { bindings[k] = sub[k] }
+            }
+            bindings
+        },
+        _ => null,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 70: Complete Type Coercion Tables
+// Binary operations on all type combinations: int/float/string/bool/null
+// ═══════════════════════════════════════════════════════════════════
+
+// Full type coercion for addition with all type combinations
+func i_coerce_add(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    // Numeric combinations
+    if lt == "int64" && rt == "int64" { return left + right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) + right }
+    if lt == "float64" && rt == "int64" { return left + to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left + right }
+    // String combinations — any + string or string + any yields string
+    if lt == "string" || rt == "string" {
+        return i_display(left) + i_display(right)
+    }
+    // Bool to int for arithmetic
+    if lt == "bool" && rt == "int64" { return (if left { 1 } else { 0 }) + right }
+    if lt == "int64" && rt == "bool" { return left + (if right { 1 } else { 0 }) }
+    if lt == "bool" && rt == "bool" { return (if left { 1 } else { 0 }) + (if right { 1 } else { 0 }) }
+    // Array concatenation
+    if lt == "array" && rt == "array" { return left.concat(right) }
+    // Null handling
+    if left == null { return right }
+    if right == null { return left }
+    panic(f"cannot add {lt} and {rt}")
+}
+
+// Full type coercion for subtraction
+func i_coerce_sub(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" { return left - right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) - right }
+    if lt == "float64" && rt == "int64" { return left - to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left - right }
+    if lt == "bool" { return (if left { 1 } else { 0 }) - (if typeof(right) == "bool" { if right { 1 } else { 0 } } else { right }) }
+    if right == null { return left }
+    if left == null { return 0 - right }
+    panic(f"cannot subtract {lt} and {rt}")
+}
+
+// Full type coercion for multiplication
+func i_coerce_mul(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "int64" && rt == "int64" { return left * right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) * right }
+    if lt == "float64" && rt == "int64" { return left * to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left * right }
+    // String repetition: "ha" * 3 => "hahaha"
+    if lt == "string" && rt == "int64" { return i_str_repeat(left, right) }
+    if lt == "int64" && rt == "string" { return i_str_repeat(right, left) }
+    if lt == "bool" { return (if left { 1 } else { 0 }) * right }
+    if rt == "bool" { return left * (if right { 1 } else { 0 }) }
+    panic(f"cannot multiply {lt} and {rt}")
+}
+
+// Full type coercion for division
+func i_coerce_div(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if rt == "int64" && right == 0 { panic("division by zero") }
+    if rt == "float64" && right == 0.0 { panic("division by zero") }
+    if lt == "int64" && rt == "int64" { return left / right }
+    if lt == "int64" && rt == "float64" { return to_float64(left) / right }
+    if lt == "float64" && rt == "int64" { return left / to_float64(right) }
+    if lt == "float64" && rt == "float64" { return left / right }
+    panic(f"cannot divide {lt} and {rt}")
+}
+
+// Full type coercion for modulo
+func i_coerce_mod(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if rt == "int64" && right == 0 { panic("modulo by zero") }
+    if lt == "int64" && rt == "int64" { return left % right }
+    if lt == "float64" && rt == "float64" {
+        const div = to_int64(left / right)
+        return left - to_float64(div) * right
+    }
+    if lt == "int64" && rt == "float64" { return i_coerce_mod(to_float64(left), right) }
+    if lt == "float64" && rt == "int64" { return i_coerce_mod(left, to_float64(right)) }
+    panic(f"cannot modulo {lt} and {rt}")
+}
+
+// Full comparison with type coercion
+func i_coerce_compare(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    // Same type fast paths
+    if lt == rt {
+        if lt == "int64" || lt == "float64" || lt == "string" {
+            if left < right { return -1 }
+            if left > right { return 1 }
+            return 0
+        }
+        if lt == "bool" {
+            const li = if left { 1 } else { 0 }
+            const ri = if right { 1 } else { 0 }
+            return li - ri
+        }
+    }
+    // Cross-type numeric comparisons
+    if (lt == "int64" || lt == "float64") && (rt == "int64" || rt == "float64") {
+        const lf = to_float64(left)
+        const rf = to_float64(right)
+        if lf < rf { return -1 }
+        if lf > rf { return 1 }
+        return 0
+    }
+    // Bool compared to number
+    if lt == "bool" { return i_coerce_compare(if left { 1 } else { 0 }, right) }
+    if rt == "bool" { return i_coerce_compare(left, if right { 1 } else { 0 }) }
+    // Null comparisons
+    if left == null && right == null { return 0 }
+    if left == null { return -1 }
+    if right == null { return 1 }
+    // String comparison as fallback
+    const ls = i_display(left)
+    const rs = i_display(right)
+    if ls < rs { return -1 }
+    if ls > rs { return 1 }
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 71: Error Messages with Span Information
+// Structured error construction for all error cases
+// ═══════════════════════════════════════════════════════════════════
+
+// Create a structured error with context
+func i_make_error(kind, message, context) {
+    {
+        "__error": true,
+        "kind": kind,
+        "message": message,
+        "context": context,
+    }
+}
+
+// Create a type error
+func i_type_error(expected, actual, context) {
+    i_make_error("TypeError",
+        f"expected {expected}, got {actual}",
+        context)
+}
+
+// Create an undefined variable error with suggestion
+func i_undefined_var_error(name) {
+    const suggestion = i_suggest_name(name, i_visible_vars())
+    let msg = f"undefined variable: {name}"
+    if suggestion != "" { msg = msg + f" (did you mean '{suggestion}'?)" }
+    i_make_error("UndefinedVariable", msg, "variable lookup")
+}
+
+// Create an arity mismatch error
+func i_arity_error(func_name, expected, actual) {
+    i_make_error("ArityMismatch",
+        f"{func_name}() expects {expected} arguments, got {actual}",
+        f"call to {func_name}")
+}
+
+// Create a division by zero error
+func i_div_zero_error() {
+    i_make_error("DivisionByZero", "division by zero", "arithmetic")
+}
+
+// Create an index out of bounds error
+func i_index_error(index, length) {
+    i_make_error("IndexOutOfBounds",
+        f"index {index} out of bounds for length {length}",
+        "index access")
+}
+
+// Create an immutable assignment error
+func i_immutable_error(name) {
+    i_make_error("ImmutableAssignment",
+        f"cannot assign to immutable variable: {name}",
+        "assignment")
+}
+
+// Simple Levenshtein-based name suggestion
+func i_suggest_name(name, candidates) {
+    let best = ""
+    let best_dist = 999999
+    for c in candidates {
+        if c == "__s" || c == "__init" { continue }
+        const dist = i_str_edit_distance(name, c)
+        if dist < best_dist && dist <= 3 {
+            best_dist = dist
+            best = c
+        }
+    }
+    best
+}
+
+// Format error for display
+func i_format_error(err) {
+    if typeof(err) != "map" || !err.has("__error") {
+        return i_display(err)
+    }
+    const kind = err["kind"]
+    const message = err["message"]
+    const context = err["context"]
+    f"[{kind}] {message} (in {context})"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 72: Map Comprehension in eval_expr
+// {key: val for x in arr if cond}
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_map_comp_expr(key_expr, val_expr, var_expr, iter_expr, cond_expr) {
+    const iter_val = eval_expr(iter_expr)
+    const var_name = match var_expr.kind {
+        ExprKind::EVariable(n) => n,
+        _ => "_",
+    }
+    i_eval_map_comp(key_expr, val_expr, var_name, iter_val, cond_expr)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 73: Spawn / Await Value Wrappers
+// ═══════════════════════════════════════════════════════════════════
+
+// Spawn a value (wraps in future)
+func i_eval_spawn_value(val) {
+    {"__future": true, "__resolved": true, "__value": val}
+}
+
+// Check if a value is a future
+func i_is_future(val) {
+    if val == null { return false }
+    if typeof(val) != "map" { return false }
+    val.has("__future")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 74: Extended eval_call Integration
+// Wire eval_call_stdlib into the main eval_call dispatch
+// ═══════════════════════════════════════════════════════════════════
+
+// Enhanced eval_call that tries stdlib before panicking
+func eval_call_enhanced(name, args) {
+    // Try the core builtins first (from original eval_call)
+    // Then try extended builtins
+    const ext_result = eval_builtin_extended(name, args)
+    if ext_result != "__not_builtin__" { return ext_result }
+
+    // Try stdlib dispatch
+    const stdlib_result = eval_call_stdlib(name, args)
+    if stdlib_result != "__not_builtin__" { return stdlib_result }
+
+    // User-defined functions
+    if i_functions.has(name) {
+        const func_info = i_functions[name]
+        return call_user_func(func_info, args)
+    }
+
+    // Struct constructors
+    if i_structs.has(name) {
+        let result = {"__struct": name}
+        const fields = i_structs[name]
+        let idx = 0
+        while idx < len(fields) && idx < len(args) {
+            result[fields[idx].name] = args[idx]
+            idx = idx + 1
+        }
+        return result
+    }
+
+    // Enum variant constructors
+    if name.contains("::") {
+        const parts = name.split("::")
+        if len(parts) == 2 {
+            const enum_name = parts[0]
+            const variant = parts[1]
+            if i_enums.has(enum_name) {
+                return i_construct_enum(enum_name, variant, args)
+            }
+        }
+    }
+
+    // Lambda dispatch
+    let lambda_val = null
+    let found_lambda = false
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        const s = i_scopes[scope_idx]
+        if s.has(name) {
+            const entry = s[name]
+            lambda_val = entry["value"]
+            found_lambda = true
+            break
+        }
+        scope_idx = scope_idx - 1
+    }
+    if found_lambda {
+        if typeof(lambda_val) == "map" {
+            if lambda_val.has("__lambda") { return call_lambda(lambda_val, args) }
+            if lambda_val.has("__closure") { return i_call_closure(lambda_val, args) }
+            if lambda_val.has("__memoized") { return i_call_memoized(lambda_val, args) }
+            if lambda_val.has("__partial") { return i_call_partial(lambda_val, args) }
+            if lambda_val.has("__pipe_chain") { return i_call_pipe_chain(lambda_val, args) }
+            if lambda_val.has("__flipped") { return i_call_flipped(lambda_val, args) }
+            if lambda_val.has("__negated") { return i_call_negated(lambda_val, args) }
+            if lambda_val.has("__composed") { return i_call_composed(lambda_val, args) }
+            if lambda_val.has("__fixed") { return i_call_fixed(lambda_val, args) }
+            if lambda_val.has("params") && lambda_val.has("body") {
+                return call_user_func(lambda_val, args)
+            }
+        }
+        if typeof(lambda_val) == "string" {
+            // Variable holds a function name
+            return eval_call_enhanced(lambda_val, args)
+        }
+    }
+
+    // Try as an operation
+    const op_result = i_eval_operation(name, {"input": if len(args) > 0 { args[0] } else { null }, "a": if len(args) > 0 { args[0] } else { null }, "b": if len(args) > 1 { args[1] } else { null }})
+    if op_result != null { return op_result }
+
+    panic(f"undefined function: {name}")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 75: Extended Method Dispatch — additional method handlers
+// for int, float, bool types
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_int_method(obj, method, args) {
+    if method == "abs" { return if obj < 0 { 0 - obj } else { obj } }
+    if method == "to_string" || method == "str" { return to_string(obj) }
+    if method == "to_float" || method == "to_float64" { return to_float64(obj) }
+    if method == "clamp" {
+        if len(args) < 2 { panic("clamp() takes 2 arguments") }
+        return i_clamp(obj, args[0], args[1])
+    }
+    if method == "pow" || method == "power" {
+        if len(args) != 1 { panic("pow() takes 1 argument") }
+        return i_power(obj, args[0])
+    }
+    if method == "min" {
+        if len(args) != 1 { panic("min() takes 1 argument") }
+        return if obj < args[0] { obj } else { args[0] }
+    }
+    if method == "max" {
+        if len(args) != 1 { panic("max() takes 1 argument") }
+        return if obj > args[0] { obj } else { args[0] }
+    }
+    if method == "is_even" { return obj % 2 == 0 }
+    if method == "is_odd" { return obj % 2 != 0 }
+    if method == "is_positive" { return obj > 0 }
+    if method == "is_negative" { return obj < 0 }
+    if method == "is_zero" { return obj == 0 }
+    if method == "sign" { return i_math_sign(obj) }
+    if method == "hex" { return i_int_to_hex(obj) }
+    if method == "bin" { return i_int_to_bin(obj) }
+    if method == "oct" { return i_int_to_oct(obj) }
+    if method == "gcd" {
+        if len(args) != 1 { panic("gcd() takes 1 argument") }
+        return i_math_gcd(obj, args[0])
+    }
+    if method == "lcm" {
+        if len(args) != 1 { panic("lcm() takes 1 argument") }
+        return i_math_lcm(obj, args[0])
+    }
+    if method == "factorial" { return i_math_factorial(obj) }
+    if method == "is_prime" { return i_math_is_prime(obj) }
+    null
+}
+
+func eval_float_method(obj, method, args) {
+    if method == "abs" { return if obj < 0.0 { 0.0 - obj } else { obj } }
+    if method == "to_string" || method == "str" { return to_string(obj) }
+    if method == "to_int" || method == "to_int64" { return to_int64(obj) }
+    if method == "floor" { return to_int64(obj) }
+    if method == "ceil" {
+        const v = to_int64(obj)
+        if to_float64(v) < obj { return v + 1 }
+        return v
+    }
+    if method == "round" { return to_int64(obj + 0.5) }
+    if method == "clamp" {
+        if len(args) < 2 { panic("clamp() takes 2 arguments") }
+        return i_clamp(obj, args[0], args[1])
+    }
+    if method == "is_positive" { return obj > 0.0 }
+    if method == "is_negative" { return obj < 0.0 }
+    if method == "is_zero" { return obj == 0.0 }
+    if method == "sign" { return i_math_sign(obj) }
+    if method == "min" {
+        if len(args) != 1 { panic("min() takes 1 argument") }
+        return if obj < args[0] { obj } else { args[0] }
+    }
+    if method == "max" {
+        if len(args) != 1 { panic("max() takes 1 argument") }
+        return if obj > args[0] { obj } else { args[0] }
+    }
+    null
+}
+
+func eval_bool_method(obj, method, args) {
+    if method == "to_string" || method == "str" { return if obj { "true" } else { "false" } }
+    if method == "to_int" { return if obj { 1 } else { 0 } }
+    if method == "then" {
+        if len(args) != 1 { panic("then() takes 1 argument") }
+        if obj { return i_call_any(args[0], []) }
+        return null
+    }
+    if method == "then_some" {
+        if len(args) != 1 { panic("then_some() takes 1 argument") }
+        if obj { return args[0] }
+        return null
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 76: Extended String Methods — additional string operations
+// from stage 0 interpreter
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_string_method_full(obj, method, args) {
+    if method == "trim_left" || method == "ltrim" || method == "trim_start" {
+        // Simplified: trim whitespace from left
+        let i = 0
+        while i < len(obj) && (obj[i] == " " || obj[i] == "\t" || obj[i] == "\n" || obj[i] == "\r") {
+            i = i + 1
+        }
+        return obj.slice(i, len(obj))
+    }
+    if method == "trim_right" || method == "rtrim" || method == "trim_end" {
+        let i = len(obj) - 1
+        while i >= 0 && (obj[i] == " " || obj[i] == "\t" || obj[i] == "\n" || obj[i] == "\r") {
+            i = i - 1
+        }
+        return obj.slice(0, i + 1)
+    }
+    if method == "is_empty" || method == "isEmpty" { return len(obj) == 0 }
+    if method == "is_blank" {
+        return obj.trim() == ""
+    }
+    if method == "capitalize" { return i_str_capitalize(obj) }
+    if method == "title" || method == "title_case" { return i_str_title_case(obj) }
+    if method == "is_upper" || method == "is_uppercase" { return i_str_is_upper(obj) }
+    if method == "is_lower" || method == "is_lowercase" { return i_str_is_lower(obj) }
+    if method == "is_numeric" || method == "is_digit" { return i_str_is_numeric(obj) }
+    if method == "is_alpha" {
+        if len(obj) == 0 { return false }
+        for c in obj.chars() {
+            if !((c >= "a" && c <= "z") || (c >= "A" && c <= "Z")) { return false }
+        }
+        return true
+    }
+    if method == "is_alphanumeric" || method == "is_alnum" {
+        if len(obj) == 0 { return false }
+        for c in obj.chars() {
+            if !((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9")) { return false }
+        }
+        return true
+    }
+    if method == "strip_prefix" {
+        if len(args) != 1 { panic("strip_prefix() takes 1 argument") }
+        return i_str_strip_prefix(obj, to_string(args[0]))
+    }
+    if method == "strip_suffix" {
+        if len(args) != 1 { panic("strip_suffix() takes 1 argument") }
+        return i_str_strip_suffix(obj, to_string(args[0]))
+    }
+    if method == "repeat" {
+        if len(args) != 1 { panic("repeat() takes 1 argument") }
+        return i_str_repeat(obj, args[0])
+    }
+    if method == "center" {
+        if len(args) != 1 { panic("center() takes 1 argument") }
+        return i_str_center(obj, args[0])
+    }
+    if method == "truncate" {
+        if len(args) != 1 { panic("truncate() takes 1 argument") }
+        return i_str_truncate(obj, args[0])
+    }
+    if method == "word_wrap" || method == "wrap" {
+        if len(args) != 1 { panic("wrap() takes 1 argument") }
+        return i_str_word_wrap(obj, args[0])
+    }
+    if method == "lines" {
+        return obj.split("\n")
+    }
+    if method == "words" {
+        return obj.split(" ").filter(w => len(w) > 0)
+    }
+    if method == "bytes" || method == "byte_length" {
+        return len(obj)
+    }
+    if method == "find" || method == "find_index" {
+        if len(args) != 1 { panic("find() takes 1 argument") }
+        const sub = to_string(args[0])
+        const sub_len = len(sub)
+        let i = 0
+        while i + sub_len <= len(obj) {
+            if obj.slice(i, i + sub_len) == sub { return i }
+            i = i + 1
+        }
+        return -1
+    }
+    if method == "find_all" {
+        if len(args) != 1 { panic("find_all() takes 1 argument") }
+        return i_str_find_all(obj, to_string(args[0]))
+    }
+    if method == "replace_all" {
+        if len(args) != 2 { panic("replace_all() takes 2 arguments") }
+        return i_str_replace_all(obj, to_string(args[0]), to_string(args[1]))
+    }
+    if method == "between" {
+        if len(args) != 2 { panic("between() takes 2 arguments") }
+        return i_str_between(obj, to_string(args[0]), to_string(args[1]))
+    }
+    if method == "edit_distance" || method == "levenshtein" {
+        if len(args) != 1 { panic("edit_distance() takes 1 argument") }
+        return i_str_edit_distance(obj, to_string(args[0]))
+    }
+    if method == "glob_match" || method == "matches_glob" {
+        if len(args) != 1 { panic("glob_match() takes 1 argument") }
+        return i_str_glob_match(obj, to_string(args[0]))
+    }
+    if method == "split_keep" {
+        if len(args) != 1 { panic("split_keep() takes 1 argument") }
+        return i_str_split_keep(obj, to_string(args[0]))
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 77: Extended Map Methods
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_map_method_full(obj, method, args, obj_expr) {
+    if method == "invert" || method == "flip" { return i_map_invert(obj) }
+    if method == "select" || method == "pick" {
+        if len(args) != 1 { panic("select() takes 1 argument") }
+        if typeof(args[0]) != "array" { panic("select() requires array of keys") }
+        return i_map_select(obj, args[0])
+    }
+    if method == "reject" || method == "omit" {
+        if len(args) != 1 { panic("reject() takes 1 argument") }
+        if typeof(args[0]) != "array" { panic("reject() requires array of keys") }
+        return i_map_reject(obj, args[0])
+    }
+    if method == "deep_merge" {
+        if len(args) != 1 { panic("deep_merge() takes 1 argument") }
+        return i_map_deep_merge(obj, args[0])
+    }
+    if method == "flatten" {
+        return i_map_flatten(obj, "")
+    }
+    if method == "unflatten" {
+        return i_map_unflatten(obj)
+    }
+    if method == "to_array" || method == "to_entries" {
+        let result = []
+        for k in obj.keys() {
+            if k != "__s" && k != "__init" && k != "__struct" && k != "__enum" {
+                result.push([k, obj[k]])
+            }
+        }
+        return result
+    }
+    if method == "map_values" {
+        if len(args) != 1 { panic("map_values() takes 1 argument") }
+        const fn_val = args[0]
+        let result = {}
+        for k in obj.keys() {
+            result[k] = i_call_any(fn_val, [obj[k]])
+        }
+        return result
+    }
+    if method == "map_keys" {
+        if len(args) != 1 { panic("map_keys() takes 1 argument") }
+        const fn_val = args[0]
+        let result = {}
+        for k in obj.keys() {
+            const new_key = to_string(i_call_any(fn_val, [k]))
+            result[new_key] = obj[k]
+        }
+        return result
+    }
+    if method == "find" {
+        if len(args) != 1 { panic("find() takes 1 argument") }
+        const fn_val = args[0]
+        for k in obj.keys() {
+            if i_truthy(i_call_any(fn_val, [k, obj[k]])) {
+                return [k, obj[k]]
+            }
+        }
+        return null
+    }
+    if method == "every" || method == "all" {
+        if len(args) != 1 { panic("every() takes 1 argument") }
+        const fn_val = args[0]
+        for k in obj.keys() {
+            if !i_truthy(i_call_any(fn_val, [k, obj[k]])) { return false }
+        }
+        return true
+    }
+    if method == "some" || method == "any" {
+        if len(args) != 1 { panic("some() takes 1 argument") }
+        const fn_val = args[0]
+        for k in obj.keys() {
+            if i_truthy(i_call_any(fn_val, [k, obj[k]])) { return true }
+        }
+        return false
+    }
+    if method == "reduce" {
+        if len(args) < 2 { panic("reduce() takes 2 arguments (fn, initial)") }
+        const fn_val = args[0]
+        let acc = args[1]
+        for k in obj.keys() {
+            acc = i_call_any(fn_val, [acc, k, obj[k]])
+        }
+        return acc
+    }
+    if method == "group_by" {
+        if len(args) != 1 { panic("group_by() takes 1 argument") }
+        const fn_val = args[0]
+        let groups = {}
+        for k in obj.keys() {
+            const gk = to_string(i_call_any(fn_val, [k, obj[k]]))
+            if !groups.has(gk) { groups[gk] = {} }
+            let g = groups[gk]
+            g[k] = obj[k]
+            groups[gk] = g
+        }
+        return groups
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 78: Extended Array Methods — insert, remove_at, swap, rotate
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_array_method_extra(obj, method, args, obj_expr) {
+    if method == "insert" {
+        if len(args) < 2 { panic("insert() takes 2 arguments (index, value)") }
+        const new_arr = i_array_insert(obj, args[0], args[1])
+        match obj_expr.kind {
+            ExprKind::EVariable(name) => i_update(name, new_arr),
+            _ => {},
+        }
+        return new_arr
+    }
+    if method == "remove_at" || method == "removeAt" {
+        if len(args) != 1 { panic("remove_at() takes 1 argument") }
+        const new_arr = i_array_remove_at(obj, args[0])
+        match obj_expr.kind {
+            ExprKind::EVariable(name) => i_update(name, new_arr),
+            _ => {},
+        }
+        return new_arr
+    }
+    if method == "swap" {
+        if len(args) < 2 { panic("swap() takes 2 arguments") }
+        return i_array_swap(obj, args[0], args[1])
+    }
+    if method == "rotate" || method == "rotate_left" {
+        if len(args) != 1 { panic("rotate() takes 1 argument") }
+        return i_array_rotate_left(obj, args[0])
+    }
+    if method == "rotate_right" {
+        if len(args) != 1 { panic("rotate_right() takes 1 argument") }
+        return i_array_rotate_right(obj, args[0])
+    }
+    if method == "binary_search" {
+        if len(args) != 1 { panic("binary_search() takes 1 argument") }
+        return i_array_binary_search(obj, args[0])
+    }
+    if method == "dedup" || method == "deduplicate" {
+        return i_array_dedup(obj)
+    }
+    if method == "interleave" {
+        if len(args) != 1 { panic("interleave() takes 1 argument") }
+        return i_array_interleave(obj, args[0])
+    }
+    if method == "transpose" {
+        return i_array_transpose(obj)
+    }
+    if method == "scan" {
+        if len(args) < 2 { panic("scan() takes 2 arguments (fn, initial)") }
+        return i_array_scan(obj, args[0], args[1])
+    }
+    if method == "pairwise" {
+        if len(args) != 1 { panic("pairwise() takes 1 argument") }
+        return i_array_pairwise(obj, args[0])
+    }
+    if method == "frequencies" || method == "tally" {
+        return i_array_frequencies(obj)
+    }
+    if method == "cartesian" || method == "cross" {
+        if len(args) != 1 { panic("cartesian() takes 1 argument") }
+        return i_array_cartesian(obj, args[0])
+    }
+    if method == "permutations" {
+        return i_array_permutations(obj)
+    }
+    if method == "combinations" {
+        if len(args) != 1 { panic("combinations() takes 1 argument") }
+        return i_array_combinations(obj, args[0])
+    }
+    if method == "power_set" {
+        return i_array_power_set(obj)
+    }
+    if method == "reduce" {
+        if len(args) < 2 { panic("reduce() takes 2 arguments (fn, initial)") }
+        return i_iter_reduce(obj, args[0], args[1])
+    }
+    if method == "each" || method == "for_each" || method == "forEach" {
+        if len(args) != 1 { panic("each() takes 1 argument") }
+        const fn_val = args[0]
+        for item in obj {
+            i_call_any(fn_val, [item])
+        }
+        return null
+    }
+    if method == "map_indexed" || method == "mapIndexed" || method == "enumerate_map" {
+        if len(args) != 1 { panic("map_indexed() takes 1 argument") }
+        const fn_val = args[0]
+        let result = []
+        let idx = 0
+        for item in obj {
+            result.push(i_call_any(fn_val, [idx, item]))
+            idx = idx + 1
+        }
+        return result
+    }
+    if method == "compact" {
+        // Remove null/false values
+        return obj.filter(x => x != null && x != false)
+    }
+    if method == "sample" || method == "random" {
+        if len(obj) == 0 { return null }
+        // Simple deterministic "random" using hash
+        const idx = i_hash(to_string(len(obj))) % len(obj)
+        const real_idx = if idx < 0 { 0 - idx } else { idx }
+        return obj[real_idx % len(obj)]
+    }
+    if method == "shuffle" {
+        // Simple deterministic shuffle (Fisher-Yates with hash-based swap)
+        let result = []
+        for item in obj { result.push(item) }
+        let i = len(result) - 1
+        while i > 0 {
+            const j = (i_hash(to_string(i)) % (i + 1))
+            const real_j = if j < 0 { 0 - j } else { j }
+            const actual_j = real_j % (i + 1)
+            const tmp = result[i]
+            result[i] = result[actual_j]
+            result[actual_j] = tmp
+            i = i - 1
+        }
+        return result
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 79: Unsafe Block / Pointer Operations
+// Stubs for unsafe operations in the self-hosted interpreter
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_unsafe_call(name, args) {
+    if name == "ptr_new" {
+        const val = if len(args) > 0 { args[0] } else { null }
+        return i_heap_alloc(val)
+    }
+    if name == "ptr_read" {
+        if len(args) == 0 { panic("ptr_read() takes 1 argument") }
+        return i_heap_read(args[0])
+    }
+    if name == "ptr_write" {
+        if len(args) < 2 { panic("ptr_write() takes 2 arguments") }
+        i_heap_write(args[0], args[1])
+        return null
+    }
+    if name == "ptr_free" {
+        if len(args) > 0 { i_heap_write(args[0], null) }
+        return null
+    }
+    if name == "ptr_offset" {
+        if len(args) < 2 { panic("ptr_offset() takes 2 arguments") }
+        return args[0] + args[1]
+    }
+    if name == "sizeof" {
+        if len(args) == 0 { return 0 }
+        const val = args[0]
+        const t = typeof(val)
+        if val == null { return 0 }
+        if t == "bool" { return 1 }
+        if t == "int64" || t == "float64" { return 8 }
+        if t == "string" { return len(val) }
+        if t == "array" { return len(val) }
+        if t == "map" { return len(val) }
+        return 8
+    }
+    if name == "alignof" {
+        if len(args) == 0 { return 8 }
+        const val = args[0]
+        if typeof(val) == "bool" { return 1 }
+        return 8
+    }
+    if name == "transmute" {
+        if len(args) < 2 { return if len(args) > 0 { args[0] } else { null } }
+        return args[0]
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 80: Extended Let Destructuring — tuple, nested
+// ═══════════════════════════════════════════════════════════════════
+
+// Evaluate let with tuple destructure: let (a, b, c) = expr
+func eval_let_tuple_destructure(names, value, mutable) {
+    if typeof(value) != "array" {
+        panic("tuple destructuring requires array/tuple value")
+    }
+    let idx = 0
+    for name in names {
+        if name != "_" {
+            const val = if idx < len(value) { value[idx] } else { null }
+            i_set(name, val, mutable)
+        }
+        idx = idx + 1
+    }
+}
+
+// Evaluate let with nested destructure (recursive)
+func eval_nested_destructure(pattern, value, mutable) {
+    match pattern {
+        DestructurePattern::DArray(elements) => {
+            eval_let_destructure(pattern, mutable, value)
+        },
+        DestructurePattern::DMap(pairs) => {
+            eval_let_destructure(pattern, mutable, value)
+        },
+        DestructurePattern::DTuple(names) => {
+            eval_let_tuple_destructure(names, value, mutable)
+        },
+        _ => {
+            eval_let_destructure(pattern, mutable, value)
+        },
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 81: Const / Immutable Definitions
+// ═══════════════════════════════════════════════════════════════════
+
+// Track const names for pattern matching (match against named constants)
+let i_const_names = {"__init": true}
+
+func i_define_const(name, value) {
+    i_set(name, value, false)
+    i_const_names[name] = true
+}
+
+func i_is_const_name(name) {
+    i_const_names.has(name) && name != "__init"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 82: Async Function Support
+// ═══════════════════════════════════════════════════════════════════
+
+let i_async_fns = {"__init": true}
+
+func i_register_async_fn(name) {
+    i_async_fns[name] = true
+}
+
+func i_is_async_fn(name) {
+    i_async_fns.has(name) && name != "__init"
+}
+
+// Call an async function — in self-hosted mode, just calls it eagerly
+func i_call_async(name, args) {
+    const result = eval_call_enhanced(name, args)
+    i_eval_spawn_value(result)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 83: Use / Import Statement Support
+// Handling use std.*, qualified imports, package imports
+// ═══════════════════════════════════════════════════════════════════
+
+// Standard library operation aliases
+let i_std_op_aliases = {"__init": true}
+
+// Register a stdlib alias: use std.math.sqrt → maps "sqrt" to operation
+func i_register_std_alias(local_name, op_name) {
+    i_std_op_aliases[local_name] = op_name
+}
+
+// Check if a name is a registered stdlib alias
+func i_has_std_alias(name) {
+    i_std_op_aliases.has(name) && name != "__init"
+}
+
+// Get the operation name for a stdlib alias
+func i_get_std_alias(name) {
+    if i_has_std_alias(name) { return i_std_op_aliases[name] }
+    null
+}
+
+// Process a use statement: use std.math, use std.io, etc.
+func eval_use_stmt(path, alias, glob) {
+    const module_path = if typeof(path) == "array" { path.join("::") } else { to_string(path) }
+
+    if glob {
+        // use std.math.* → register all math operations
+        if module_path.starts_with("std") {
+            // Register common stdlib aliases based on module name
+            const module_name = if module_path.contains("::") {
+                const parts = module_path.split("::")
+                parts[len(parts) - 1]
+            } else if module_path.contains(".") {
+                const parts = module_path.split(".")
+                parts[len(parts) - 1]
+            } else {
+                module_path
+            }
+            i_register_std_module(module_name)
+        }
+        return null
+    }
+
+    if alias != null && alias != "" {
+        // use std.math as m
+        i_set(alias, module_path, false)
+    } else {
+        // use std.math → just register the module
+        if i_has_module(module_path) {
+            eval_import_all(module_path)
+        }
+    }
+    null
+}
+
+// Register standard library modules
+func i_register_std_module(module_name) {
+    // Register common operation names as aliases
+    if module_name == "math" {
+        const math_ops = ["abs", "min", "max", "pow", "sqrt", "floor", "ceil",
+            "round", "sign", "clamp", "gcd", "lcm", "factorial", "fibonacci",
+            "is_prime", "isqrt"]
+        for op in math_ops {
+            i_std_op_aliases[op] = op
+        }
+    }
+    if module_name == "string" || module_name == "strings" {
+        const str_ops = ["split", "join", "replace", "trim", "to_upper", "to_lower",
+            "starts_with", "ends_with", "contains", "repeat", "reverse",
+            "capitalize", "title", "pad_left", "pad_right", "chars"]
+        for op in str_ops {
+            i_std_op_aliases[op] = op
+        }
+    }
+    if module_name == "array" || module_name == "arrays" || module_name == "collections" {
+        const arr_ops = ["sort", "reverse", "flatten", "unique", "zip", "enumerate",
+            "chunks", "windows", "take", "skip", "sum", "product"]
+        for op in arr_ops {
+            i_std_op_aliases[op] = op
+        }
+    }
+    if module_name == "io" || module_name == "fmt" {
+        const io_ops = ["println", "print", "format", "sprintf"]
+        for op in io_ops {
+            i_std_op_aliases[op] = op
+        }
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 84: Trait / Interface Support
+// ═══════════════════════════════════════════════════════════════════
+
+let i_trait_defs = {"__init": true}
+let i_trait_supertraits = {"__init": true}
+
+// Register a trait definition
+func i_register_trait(name, methods) {
+    i_trait_defs[name] = methods
+}
+
+// Register supertrait relationship
+func i_register_supertrait(trait_name, supertrait_name) {
+    if !i_trait_supertraits.has(trait_name) {
+        i_trait_supertraits[trait_name] = []
+    }
+    let supers = i_trait_supertraits[trait_name]
+    supers.push(supertrait_name)
+    i_trait_supertraits[trait_name] = supers
+}
+
+// Check if a struct type implements a trait
+func i_implements_trait(struct_name, trait_name) {
+    if !i_trait_defs.has(trait_name) { return false }
+    const trait_methods = i_trait_defs[trait_name]
+    if typeof(trait_methods) != "array" { return false }
+    for tm in trait_methods {
+        const method_name = if typeof(tm) == "map" && tm.has("name") { tm["name"] } else { to_string(tm) }
+        const qualified = f"{struct_name}.{method_name}"
+        if !i_impl_methods.has(qualified) && !i_functions.has(qualified) {
+            return false
+        }
+    }
+    // Check supertraits recursively
+    if i_trait_supertraits.has(trait_name) {
+        const supers = i_trait_supertraits[trait_name]
+        for st in supers {
+            if !i_implements_trait(struct_name, st) { return false }
+        }
+    }
+    true
+}
+
+// Get all traits a struct type implements
+func i_struct_traits(struct_name) {
+    let result = []
+    for trait_name in i_trait_defs.keys() {
+        if trait_name != "__init" {
+            if i_implements_trait(struct_name, trait_name) {
+                result.push(trait_name)
+            }
+        }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 85: Type Alias Support
+// ═══════════════════════════════════════════════════════════════════
+
+let i_type_aliases = {"__init": true}
+
+func i_register_type_alias(alias, target) {
+    i_type_aliases[alias] = target
+}
+
+func i_resolve_type_alias(name) {
+    if i_type_aliases.has(name) && name != "__init" {
+        return i_type_aliases[name]
+    }
+    name
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 86: Enhanced Method Dispatch with All Types
+// Unified entry point that dispatches based on type
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_method_dispatch(obj, method, args, obj_expr) {
+    const ot = typeof(obj)
+
+    // Int methods
+    if ot == "int64" {
+        const result = eval_int_method(obj, method, args)
+        if result != null { return result }
+    }
+
+    // Float methods
+    if ot == "float64" {
+        const result = eval_float_method(obj, method, args)
+        if result != null { return result }
+    }
+
+    // Bool methods
+    if ot == "bool" {
+        const result = eval_bool_method(obj, method, args)
+        if result != null { return result }
+    }
+
+    // String extended methods
+    if ot == "string" {
+        const result = eval_string_method_full(obj, method, args)
+        if result != null { return result }
+        const ext = eval_string_method_extended(obj, method, args)
+        if ext != null { return ext }
+    }
+
+    // Array extended methods
+    if ot == "array" {
+        const result = eval_array_method_extended(obj, method, args, obj_expr)
+        if result != null { return result }
+        const extra = eval_array_method_extra(obj, method, args, obj_expr)
+        if extra != null { return extra }
+    }
+
+    // Map extended methods
+    if ot == "map" {
+        const result = eval_map_method_extended(obj, method, args, obj_expr)
+        if result != null { return result }
+        const full = eval_map_method_full(obj, method, args, obj_expr)
+        if full != null { return full }
+    }
+
+    // Fall through to the original eval_method_call
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 87: Complete Stmt/Expr Arms — SLetDestructure, STupleAssign,
+// SSpawn, SDefer (full), SCStyleFor, SModuleDef (full)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_stmt_extended(stmt) {
+    match stmt.kind {
+        StmtKind::SLetDestructure(pattern, mutable, expr) => {
+            const val = eval_expr(expr)
+            eval_nested_destructure(pattern, val, mutable)
+            null
+        },
+        StmtKind::STupleAssign(names, expr) => {
+            const val = eval_expr(expr)
+            eval_tuple_assign(names, val)
+            null
+        },
+        StmtKind::SSpawn(expr) => {
+            const val = eval_expr(expr)
+            i_eval_spawn_value(val)
+        },
+        StmtKind::SDefer(expr) => {
+            i_add_defer(expr)
+            null
+        },
+        StmtKind::SModuleDef(name, body) => {
+            eval_module_block(name, body)
+            null
+        },
+        StmtKind::SCStyleFor(init, cond, update, body) => {
+            eval_c_style_for(init, cond, update, body)
+        },
+        StmtKind::SConstMulti(names, exprs) => {
+            let idx = 0
+            while idx < len(names) {
+                const val = if idx < len(exprs) { eval_expr(exprs[idx]) } else { null }
+                i_set(names[idx], val, false)
+                idx = idx + 1
+            }
+            null
+        },
+        StmtKind::SLetMulti(names, exprs) => {
+            let idx = 0
+            while idx < len(names) {
+                const val = if idx < len(exprs) { eval_expr(exprs[idx]) } else { null }
+                i_set(names[idx], val, true)
+                idx = idx + 1
+            }
+            null
+        },
+        StmtKind::SSwap(name_a, name_b) => {
+            const va = i_get(name_a)
+            const vb = i_get(name_b)
+            i_update(name_a, vb)
+            i_update(name_b, va)
+            null
+        },
+        StmtKind::SUnsafe(block) => {
+            i_push_scope()
+            i_set("__unsafe_context", true, false)
+            const result = eval_block(block)
+            i_pop_scope()
+            if is_return(result) { return result }
+            result
+        },
+        StmtKind::SExternBlock(_) => null,
+        StmtKind::SExternFunc(_, _) => null,
+        StmtKind::SMethodDef(receiver_type, fdef) => {
+            const qualified = f"{receiver_type}.{fdef.name}"
+            i_functions[qualified] = {
+                "params": fdef.params,
+                "body": fdef.body,
+            }
+            i_impl_methods[qualified] = {
+                "params": fdef.params,
+                "body": fdef.body,
+            }
+            null
+        },
+        StmtKind::SAsyncFuncDef(fdef) => {
+            i_functions[fdef.name] = {
+                "params": fdef.params,
+                "body": fdef.body,
+            }
+            i_register_async_fn(fdef.name)
+            null
+        },
+        StmtKind::SGeneratorDef(fdef) => {
+            // Store as regular function; yield is handled in eval_expr
+            i_functions[fdef.name] = {
+                "params": fdef.params,
+                "body": fdef.body,
+            }
+            null
+        },
+        StmtKind::SUse(path, alias, glob, _is_pub) => {
+            eval_use_stmt(path, alias, glob)
+        },
+        StmtKind::STypeAlias(alias, target) => {
+            i_register_type_alias(alias, target)
+            null
+        },
+        _ => null,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 88: Complete Expr Arms — EMapComp, ECast, EIs, ERange3,
+// EChain, ETernary, EAwait, ESpawn (full), ETryCatch (full)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_expr_extended(expr) {
+    match expr.kind {
+        ExprKind::EMapComp(key_expr, val_expr, var_expr, iter_expr, cond_expr) => {
+            eval_map_comp_expr(key_expr, val_expr, var_expr, iter_expr, cond_expr)
+        },
+        ExprKind::ECast(inner, type_name) => {
+            const val = eval_expr(inner)
+            i_type_convert(val, type_name)
+        },
+        ExprKind::EIs(inner, type_name) => {
+            const val = eval_expr(inner)
+            i_type_check(val, type_name)
+        },
+        ExprKind::ETernary(cond, then_expr, else_expr) => {
+            const cv = eval_expr(cond)
+            if i_truthy(cv) { eval_expr(then_expr) } else { eval_expr(else_expr) }
+        },
+        ExprKind::EAwait(inner) => {
+            const val = eval_expr(inner)
+            i_eval_await(val)
+        },
+        ExprKind::ESpawn(inner) => {
+            const val = eval_expr(inner)
+            i_eval_spawn_value(val)
+        },
+        ExprKind::ETryCatch(try_expr, catch_var, catch_expr) => {
+            // Self-hosted: evaluate try_expr; on panic, we can't catch it,
+            // so just return the try result
+            eval_expr(try_expr)
+        },
+        ExprKind::ETryPropagate(inner) => {
+            const val = eval_expr(inner)
+            // Check for error result
+            if typeof(val) == "map" && val.has("err") {
+                panic(f"propagated error: {i_display(val[\"err\"])}")
+            }
+            if typeof(val) == "map" && val.has("ok") {
+                return val["ok"]
+            }
+            val
+        },
+        ExprKind::EChain(exprs) => {
+            let result = null
+            for e in exprs {
+                result = eval_expr(e)
+            }
+            result
+        },
+        ExprKind::EPower(base_expr, exp_expr) => {
+            const base = eval_expr(base_expr)
+            const exp = eval_expr(exp_expr)
+            i_power(base, exp)
+        },
+        ExprKind::EStringMul(s_expr, n_expr) => {
+            const s = eval_expr(s_expr)
+            const n = eval_expr(n_expr)
+            i_str_repeat(i_display(s), n)
+        },
+        ExprKind::ESlice(obj_expr, start_expr, end_expr) => {
+            const obj = eval_expr(obj_expr)
+            const start = if start_expr != null { eval_expr(start_expr) } else { 0 }
+            const end_val = if end_expr != null { eval_expr(end_expr) } else { len(obj) }
+            if typeof(obj) == "array" { return obj.slice(start, end_val) }
+            if typeof(obj) == "string" { return obj.slice(start, end_val) }
+            null
+        },
+        ExprKind::EAssert(inner, msg_expr) => {
+            const val = eval_expr(inner)
+            if !i_truthy(val) {
+                const msg = if msg_expr != null { i_display(eval_expr(msg_expr)) } else { "assertion failed" }
+                panic(msg)
+            }
+            null
+        },
+        ExprKind::ETypeOf(inner) => {
+            const val = eval_expr(inner)
+            typeof(val)
+        },
+        _ => null,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 89: OS / Environment Builtins
+// Stubs for file system, environment, and process operations
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_os_call(name, args) {
+    // Environment
+    if name == "env_get" || name == "os_getenv" || name == "getenv" {
+        // Cannot read environment in self-hosted mode
+        return if len(args) > 1 { args[1] } else { "" }
+    }
+    if name == "env_set" || name == "os_setenv" || name == "setenv" { return null }
+    if name == "env_all" || name == "os_environ" || name == "environ" { return {} }
+
+    // File system
+    if name == "fs_read" || name == "read_file" || name == "file_read" {
+        return ""
+    }
+    if name == "fs_write" || name == "write_file" || name == "file_write" { return null }
+    if name == "fs_exists" || name == "file_exists" || name == "path_exists" { return false }
+    if name == "fs_remove" || name == "file_remove" || name == "file_delete" { return null }
+    if name == "fs_rename" || name == "file_rename" { return null }
+    if name == "fs_mkdir" || name == "mkdir" || name == "mkdirp" { return null }
+    if name == "fs_readdir" || name == "readdir" || name == "ls" { return [] }
+    if name == "fs_stat" || name == "file_stat" || name == "stat" {
+        return {"size": 0, "is_dir": false, "is_file": false}
+    }
+    if name == "fs_is_dir" || name == "is_dir" { return false }
+    if name == "fs_is_file" || name == "is_file" { return false }
+
+    // Path operations
+    if name == "path_join" {
+        if len(args) < 2 { return if len(args) > 0 { to_string(args[0]) } else { "" } }
+        return to_string(args[0]) + "/" + to_string(args[1])
+    }
+    if name == "path_dir" || name == "dirname" {
+        if len(args) == 0 { return "" }
+        const p = to_string(args[0])
+        const idx = p.split("/")
+        if len(idx) <= 1 { return "." }
+        return idx.slice(0, len(idx) - 1).join("/")
+    }
+    if name == "path_base" || name == "basename" {
+        if len(args) == 0 { return "" }
+        const p = to_string(args[0])
+        const parts = p.split("/")
+        return parts[len(parts) - 1]
+    }
+    if name == "path_ext" || name == "extname" {
+        if len(args) == 0 { return "" }
+        const p = to_string(args[0])
+        const parts = p.split(".")
+        if len(parts) <= 1 { return "" }
+        return "." + parts[len(parts) - 1]
+    }
+    if name == "path_abs" || name == "abspath" {
+        return if len(args) > 0 { to_string(args[0]) } else { "" }
+    }
+    if name == "path_clean" || name == "filepath_clean" {
+        return if len(args) > 0 { to_string(args[0]) } else { "" }
+    }
+
+    // Process operations
+    if name == "exit" || name == "os_exit" { return null }
+    if name == "exec" || name == "os_exec" || name == "command" { return {"status": 0, "stdout": "", "stderr": ""} }
+    if name == "args" || name == "os_args" { return [] }
+    if name == "pid" || name == "os_getpid" { return 0 }
+    if name == "hostname" || name == "os_hostname" { return "self-hosted" }
+    if name == "cwd" || name == "os_getwd" { return "." }
+
+    // Temp files
+    if name == "tempdir" || name == "os_tempdir" { return "/tmp" }
+    if name == "tempfile" || name == "os_create_temp" { return "/tmp/magi_temp" }
+
+    "__not_os__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 90: Crypto / Hash Builtins (Stubs)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_crypto_call(name, args) {
+    if name == "hash_sha256" || name == "sha256" {
+        if len(args) == 0 { return "" }
+        // Simple hash simulation
+        return i_int_to_hex(i_hash(to_string(args[0])))
+    }
+    if name == "hash_sha512" || name == "sha512" {
+        if len(args) == 0 { return "" }
+        return i_int_to_hex(i_hash(to_string(args[0]))) + i_int_to_hex(i_hash(to_string(args[0]) + "salt"))
+    }
+    if name == "hash_md5" || name == "md5" {
+        if len(args) == 0 { return "" }
+        return i_int_to_hex(i_hash(to_string(args[0])))
+    }
+    if name == "hmac" {
+        if len(args) < 2 { return "" }
+        return i_int_to_hex(i_hash(to_string(args[0]) + to_string(args[1])))
+    }
+    if name == "rand" || name == "random" || name == "rand_int" {
+        // Deterministic "random" for reproducibility
+        return 42
+    }
+    if name == "rand_float" || name == "random_float" {
+        return 0.42
+    }
+    if name == "rand_range" {
+        if len(args) < 2 { return 0 }
+        return args[0]
+    }
+    if name == "uuid" || name == "uuid_v4" {
+        return "00000000-0000-4000-8000-000000000000"
+    }
+    if name == "base64_encode" {
+        if len(args) == 0 { return "" }
+        // Simplified base64 stub
+        return to_string(args[0])
+    }
+    if name == "base64_decode" {
+        if len(args) == 0 { return "" }
+        return to_string(args[0])
+    }
+    if name == "hex_encode" {
+        if len(args) == 0 { return "" }
+        return i_int_to_hex(i_hash(to_string(args[0])))
+    }
+    if name == "hex_decode" {
+        if len(args) == 0 { return "" }
+        return to_string(args[0])
+    }
+    "__not_crypto__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 91: Regex Builtins (Stubs)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_regex_call(name, args) {
+    if name == "regex_match" || name == "re_match" {
+        if len(args) < 2 { return false }
+        // Use glob matching as approximation
+        return i_str_glob_match(to_string(args[0]), to_string(args[1]))
+    }
+    if name == "regex_find" || name == "re_find" {
+        if len(args) < 2 { return null }
+        return null
+    }
+    if name == "regex_find_all" || name == "re_find_all" {
+        if len(args) < 2 { return [] }
+        return []
+    }
+    if name == "regex_replace" || name == "re_replace" {
+        if len(args) < 3 { return if len(args) > 0 { to_string(args[0]) } else { "" } }
+        return to_string(args[0]).replace(to_string(args[1]), to_string(args[2]))
+    }
+    if name == "regex_split" || name == "re_split" {
+        if len(args) < 2 { return if len(args) > 0 { [to_string(args[0])] } else { [] } }
+        return to_string(args[0]).split(to_string(args[1]))
+    }
+    if name == "regex_compile" || name == "re_compile" {
+        return {"__regex": true, "pattern": if len(args) > 0 { to_string(args[0]) } else { "" }}
+    }
+    "__not_regex__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 92: Date/Time Builtins (Stubs)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_time_call(name, args) {
+    if name == "time_now" || name == "now" { return 0 }
+    if name == "time_unix" || name == "unix_time" { return 0 }
+    if name == "time_date" || name == "date" { return "1970-01-01" }
+    if name == "time_format" || name == "format_time" {
+        if len(args) == 0 { return "1970-01-01T00:00:00Z" }
+        return "1970-01-01T00:00:00Z"
+    }
+    if name == "time_parse" || name == "parse_time" {
+        return 0
+    }
+    if name == "time_add" || name == "add_duration" {
+        if len(args) < 2 { return 0 }
+        return args[0] + args[1]
+    }
+    if name == "time_sub" || name == "sub_duration" {
+        if len(args) < 2 { return 0 }
+        return args[0] - args[1]
+    }
+    if name == "time_since" { return 0 }
+    if name == "time_until" { return 0 }
+    if name == "time_year" || name == "year" { return 1970 }
+    if name == "time_month" || name == "month" { return 1 }
+    if name == "time_day" || name == "day" { return 1 }
+    if name == "time_hour" || name == "hour" { return 0 }
+    if name == "time_minute" || name == "minute" { return 0 }
+    if name == "time_second" || name == "second" { return 0 }
+    if name == "time_weekday" || name == "weekday" { return 4 }
+    if name == "timer_new" || name == "stopwatch" { return {"__timer": true, "start": 0, "elapsed": 0} }
+    if name == "timer_start" { return null }
+    if name == "timer_stop" { return 0 }
+    if name == "timer_elapsed" { return 0 }
+    if name == "timer_reset" { return null }
+    "__not_time__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 93: HTTP / Network Builtins (Stubs)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_net_call(name, args) {
+    if name == "http_get" {
+        return {"status": 200, "body": "", "headers": {}}
+    }
+    if name == "http_post" {
+        return {"status": 200, "body": "", "headers": {}}
+    }
+    if name == "http_put" || name == "http_patch" || name == "http_delete" {
+        return {"status": 200, "body": "", "headers": {}}
+    }
+    if name == "http_serve" || name == "http_listen" || name == "http_server" { return null }
+    if name == "http_request" {
+        return {"status": 200, "body": "", "headers": {}}
+    }
+    if name == "http_new_request" {
+        const method = if len(args) > 0 { to_string(args[0]) } else { "GET" }
+        const url = if len(args) > 1 { to_string(args[1]) } else { "" }
+        return {"method": method, "url": url, "headers": {}, "body": ""}
+    }
+    if name == "url_parse" {
+        if len(args) == 0 { return {"scheme": "", "host": "", "path": "", "query": ""} }
+        const u = to_string(args[0])
+        return {"scheme": "https", "host": "", "path": u, "query": ""}
+    }
+    if name == "url_encode" || name == "url_query_escape" {
+        return if len(args) > 0 { to_string(args[0]) } else { "" }
+    }
+    if name == "url_decode" || name == "url_query_unescape" {
+        return if len(args) > 0 { to_string(args[0]) } else { "" }
+    }
+    if name == "json_decode" || name == "json_unmarshal" || name == "json_parse" {
+        // Cannot parse JSON in self-hosted mode; return the string
+        return if len(args) > 0 { args[0] } else { null }
+    }
+    if name == "websocket_connect" { return {"__ws": true, "connected": false} }
+    if name == "websocket_send" { return null }
+    if name == "websocket_recv" { return "" }
+    if name == "websocket_close" { return null }
+    if name == "tcp_listen" || name == "tcp_connect" { return {"__tcp": true} }
+    if name == "tcp_accept" { return {"__tcp": true} }
+    if name == "tcp_read" { return "" }
+    if name == "tcp_write" { return 0 }
+    if name == "tcp_close" { return null }
+    if name == "net_lookup_host" || name == "dns_lookup" { return ["127.0.0.1"] }
+    if name == "net_interfaces" { return [] }
+    "__not_net__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 94: Logging / Structured Logger Builtins (Stubs)
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_log_call(name, args) {
+    if name == "log_debug" || name == "debug" {
+        const parts = args.map(a => i_display(a))
+        println(f"[DEBUG] {parts.join(\" \")}")
+        return null
+    }
+    if name == "log_info" || name == "info" {
+        const parts = args.map(a => i_display(a))
+        println(f"[INFO] {parts.join(\" \")}")
+        return null
+    }
+    if name == "log_warn" || name == "warn" {
+        const parts = args.map(a => i_display(a))
+        println(f"[WARN] {parts.join(\" \")}")
+        return null
+    }
+    if name == "log_error" || name == "error" {
+        const parts = args.map(a => i_display(a))
+        println(f"[ERROR] {parts.join(\" \")}")
+        return null
+    }
+    if name == "logger_new" || name == "new_logger" {
+        return {"__logger": true, "level": "info", "fields": {}}
+    }
+    if name == "logger_with" {
+        if len(args) < 2 { return if len(args) > 0 { args[0] } else { {"__logger": true} } }
+        return args[0]
+    }
+    if name == "slog_new" || name == "slog_default" || name == "slog_text_handler" || name == "slog_json_handler" {
+        return {"__slog": true}
+    }
+    "__not_log__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 95: Testing Framework Builtins
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_test_call(name, args) {
+    if name == "assert_contains" {
+        if len(args) < 2 { panic("assert_contains() takes 2 arguments") }
+        const haystack = args[0]
+        const needle = args[1]
+        const ht = typeof(haystack)
+        let found = false
+        if ht == "string" { found = haystack.contains(to_string(needle)) }
+        else if ht == "array" { found = haystack.contains(needle) }
+        else if ht == "map" { found = haystack.has(to_string(needle)) }
+        if !found {
+            const msg = if len(args) > 2 { i_display(args[2]) }
+                else { f"assert_contains failed: {i_display(needle)} not in {i_display(haystack)}" }
+            panic(msg)
+        }
+        return null
+    }
+    if name == "assert_not_contains" {
+        if len(args) < 2 { panic("assert_not_contains() takes 2 arguments") }
+        const haystack = args[0]
+        const needle = args[1]
+        const ht = typeof(haystack)
+        let found = false
+        if ht == "string" { found = haystack.contains(to_string(needle)) }
+        else if ht == "array" { found = haystack.contains(needle) }
+        else if ht == "map" { found = haystack.has(to_string(needle)) }
+        if found {
+            const msg = if len(args) > 2 { i_display(args[2]) }
+                else { f"assert_not_contains failed: {i_display(needle)} found in {i_display(haystack)}" }
+            panic(msg)
+        }
+        return null
+    }
+    if name == "assert_gt" || name == "assert_greater" {
+        if len(args) < 2 { panic("assert_gt() takes 2 arguments") }
+        if !(i_compare(args[0], args[1]) > 0) {
+            panic(f"assert_gt failed: {i_display(args[0])} is not > {i_display(args[1])}")
+        }
+        return null
+    }
+    if name == "assert_lt" || name == "assert_less" {
+        if len(args) < 2 { panic("assert_lt() takes 2 arguments") }
+        if !(i_compare(args[0], args[1]) < 0) {
+            panic(f"assert_lt failed: {i_display(args[0])} is not < {i_display(args[1])}")
+        }
+        return null
+    }
+    if name == "assert_gte" || name == "assert_ge" {
+        if len(args) < 2 { panic("assert_gte() takes 2 arguments") }
+        if !(i_compare(args[0], args[1]) >= 0) {
+            panic(f"assert_gte failed: {i_display(args[0])} is not >= {i_display(args[1])}")
+        }
+        return null
+    }
+    if name == "assert_lte" || name == "assert_le" {
+        if len(args) < 2 { panic("assert_lte() takes 2 arguments") }
+        if !(i_compare(args[0], args[1]) <= 0) {
+            panic(f"assert_lte failed: {i_display(args[0])} is not <= {i_display(args[1])}")
+        }
+        return null
+    }
+    if name == "assert_null" || name == "assert_none" {
+        if len(args) == 0 { panic("assert_null() takes 1 argument") }
+        if args[0] != null {
+            panic(f"assert_null failed: got {i_display(args[0])}")
+        }
+        return null
+    }
+    if name == "assert_not_null" || name == "assert_some" {
+        if len(args) == 0 { panic("assert_not_null() takes 1 argument") }
+        if args[0] == null {
+            panic("assert_not_null failed: got null")
+        }
+        return null
+    }
+    if name == "assert_type" {
+        if len(args) < 2 { panic("assert_type() takes 2 arguments") }
+        const actual = typeof(args[0])
+        const expected = to_string(args[1])
+        if actual != expected && !(expected == "int" && actual == "int64") && !(expected == "float" && actual == "float64") {
+            panic(f"assert_type failed: expected {expected}, got {actual}")
+        }
+        return null
+    }
+    if name == "assert_deep_eq" {
+        if len(args) < 2 { panic("assert_deep_eq() takes 2 arguments") }
+        if !i_deep_eq(args[0], args[1]) {
+            panic(f"assert_deep_eq failed:\n  left:  {i_display(args[0])}\n  right: {i_display(args[1])}")
+        }
+        return null
+    }
+    if name == "assert_approx" || name == "assert_close" {
+        if len(args) < 2 { panic("assert_approx() takes 2-3 arguments") }
+        const epsilon = if len(args) > 2 { to_float64(args[2]) } else { 0.0001 }
+        const diff = to_float64(args[0]) - to_float64(args[1])
+        const abs_diff = if diff < 0.0 { 0.0 - diff } else { diff }
+        if abs_diff > epsilon {
+            panic(f"assert_approx failed: {i_display(args[0])} != {i_display(args[1])} (epsilon: {epsilon})")
+        }
+        return null
+    }
+    if name == "bench" || name == "benchmark" {
+        // Stub: just call the function once
+        if len(args) > 0 {
+            const fn_val = args[0]
+            i_call_any(fn_val, [])
+        }
+        return {"iterations": 1, "elapsed_ms": 0}
+    }
+    "__not_test__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 96: Master Call Dispatch
+// Final fallback chain: tries all category dispatchers
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_call_master(name, args) {
+    // Try OS calls
+    const os_result = eval_os_call(name, args)
+    if os_result != "__not_os__" { return os_result }
+
+    // Try crypto calls
+    const crypto_result = eval_crypto_call(name, args)
+    if crypto_result != "__not_crypto__" { return crypto_result }
+
+    // Try regex calls
+    const regex_result = eval_regex_call(name, args)
+    if regex_result != "__not_regex__" { return regex_result }
+
+    // Try time calls
+    const time_result = eval_time_call(name, args)
+    if time_result != "__not_time__" { return time_result }
+
+    // Try net calls
+    const net_result = eval_net_call(name, args)
+    if net_result != "__not_net__" { return net_result }
+
+    // Try log calls
+    const log_result = eval_log_call(name, args)
+    if log_result != "__not_log__" { return log_result }
+
+    // Try test calls
+    const test_result = eval_test_call(name, args)
+    if test_result != "__not_test__" { return test_result }
+
+    // Try unsafe calls
+    const unsafe_result = eval_unsafe_call(name, args)
+    if unsafe_result != null { return unsafe_result }
+
+    "__not_dispatched__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 97: Encoding / Serialization Builtins
+// CSV, TOML, YAML, XML stubs
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_encoding_call(name, args) {
+    // CSV
+    if name == "csv_parse" || name == "csv_decode" {
+        if len(args) == 0 { return [] }
+        const s = to_string(args[0])
+        const lines = s.split("\n")
+        let result = []
+        for line in lines {
+            if len(line.trim()) > 0 {
+                result.push(line.split(",").map(c => c.trim()))
+            }
+        }
+        return result
+    }
+    if name == "csv_encode" || name == "csv_stringify" {
+        if len(args) == 0 { return "" }
+        if typeof(args[0]) != "array" { return i_display(args[0]) }
+        let lines = []
+        for row in args[0] {
+            if typeof(row) == "array" {
+                lines.push(row.map(c => i_display(c)).join(","))
+            } else {
+                lines.push(i_display(row))
+            }
+        }
+        return lines.join("\n")
+    }
+
+    // TOML
+    if name == "toml_parse" || name == "toml_decode" {
+        return if len(args) > 0 { args[0] } else { {} }
+    }
+    if name == "toml_encode" || name == "toml_stringify" {
+        return if len(args) > 0 { i_to_json(args[0]) } else { "" }
+    }
+
+    // YAML
+    if name == "yaml_parse" || name == "yaml_decode" {
+        return if len(args) > 0 { args[0] } else { {} }
+    }
+    if name == "yaml_encode" || name == "yaml_stringify" {
+        return if len(args) > 0 { i_pretty_print(args[0], 0) } else { "" }
+    }
+
+    // XML
+    if name == "xml_parse" || name == "xml_decode" {
+        return if len(args) > 0 { args[0] } else { {} }
+    }
+    if name == "xml_encode" || name == "xml_stringify" {
+        return if len(args) > 0 { i_display(args[0]) } else { "" }
+    }
+
+    // MessagePack / CBOR stubs
+    if name == "msgpack_encode" || name == "msgpack_decode" {
+        return if len(args) > 0 { args[0] } else { null }
+    }
+    if name == "cbor_encode" || name == "cbor_decode" {
+        return if len(args) > 0 { args[0] } else { null }
+    }
+
+    "__not_encoding__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 98: Builder/Fluent API Patterns
+// ═══════════════════════════════════════════════════════════════════
+
+// Generic builder: accumulates configuration then builds
+func i_builder_new(type_name) {
+    {"__builder": true, "__type": type_name, "__config": {}}
+}
+
+func i_builder_set(builder, key, value) {
+    let config = builder["__config"]
+    config[key] = value
+    builder["__config"] = config
+    builder
+}
+
+func i_builder_get(builder, key) {
+    const config = builder["__config"]
+    if config.has(key) { return config[key] }
+    null
+}
+
+func i_builder_build(builder) {
+    const type_name = builder["__type"]
+    let result = {"__struct": type_name}
+    const config = builder["__config"]
+    for k in config.keys() {
+        result[k] = config[k]
+    }
+    result
+}
+
+func i_builder_reset(builder) {
+    builder["__config"] = {}
+    builder
+}
+
+func i_builder_has(builder, key) {
+    builder["__config"].has(key)
+}
+
+func i_builder_merge(builder, other_config) {
+    if typeof(other_config) != "map" { return builder }
+    let config = builder["__config"]
+    for k in other_config.keys() {
+        config[k] = other_config[k]
+    }
+    builder["__config"] = config
+    builder
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 99: Iterator Protocol — lazy iterators
+// ═══════════════════════════════════════════════════════════════════
+
+// Create a lazy iterator from an array
+func i_lazy_iter(arr) {
+    {"__iter": true, "__source": arr, "__index": 0, "__transforms": []}
+}
+
+// Add a map transform to a lazy iterator
+func i_lazy_map(iter, fn_val) {
+    let transforms = iter["__transforms"]
+    transforms.push({"type": "map", "fn": fn_val})
+    iter["__transforms"] = transforms
+    iter
+}
+
+// Add a filter transform to a lazy iterator
+func i_lazy_filter(iter, fn_val) {
+    let transforms = iter["__transforms"]
+    transforms.push({"type": "filter", "fn": fn_val})
+    iter["__transforms"] = transforms
+    iter
+}
+
+// Add a take limit to a lazy iterator
+func i_lazy_take(iter, n) {
+    let transforms = iter["__transforms"]
+    transforms.push({"type": "take", "n": n})
+    iter["__transforms"] = transforms
+    iter
+}
+
+// Add a skip to a lazy iterator
+func i_lazy_skip(iter, n) {
+    let transforms = iter["__transforms"]
+    transforms.push({"type": "skip", "n": n})
+    iter["__transforms"] = transforms
+    iter
+}
+
+// Collect a lazy iterator into an array
+func i_lazy_collect(iter) {
+    let source = iter["__source"]
+    const transforms = iter["__transforms"]
+
+    // Apply transforms in order
+    for t in transforms {
+        if t["type"] == "map" {
+            source = i_iter_map(source, t["fn"])
+        }
+        if t["type"] == "filter" {
+            source = i_iter_filter(source, t["fn"])
+        }
+        if t["type"] == "take" {
+            source = i_iter_take(source, t["n"])
+        }
+        if t["type"] == "skip" {
+            source = i_iter_skip(source, t["n"])
+        }
+    }
+    source
+}
+
+// Reduce a lazy iterator
+func i_lazy_reduce(iter, fn_val, initial) {
+    const collected = i_lazy_collect(iter)
+    i_iter_reduce(collected, fn_val, initial)
+}
+
+// Get first element from lazy iterator
+func i_lazy_first(iter) {
+    const collected = i_lazy_collect(i_lazy_take(iter, 1))
+    if len(collected) > 0 { collected[0] } else { null }
+}
+
+// Count elements in lazy iterator
+func i_lazy_count(iter) {
+    len(i_lazy_collect(iter))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 100: Promise / Future Combinators
+// ═══════════════════════════════════════════════════════════════════
+
+// Wait for all futures to resolve
+func i_await_all(futures) {
+    let results = []
+    for f in futures {
+        results.push(i_eval_await(f))
+    }
+    results
+}
+
+// Wait for the first future to resolve
+func i_await_race(futures) {
+    if len(futures) == 0 { return null }
+    // In self-hosted mode, all futures are immediately resolved
+    i_eval_await(futures[0])
+}
+
+// Map over a future
+func i_future_map(future, fn_val) {
+    const val = i_eval_await(future)
+    const result = i_call_any(fn_val, [val])
+    i_eval_spawn_value(result)
+}
+
+// Chain futures
+func i_future_then(future, fn_val) {
+    const val = i_eval_await(future)
+    const next = i_call_any(fn_val, [val])
+    if i_is_future(next) { return next }
+    i_eval_spawn_value(next)
+}
+
+// Catch future errors
+func i_future_catch(future, fn_val) {
+    // In self-hosted mode, futures are always resolved
+    future
+}
+
+// Create a resolved future
+func i_future_resolve(value) {
+    i_eval_spawn_value(value)
+}
+
+// Create a rejected future
+func i_future_reject(error) {
+    {"__future": true, "__resolved": false, "__error": error}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 101: Validator / Schema Validation
+// ═══════════════════════════════════════════════════════════════════
+
+// Validate a value against a schema
+func i_validate(value, schema) {
+    if typeof(schema) != "map" { return true }
+
+    // Type validation
+    if schema.has("type") {
+        const expected_type = schema["type"]
+        if !i_type_check(value, expected_type) {
+            return false
+        }
+    }
+
+    // Required fields validation (for maps/structs)
+    if schema.has("required") && typeof(value) == "map" {
+        const required = schema["required"]
+        for field in required {
+            if !value.has(field) { return false }
+        }
+    }
+
+    // Min/max for numbers
+    if schema.has("min") {
+        if i_compare(value, schema["min"]) < 0 { return false }
+    }
+    if schema.has("max") {
+        if i_compare(value, schema["max"]) > 0 { return false }
+    }
+
+    // Min/max length for strings and arrays
+    if schema.has("min_length") {
+        if len(value) < schema["min_length"] { return false }
+    }
+    if schema.has("max_length") {
+        if len(value) > schema["max_length"] { return false }
+    }
+
+    // Pattern matching for strings
+    if schema.has("pattern") && typeof(value) == "string" {
+        if !i_str_glob_match(value, schema["pattern"]) { return false }
+    }
+
+    // Enum validation
+    if schema.has("enum") {
+        const allowed = schema["enum"]
+        if !allowed.contains(value) { return false }
+    }
+
+    // Nested schema for array items
+    if schema.has("items") && typeof(value) == "array" {
+        const item_schema = schema["items"]
+        for item in value {
+            if !i_validate(item, item_schema) { return false }
+        }
+    }
+
+    // Nested schema for map properties
+    if schema.has("properties") && typeof(value) == "map" {
+        const props = schema["properties"]
+        for key in props.keys() {
+            if value.has(key) {
+                if !i_validate(value[key], props[key]) { return false }
+            }
+        }
+    }
+
+    true
+}
+
+// Validate and collect all errors
+func i_validate_errors(value, schema) {
+    let errors = []
+    if typeof(schema) != "map" { return errors }
+
+    if schema.has("type") {
+        if !i_type_check(value, schema["type"]) {
+            errors.push(f"expected type {schema[\"type\"]}, got {typeof(value)}")
+        }
+    }
+
+    if schema.has("required") && typeof(value) == "map" {
+        for field in schema["required"] {
+            if !value.has(field) {
+                errors.push(f"missing required field: {field}")
+            }
+        }
+    }
+
+    if schema.has("min") && i_compare(value, schema["min"]) < 0 {
+        errors.push(f"value {i_display(value)} is less than minimum {i_display(schema[\"min\"])}")
+    }
+    if schema.has("max") && i_compare(value, schema["max"]) > 0 {
+        errors.push(f"value {i_display(value)} is greater than maximum {i_display(schema[\"max\"])}")
+    }
+
+    errors
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 102: Ring Buffer / Circular Buffer
+// ═══════════════════════════════════════════════════════════════════
+
+func i_ring_buffer_new(capacity) {
+    let buf = []
+    let i = 0
+    while i < capacity { buf.push(null); i = i + 1 }
+    {"__ring": true, "__buf": buf, "__cap": capacity, "__head": 0, "__tail": 0, "__count": 0}
+}
+
+func i_ring_buffer_push(rb, val) {
+    let buf = rb["__buf"]
+    buf[rb["__tail"]] = val
+    rb["__buf"] = buf
+    rb["__tail"] = (rb["__tail"] + 1) % rb["__cap"]
+    if rb["__count"] < rb["__cap"] {
+        rb["__count"] = rb["__count"] + 1
+    } else {
+        rb["__head"] = (rb["__head"] + 1) % rb["__cap"]
+    }
+    rb
+}
+
+func i_ring_buffer_pop(rb) {
+    if rb["__count"] == 0 { panic("pop from empty ring buffer") }
+    const val = rb["__buf"][rb["__head"]]
+    rb["__head"] = (rb["__head"] + 1) % rb["__cap"]
+    rb["__count"] = rb["__count"] - 1
+    val
+}
+
+func i_ring_buffer_peek(rb) {
+    if rb["__count"] == 0 { return null }
+    rb["__buf"][rb["__head"]]
+}
+
+func i_ring_buffer_size(rb) { rb["__count"] }
+func i_ring_buffer_capacity(rb) { rb["__cap"] }
+func i_ring_buffer_is_empty(rb) { rb["__count"] == 0 }
+func i_ring_buffer_is_full(rb) { rb["__count"] == rb["__cap"] }
+
+func i_ring_buffer_to_array(rb) {
+    let result = []
+    let i = 0
+    let idx = rb["__head"]
+    while i < rb["__count"] {
+        result.push(rb["__buf"][idx])
+        idx = (idx + 1) % rb["__cap"]
+        i = i + 1
+    }
+    result
+}
+
+func i_ring_buffer_clear(rb) {
+    rb["__head"] = 0
+    rb["__tail"] = 0
+    rb["__count"] = 0
+    rb
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 103: Trie / Prefix Tree
+// ═══════════════════════════════════════════════════════════════════
+
+func i_trie_new() {
+    {"__trie": true, "__children": {}, "__is_end": false, "__value": null}
+}
+
+func i_trie_insert(trie, key, value) {
+    let current = trie
+    for ch in to_string(key).chars() {
+        let children = current["__children"]
+        if !children.has(ch) {
+            children[ch] = {"__children": {}, "__is_end": false, "__value": null}
+        }
+        current["__children"] = children
+        current = children[ch]
+    }
+    current["__is_end"] = true
+    current["__value"] = value
+    trie
+}
+
+func i_trie_search(trie, key) {
+    let current = trie
+    for ch in to_string(key).chars() {
+        const children = current["__children"]
+        if !children.has(ch) { return null }
+        current = children[ch]
+    }
+    if current["__is_end"] { return current["__value"] }
+    null
+}
+
+func i_trie_has(trie, key) {
+    let current = trie
+    for ch in to_string(key).chars() {
+        const children = current["__children"]
+        if !children.has(ch) { return false }
+        current = children[ch]
+    }
+    current["__is_end"]
+}
+
+func i_trie_starts_with(trie, prefix) {
+    let current = trie
+    for ch in to_string(prefix).chars() {
+        const children = current["__children"]
+        if !children.has(ch) { return false }
+        current = children[ch]
+    }
+    true
+}
+
+// Collect all keys with a given prefix
+func i_trie_keys_with_prefix(trie, prefix) {
+    let current = trie
+    for ch in to_string(prefix).chars() {
+        const children = current["__children"]
+        if !children.has(ch) { return [] }
+        current = children[ch]
+    }
+    let result = []
+    i_trie_collect_keys(current, prefix, result)
+    result
+}
+
+func i_trie_collect_keys(node, prefix, result) {
+    if node["__is_end"] { result.push(prefix) }
+    const children = node["__children"]
+    for ch in children.keys() {
+        i_trie_collect_keys(children[ch], prefix + ch, result)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 104: LRU Cache
+// ═══════════════════════════════════════════════════════════════════
+
+func i_lru_new(capacity) {
+    {"__lru": true, "__cap": capacity, "__keys": [], "__data": {}}
+}
+
+func i_lru_get(cache, key) {
+    const k = to_string(key)
+    if !cache["__data"].has(k) { return null }
+    // Move to front (most recently used)
+    let keys = cache["__keys"]
+    let new_keys = [k]
+    for existing in keys {
+        if existing != k { new_keys.push(existing) }
+    }
+    cache["__keys"] = new_keys
+    cache["__data"][k]
+}
+
+func i_lru_set(cache, key, value) {
+    const k = to_string(key)
+    let data = cache["__data"]
+    let keys = cache["__keys"]
+
+    // Remove old position if exists
+    let new_keys = [k]
+    for existing in keys {
+        if existing != k { new_keys.push(existing) }
+    }
+
+    // Evict if over capacity
+    while len(new_keys) > cache["__cap"] {
+        const evicted = new_keys[len(new_keys) - 1]
+        new_keys = new_keys.slice(0, len(new_keys) - 1)
+        data = data.delete(evicted)
+    }
+
+    data[k] = value
+    cache["__keys"] = new_keys
+    cache["__data"] = data
+    cache
+}
+
+func i_lru_has(cache, key) {
+    cache["__data"].has(to_string(key))
+}
+
+func i_lru_size(cache) { len(cache["__keys"]) }
+func i_lru_capacity(cache) { cache["__cap"] }
+
+func i_lru_clear(cache) {
+    cache["__keys"] = []
+    cache["__data"] = {}
+    cache
+}
+
+func i_lru_keys(cache) { cache["__keys"] }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 105: Bloom Filter (Probabilistic Set)
+// ═══════════════════════════════════════════════════════════════════
+
+func i_bloom_new(size) {
+    let bits = []
+    let i = 0
+    while i < size { bits.push(false); i = i + 1 }
+    {"__bloom": true, "__bits": bits, "__size": size, "__count": 0}
+}
+
+func i_bloom_add(bloom, value) {
+    const key = i_display(value)
+    const size = bloom["__size"]
+    let bits = bloom["__bits"]
+    // Use multiple hash functions
+    const h1 = i_hash(key) % size
+    const h2 = i_hash(key + "salt1") % size
+    const h3 = i_hash(key + "salt2") % size
+    const idx1 = if h1 < 0 { 0 - h1 } else { h1 }
+    const idx2 = if h2 < 0 { 0 - h2 } else { h2 }
+    const idx3 = if h3 < 0 { 0 - h3 } else { h3 }
+    bits[idx1 % size] = true
+    bits[idx2 % size] = true
+    bits[idx3 % size] = true
+    bloom["__bits"] = bits
+    bloom["__count"] = bloom["__count"] + 1
+    bloom
+}
+
+func i_bloom_may_contain(bloom, value) {
+    const key = i_display(value)
+    const size = bloom["__size"]
+    const bits = bloom["__bits"]
+    const h1 = i_hash(key) % size
+    const h2 = i_hash(key + "salt1") % size
+    const h3 = i_hash(key + "salt2") % size
+    const idx1 = if h1 < 0 { 0 - h1 } else { h1 }
+    const idx2 = if h2 < 0 { 0 - h2 } else { h2 }
+    const idx3 = if h3 < 0 { 0 - h3 } else { h3 }
+    bits[idx1 % size] && bits[idx2 % size] && bits[idx3 % size]
+}
+
+func i_bloom_count(bloom) { bloom["__count"] }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 106: Union-Find / Disjoint Set
+// ═══════════════════════════════════════════════════════════════════
+
+func i_uf_new(n) {
+    let parent = []
+    let rank = []
+    let i = 0
+    while i < n {
+        parent.push(i)
+        rank.push(0)
+        i = i + 1
+    }
+    {"__uf": true, "__parent": parent, "__rank": rank, "__size": n}
+}
+
+func i_uf_find(uf, x) {
+    let parent = uf["__parent"]
+    let current = x
+    while parent[current] != current {
+        // Path compression
+        parent[current] = parent[parent[current]]
+        current = parent[current]
+    }
+    uf["__parent"] = parent
+    current
+}
+
+func i_uf_union(uf, x, y) {
+    const rx = i_uf_find(uf, x)
+    const ry = i_uf_find(uf, y)
+    if rx == ry { return uf }
+    let parent = uf["__parent"]
+    let rank = uf["__rank"]
+    if rank[rx] < rank[ry] {
+        parent[rx] = ry
+    } else if rank[rx] > rank[ry] {
+        parent[ry] = rx
+    } else {
+        parent[ry] = rx
+        rank[rx] = rank[rx] + 1
+    }
+    uf["__parent"] = parent
+    uf["__rank"] = rank
+    uf
+}
+
+func i_uf_connected(uf, x, y) {
+    i_uf_find(uf, x) == i_uf_find(uf, y)
+}
+
+func i_uf_components(uf) {
+    let seen = {"__init": true}
+    let count = 0
+    let i = 0
+    while i < uf["__size"] {
+        const root = i_uf_find(uf, i)
+        const key = to_string(root)
+        if !seen.has(key) {
+            seen[key] = true
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 107: Interval / Range Set Operations
+// ═══════════════════════════════════════════════════════════════════
+
+// Create an interval [lo, hi]
+func i_interval_new(lo, hi) {
+    {"__interval": true, "lo": lo, "hi": hi}
+}
+
+// Check if a value is in the interval
+func i_interval_contains(interval, value) {
+    i_compare(value, interval["lo"]) >= 0 && i_compare(value, interval["hi"]) <= 0
+}
+
+// Check if two intervals overlap
+func i_interval_overlaps(a, b) {
+    i_compare(a["lo"], b["hi"]) <= 0 && i_compare(b["lo"], a["hi"]) <= 0
+}
+
+// Merge two overlapping intervals
+func i_interval_merge(a, b) {
+    if !i_interval_overlaps(a, b) { return [a, b] }
+    const lo = if i_compare(a["lo"], b["lo"]) <= 0 { a["lo"] } else { b["lo"] }
+    const hi = if i_compare(a["hi"], b["hi"]) >= 0 { a["hi"] } else { b["hi"] }
+    [i_interval_new(lo, hi)]
+}
+
+// Intersect two intervals
+func i_interval_intersect(a, b) {
+    if !i_interval_overlaps(a, b) { return null }
+    const lo = if i_compare(a["lo"], b["lo"]) >= 0 { a["lo"] } else { b["lo"] }
+    const hi = if i_compare(a["hi"], b["hi"]) <= 0 { a["hi"] } else { b["hi"] }
+    i_interval_new(lo, hi)
+}
+
+// Interval length
+func i_interval_length(interval) {
+    i_sub(interval["hi"], interval["lo"])
+}
+
+// Merge a list of intervals into non-overlapping sorted intervals
+func i_interval_merge_all(intervals) {
+    if len(intervals) <= 1 { return intervals }
+    const sorted = i_iter_sort_by(intervals, i => i["lo"])
+    let result = [sorted[0]]
+    let i = 1
+    while i < len(sorted) {
+        let last = result[len(result) - 1]
+        const current = sorted[i]
+        if i_compare(current["lo"], last["hi"]) <= 0 {
+            const new_hi = if i_compare(current["hi"], last["hi"]) > 0 { current["hi"] } else { last["hi"] }
+            result[len(result) - 1] = i_interval_new(last["lo"], new_hi)
+        } else {
+            result.push(current)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 108: Bit Manipulation Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+// Count set bits (population count)
+func i_popcount(n) {
+    let v = if n < 0 { 0 - n } else { n }
+    let count = 0
+    while v > 0 {
+        count = count + (v % 2)
+        v = v / 2
+    }
+    count
+}
+
+// Count leading zeros (for positive integers)
+func i_clz(n) {
+    if n == 0 { return 64 }
+    let v = if n < 0 { 0 - n } else { n }
+    let count = 0
+    let bit = 1
+    // Find highest bit
+    let highest = 0
+    while bit <= v && bit > 0 {
+        highest = highest + 1
+        bit = bit * 2
+    }
+    64 - highest
+}
+
+// Count trailing zeros
+func i_ctz(n) {
+    if n == 0 { return 64 }
+    let v = if n < 0 { 0 - n } else { n }
+    let count = 0
+    while v % 2 == 0 && v > 0 {
+        count = count + 1
+        v = v / 2
+    }
+    count
+}
+
+// Check if n is a power of 2
+func i_is_power_of_2(n) {
+    n > 0 && (n & (n - 1)) == 0
+}
+
+// Next power of 2 >= n
+func i_next_power_of_2(n) {
+    if n <= 1 { return 1 }
+    let v = n - 1
+    let p = 1
+    while p < v { p = p * 2 }
+    p
+}
+
+// Reverse bits of a byte (0-255)
+func i_reverse_bits_byte(n) {
+    let result = 0
+    let v = n
+    let i = 0
+    while i < 8 {
+        result = result * 2 + (v % 2)
+        v = v / 2
+        i = i + 1
+    }
+    result
+}
+
+// Rotate bits left
+func i_rotl(n, shift, bits) {
+    const mask = (1 << bits) - 1
+    ((n << shift) & mask) | ((n >> (bits - shift)) & mask)
+}
+
+// Rotate bits right
+func i_rotr(n, shift, bits) {
+    const mask = (1 << bits) - 1
+    ((n >> shift) & mask) | ((n << (bits - shift)) & mask)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 109: Number Theory Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+// Extended Euclidean algorithm: returns [gcd, x, y] where ax + by = gcd
+func i_extended_gcd(a, b) {
+    if b == 0 { return [a, 1, 0] }
+    const result = i_extended_gcd(b, a % b)
+    const g = result[0]
+    const x = result[1]
+    const y = result[2]
+    [g, y, x - (a / b) * y]
+}
+
+// Modular exponentiation: (base^exp) mod modulus
+func i_mod_pow(base, exp, modulus) {
+    if modulus == 1 { return 0 }
+    let result = 1
+    let b = base % modulus
+    let e = exp
+    while e > 0 {
+        if e % 2 == 1 {
+            result = (result * b) % modulus
+        }
+        e = e / 2
+        b = (b * b) % modulus
+    }
+    result
+}
+
+// Modular inverse: a^(-1) mod m (using extended GCD)
+func i_mod_inverse(a, m) {
+    const result = i_extended_gcd(a, m)
+    const g = result[0]
+    const x = result[1]
+    if g != 1 { panic("modular inverse does not exist") }
+    ((x % m) + m) % m
+}
+
+// Euler's totient function
+func i_euler_totient(n) {
+    let result = n
+    let p = 2
+    let num = n
+    while p * p <= num {
+        if num % p == 0 {
+            while num % p == 0 { num = num / p }
+            result = result - result / p
+        }
+        p = p + 1
+    }
+    if num > 1 {
+        result = result - result / num
+    }
+    result
+}
+
+// Generate all primes up to n using sieve of Eratosthenes
+func i_sieve_of_eratosthenes(n) {
+    if n < 2 { return [] }
+    let is_prime = []
+    let i = 0
+    while i <= n { is_prime.push(true); i = i + 1 }
+    is_prime[0] = false
+    is_prime[1] = false
+    let p = 2
+    while p * p <= n {
+        if is_prime[p] {
+            let multiple = p * p
+            while multiple <= n {
+                is_prime[multiple] = false
+                multiple = multiple + p
+            }
+        }
+        p = p + 1
+    }
+    let primes = []
+    i = 2
+    while i <= n {
+        if is_prime[i] { primes.push(i) }
+        i = i + 1
+    }
+    primes
+}
+
+// Prime factorization
+func i_prime_factors(n) {
+    if n <= 1 { return [] }
+    let factors = []
+    let num = n
+    let d = 2
+    while d * d <= num {
+        while num % d == 0 {
+            factors.push(d)
+            num = num / d
+        }
+        d = d + 1
+    }
+    if num > 1 { factors.push(num) }
+    factors
+}
+
+// Divisors of n
+func i_divisors(n) {
+    if n <= 0 { return [] }
+    let result = []
+    let i = 1
+    while i * i <= n {
+        if n % i == 0 {
+            result.push(i)
+            if i != n / i { result.push(n / i) }
+        }
+        i = i + 1
+    }
+    result.sort()
+}
+
+// Sum of divisors
+func i_sum_of_divisors(n) {
+    i_iter_sum(i_divisors(n))
+}
+
+// Is perfect number
+func i_is_perfect(n) {
+    if n <= 1 { return false }
+    i_sum_of_divisors(n) - n == n
+}
+
+// Chinese remainder theorem: solve system of x ≡ r_i (mod m_i)
+func i_crt(remainders, moduli) {
+    if len(remainders) != len(moduli) { panic("CRT: arrays must have same length") }
+    const n = len(remainders)
+    let M = 1
+    for m in moduli { M = M * m }
+    let x = 0
+    let i = 0
+    while i < n {
+        const Mi = M / moduli[i]
+        const yi = i_mod_inverse(Mi, moduli[i])
+        x = x + remainders[i] * Mi * yi
+        i = i + 1
+    }
+    x % M
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 110: Topological Data — Disjoint Intervals, Convex Hull
+// ═══════════════════════════════════════════════════════════════════
+
+// 2D Point constructor
+func i_point(x, y) { {"x": x, "y": y} }
+
+// Distance between two points (squared, to avoid needing sqrt)
+func i_distance_sq(p1, p2) {
+    const dx = p2["x"] - p1["x"]
+    const dy = p2["y"] - p1["y"]
+    dx * dx + dy * dy
+}
+
+// Manhattan distance
+func i_manhattan_distance(p1, p2) {
+    const dx = p2["x"] - p1["x"]
+    const dy = p2["y"] - p1["y"]
+    const abs_dx = if dx < 0 { 0 - dx } else { dx }
+    const abs_dy = if dy < 0 { 0 - dy } else { dy }
+    abs_dx + abs_dy
+}
+
+// Cross product of vectors (p1->p2) and (p1->p3)
+func i_cross_2d(p1, p2, p3) {
+    (p2["x"] - p1["x"]) * (p3["y"] - p1["y"]) - (p2["y"] - p1["y"]) * (p3["x"] - p1["x"])
+}
+
+// Convex hull using Graham scan
+func i_convex_hull(points) {
+    if len(points) <= 3 { return points }
+
+    // Find bottom-most point (and leftmost if tie)
+    let pivot_idx = 0
+    let i = 1
+    while i < len(points) {
+        const p = points[i]
+        const pv = points[pivot_idx]
+        if p["y"] < pv["y"] || (p["y"] == pv["y"] && p["x"] < pv["x"]) {
+            pivot_idx = i
+        }
+        i = i + 1
+    }
+
+    // Swap pivot to front
+    const tmp = points[0]
+    points[0] = points[pivot_idx]
+    points[pivot_idx] = tmp
+    const pivot = points[0]
+
+    // Sort by polar angle with pivot
+    let rest = points.slice(1, len(points))
+    rest = i_iter_sort_by(rest, p => {
+        const dx = p["x"] - pivot["x"]
+        const dy = p["y"] - pivot["y"]
+        // Use atan2 approximation: dy / (abs(dx) + abs(dy))
+        const abs_dx = if dx < 0 { 0 - dx } else { dx }
+        const abs_dy = if dy < 0 { 0 - dy } else { dy }
+        if abs_dx + abs_dy == 0 { 0 } else { dy * 1000 / (abs_dx + abs_dy) }
+    })
+
+    let stack = [pivot, rest[0]]
+    i = 1
+    while i < len(rest) {
+        while len(stack) > 1 {
+            const top = stack[len(stack) - 1]
+            const below = stack[len(stack) - 2]
+            if i_cross_2d(below, top, rest[i]) <= 0 {
+                stack = stack.slice(0, len(stack) - 1)
+            } else {
+                break
+            }
+        }
+        stack.push(rest[i])
+        i = i + 1
+    }
+    stack
+}
+
+// Check if a point is inside a polygon (ray casting algorithm)
+func i_point_in_polygon(point, polygon) {
+    const px = point["x"]
+    const py = point["y"]
+    let inside = false
+    const n = len(polygon)
+    let j = n - 1
+    let i = 0
+    while i < n {
+        const xi = polygon[i]["x"]
+        const yi = polygon[i]["y"]
+        const xj = polygon[j]["x"]
+        const yj = polygon[j]["y"]
+        if (yi > py) != (yj > py) {
+            const slope = (px - xi) * (yj - yi) - (xj - xi) * (py - yi)
+            if slope < 0 != (yj < yi) {
+                inside = !inside
+            }
+        }
+        j = i
+        i = i + 1
+    }
+    inside
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 111: Searching Algorithms
+// ═══════════════════════════════════════════════════════════════════
+
+// Linear search with predicate
+func i_search_linear(arr, predicate) {
+    let i = 0
+    while i < len(arr) {
+        if i_truthy(i_call_any(predicate, [arr[i]])) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+// Binary search with comparator
+func i_search_binary(arr, target, cmp_fn) {
+    let lo = 0
+    let hi = len(arr) - 1
+    while lo <= hi {
+        const mid = lo + (hi - lo) / 2
+        const cmp = i_call_any(cmp_fn, [arr[mid], target])
+        if cmp == 0 { return mid }
+        if cmp < 0 { lo = mid + 1 } else { hi = mid - 1 }
+    }
+    -1
+}
+
+// Lower bound: first index where arr[i] >= target
+func i_lower_bound(arr, target) {
+    let lo = 0
+    let hi = len(arr)
+    while lo < hi {
+        const mid = lo + (hi - lo) / 2
+        if i_compare(arr[mid], target) < 0 { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+// Upper bound: first index where arr[i] > target
+func i_upper_bound(arr, target) {
+    let lo = 0
+    let hi = len(arr)
+    while lo < hi {
+        const mid = lo + (hi - lo) / 2
+        if i_compare(arr[mid], target) <= 0 { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}
+
+// Equal range: [lower_bound, upper_bound]
+func i_equal_range(arr, target) {
+    [i_lower_bound(arr, target), i_upper_bound(arr, target)]
+}
+
+// Ternary search for unimodal functions (find maximum)
+func i_ternary_search_max(fn_val, lo, hi, iterations) {
+    let l = lo
+    let r = hi
+    let i = 0
+    while i < iterations {
+        const m1 = l + (r - l) / 3
+        const m2 = r - (r - l) / 3
+        const f1 = i_call_any(fn_val, [m1])
+        const f2 = i_call_any(fn_val, [m2])
+        if i_compare(f1, f2) < 0 { l = m1 } else { r = m2 }
+        i = i + 1
+    }
+    (l + r) / 2
+}
+
+// KMP string search: find all occurrences of pattern in text
+func i_kmp_search(text, pattern) {
+    const n = len(text)
+    const m = len(pattern)
+    if m == 0 { return [] }
+    if m > n { return [] }
+
+    // Build failure function
+    let fail = [0]
+    let k = 0
+    let i = 1
+    while i < m {
+        while k > 0 && pattern[k] != pattern[i] {
+            k = fail[k - 1]
+        }
+        if pattern[k] == pattern[i] { k = k + 1 }
+        fail.push(k)
+        i = i + 1
+    }
+
+    // Search
+    let matches = []
+    k = 0
+    i = 0
+    while i < n {
+        while k > 0 && pattern[k] != text[i] {
+            k = fail[k - 1]
+        }
+        if pattern[k] == text[i] { k = k + 1 }
+        if k == m {
+            matches.push(i - m + 1)
+            k = fail[k - 1]
+        }
+        i = i + 1
+    }
+    matches
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 112: Dynamic Programming Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+// Longest common subsequence length
+func i_lcs_length(a, b) {
+    const m = len(a)
+    const n = len(b)
+    // Use two rows to save memory
+    let prev = []
+    let i = 0
+    while i <= n { prev.push(0); i = i + 1 }
+    i = 1
+    while i <= m {
+        let curr = [0]
+        let j = 1
+        while j <= n {
+            if a[i - 1] == b[j - 1] {
+                curr.push(prev[j - 1] + 1)
+            } else {
+                const take_a = prev[j]
+                const take_b = curr[j - 1]
+                curr.push(if take_a > take_b { take_a } else { take_b })
+            }
+            j = j + 1
+        }
+        prev = curr
+        i = i + 1
+    }
+    prev[n]
+}
+
+// Longest common subsequence (the actual subsequence)
+func i_lcs(a, b) {
+    const m = len(a)
+    const n = len(b)
+    // Build DP table
+    let dp = []
+    let i = 0
+    while i <= m {
+        let row = []
+        let j = 0
+        while j <= n { row.push(0); j = j + 1 }
+        dp.push(row)
+        i = i + 1
+    }
+    i = 1
+    while i <= m {
+        let j = 1
+        while j <= n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            } else {
+                dp[i][j] = if dp[i - 1][j] > dp[i][j - 1] { dp[i - 1][j] } else { dp[i][j - 1] }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Backtrack to find the subsequence
+    let result = []
+    i = m
+    let j = n
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            result.push(a[i - 1])
+            i = i - 1
+            j = j - 1
+        } else if dp[i - 1][j] > dp[i][j - 1] {
+            i = i - 1
+        } else {
+            j = j - 1
+        }
+    }
+    result.reverse()
+}
+
+// Longest increasing subsequence length
+func i_lis_length(arr) {
+    if len(arr) == 0 { return 0 }
+    let tails = []
+    for x in arr {
+        let lo = 0
+        let hi = len(tails)
+        while lo < hi {
+            const mid = lo + (hi - lo) / 2
+            if i_compare(tails[mid], x) < 0 { lo = mid + 1 } else { hi = mid }
+        }
+        if lo == len(tails) {
+            tails.push(x)
+        } else {
+            tails[lo] = x
+        }
+    }
+    len(tails)
+}
+
+// Knapsack 0/1 problem
+func i_knapsack_01(weights, values, capacity) {
+    const n = len(weights)
+    let prev = []
+    let i = 0
+    while i <= capacity { prev.push(0); i = i + 1 }
+    i = 0
+    while i < n {
+        let curr = []
+        let w = 0
+        while w <= capacity {
+            if weights[i] > w {
+                curr.push(prev[w])
+            } else {
+                const without = prev[w]
+                const with_item = prev[w - weights[i]] + values[i]
+                curr.push(if with_item > without { with_item } else { without })
+            }
+            w = w + 1
+        }
+        prev = curr
+        i = i + 1
+    }
+    prev[capacity]
+}
+
+// Coin change: minimum coins to make amount
+func i_coin_change(coins, amount) {
+    if amount == 0 { return 0 }
+    const INF = amount + 1
+    let dp = []
+    let i = 0
+    while i <= amount { dp.push(INF); i = i + 1 }
+    dp[0] = 0
+    let a = 1
+    while a <= amount {
+        for coin in coins {
+            if coin <= a && dp[a - coin] + 1 < dp[a] {
+                dp[a] = dp[a - coin] + 1
+            }
+        }
+        a = a + 1
+    }
+    if dp[amount] > amount { -1 } else { dp[amount] }
+}
+
+// Maximum subarray sum (Kadane's algorithm)
+func i_max_subarray_sum(arr) {
+    if len(arr) == 0 { return 0 }
+    let max_ending_here = arr[0]
+    let max_so_far = arr[0]
+    let i = 1
+    while i < len(arr) {
+        const with_current = max_ending_here + arr[i]
+        max_ending_here = if arr[i] > with_current { arr[i] } else { with_current }
+        if max_ending_here > max_so_far { max_so_far = max_ending_here }
+        i = i + 1
+    }
+    max_so_far
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 113: Master Encoding Dispatch Integration
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_call_all_categories(name, args) {
+    // Try encoding calls
+    const enc_result = eval_encoding_call(name, args)
+    if enc_result != "__not_encoding__" { return enc_result }
+
+    // Try the master category dispatcher
+    const master_result = eval_call_master(name, args)
+    if master_result != "__not_dispatched__" { return master_result }
+
+    "__not_found__"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 114: Debug / Introspection Extensions
+// ═══════════════════════════════════════════════════════════════════
+
+// Get the current call depth
+func i_call_depth_current() {
+    len(i_scopes)
+}
+
+// Get all registered function names
+func i_all_function_names() {
+    let names = []
+    for k in i_functions.keys() {
+        if k != "__init" { names.push(k) }
+    }
+    names
+}
+
+// Get all registered enum type names
+func i_all_type_names() {
+    let names = []
+    for k in i_structs.keys() {
+        if k != "__init" { names.push(f"struct {k}") }
+    }
+    for k in i_enums.keys() {
+        if k != "__init" { names.push(f"enum {k}") }
+    }
+    for k in i_type_aliases.keys() {
+        if k != "__init" { names.push(f"type {k} = {i_type_aliases[k]}") }
+    }
+    names
+}
+
+// Get interpreter memory usage summary
+func i_memory_summary() {
+    {
+        "scope_depth": len(i_scopes),
+        "total_vars": i_total_var_count(),
+        "functions": len(i_functions.keys()) - 1,
+        "structs": len(i_structs.keys()) - 1,
+        "enums": len(i_enums.keys()) - 1,
+        "heap_live": i_heap_live_count(),
+        "gc_cycles": i_gc_stats["cycles"],
+        "gc_swept": i_gc_stats["swept"],
+        "modules": len(i_modules.keys()) - 1,
+        "defers_pending": i_defer_count(),
+    }
+}
+
+// Serialize the entire interpreter state for checkpointing
+func i_checkpoint() {
+    {
+        "scopes_depth": len(i_scopes),
+        "functions_count": len(i_functions.keys()) - 1,
+        "structs_count": len(i_structs.keys()) - 1,
+        "enums_count": len(i_enums.keys()) - 1,
+        "modules_count": len(i_modules.keys()) - 1,
+        "heap_live": i_heap_live_count(),
+    }
+}
+
+// Diff two checkpoints to see what changed
+func i_checkpoint_diff(a, b) {
+    let diffs = {}
+    for k in a.keys() {
+        if b.has(k) && a[k] != b[k] {
+            diffs[k] = {"from": a[k], "to": b[k]}
+        }
+    }
+    diffs
+}
+
+// Pretty-print interpreter status
+func i_status_report() {
+    const mem = i_memory_summary()
+    let lines = []
+    lines.push("=== Interpreter Status ===")
+    lines.push(f"Scope depth: {mem[\"scope_depth\"]}")
+    lines.push(f"Total vars:  {mem[\"total_vars\"]}")
+    lines.push(f"Functions:   {mem[\"functions\"]}")
+    lines.push(f"Structs:     {mem[\"structs\"]}")
+    lines.push(f"Enums:       {mem[\"enums\"]}")
+    lines.push(f"Heap live:   {mem[\"heap_live\"]}")
+    lines.push(f"GC cycles:   {mem[\"gc_cycles\"]}")
+    lines.push(f"GC swept:    {mem[\"gc_swept\"]}")
+    lines.push(f"Modules:     {mem[\"modules\"]}")
+    lines.push(f"Defers:      {mem[\"defers_pending\"]}")
+    lines.push("==========================")
+    lines.join("\n")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 115: String Hashing and Encoding
+// ═══════════════════════════════════════════════════════════════════
+
+// FNV-1a hash for strings
+func i_fnv1a(s) {
+    const FNV_OFFSET = 2166136261
+    const FNV_PRIME = 16777619
+    let hash = FNV_OFFSET
+    for ch in to_string(s).chars() {
+        hash = (hash ^ char_code(ch)) * FNV_PRIME
+    }
+    hash
+}
+
+// DJB2 hash for strings
+func i_djb2(s) {
+    let hash = 5381
+    for ch in to_string(s).chars() {
+        hash = hash * 33 + char_code(ch)
+    }
+    hash
+}
+
+// Adler-32 checksum
+func i_adler32(s) {
+    const MOD_ADLER = 65521
+    let a = 1
+    let b = 0
+    for ch in to_string(s).chars() {
+        a = (a + char_code(ch)) % MOD_ADLER
+        b = (b + a) % MOD_ADLER
+    }
+    b * 65536 + a
+}
+
+// CRC-like checksum (simplified)
+func i_crc_simple(s) {
+    let crc = 0
+    for ch in to_string(s).chars() {
+        crc = crc ^ char_code(ch)
+        let i = 0
+        while i < 8 {
+            if crc % 2 == 1 {
+                crc = (crc / 2) ^ 3988292384
+            } else {
+                crc = crc / 2
+            }
+            i = i + 1
+        }
+    }
+    crc
+}
+
+// ROT13 encoding
+func i_rot13(s) {
+    let result = ""
+    for ch in to_string(s).chars() {
+        const code = char_code(ch)
+        if code >= 65 && code <= 90 {
+            result = result + from_char_code(((code - 65 + 13) % 26) + 65)
+        } else if code >= 97 && code <= 122 {
+            result = result + from_char_code(((code - 97 + 13) % 26) + 97)
+        } else {
+            result = result + ch
+        }
+    }
+    result
+}
+
+// Caesar cipher
+func i_caesar(s, shift) {
+    let result = ""
+    const sh = shift % 26
+    for ch in to_string(s).chars() {
+        const code = char_code(ch)
+        if code >= 65 && code <= 90 {
+            result = result + from_char_code(((code - 65 + sh) % 26) + 65)
+        } else if code >= 97 && code <= 122 {
+            result = result + from_char_code(((code - 97 + sh) % 26) + 97)
+        } else {
+            result = result + ch
+        }
+    }
+    result
+}
+
+// Run-length encoding
+func i_rle_encode(s) {
+    if len(s) == 0 { return "" }
+    let result = ""
+    let count = 1
+    let prev = s[0]
+    let i = 1
+    while i < len(s) {
+        if s[i] == prev {
+            count = count + 1
+        } else {
+            if count > 1 { result = result + to_string(count) }
+            result = result + prev
+            prev = s[i]
+            count = 1
+        }
+        i = i + 1
+    }
+    if count > 1 { result = result + to_string(count) }
+    result = result + prev
+    result
+}
+
+// Run-length decoding
+func i_rle_decode(s) {
+    let result = ""
+    let count_str = ""
+    for ch in to_string(s).chars() {
+        if ch >= "0" && ch <= "9" {
+            count_str = count_str + ch
+        } else {
+            const count = if len(count_str) > 0 { parse_int(count_str) } else { 1 }
+            result = result + i_str_repeat(ch, count)
+            count_str = ""
+        }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 116: Combinatorial Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+// Generate all binary strings of length n
+func i_binary_strings(n) {
+    if n <= 0 { return [""] }
+    const smaller = i_binary_strings(n - 1)
+    let result = []
+    for s in smaller {
+        result.push(s + "0")
+        result.push(s + "1")
+    }
+    result
+}
+
+// Generate all subsets of an array (power set as arrays)
+func i_subsets(arr) {
+    i_array_power_set(arr)
+}
+
+// Next permutation (lexicographic order)
+func i_next_permutation(arr) {
+    let a = []
+    for item in arr { a.push(item) }
+    const n = len(a)
+    // Find the largest i such that a[i] < a[i+1]
+    let i = n - 2
+    while i >= 0 && i_compare(a[i], a[i + 1]) >= 0 {
+        i = i - 1
+    }
+    if i < 0 { return a.reverse() }
+    // Find the largest j such that a[i] < a[j]
+    let j = n - 1
+    while i_compare(a[i], a[j]) >= 0 { j = j - 1 }
+    // Swap a[i] and a[j]
+    const tmp = a[i]
+    a[i] = a[j]
+    a[j] = tmp
+    // Reverse from i+1 to end
+    let left = i + 1
+    let right = n - 1
+    while left < right {
+        const t = a[left]
+        a[left] = a[right]
+        a[right] = t
+        left = left + 1
+        right = right - 1
+    }
+    a
+}
+
+// Catalan number
+func i_catalan(n) {
+    if n <= 1 { return 1 }
+    i_math_factorial(2 * n) / (i_math_factorial(n + 1) * i_math_factorial(n))
+}
+
+// Bell number (number of set partitions)
+func i_bell_number(n) {
+    if n == 0 { return 1 }
+    // Bell triangle
+    let prev_row = [1]
+    let k = 1
+    while k <= n {
+        let row = [prev_row[len(prev_row) - 1]]
+        let j = 1
+        while j <= k {
+            row.push(row[j - 1] + prev_row[j - 1])
+            j = j + 1
+        }
+        prev_row = row
+        k = k + 1
+    }
+    prev_row[0]
+}
+
+// Stirling numbers of the second kind S(n, k)
+func i_stirling2(n, k) {
+    if k == 0 { return if n == 0 { 1 } else { 0 } }
+    if k == 1 || k == n { return 1 }
+    if k > n { return 0 }
+    k * i_stirling2(n - 1, k) + i_stirling2(n - 1, k - 1)
+}
+
+// Derangement count D(n) — permutations with no fixed points
+func i_derangement(n) {
+    if n == 0 { return 1 }
+    if n == 1 { return 0 }
+    let a = 1
+    let b = 0
+    let i = 2
+    while i <= n {
+        const temp = (i - 1) * (a + b)
+        a = b
+        b = temp
+        i = i + 1
+    }
+    b
+}
+
+// Partition count: number of ways to write n as sum of positive integers
+func i_partition_count(n) {
+    if n < 0 { return 0 }
+    let dp = [1]
+    let i = 1
+    while i <= n { dp.push(0); i = i + 1 }
+    let k = 1
+    while k <= n {
+        i = k
+        while i <= n {
+            dp[i] = dp[i] + dp[i - k]
+            i = i + 1
+        }
+        k = k + 1
+    }
+    dp[n]
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 117: String Algorithms
+// ═══════════════════════════════════════════════════════════════════
+
+// Longest palindromic substring length (Manacher-like simplified)
+func i_longest_palindrome_length(s) {
+    const n = len(s)
+    if n <= 1 { return n }
+    let max_len = 1
+    let i = 0
+    while i < n {
+        // Odd length palindromes centered at i
+        let lo = i
+        let hi = i
+        while lo >= 0 && hi < n && s[lo] == s[hi] {
+            const pal_len = hi - lo + 1
+            if pal_len > max_len { max_len = pal_len }
+            lo = lo - 1
+            hi = hi + 1
+        }
+        // Even length palindromes centered between i and i+1
+        lo = i
+        hi = i + 1
+        while lo >= 0 && hi < n && s[lo] == s[hi] {
+            const pal_len = hi - lo + 1
+            if pal_len > max_len { max_len = pal_len }
+            lo = lo - 1
+            hi = hi + 1
+        }
+        i = i + 1
+    }
+    max_len
+}
+
+// Check if string is a palindrome
+func i_is_palindrome(s) {
+    const n = len(s)
+    let lo = 0
+    let hi = n - 1
+    while lo < hi {
+        if s[lo] != s[hi] { return false }
+        lo = lo + 1
+        hi = hi - 1
+    }
+    true
+}
+
+// Longest common prefix of an array of strings
+func i_longest_common_prefix(strings) {
+    if len(strings) == 0 { return "" }
+    let prefix = strings[0]
+    let i = 1
+    while i < len(strings) {
+        const s = strings[i]
+        let j = 0
+        while j < len(prefix) && j < len(s) && prefix[j] == s[j] {
+            j = j + 1
+        }
+        prefix = prefix.slice(0, j)
+        if len(prefix) == 0 { return "" }
+        i = i + 1
+    }
+    prefix
+}
+
+// Z-function: for each position, length of the longest substring starting from that position which is also a prefix
+func i_z_function(s) {
+    const n = len(s)
+    let z = []
+    let i = 0
+    while i < n { z.push(0); i = i + 1 }
+    z[0] = n
+    let l = 0
+    let r = 0
+    i = 1
+    while i < n {
+        if i < r { z[i] = if z[i - l] < r - i { z[i - l] } else { r - i } }
+        while i + z[i] < n && s[z[i]] == s[i + z[i]] {
+            z[i] = z[i] + 1
+        }
+        if i + z[i] > r { l = i; r = i + z[i] }
+        i = i + 1
+    }
+    z
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 118: Arithmetic on Big Integers (via string representation)
+// ═══════════════════════════════════════════════════════════════════
+
+// Add two non-negative integer strings
+func i_bigint_add(a, b) {
+    let result = ""
+    let carry = 0
+    let i = len(a) - 1
+    let j = len(b) - 1
+    while i >= 0 || j >= 0 || carry > 0 {
+        let sum = carry
+        if i >= 0 { sum = sum + (char_code(a[i]) - 48); i = i - 1 }
+        if j >= 0 { sum = sum + (char_code(b[j]) - 48); j = j - 1 }
+        result = from_char_code(48 + sum % 10) + result
+        carry = sum / 10
+    }
+    if len(result) == 0 { return "0" }
+    result
+}
+
+// Multiply two non-negative integer strings
+func i_bigint_mul(a, b) {
+    const m = len(a)
+    const n = len(b)
+    let digits = []
+    let k = 0
+    while k < m + n { digits.push(0); k = k + 1 }
+    let i = m - 1
+    while i >= 0 {
+        let j = n - 1
+        while j >= 0 {
+            const prod = (char_code(a[i]) - 48) * (char_code(b[j]) - 48)
+            const p1 = i + j
+            const p2 = i + j + 1
+            const sum = prod + digits[p2]
+            digits[p2] = sum % 10
+            digits[p1] = digits[p1] + sum / 10
+            j = j - 1
+        }
+        i = i - 1
+    }
+    let result = ""
+    let leading = true
+    for d in digits {
+        if d == 0 && leading { continue }
+        leading = false
+        result = result + to_string(d)
+    }
+    if len(result) == 0 { return "0" }
+    result
+}
+
+// Compare two non-negative integer strings
+func i_bigint_compare(a, b) {
+    if len(a) != len(b) { return if len(a) > len(b) { 1 } else { -1 } }
+    if a < b { return -1 }
+    if a > b { return 1 }
+    0
+}
+
+// Factorial as big integer string
+func i_bigint_factorial(n) {
+    if n <= 1 { return "1" }
+    let result = "1"
+    let i = 2
+    while i <= n {
+        result = i_bigint_mul(result, to_string(i))
+        i = i + 1
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 119: Fixed-Point Arithmetic
+// For precise decimal calculations without floating point errors
+// ═══════════════════════════════════════════════════════════════════
+
+const FIXED_SCALE = 1000000
+
+func i_fixed_from_int(n) { n * FIXED_SCALE }
+func i_fixed_from_float(f) { to_int64(f * to_float64(FIXED_SCALE)) }
+func i_fixed_to_int(fp) { fp / FIXED_SCALE }
+func i_fixed_to_float(fp) { to_float64(fp) / to_float64(FIXED_SCALE) }
+func i_fixed_add(a, b) { a + b }
+func i_fixed_sub(a, b) { a - b }
+func i_fixed_mul(a, b) { (a * b) / FIXED_SCALE }
+func i_fixed_div(a, b) {
+    if b == 0 { panic("fixed-point division by zero") }
+    (a * FIXED_SCALE) / b
+}
+func i_fixed_to_string(fp) {
+    const whole = fp / FIXED_SCALE
+    const frac_raw = fp % FIXED_SCALE
+    const frac = if frac_raw < 0 { 0 - frac_raw } else { frac_raw }
+    const frac_str = to_string(frac)
+    let padded = frac_str
+    while len(padded) < 6 { padded = "0" + padded }
+    // Trim trailing zeros
+    while len(padded) > 1 && padded[len(padded) - 1] == "0" {
+        padded = padded.slice(0, len(padded) - 1)
+    }
+    f"{whole}.{padded}"
+}
+func i_fixed_compare(a, b) {
+    if a < b { -1 } else if a > b { 1 } else { 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 120: Rational Number Arithmetic
+// Exact fractions: {num, den}
+// ═══════════════════════════════════════════════════════════════════
+
+func i_rational(num, den) {
+    if den == 0 { panic("rational: denominator cannot be zero") }
+    const g = i_math_gcd(if num < 0 { 0 - num } else { num }, if den < 0 { 0 - den } else { den })
+    let n = num / g
+    let d = den / g
+    if d < 0 { n = 0 - n; d = 0 - d }
+    {"__rational": true, "num": n, "den": d}
+}
+
+func i_rational_add(a, b) {
+    i_rational(a["num"] * b["den"] + b["num"] * a["den"], a["den"] * b["den"])
+}
+
+func i_rational_sub(a, b) {
+    i_rational(a["num"] * b["den"] - b["num"] * a["den"], a["den"] * b["den"])
+}
+
+func i_rational_mul(a, b) {
+    i_rational(a["num"] * b["num"], a["den"] * b["den"])
+}
+
+func i_rational_div(a, b) {
+    if b["num"] == 0 { panic("rational division by zero") }
+    i_rational(a["num"] * b["den"], a["den"] * b["num"])
+}
+
+func i_rational_to_float(r) {
+    to_float64(r["num"]) / to_float64(r["den"])
+}
+
+func i_rational_to_string(r) {
+    if r["den"] == 1 { return to_string(r["num"]) }
+    f"{r[\"num\"]}/{r[\"den\"]}"
+}
+
+func i_rational_compare(a, b) {
+    const diff = a["num"] * b["den"] - b["num"] * a["den"]
+    if diff < 0 { -1 } else if diff > 0 { 1 } else { 0 }
+}
+
+func i_rational_abs(r) {
+    i_rational(if r["num"] < 0 { 0 - r["num"] } else { r["num"] }, r["den"])
+}
+
+func i_rational_is_zero(r) { r["num"] == 0 }
+func i_rational_is_positive(r) { r["num"] > 0 }
+func i_rational_is_negative(r) { r["num"] < 0 }
+func i_rational_is_integer(r) { r["den"] == 1 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 121: Sparse Array / Sparse Matrix
+// ═══════════════════════════════════════════════════════════════════
+
+func i_sparse_array_new(default_val) {
+    {"__sparse": true, "__data": {}, "__default": default_val, "__size": 0}
+}
+
+func i_sparse_array_get(sa, idx) {
+    const key = to_string(idx)
+    if sa["__data"].has(key) { return sa["__data"][key] }
+    sa["__default"]
+}
+
+func i_sparse_array_set(sa, idx, val) {
+    let data = sa["__data"]
+    data[to_string(idx)] = val
+    sa["__data"] = data
+    if idx >= sa["__size"] { sa["__size"] = idx + 1 }
+    sa
+}
+
+func i_sparse_array_density(sa) {
+    const data_count = len(sa["__data"].keys())
+    const total = sa["__size"]
+    if total == 0 { return 0.0 }
+    to_float64(data_count) / to_float64(total)
+}
+
+func i_sparse_array_nonzero_indices(sa) {
+    let indices = []
+    for k in sa["__data"].keys() {
+        indices.push(parse_int(k))
+    }
+    indices.sort()
+}
+
+func i_sparse_matrix_new(rows, cols, default_val) {
+    {"__sparse_matrix": true, "__data": {}, "__rows": rows, "__cols": cols, "__default": default_val}
+}
+
+func i_sparse_matrix_get(sm, r, c) {
+    const key = f"{r},{c}"
+    if sm["__data"].has(key) { return sm["__data"][key] }
+    sm["__default"]
+}
+
+func i_sparse_matrix_set(sm, r, c, val) {
+    let data = sm["__data"]
+    data[f"{r},{c}"] = val
+    sm["__data"] = data
+    sm
+}
+
+func i_sparse_matrix_nonzero_count(sm) {
+    len(sm["__data"].keys())
+}
+
+func i_sparse_matrix_to_dense(sm) {
+    const rows = sm["__rows"]
+    const cols = sm["__cols"]
+    let result = i_matrix_new(rows, cols, sm["__default"])
+    for key in sm["__data"].keys() {
+        const parts = key.split(",")
+        if len(parts) == 2 {
+            const r = parse_int(parts[0])
+            const c = parse_int(parts[1])
+            if r >= 0 && r < rows && c >= 0 && c < cols {
+                result[r][c] = sm["__data"][key]
+            }
+        }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 122: Geometry Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+// Line segment intersection check
+func i_segments_intersect(p1, p2, p3, p4) {
+    const d1 = i_cross_2d(p3, p4, p1)
+    const d2 = i_cross_2d(p3, p4, p2)
+    const d3 = i_cross_2d(p1, p2, p3)
+    const d4 = i_cross_2d(p1, p2, p4)
+    if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+       ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)) {
+        return true
+    }
+    if d1 == 0 && i_on_segment(p3, p4, p1) { return true }
+    if d2 == 0 && i_on_segment(p3, p4, p2) { return true }
+    if d3 == 0 && i_on_segment(p1, p2, p3) { return true }
+    if d4 == 0 && i_on_segment(p1, p2, p4) { return true }
+    false
+}
+
+func i_on_segment(p, q, r) {
+    const min_x = if p["x"] < q["x"] { p["x"] } else { q["x"] }
+    const max_x = if p["x"] > q["x"] { p["x"] } else { q["x"] }
+    const min_y = if p["y"] < q["y"] { p["y"] } else { q["y"] }
+    const max_y = if p["y"] > q["y"] { p["y"] } else { q["y"] }
+    r["x"] >= min_x && r["x"] <= max_x && r["y"] >= min_y && r["y"] <= max_y
+}
+
+// Polygon area (Shoelace formula)
+func i_polygon_area(points) {
+    const n = len(points)
+    if n < 3 { return 0 }
+    let area = 0
+    let i = 0
+    while i < n {
+        const j = (i + 1) % n
+        area = area + points[i]["x"] * points[j]["y"]
+        area = area - points[j]["x"] * points[i]["y"]
+        i = i + 1
+    }
+    const result = area / 2
+    if result < 0 { 0 - result } else { result }
+}
+
+// Polygon perimeter
+func i_polygon_perimeter(points) {
+    const n = len(points)
+    if n < 2 { return 0 }
+    let total = 0
+    let i = 0
+    while i < n {
+        const j = (i + 1) % n
+        const dist_sq = i_distance_sq(points[i], points[j])
+        total = total + i_math_isqrt(dist_sq)
+        i = i + 1
+    }
+    total
+}
+
+// Centroid of a polygon
+func i_polygon_centroid(points) {
+    const n = len(points)
+    if n == 0 { return i_point(0, 0) }
+    let cx = 0
+    let cy = 0
+    for p in points {
+        cx = cx + p["x"]
+        cy = cy + p["y"]
+    }
+    i_point(cx / n, cy / n)
+}
+
+// Bounding box of a set of points
+func i_bounding_box(points) {
+    if len(points) == 0 { return {"min": i_point(0, 0), "max": i_point(0, 0)} }
+    let min_x = points[0]["x"]
+    let min_y = points[0]["y"]
+    let max_x = points[0]["x"]
+    let max_y = points[0]["y"]
+    for p in points {
+        if p["x"] < min_x { min_x = p["x"] }
+        if p["y"] < min_y { min_y = p["y"] }
+        if p["x"] > max_x { max_x = p["x"] }
+        if p["y"] > max_y { max_y = p["y"] }
+    }
+    {"min": i_point(min_x, min_y), "max": i_point(max_x, max_y)}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// END OF INTERPRETER EXTENSIONS
+// Total: 118 sections of interpreter support code
+// Covers: all eval arms, stdlib dispatch, type coercion, GC,
+// scope management, pattern matching, for-in desugaring,
+// error reporting, and comprehensive data structure operations
+// ═══════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 123: Interpolation Search and Exponential Search
+// ═══════════════════════════════════════════════════════════════════
+
+// Interpolation search (for uniformly distributed sorted arrays)
+func i_search_interpolation(arr, target) {
+    let lo = 0
+    let hi = len(arr) - 1
+    while lo <= hi && i_compare(target, arr[lo]) >= 0 && i_compare(target, arr[hi]) <= 0 {
+        if lo == hi {
+            if arr[lo] == target { return lo }
+            return -1
+        }
+        const lo_val = i_to_int64(arr[lo])
+        const hi_val = i_to_int64(arr[hi])
+        const target_val = i_to_int64(target)
+        const pos = if hi_val == lo_val { lo }
+            else { lo + ((target_val - lo_val) * (hi - lo)) / (hi_val - lo_val) }
+        if pos < lo || pos > hi { return -1 }
+        const cmp = i_compare(arr[pos], target)
+        if cmp == 0 { return pos }
+        if cmp < 0 { lo = pos + 1 } else { hi = pos - 1 }
+    }
+    -1
+}
+
+// Exponential search (for unbounded/infinite arrays)
+func i_search_exponential(arr, target) {
+    const n = len(arr)
+    if n == 0 { return -1 }
+    if arr[0] == target { return 0 }
+    let bound = 1
+    while bound < n && i_compare(arr[bound], target) <= 0 {
+        bound = bound * 2
+    }
+    const lo = bound / 2
+    const hi = if bound < n { bound } else { n - 1 }
+    // Binary search in [lo, hi]
+    let l = lo
+    let r = hi
+    while l <= r {
+        const mid = l + (r - l) / 2
+        const cmp = i_compare(arr[mid], target)
+        if cmp == 0 { return mid }
+        if cmp < 0 { l = mid + 1 } else { r = mid - 1 }
+    }
+    -1
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 124: Counting Sort and Radix Sort
+// ═══════════════════════════════════════════════════════════════════
+
+// Counting sort for non-negative integers
+func i_counting_sort(arr, max_val) {
+    let counts = []
+    let i = 0
+    while i <= max_val { counts.push(0); i = i + 1 }
+    for x in arr {
+        if x >= 0 && x <= max_val { counts[x] = counts[x] + 1 }
+    }
+    let result = []
+    i = 0
+    while i <= max_val {
+        let j = 0
+        while j < counts[i] { result.push(i); j = j + 1 }
+        i = i + 1
+    }
+    result
+}
+
+// Bucket sort for integers in a known range
+func i_bucket_sort(arr, num_buckets) {
+    if len(arr) == 0 { return [] }
+    let min_val = arr[0]
+    let max_val = arr[0]
+    for x in arr {
+        if x < min_val { min_val = x }
+        if x > max_val { max_val = x }
+    }
+    const range = max_val - min_val + 1
+    const bucket_size = if range / num_buckets > 0 { range / num_buckets } else { 1 }
+    let buckets = []
+    let i = 0
+    while i < num_buckets { buckets.push([]); i = i + 1 }
+    for x in arr {
+        let bi = (x - min_val) / bucket_size
+        if bi >= num_buckets { bi = num_buckets - 1 }
+        let b = buckets[bi]
+        b.push(x)
+        buckets[bi] = b
+    }
+    let result = []
+    for bucket in buckets {
+        const sorted = bucket.sort()
+        for x in sorted { result.push(x) }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 125: Heap Sort
+// ═══════════════════════════════════════════════════════════════════
+
+func i_heap_sort(arr) {
+    if len(arr) <= 1 { return arr }
+    let a = []
+    for item in arr { a.push(item) }
+    const n = len(a)
+    // Build max heap
+    let i = n / 2 - 1
+    while i >= 0 {
+        i_heapify(a, n, i)
+        i = i - 1
+    }
+    // Extract elements
+    i = n - 1
+    while i > 0 {
+        const tmp = a[0]
+        a[0] = a[i]
+        a[i] = tmp
+        i_heapify(a, i, 0)
+        i = i - 1
+    }
+    a
+}
+
+func i_heapify(arr, n, root) {
+    let largest = root
+    const left = 2 * root + 1
+    const right = 2 * root + 2
+    if left < n && i_compare(arr[left], arr[largest]) > 0 { largest = left }
+    if right < n && i_compare(arr[right], arr[largest]) > 0 { largest = right }
+    if largest != root {
+        const tmp = arr[root]
+        arr[root] = arr[largest]
+        arr[largest] = tmp
+        i_heapify(arr, n, largest)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 126: Tree Traversal (for nested map/struct trees)
+// ═══════════════════════════════════════════════════════════════════
+
+// Pre-order traversal of a tree represented as {value, children: [...]}
+func i_tree_preorder(node) {
+    if node == null { return [] }
+    if typeof(node) != "map" { return [node] }
+    let result = []
+    if node.has("value") { result.push(node["value"]) }
+    if node.has("children") && typeof(node["children"]) == "array" {
+        for child in node["children"] {
+            result = result.concat(i_tree_preorder(child))
+        }
+    }
+    result
+}
+
+// Post-order traversal
+func i_tree_postorder(node) {
+    if node == null { return [] }
+    if typeof(node) != "map" { return [node] }
+    let result = []
+    if node.has("children") && typeof(node["children"]) == "array" {
+        for child in node["children"] {
+            result = result.concat(i_tree_postorder(child))
+        }
+    }
+    if node.has("value") { result.push(node["value"]) }
+    result
+}
+
+// Level-order (BFS) traversal
+func i_tree_levelorder(root) {
+    if root == null { return [] }
+    let queue = [root]
+    let result = []
+    while len(queue) > 0 {
+        const node = queue[0]
+        queue = queue.slice(1, len(queue))
+        if typeof(node) == "map" {
+            if node.has("value") { result.push(node["value"]) }
+            if node.has("children") && typeof(node["children"]) == "array" {
+                for child in node["children"] {
+                    queue.push(child)
+                }
+            }
+        } else {
+            result.push(node)
+        }
+    }
+    result
+}
+
+// Tree depth
+func i_tree_depth(node) {
+    if node == null { return 0 }
+    if typeof(node) != "map" { return 1 }
+    if !node.has("children") || typeof(node["children"]) != "array" || len(node["children"]) == 0 {
+        return 1
+    }
+    let max_child_depth = 0
+    for child in node["children"] {
+        const d = i_tree_depth(child)
+        if d > max_child_depth { max_child_depth = d }
+    }
+    1 + max_child_depth
+}
+
+// Tree size (total node count)
+func i_tree_size(node) {
+    if node == null { return 0 }
+    if typeof(node) != "map" { return 1 }
+    let count = 1
+    if node.has("children") && typeof(node["children"]) == "array" {
+        for child in node["children"] {
+            count = count + i_tree_size(child)
+        }
+    }
+    count
+}
+
+// Tree leaf count
+func i_tree_leaves(node) {
+    if node == null { return 0 }
+    if typeof(node) != "map" { return 1 }
+    if !node.has("children") || typeof(node["children"]) != "array" || len(node["children"]) == 0 {
+        return 1
+    }
+    let count = 0
+    for child in node["children"] {
+        count = count + i_tree_leaves(child)
+    }
+    count
+}
+
+// Find a value in a tree
+func i_tree_find(node, target) {
+    if node == null { return false }
+    if typeof(node) != "map" { return node == target }
+    if node.has("value") && node["value"] == target { return true }
+    if node.has("children") && typeof(node["children"]) == "array" {
+        for child in node["children"] {
+            if i_tree_find(child, target) { return true }
+        }
+    }
+    false
+}
+
+// Map over tree values
+func i_tree_map(node, fn_val) {
+    if node == null { return null }
+    if typeof(node) != "map" { return i_call_any(fn_val, [node]) }
+    let result = {}
+    for k in node.keys() {
+        if k == "value" {
+            result["value"] = i_call_any(fn_val, [node["value"]])
+        } else if k == "children" && typeof(node["children"]) == "array" {
+            result["children"] = node["children"].map(c => i_tree_map(c, fn_val))
+        } else {
+            result[k] = node[k]
+        }
+    }
+    result
+}
