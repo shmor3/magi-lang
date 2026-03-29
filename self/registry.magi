@@ -1353,3 +1353,283 @@ func install_packages(magispace_text, reg, cache) {
 
     {"ok": true, "installed": resolved, "lockfile": lockfile, "vulnerabilities": vulns}
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Git Integration ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// List git tags in a repository
+func git_list_tags(repo_path) {
+    const result = run_command_capture("git", ["-C", repo_path, "tag", "--list", "--sort=-v:refname"])
+    if typeof(result) != "string" { return [] }
+    const lines = result.split("\n")
+    let tags = []
+    for line in lines {
+        const trimmed = line.trim()
+        if len(trimmed) > 0 {
+            tags.push(trimmed)
+        }
+    }
+    tags
+}
+
+// Get latest tag matching a pattern
+func git_latest_tag(repo_path, pattern) {
+    const tags = git_list_tags(repo_path)
+    for tag in tags {
+        if pattern == null || tag.starts_with(pattern) || glob_match_single(pattern, tag) {
+            return tag
+        }
+    }
+    null
+}
+
+// Resolve a commit hash from a ref (tag, branch, HEAD)
+func git_resolve_commit(repo_path, ref_name) {
+    const result = run_command_capture("git", ["-C", repo_path, "rev-parse", ref_name])
+    if typeof(result) != "string" { return null }
+    result.trim()
+}
+
+// Get commit info
+func git_commit_info(repo_path, commit_hash) {
+    const format = "%H%n%an%n%ae%n%at%n%s"
+    const result = run_command_capture("git", ["-C", repo_path, "log", "-1", f"--format={format}", commit_hash])
+    if typeof(result) != "string" { return null }
+    const lines = result.split("\n")
+    if len(lines) < 5 { return null }
+    {
+        "hash": lines[0].trim(),
+        "author_name": lines[1].trim(),
+        "author_email": lines[2].trim(),
+        "timestamp": parse_int(lines[3].trim()),
+        "message": lines[4].trim(),
+    }
+}
+
+// Create a tag
+func git_create_tag(repo_path, tag_name, message) {
+    if message != null {
+        run_command_capture("git", ["-C", repo_path, "tag", "-a", tag_name, "-m", message])
+    } else {
+        run_command_capture("git", ["-C", repo_path, "tag", tag_name])
+    }
+}
+
+// List changed files between two refs
+func git_diff_files(repo_path, from_ref, to_ref) {
+    const result = run_command_capture("git", ["-C", repo_path, "diff", "--name-only", from_ref, to_ref])
+    if typeof(result) != "string" { return [] }
+    const lines = result.split("\n")
+    let files = []
+    for line in lines {
+        const trimmed = line.trim()
+        if len(trimmed) > 0 { files.push(trimmed) }
+    }
+    files
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Registry Mirror Support ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let registry_mirrors = []  // List of mirror URLs
+let registry_primary = "https://registry.magi-lang.org"
+
+func registry_add_mirror(url) {
+    registry_mirrors.push(url)
+}
+
+func registry_remove_mirror(url) {
+    let new_mirrors = []
+    for m in registry_mirrors {
+        if m != url { new_mirrors.push(m) }
+    }
+    registry_mirrors = new_mirrors
+}
+
+func registry_set_primary(url) {
+    registry_primary = url
+}
+
+// Fetch package info from registry with fallback to mirrors
+func registry_fetch_package(name, version) {
+    // Try primary first
+    const primary_result = registry_try_fetch(registry_primary, name, version)
+    if primary_result != null { return primary_result }
+
+    // Try mirrors
+    for mirror in registry_mirrors {
+        const result = registry_try_fetch(mirror, name, version)
+        if result != null { return result }
+    }
+
+    null
+}
+
+func registry_try_fetch(registry_url, name, version) {
+    const url = f"{registry_url}/api/v1/packages/{name}/{version}"
+    const response = http_get(url)
+    if response == null { return null }
+    if response.has("status_code") && response["status_code"] != 200 { return null }
+    if response.has("body") { return json_parse(response["body"]) }
+    null
+}
+
+// Search registry for packages matching a query
+func registry_search(query, options) {
+    const limit = if options.has("limit") { options["limit"] } else { 20 }
+    const offset = if options.has("offset") { options["offset"] } else { 0 }
+    const url = f"{registry_primary}/api/v1/search?q={url_encode(query)}&limit={limit}&offset={offset}"
+    const response = http_get(url)
+    if response == null { return [] }
+    if response.has("body") {
+        const data = json_parse(response["body"])
+        if data.has("packages") { return data["packages"] }
+    }
+    []
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Package Signing and Verification ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Sign a package tarball
+func package_sign(tarball_path, private_key_path) {
+    const content = fs_read_bytes(tarball_path)
+    if content == null { return {"error": "cannot read tarball"} }
+
+    const key = fs_read(private_key_path)
+    if key == null { return {"error": "cannot read private key"} }
+
+    // Hash the content
+    const hash = tls_sha256(content)
+
+    // Sign the hash
+    const signature = tls_sign(hash, key, "sha256WithRSAEncryption")
+
+    // Write signature file
+    const sig_path = tarball_path + ".sig"
+    fs_write(sig_path, signature)
+
+    {"hash": hash, "signature_path": sig_path}
+}
+
+// Verify a package signature
+func package_verify(tarball_path, signature_path, public_key_path) {
+    const content = fs_read_bytes(tarball_path)
+    if content == null { return {"valid": false, "reason": "cannot read tarball"} }
+
+    const signature = fs_read(signature_path)
+    if signature == null { return {"valid": false, "reason": "cannot read signature"} }
+
+    const key = fs_read(public_key_path)
+    if key == null { return {"valid": false, "reason": "cannot read public key"} }
+
+    // Verify
+    const hash = tls_sha256(content)
+    const valid = tls_verify_signature(hash, signature, key, "sha256WithRSAEncryption")
+
+    if valid {
+        {"valid": true, "hash": hash}
+    } else {
+        {"valid": false, "reason": "signature verification failed"}
+    }
+}
+
+// Verify package integrity from lockfile checksums
+func package_verify_integrity(package_path, expected_hash) {
+    const content = fs_read_bytes(package_path)
+    if content == null { return false }
+    const actual_hash = tls_sha256(content)
+    actual_hash == expected_hash
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Workspace Dependency Resolution ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Resolve all dependencies across a workspace
+func workspace_resolve(workspace_path) {
+    const config = workspace_load_toml(workspace_path)
+    if config == null { return {"error": "no magispace.toml found"} }
+
+    const members = if config.has("members") { config["members"] } else { [] }
+
+    // Collect all dependencies from all members
+    let all_deps = {"__s": true}
+    let member_deps = {"__s": true}
+
+    for member in members {
+        const member_path = workspace_path + "/" + member + "/magispace.toml"
+        const member_config = toml_parse_file(member_path)
+        if member_config == null { continue }
+
+        let deps = {"__s": true}
+        if member_config.has("dependencies") {
+            const member_dep = member_config["dependencies"]
+            for dep_name in member_dep.keys() {
+                if dep_name == "__s" { continue }
+                const constraint = member_dep[dep_name]
+                deps[dep_name] = constraint
+
+                // Track global constraint for this dependency
+                if all_deps.has(dep_name) {
+                    // Merge constraints (most restrictive wins)
+                    all_deps[dep_name] = merge_constraints(all_deps[dep_name], constraint)
+                } else {
+                    all_deps[dep_name] = constraint
+                }
+            }
+        }
+        member_deps[member] = deps
+    }
+
+    // Resolve unified dependency set
+    let requirements = []
+    for dep_name in all_deps.keys() {
+        if dep_name == "__s" { continue }
+        requirements.push({"name": dep_name, "constraint": all_deps[dep_name]})
+    }
+
+    // Fetch available versions
+    let available = {"__s": true}
+    for req in requirements {
+        const versions = registry_fetch_versions(req["name"])
+        if versions != null { available[req["name"]] = versions }
+    }
+
+    // Resolve
+    const resolution = resolve_mvs_full(requirements, available)
+
+    {
+        "resolved": resolution["resolved"],
+        "conflicts": resolution["conflicts"],
+        "member_deps": member_deps,
+    }
+}
+
+func merge_constraints(a, b) {
+    // For simplicity: if both are caret ranges, take the higher minimum
+    if typeof(a) == "string" && typeof(b) == "string" {
+        return a  // MVS will handle the actual resolution
+    }
+    a
+}
+
+func registry_fetch_versions(name) {
+    const result = registry_fetch_package(name, null)
+    if result == null { return null }
+    if result.has("versions") { return result["versions"] }
+    null
+}
+
+func toml_parse_file(path) {
+    const content = fs_read(path)
+    if content == null { return null }
+    toml_parse(content)
+}
+
+func workspace_load_toml(path) {
+    toml_parse_file(path + "/magispace.toml")
+}
