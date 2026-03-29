@@ -162,6 +162,7 @@ int64_t __magi_string_concat(int64_t a_val, int64_t b_val);
 int64_t __magi_string_len(int64_t val);
 int64_t __magi_map_get(int64_t map_val, int64_t key_val);
 void __magi_map_set(int64_t map_val, int64_t key_val, int64_t val);
+int64_t __magi_byte_slice(int64_t arr_val, int64_t start_val, int64_t len_val);
 static inline int magi_is_byte_array(MagiArray* arr) { return arr && arr->cap == -1; }
 static inline int64_t magi_byte_array_get(MagiArray* arr, int64_t idx) {
     if (!arr || idx < 0 || idx >= arr->len) return magi_make_null();
@@ -1390,6 +1391,11 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         return magi_make_int(getpid());
     }
 
+    if (strcmp(name, "__byte_slice") == 0) {
+        int64_t c = argc > 2 ? args[2] : magi_make_int(0);
+        return __magi_byte_slice(a, b, c);
+    }
+
     // Unknown: return null
     return magi_make_null();
 }
@@ -1421,3 +1427,24 @@ int64_t __magi_embed_array(const unsigned char* data, int64_t len) {
 }
 
 // magi_is_byte_array and magi_byte_array_get defined in forward declarations above
+
+// Slice a byte array without copying — returns a new MagiArray pointing into the original data
+int64_t __magi_byte_slice(int64_t arr_val, int64_t start_val, int64_t len_val) {
+    MagiArray* src = magi_array_ptr(arr_val);
+    if (!src) return magi_make_null();
+    int64_t start = magi_sext48(magi_get_payload(start_val));
+    int64_t slen = magi_sext48(magi_get_payload(len_val));
+    if (start < 0 || slen <= 0 || start + slen > src->len) return magi_make_null();
+    MagiArray* slice = (MagiArray*)malloc(sizeof(MagiArray));
+    slice->len = (int32_t)slen;
+    slice->cap = -1; // byte array marker
+    if (magi_is_byte_array(src)) {
+        const unsigned char* bytes = (const unsigned char*)(uintptr_t)src->data;
+        slice->data = (int64_t*)(uintptr_t)(bytes + start);
+    } else {
+        // Regular array — can't slice without copy
+        slice->data = src->data + start;
+        slice->cap = (int32_t)slen;
+    }
+    return magi_make_array_val(slice);
+}
