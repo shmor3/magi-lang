@@ -1612,3 +1612,541 @@ func dbg_show_stats() {
         println(f"Rate: ~{rate} stmts/sec")
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Memory Inspection ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_heap_snapshots = []
+
+// Take a snapshot of the current heap state
+func dbg_snapshot_heap(scopes) {
+    let snapshot = {
+        "timestamp": time_now(),
+        "scope_count": len(scopes),
+        "variables": {},
+    }
+
+    let total_vars = 0
+    for scope in scopes {
+        for key in scope.keys() {
+            if key.starts_with("__") { continue }
+            snapshot["variables"][key] = {
+                "type": typeof(scope[key]),
+                "size": dbg_estimate_size(scope[key]),
+            }
+            total_vars = total_vars + 1
+        }
+    }
+    snapshot["total_variables"] = total_vars
+    snapshot["estimated_total_bytes"] = dbg_total_heap_size(snapshot["variables"])
+
+    dbg_heap_snapshots.push(snapshot)
+    snapshot
+}
+
+// Estimate memory size of a value
+func dbg_estimate_size(val) {
+    if val == null { return 8 }
+    const t = typeof(val)
+    match t {
+        "int" | "int64" => 8,
+        "float" | "float64" => 8,
+        "bool" => 1,
+        "string" => 24 + len(to_string(val)),
+        "array" => {
+            let size = 24  // array header
+            for item in val {
+                size = size + dbg_estimate_size(item) + 8  // 8 for pointer
+            }
+            size
+        },
+        "map" => {
+            let size = 48  // map header
+            for key in val.keys() {
+                size = size + dbg_estimate_size(key) + dbg_estimate_size(val[key]) + 16
+            }
+            size
+        },
+        "function" | "closure" => 64,
+        _ => 16,
+    }
+}
+
+func dbg_total_heap_size(variables) {
+    let total = 0
+    for key in variables.keys() {
+        total = total + variables[key]["size"]
+    }
+    total
+}
+
+// Display memory usage report
+func dbg_memory_report() {
+    if len(dbg_heap_snapshots) == 0 {
+        println("No heap snapshots taken. Use 'heap' command to take a snapshot.")
+        return null
+    }
+    const latest = dbg_heap_snapshots[len(dbg_heap_snapshots) - 1]
+    println(f"=== Memory Report ===")
+    println(f"Timestamp: {latest[\"timestamp\"]}")
+    println(f"Scopes: {latest[\"scope_count\"]}")
+    println(f"Variables: {latest[\"total_variables\"]}")
+    println(f"Estimated heap: {format_bytes(latest[\"estimated_total_bytes\"])}")
+
+    // Show top 10 largest variables
+    let vars = []
+    for key in latest["variables"].keys() {
+        vars.push({"name": key, "size": latest["variables"][key]["size"], "type": latest["variables"][key]["type"]})
+    }
+    vars = sort_by_desc(vars, v => v["size"])
+
+    println(f"\nTop variables by size:")
+    let shown = 0
+    for v in vars {
+        if shown >= 10 { break }
+        println(f"  {v[\"name\"]}: {v[\"type\"]} ({format_bytes(v[\"size\"])})")
+        shown = shown + 1
+    }
+
+    // Show growth if we have multiple snapshots
+    if len(dbg_heap_snapshots) > 1 {
+        const prev = dbg_heap_snapshots[len(dbg_heap_snapshots) - 2]
+        const delta = latest["estimated_total_bytes"] - prev["estimated_total_bytes"]
+        const sign = if delta >= 0 { "+" } else { "" }
+        println(f"\nHeap delta since last snapshot: {sign}{format_bytes(delta)}")
+    }
+}
+
+func format_bytes(bytes) {
+    if bytes < 1024 { return f"{bytes}B" }
+    if bytes < 1024 * 1024 { return f"{bytes / 1024}KB" }
+    f"{bytes / (1024 * 1024)}MB"
+}
+
+func sort_by_desc(arr, key_fn) {
+    let sorted = []
+    for item in arr { sorted.push(item) }
+    let i = 1
+    while i < len(sorted) {
+        let j = i
+        while j > 0 {
+            if key_fn(sorted[j]) > key_fn(sorted[j - 1]) {
+                const tmp = sorted[j]
+                sorted[j] = sorted[j - 1]
+                sorted[j - 1] = tmp
+            }
+            j = j - 1
+        }
+        i = i + 1
+    }
+    sorted
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Profiler Integration ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_profile_data = {"__s": true}  // func_name -> {calls, total_time, min_time, max_time}
+let dbg_profiling = false
+let dbg_profile_stack = []  // stack of {name, start_time}
+
+func dbg_profiler_start() {
+    dbg_profiling = true
+    dbg_profile_data = {"__s": true}
+    println("Profiler started.")
+}
+
+func dbg_profiler_stop() {
+    dbg_profiling = false
+    println("Profiler stopped.")
+}
+
+func dbg_profiler_enter(func_name) {
+    if !dbg_profiling { return null }
+    dbg_profile_stack.push({"name": func_name, "start_time": time_now()})
+}
+
+func dbg_profiler_exit(func_name) {
+    if !dbg_profiling { return null }
+    if len(dbg_profile_stack) == 0 { return null }
+    const frame = dbg_profile_stack.pop()
+    if frame["name"] != func_name { return null }
+
+    const elapsed = time_now() - frame["start_time"]
+
+    if !dbg_profile_data.has(func_name) {
+        dbg_profile_data[func_name] = {"calls": 0, "total_time": 0, "min_time": 999999999, "max_time": 0}
+    }
+    const entry = dbg_profile_data[func_name]
+    entry["calls"] = entry["calls"] + 1
+    entry["total_time"] = entry["total_time"] + elapsed
+    if elapsed < entry["min_time"] { entry["min_time"] = elapsed }
+    if elapsed > entry["max_time"] { entry["max_time"] = elapsed }
+    dbg_profile_data[func_name] = entry
+}
+
+func dbg_profiler_report() {
+    println("=== Profiler Report ===")
+    println(f"{'Function':-30} {'Calls':>8} {'Total(ms)':>10} {'Avg(ms)':>10} {'Min(ms)':>10} {'Max(ms)':>10}")
+    println("-".repeat(80))
+
+    let entries = []
+    for name in dbg_profile_data.keys() {
+        if name == "__s" { continue }
+        const data = dbg_profile_data[name]
+        entries.push({"name": name, "data": data})
+    }
+
+    // Sort by total time descending
+    entries = sort_by_desc(entries, e => e["data"]["total_time"])
+
+    for entry in entries {
+        const d = entry["data"]
+        const avg = if d["calls"] > 0 { d["total_time"] / d["calls"] } else { 0 }
+        const name_padded = entry["name"]
+        println(f"{name_padded:-30} {d[\"calls\"]:>8} {d[\"total_time\"]:>10} {avg:>10} {d[\"min_time\"]:>10} {d[\"max_time\"]:>10}")
+    }
+
+    // Summary
+    let total_calls = 0
+    let total_time = 0
+    for entry in entries {
+        total_calls = total_calls + entry["data"]["calls"]
+        total_time = total_time + entry["data"]["total_time"]
+    }
+    println(f"\nTotal: {total_calls} calls, {total_time}ms")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Thread Debugging ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_threads = {"__s": true}  // thread_id -> {name, state, stack, created_at}
+
+func dbg_register_thread(thread_id, name) {
+    dbg_threads[thread_id] = {
+        "name": name,
+        "state": "running",
+        "stack": [],
+        "created_at": time_now(),
+        "paused_at": null,
+    }
+}
+
+func dbg_unregister_thread(thread_id) {
+    if dbg_threads.has(thread_id) {
+        dbg_threads[thread_id] = null
+    }
+}
+
+func dbg_thread_push_frame(thread_id, frame_name, line) {
+    if !dbg_threads.has(thread_id) { return null }
+    const thread = dbg_threads[thread_id]
+    if thread == null { return null }
+    thread["stack"].push({"name": frame_name, "line": line, "time": time_now()})
+}
+
+func dbg_thread_pop_frame(thread_id) {
+    if !dbg_threads.has(thread_id) { return null }
+    const thread = dbg_threads[thread_id]
+    if thread == null { return null }
+    if len(thread["stack"]) > 0 { thread["stack"].pop() }
+}
+
+func dbg_pause_thread(thread_id) {
+    if !dbg_threads.has(thread_id) { return null }
+    const thread = dbg_threads[thread_id]
+    if thread == null { return null }
+    thread["state"] = "paused"
+    thread["paused_at"] = time_now()
+    println(f"Thread {thread_id} ({thread[\"name\"]}) paused")
+}
+
+func dbg_resume_thread(thread_id) {
+    if !dbg_threads.has(thread_id) { return null }
+    const thread = dbg_threads[thread_id]
+    if thread == null { return null }
+    thread["state"] = "running"
+    thread["paused_at"] = null
+    println(f"Thread {thread_id} ({thread[\"name\"]}) resumed")
+}
+
+func dbg_list_threads() {
+    println("=== Active Threads ===")
+    let count = 0
+    for tid in dbg_threads.keys() {
+        if tid == "__s" { continue }
+        const thread = dbg_threads[tid]
+        if thread == null { continue }
+        const stack_depth = len(thread["stack"])
+        const top_frame = if stack_depth > 0 { thread["stack"][stack_depth - 1]["name"] } else { "<idle>" }
+        const age = time_now() - thread["created_at"]
+        println(f"  [{tid}] {thread[\"name\"]} - {thread[\"state\"]} ({stack_depth} frames, top: {top_frame}, age: {age}ms)")
+        count = count + 1
+    }
+    if count == 0 {
+        println("  No active threads.")
+    }
+}
+
+func dbg_thread_backtrace(thread_id) {
+    if !dbg_threads.has(thread_id) {
+        println(f"Thread {thread_id} not found")
+        return null
+    }
+    const thread = dbg_threads[thread_id]
+    if thread == null {
+        println(f"Thread {thread_id} not found")
+        return null
+    }
+    println(f"=== Thread {thread_id} ({thread[\"name\"]}) Backtrace ===")
+    let i = len(thread["stack"]) - 1
+    let frame_num = 0
+    while i >= 0 {
+        const frame = thread["stack"][i]
+        println(f"  #{frame_num} {frame[\"name\"]} at line {frame[\"line\"]}")
+        i = i - 1
+        frame_num = frame_num + 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Remote Debugging Protocol ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// DAP-like (Debug Adapter Protocol) message handling
+let dbg_remote_connected = false
+let dbg_remote_seq = 1
+
+func dbg_remote_start(port) {
+    println(f"Debug server starting on port {port}...")
+    // Delegate to stage 0 for actual TCP server
+    const server = tcp_listen("127.0.0.1", port)
+    if server == null {
+        println("Failed to start debug server")
+        return null
+    }
+    dbg_remote_connected = true
+    println(f"Debug server listening on 127.0.0.1:{port}")
+    println("Waiting for debugger to connect...")
+
+    // Main debug loop
+    while dbg_remote_connected {
+        const conn = tcp_accept(server)
+        if conn == null { continue }
+        dbg_remote_handle_connection(conn)
+    }
+}
+
+func dbg_remote_handle_connection(conn) {
+    println("Debugger connected")
+
+    // Send initialize response
+    dbg_remote_send(conn, "event", "initialized", {})
+
+    while dbg_remote_connected {
+        const msg = dbg_remote_receive(conn)
+        if msg == null { break }
+
+        const command = msg["command"]
+        match command {
+            "initialize" => {
+                dbg_remote_send(conn, "response", "initialize", {
+                    "supportsConfigurationDoneRequest": true,
+                    "supportsEvaluateForHovers": true,
+                    "supportsStepBack": false,
+                    "supportsSetVariable": true,
+                    "supportsRestartFrame": false,
+                    "supportsBreakpointLocationsRequest": true,
+                })
+            },
+            "configurationDone" => {
+                dbg_remote_send(conn, "response", "configurationDone", {})
+            },
+            "setBreakpoints" => {
+                const source = msg["arguments"]["source"]["path"]
+                const breakpoints = msg["arguments"]["breakpoints"]
+                let verified = []
+                for bp in breakpoints {
+                    const line = bp["line"]
+                    dbg_set_breakpoint(line)
+                    verified.push({"verified": true, "line": line})
+                }
+                dbg_remote_send(conn, "response", "setBreakpoints", {"breakpoints": verified})
+            },
+            "threads" => {
+                let thread_list = [{"id": 1, "name": "main"}]
+                for tid in dbg_threads.keys() {
+                    if tid == "__s" { continue }
+                    const thread = dbg_threads[tid]
+                    if thread != null {
+                        thread_list.push({"id": parse_int(tid), "name": thread["name"]})
+                    }
+                }
+                dbg_remote_send(conn, "response", "threads", {"threads": thread_list})
+            },
+            "stackTrace" => {
+                let frames = []
+                let frame_id = 0
+                for entry in dbg_call_stack {
+                    frames.push({
+                        "id": frame_id,
+                        "name": entry["name"],
+                        "line": entry["line"],
+                        "column": 0,
+                        "source": {"name": "program.magi"},
+                    })
+                    frame_id = frame_id + 1
+                }
+                dbg_remote_send(conn, "response", "stackTrace", {"stackFrames": frames, "totalFrames": len(frames)})
+            },
+            "scopes" => {
+                dbg_remote_send(conn, "response", "scopes", {
+                    "scopes": [
+                        {"name": "Local", "variablesReference": 1, "expensive": false},
+                        {"name": "Global", "variablesReference": 2, "expensive": false},
+                    ]
+                })
+            },
+            "continue" => {
+                dbg_step_mode = false
+                dbg_remote_send(conn, "response", "continue", {"allThreadsContinued": true})
+            },
+            "next" => {
+                dbg_step_mode = true
+                dbg_remote_send(conn, "response", "next", {})
+            },
+            "stepIn" => {
+                dbg_step_mode = true
+                dbg_remote_send(conn, "response", "stepIn", {})
+            },
+            "stepOut" => {
+                dbg_step_mode = true
+                dbg_remote_send(conn, "response", "stepOut", {})
+            },
+            "evaluate" => {
+                const expression = msg["arguments"]["expression"]
+                const result = eval_source(expression)
+                dbg_remote_send(conn, "response", "evaluate", {"result": to_string(result), "variablesReference": 0})
+            },
+            "disconnect" => {
+                dbg_remote_send(conn, "response", "disconnect", {})
+                dbg_remote_connected = false
+            },
+            _ => {
+                dbg_remote_send(conn, "response", command, {})
+            },
+        }
+    }
+
+    println("Debugger disconnected")
+}
+
+func dbg_remote_send(conn, msg_type, command, body) {
+    const msg = {
+        "seq": dbg_remote_seq,
+        "type": msg_type,
+        "command": command,
+        "body": body,
+        "success": true,
+    }
+    dbg_remote_seq = dbg_remote_seq + 1
+    const json_str = to_json(msg)
+    const header = f"Content-Length: {len(json_str)}\r\n\r\n"
+    tcp_write(conn, header + json_str)
+}
+
+func dbg_remote_receive(conn) {
+    // Read Content-Length header
+    const header = tcp_read_line(conn)
+    if header == null { return null }
+    // Parse content length
+    if !header.starts_with("Content-Length:") { return null }
+    const len_str = header[15..len(header)].trim()
+    const content_length = parse_int(len_str)
+    if content_length == null || content_length <= 0 { return null }
+    // Skip empty line
+    tcp_read_line(conn)
+    // Read body
+    const body = tcp_read(conn, content_length)
+    if body == null { return null }
+    json_parse(body)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended Debugger Commands ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Conditional breakpoint
+let dbg_conditional_bps = {"__s": true}  // line -> expression_string
+
+func dbg_set_conditional_breakpoint(line, condition) {
+    dbg_set_breakpoint(line)
+    dbg_conditional_bps[to_string(line)] = condition
+    println(f"Conditional breakpoint set at line {line}: {condition}")
+}
+
+func dbg_check_conditional_bp(line, eval_fn) {
+    const key = to_string(line)
+    if !dbg_conditional_bps.has(key) { return true }
+    const condition = dbg_conditional_bps[key]
+    const result = eval_fn(condition)
+    result == true
+}
+
+// Hit count breakpoint
+let dbg_hit_counts = {"__s": true}  // line -> {target, current}
+
+func dbg_set_hit_count_breakpoint(line, count) {
+    dbg_set_breakpoint(line)
+    dbg_hit_counts[to_string(line)] = {"target": count, "current": 0}
+    println(f"Hit count breakpoint set at line {line}: break after {count} hits")
+}
+
+func dbg_check_hit_count_bp(line) {
+    const key = to_string(line)
+    if !dbg_hit_counts.has(key) { return true }
+    const entry = dbg_hit_counts[key]
+    entry["current"] = entry["current"] + 1
+    dbg_hit_counts[key] = entry
+    entry["current"] >= entry["target"]
+}
+
+// Log point (non-breaking breakpoint that logs a message)
+let dbg_log_points = {"__s": true}  // line -> format_string
+
+func dbg_set_log_point(line, format_str) {
+    dbg_set_breakpoint(line)
+    dbg_log_points[to_string(line)] = format_str
+    println(f"Log point set at line {line}: {format_str}")
+}
+
+func dbg_check_log_point(line) {
+    const key = to_string(line)
+    dbg_log_points.has(key)
+}
+
+func dbg_format_log_point(line, eval_fn) {
+    const key = to_string(line)
+    if !dbg_log_points.has(key) { return null }
+    const format_str = dbg_log_points[key]
+    // Simple interpolation: replace {expr} with evaluated result
+    let result = format_str
+    let i = 0
+    while i < len(result) {
+        if result[i] == "{" {
+            const end = result[i..len(result)].index_of("}")
+            if end > 0 {
+                const expr = result[i + 1..i + end]
+                const val = eval_fn(expr)
+                const val_str = to_string(val)
+                result = result[0..i] + val_str + result[i + end + 1..len(result)]
+                i = i + len(val_str)
+                continue
+            }
+        }
+        i = i + 1
+    }
+    result
+}
