@@ -9786,4 +9786,8 @@ func json_stringify(value) {
     json_emit(value)
 }
 
-dispatch_v2(process_args())
+const __args = process_args()
+if len(__args) > 0 && __args[0] == "version" { print_version(); exit(0) }
+if len(__args) > 0 && __args[0] == "help" { print_help_full(); exit(0) }
+if len(__args) == 0 { print_help_full(); exit(0) }
+dispatch_v2(__args)
