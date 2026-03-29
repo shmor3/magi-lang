@@ -1399,13 +1399,15 @@ int64_t __magi_embed_array(const unsigned char* data, int64_t len) {
     MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
     if (!arr) return magi_make_null();
     arr->len = (int32_t)len;
-    arr->cap = (int32_t)len;
-    // Store raw pointer in data field — __magi_array_get_byte handles it
     arr->data = (int64_t*)(uintptr_t)data;
-    // Tag with a special marker so array_get knows it's a byte array
-    // Use negative cap as marker
     arr->cap = -1;
-    return magi_make_array_val(arr);
+    int64_t tagged = magi_make_array_val(arr);
+    uintptr_t orig_ptr = (uintptr_t)arr;
+    uintptr_t recovered = (uintptr_t)magi_get_payload(tagged);
+    fprintf(stderr, "[embed] arr=%p orig=%llx recovered=%llx %s\n",
+        (void*)arr, (unsigned long long)orig_ptr, (unsigned long long)recovered,
+        orig_ptr == recovered ? "OK" : "POINTER TRUNCATED!");
+    return tagged;
 }
 
 // magi_is_byte_array and magi_byte_array_get defined in forward declarations above
