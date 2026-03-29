@@ -201,9 +201,26 @@ fn emit_native(
     let mut temp_files: Vec<String> = vec![obj_path.clone(), rt_path.clone()];
 
     // Resolve native dependencies from packages with [native] in magi.toml
-    let is_windows = target_triple.map(|t| t.contains("windows")).unwrap_or(false);
-    let platform_key = if is_windows { "windows-x86_64" } else { "linux-x86_64" };
-    let cc_cmd = if is_windows { "x86_64-w64-mingw32-gcc" } else { "cc" };
+    let triple_str = target_triple.unwrap_or("");
+    let is_windows = triple_str.contains("windows");
+    let is_macos = triple_str.contains("apple") || triple_str.contains("darwin") || triple_str.contains("macos");
+    let is_aarch64 = triple_str.contains("aarch64");
+    let platform_key = if is_windows { "windows-x86_64" }
+        else if is_macos && is_aarch64 { "macos-aarch64" }
+        else if is_macos { "macos-x86_64" }
+        else { "linux-x86_64" };
+    let cc_cmd = if is_windows {
+        "x86_64-w64-mingw32-gcc"
+    } else if is_macos {
+        // Use zig cc as macOS cross-compiler if available
+        if std::process::Command::new("zig").arg("version").output().is_ok() {
+            "zig"
+        } else {
+            "cc"
+        }
+    } else {
+        "cc"
+    };
 
     for pkg_dir in find_native_packages() {
         let toml_path = format!("{}/magi.toml", pkg_dir);
@@ -271,14 +288,48 @@ fn emit_native(
 
     link_args.push("-o".into());
     link_args.push(output_path.into());
-    if !is_windows { link_args.push("-lm".into()); }
+    if !is_windows && !is_macos { link_args.push("-lm".into()); }
     link_args.push("-O2".into());
     if is_windows { link_args.push("-mwindows".into()); }
+    if is_macos {
+        link_args.push("-lm".into());
+        link_args.push("-framework".into());
+        link_args.push("Cocoa".into());
+        link_args.push("-framework".into());
+        link_args.push("IOKit".into());
+        link_args.push("-framework".into());
+        link_args.push("CoreVideo".into());
+        link_args.push("-framework".into());
+        link_args.push("CoreAudio".into());
+        link_args.push("-framework".into());
+        link_args.push("AudioToolbox".into());
+        link_args.push("-framework".into());
+        link_args.push("Carbon".into());
+        link_args.push("-framework".into());
+        link_args.push("ForceFeedback".into());
+        link_args.push("-liconv".into());
+    }
 
-    let status = std::process::Command::new(cc_cmd)
-        .args(&link_args)
-        .status()
-        .map_err(|e| format!("linker: {}", e))?;
+    let status = if cc_cmd == "zig" {
+        let mut zig_args = vec!["cc".to_string()];
+        if is_macos && is_aarch64 {
+            zig_args.push("-target".into());
+            zig_args.push("aarch64-macos".into());
+        } else if is_macos {
+            zig_args.push("-target".into());
+            zig_args.push("x86_64-macos".into());
+        }
+        zig_args.extend(link_args.iter().cloned());
+        std::process::Command::new("zig")
+            .args(&zig_args)
+            .status()
+            .map_err(|e| format!("zig cc: {}", e))?
+    } else {
+        std::process::Command::new(cc_cmd)
+            .args(&link_args)
+            .status()
+            .map_err(|e| format!("linker: {}", e))?
+    };
 
     for f in &temp_files { let _ = std::fs::remove_file(f); }
 
