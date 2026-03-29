@@ -4901,3 +4901,1142 @@ func op_ecs_system(world, component_names, system_fn) {
         system_fn(entity_id, components)
     }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Full HTTP Operations — matching stage 0 response format
+// ══════════════════════════════════════════════════════════════════
+
+func op_http_response(status, body, headers) {
+    let h = {}
+    if headers != null && typeof(headers) == "map" {
+        h = headers
+    }
+    {"status": status, "body": body, "headers": h}
+}
+
+func op_http_get(args) {
+    const url = op_arg(args, 0, "")
+    if url == "" { panic("http_get: url required") }
+    // Delegate to host http_get builtin
+    const resp = http_get(url)
+    if typeof(resp) == "map" { return resp }
+    op_http_response(200, to_string(resp), {})
+}
+
+func op_http_post(args) {
+    const url = op_arg(args, 0, "")
+    const body = op_arg(args, 1, "")
+    if url == "" { panic("http_post: url required") }
+    const resp = http_post(url, body)
+    if typeof(resp) == "map" { return resp }
+    op_http_response(200, to_string(resp), {})
+}
+
+func op_http_put(args) {
+    const url = op_arg(args, 0, "")
+    const body = op_arg(args, 1, "")
+    if url == "" { panic("http_put: url required") }
+    const resp = http_put(url, body)
+    if typeof(resp) == "map" { return resp }
+    op_http_response(200, to_string(resp), {})
+}
+
+func op_http_delete(args) {
+    const url = op_arg(args, 0, "")
+    if url == "" { panic("http_delete: url required") }
+    const resp = http_delete(url)
+    if typeof(resp) == "map" { return resp }
+    op_http_response(200, to_string(resp), {})
+}
+
+func op_http_patch(args) {
+    const url = op_arg(args, 0, "")
+    const body = op_arg(args, 1, "")
+    if url == "" { panic("http_patch: url required") }
+    const resp = http_patch(url, body)
+    if typeof(resp) == "map" { return resp }
+    op_http_response(200, to_string(resp), {})
+}
+
+func op_http_head(args) {
+    const url = op_arg(args, 0, "")
+    if url == "" { panic("http_head: url required") }
+    const resp = http_head(url)
+    if typeof(resp) == "map" { return resp }
+    {"status": 200, "headers": {}}
+}
+
+func op_http_options(args) {
+    const url = op_arg(args, 0, "")
+    if url == "" { panic("http_options: url required") }
+    const resp = http_options(url)
+    if typeof(resp) == "map" { return resp }
+    {"status": 200, "headers": {}, "allow": ""}
+}
+
+func op_http_request(args) {
+    const method = op_arg(args, 0, "GET")
+    const url = op_arg(args, 1, "")
+    const headers = op_arg(args, 2, {})
+    const body = op_arg(args, 3, null)
+    if url == "" { panic("http_request: url required") }
+    const upper = method.to_upper()
+    const resp = http_request(upper, url, headers, body)
+    if typeof(resp) == "map" { return resp }
+    op_http_response(200, to_string(resp), {})
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Certificate Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_cert_generate(args) {
+    const cn = op_arg(args, 0, "localhost")
+    // Delegate to host cert_generate if available
+    const result = cert_generate(cn)
+    if typeof(result) == "map" { return result }
+    {
+        "cert_pem": "",
+        "key_pem": "",
+    }
+}
+
+func op_cert_self_signed(args) {
+    op_cert_generate(args)
+}
+
+func op_cert_parse(args) {
+    const pem = op_arg(args, 0, "")
+    if pem == "" { panic("cert_parse: pem required") }
+    const result = cert_parse(pem)
+    if typeof(result) == "map" { return result }
+    {
+        "subject": "",
+        "issuer": "",
+        "serial": "",
+        "not_before": "",
+        "not_after": "",
+        "version": 0,
+        "signature_algorithm": "",
+        "is_ca": false,
+    }
+}
+
+func op_cert_info(args) {
+    const pem = op_arg(args, 0, "")
+    if pem == "" { panic("cert_info: pem required") }
+    const result = cert_info(pem)
+    if typeof(result) == "map" { return result }
+    {
+        "subject": "",
+        "issuer": "",
+        "serial": "",
+        "not_before": "",
+        "not_after": "",
+        "version": 0,
+    }
+}
+
+func op_cert_verify(args) {
+    const pem = op_arg(args, 0, "")
+    if pem == "" { return {"valid": false, "error": "empty PEM"} }
+    const result = cert_verify(pem)
+    if typeof(result) == "map" { return result }
+    {"valid": false, "error": "verification not available in self-hosted mode"}
+}
+
+func op_key_generate(args) {
+    const result = key_generate()
+    if typeof(result) == "map" { return result }
+    {
+        "private_pem": "",
+        "public_pem": "",
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full WebSocket Operations
+// ══════════════════════════════════════════════════════════════════
+
+// Global WebSocket connection registry
+let ws_connections = {}
+let ws_next_id = 0
+
+func op_ws_connect(args) {
+    const url = op_arg(args, 0, "")
+    if url == "" { panic("ws_connect: url required") }
+    const id = f"ws:{ws_next_id}"
+    ws_next_id = ws_next_id + 1
+    // Delegate to host ws_connect if available
+    const conn = ws_connect(url)
+    if typeof(conn) == "string" { return conn }
+    ws_connections[id] = {
+        "url": url,
+        "connected": true,
+        "buffer": [],
+    }
+    id
+}
+
+func op_ws_send(args) {
+    const conn_id = op_arg(args, 0, "")
+    const message = op_arg(args, 1, "")
+    if conn_id == "" { panic("ws_send: conn_id required") }
+    // Delegate to host
+    const result = ws_send(conn_id, message)
+    if result != null { return result }
+    // Track in local state
+    if ws_connections.has(conn_id) {
+        if !ws_connections[conn_id]["connected"] {
+            panic("ws_send: connection closed")
+        }
+    }
+    null
+}
+
+func op_ws_receive(args) {
+    const conn_id = op_arg(args, 0, "")
+    if conn_id == "" { panic("ws_receive: conn_id required") }
+    // Delegate to host
+    const result = ws_receive(conn_id)
+    if result != null { return result }
+    // Check local buffer
+    if ws_connections.has(conn_id) {
+        const conn = ws_connections[conn_id]
+        if len(conn["buffer"]) > 0 {
+            const msg = conn["buffer"][0]
+            conn["buffer"] = conn["buffer"].slice(1, len(conn["buffer"]))
+            ws_connections[conn_id] = conn
+            return msg
+        }
+    }
+    null
+}
+
+func op_ws_close(args) {
+    const conn_id = op_arg(args, 0, "")
+    if conn_id == "" { return null }
+    // Delegate to host
+    ws_close(conn_id)
+    if ws_connections.has(conn_id) {
+        let conn = ws_connections[conn_id]
+        conn["connected"] = false
+        ws_connections[conn_id] = conn
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full SSE (Server-Sent Events) Operations
+// ══════════════════════════════════════════════════════════════════
+
+let sse_connections = {}
+let sse_next_id = 0
+
+func op_sse_connect(args) {
+    const url = op_arg(args, 0, "")
+    if url == "" { panic("sse_connect: url required") }
+    const id = f"sse:{sse_next_id}"
+    sse_next_id = sse_next_id + 1
+    // Delegate to host
+    const conn = sse_connect(url)
+    if typeof(conn) == "string" { return conn }
+    sse_connections[id] = {
+        "url": url,
+        "connected": true,
+        "events": [],
+    }
+    id
+}
+
+func op_sse_read_event(args) {
+    const conn_id = op_arg(args, 0, "")
+    if conn_id == "" { panic("sse_read_event: conn_id required") }
+    // Delegate to host
+    const result = sse_read_event(conn_id)
+    if result != null { return result }
+    // Check local buffer
+    if sse_connections.has(conn_id) {
+        const conn = sse_connections[conn_id]
+        if len(conn["events"]) > 0 {
+            const evt = conn["events"][0]
+            conn["events"] = conn["events"].slice(1, len(conn["events"]))
+            sse_connections[conn_id] = conn
+            return evt
+        }
+    }
+    null
+}
+
+func op_sse_close(args) {
+    const conn_id = op_arg(args, 0, "")
+    if conn_id == "" { return null }
+    sse_close(conn_id)
+    if sse_connections.has(conn_id) {
+        let conn = sse_connections[conn_id]
+        conn["connected"] = false
+        sse_connections[conn_id] = conn
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full HTTP Server Operations
+// ══════════════════════════════════════════════════════════════════
+
+let http_servers = {}
+let http_server_next_id = 0
+
+func op_http_server_start(args) {
+    const port = op_arg(args, 0, 8080)
+    const id = f"srv:{http_server_next_id}"
+    http_server_next_id = http_server_next_id + 1
+    // Delegate to host
+    const result = http_server_start(port)
+    if typeof(result) == "string" { return result }
+    http_servers[id] = {
+        "port": port,
+        "running": true,
+        "request_queue": [],
+    }
+    id
+}
+
+func op_http_server_receive(args) {
+    const server_id = op_arg(args, 0, "")
+    if server_id == "" { panic("http_server_receive: server_id required") }
+    // Delegate to host
+    const result = http_server_receive(server_id)
+    if result != null { return result }
+    // Return from local queue
+    if http_servers.has(server_id) {
+        const srv = http_servers[server_id]
+        if len(srv["request_queue"]) > 0 {
+            const req = srv["request_queue"][0]
+            srv["request_queue"] = srv["request_queue"].slice(1, len(srv["request_queue"]))
+            http_servers[server_id] = srv
+            return req
+        }
+    }
+    null
+}
+
+func op_http_server_respond(args) {
+    const server_id = op_arg(args, 0, "")
+    const request_id = op_arg(args, 1, "")
+    const status = op_arg(args, 2, 200)
+    const body = op_arg(args, 3, "")
+    const headers = op_arg(args, 4, {})
+    // Delegate to host
+    http_server_respond(server_id, request_id, status, body, headers)
+    null
+}
+
+func op_http_server_stop(args) {
+    const server_id = op_arg(args, 0, "")
+    if server_id == "" { return null }
+    http_server_stop(server_id)
+    if http_servers.has(server_id) {
+        let srv = http_servers[server_id]
+        srv["running"] = false
+        http_servers[server_id] = srv
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TCP Operations
+// ══════════════════════════════════════════════════════════════════
+
+let tcp_connections = {}
+let tcp_next_id = 0
+
+func op_tcp_connect(args) {
+    const host = op_arg(args, 0, "")
+    const port = op_arg(args, 1, 0)
+    if host == "" { panic("tcp_connect: host required") }
+    const id = f"tcp:{tcp_next_id}"
+    tcp_next_id = tcp_next_id + 1
+    const result = tcp_connect(host, port)
+    if typeof(result) == "string" { return result }
+    tcp_connections[id] = {"host": host, "port": port, "connected": true}
+    id
+}
+
+func op_tcp_write(args) {
+    const conn_id = op_arg(args, 0, "")
+    const data = op_arg(args, 1, "")
+    if conn_id == "" { panic("tcp_write: conn_id required") }
+    tcp_write(conn_id, data)
+}
+
+func op_tcp_read(args) {
+    const conn_id = op_arg(args, 0, "")
+    if conn_id == "" { panic("tcp_read: conn_id required") }
+    tcp_read(conn_id)
+}
+
+func op_tcp_close(args) {
+    const conn_id = op_arg(args, 0, "")
+    if conn_id == "" { return null }
+    tcp_close(conn_id)
+    if tcp_connections.has(conn_id) {
+        tcp_connections[conn_id]["connected"] = false
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// UDP Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_udp_bind(args) {
+    const addr = op_arg(args, 0, "0.0.0.0:0")
+    udp_bind(addr)
+}
+
+func op_udp_send(args) {
+    const socket_id = op_arg(args, 0, "")
+    const addr = op_arg(args, 1, "")
+    const data = op_arg(args, 2, "")
+    udp_send(socket_id, addr, data)
+}
+
+func op_udp_recv(args) {
+    const socket_id = op_arg(args, 0, "")
+    udp_recv(socket_id)
+}
+
+func op_udp_close(args) {
+    const socket_id = op_arg(args, 0, "")
+    udp_close(socket_id)
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TLS Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_tls_connect(args) {
+    const host = op_arg(args, 0, "")
+    const port = op_arg(args, 1, 443)
+    if host == "" { panic("tls_connect: host required") }
+    tls_connect(host, port)
+}
+
+func op_tls_write(args) {
+    const conn_id = op_arg(args, 0, "")
+    const data = op_arg(args, 1, "")
+    tls_write(conn_id, data)
+}
+
+func op_tls_read(args) {
+    const conn_id = op_arg(args, 0, "")
+    tls_read(conn_id)
+}
+
+func op_tls_close(args) {
+    const conn_id = op_arg(args, 0, "")
+    tls_close(conn_id)
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// DNS Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_dns_lookup(args) {
+    const hostname = op_arg(args, 0, "")
+    if hostname == "" { return [] }
+    dns_lookup(hostname)
+}
+
+func op_dns_reverse(args) {
+    const ip = op_arg(args, 0, "")
+    if ip == "" { return [] }
+    dns_reverse(ip)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Compression Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_compress_zstd(args) {
+    const data = op_arg(args, 0, "")
+    compress_zstd(data)
+}
+
+func op_decompress_zstd(args) {
+    const data = op_arg(args, 0, "")
+    decompress_zstd(data)
+}
+
+func op_compress_gzip(args) {
+    const data = op_arg(args, 0, "")
+    compress_gzip(data)
+}
+
+func op_decompress_gzip(args) {
+    const data = op_arg(args, 0, "")
+    decompress_gzip(data)
+}
+
+func op_compress_lz4(args) {
+    const data = op_arg(args, 0, "")
+    compress_lz4(data)
+}
+
+func op_decompress_lz4(args) {
+    const data = op_arg(args, 0, "")
+    decompress_lz4(data)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Encoding Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_base64_encode(args) {
+    const data = op_arg(args, 0, "")
+    base64_encode(data)
+}
+
+func op_base64_decode(args) {
+    const data = op_arg(args, 0, "")
+    base64_decode(data)
+}
+
+func op_hex_encode(args) {
+    const data = op_arg(args, 0, "")
+    hex_encode(data)
+}
+
+func op_hex_decode(args) {
+    const data = op_arg(args, 0, "")
+    hex_decode(data)
+}
+
+func op_url_encode(args) {
+    const data = op_arg(args, 0, "")
+    url_encode(data)
+}
+
+func op_url_decode(args) {
+    const data = op_arg(args, 0, "")
+    url_decode(data)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Hashing Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_hash_sha256(args) {
+    const data = op_arg(args, 0, "")
+    sha256(data)
+}
+
+func op_hash_sha512(args) {
+    const data = op_arg(args, 0, "")
+    sha512(data)
+}
+
+func op_hash_md5(args) {
+    const data = op_arg(args, 0, "")
+    md5(data)
+}
+
+func op_hash_blake3(args) {
+    const data = op_arg(args, 0, "")
+    blake3(data)
+}
+
+func op_hmac(args) {
+    const key = op_arg(args, 0, "")
+    const data = op_arg(args, 1, "")
+    const algo = op_arg(args, 2, "sha256")
+    hmac(key, data, algo)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// UUID Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_uuid_v4(args) {
+    uuid_v4()
+}
+
+func op_uuid_v7(args) {
+    uuid_v7()
+}
+
+func op_uuid_parse(args) {
+    const s = op_arg(args, 0, "")
+    uuid_parse(s)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Time Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_time_now(args) {
+    time_now()
+}
+
+func op_time_unix(args) {
+    time_unix()
+}
+
+func op_time_format(args) {
+    const ts = op_arg(args, 0, 0)
+    const fmt = op_arg(args, 1, "RFC3339")
+    time_format(ts, fmt)
+}
+
+func op_time_parse(args) {
+    const s = op_arg(args, 0, "")
+    const fmt = op_arg(args, 1, "RFC3339")
+    time_parse(s, fmt)
+}
+
+func op_time_diff(args) {
+    const a = op_arg(args, 0, 0)
+    const b = op_arg(args, 1, 0)
+    a - b
+}
+
+func op_sleep(args) {
+    const ms = op_arg(args, 0, 0)
+    sleep(ms)
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Regex Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_regex_match(args) {
+    const pattern = op_arg(args, 0, "")
+    const text = op_arg(args, 1, "")
+    regex_match(pattern, text)
+}
+
+func op_regex_test(args) {
+    const pattern = op_arg(args, 0, "")
+    const text = op_arg(args, 1, "")
+    regex_test(pattern, text)
+}
+
+func op_regex_find(args) {
+    const pattern = op_arg(args, 0, "")
+    const text = op_arg(args, 1, "")
+    regex_find(pattern, text)
+}
+
+func op_regex_find_all(args) {
+    const pattern = op_arg(args, 0, "")
+    const text = op_arg(args, 1, "")
+    regex_find_all(pattern, text)
+}
+
+func op_regex_replace(args) {
+    const pattern = op_arg(args, 0, "")
+    const text = op_arg(args, 1, "")
+    const replacement = op_arg(args, 2, "")
+    regex_replace(pattern, text, replacement)
+}
+
+func op_regex_split(args) {
+    const pattern = op_arg(args, 0, "")
+    const text = op_arg(args, 1, "")
+    regex_split(pattern, text)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// JSON / YAML / TOML / CSV Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_json_parse(args) {
+    const s = op_arg(args, 0, "")
+    json_parse(s)
+}
+
+func op_json_stringify(args) {
+    const val = op_arg(args, 0, null)
+    const indent = op_arg(args, 1, false)
+    if indent { json_stringify_pretty(val) } else { json_stringify(val) }
+}
+
+func op_yaml_parse(args) {
+    const s = op_arg(args, 0, "")
+    yaml_parse(s)
+}
+
+func op_yaml_stringify(args) {
+    const val = op_arg(args, 0, null)
+    yaml_stringify(val)
+}
+
+func op_toml_parse(args) {
+    const s = op_arg(args, 0, "")
+    toml_parse(s)
+}
+
+func op_toml_stringify(args) {
+    const val = op_arg(args, 0, null)
+    toml_stringify(val)
+}
+
+func op_csv_parse(args) {
+    const s = op_arg(args, 0, "")
+    const delimiter = op_arg(args, 1, ",")
+    const has_header = op_arg(args, 2, true)
+    csv_parse(s, delimiter, has_header)
+}
+
+func op_csv_stringify(args) {
+    const data = op_arg(args, 0, [])
+    const delimiter = op_arg(args, 1, ",")
+    csv_stringify(data, delimiter)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Process / OS Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_exec(args) {
+    const cmd = op_arg(args, 0, "")
+    const exec_args = op_arg(args, 1, [])
+    exec(cmd, exec_args)
+}
+
+func op_env_get(args) {
+    const name = op_arg(args, 0, "")
+    const default_val = op_arg(args, 1, "")
+    const result = env_get(name)
+    if result == null || result == "" { default_val } else { result }
+}
+
+func op_env_set(args) {
+    const name = op_arg(args, 0, "")
+    const value = op_arg(args, 1, "")
+    env_set(name, value)
+    null
+}
+
+func op_env_all(args) {
+    env_all()
+}
+
+func op_os_exit(args) {
+    const code = op_arg(args, 0, 0)
+    os_exit(code)
+}
+
+func op_os_args(args) {
+    os_args()
+}
+
+func op_os_pid(args) {
+    os_pid()
+}
+
+func op_os_hostname(args) {
+    os_hostname()
+}
+
+func op_os_cwd(args) {
+    os_cwd()
+}
+
+// ══════════════════════════════════════════════════════════════════
+// File System Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_fs_read(args) {
+    const path = op_arg(args, 0, "")
+    if path == "" { panic("fs_read: path required") }
+    fs_read(path)
+}
+
+func op_fs_write(args) {
+    const path = op_arg(args, 0, "")
+    const data = op_arg(args, 1, "")
+    if path == "" { panic("fs_write: path required") }
+    fs_write(path, data)
+    null
+}
+
+func op_fs_append(args) {
+    const path = op_arg(args, 0, "")
+    const data = op_arg(args, 1, "")
+    if path == "" { panic("fs_append: path required") }
+    fs_append(path, data)
+    null
+}
+
+func op_fs_exists(args) {
+    const path = op_arg(args, 0, "")
+    fs_exists(path)
+}
+
+func op_fs_remove(args) {
+    const path = op_arg(args, 0, "")
+    fs_remove(path)
+    null
+}
+
+func op_fs_rename(args) {
+    const from = op_arg(args, 0, "")
+    const to = op_arg(args, 1, "")
+    fs_rename(from, to)
+    null
+}
+
+func op_fs_mkdir(args) {
+    const path = op_arg(args, 0, "")
+    fs_mkdir(path)
+    null
+}
+
+func op_fs_readdir(args) {
+    const path = op_arg(args, 0, ".")
+    fs_readdir(path)
+}
+
+func op_fs_stat(args) {
+    const path = op_arg(args, 0, "")
+    fs_stat(path)
+}
+
+func op_fs_is_dir(args) {
+    const path = op_arg(args, 0, "")
+    fs_is_dir(path)
+}
+
+func op_fs_is_file(args) {
+    const path = op_arg(args, 0, "")
+    fs_is_file(path)
+}
+
+func op_fs_copy(args) {
+    const from = op_arg(args, 0, "")
+    const to = op_arg(args, 1, "")
+    fs_copy(from, to)
+    null
+}
+
+func op_fs_glob(args) {
+    const pattern = op_arg(args, 0, "*")
+    fs_glob(pattern)
+}
+
+func op_fs_temp_file(args) {
+    fs_temp_file()
+}
+
+func op_fs_temp_dir(args) {
+    fs_temp_dir()
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Path Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_path_join(args) {
+    const parts = args
+    let result = ""
+    for p in parts {
+        const s = to_string(p)
+        if len(result) == 0 { result = s }
+        else if result.ends_with("/") { result = result + s }
+        else { result = result + "/" + s }
+    }
+    result
+}
+
+func op_path_dir(args) {
+    const p = op_arg(args, 0, "")
+    const parts = p.split("/")
+    if len(parts) <= 1 { return "." }
+    parts.slice(0, len(parts) - 1).join("/")
+}
+
+func op_path_base(args) {
+    const p = op_arg(args, 0, "")
+    const parts = p.split("/")
+    parts[len(parts) - 1]
+}
+
+func op_path_ext(args) {
+    const p = op_arg(args, 0, "")
+    const base = op_path_base([p])
+    const parts = base.split(".")
+    if len(parts) <= 1 { return "" }
+    "." + parts[len(parts) - 1]
+}
+
+func op_path_stem(args) {
+    const p = op_arg(args, 0, "")
+    const base = op_path_base([p])
+    const parts = base.split(".")
+    if len(parts) <= 1 { return base }
+    parts.slice(0, len(parts) - 1).join(".")
+}
+
+func op_path_abs(args) {
+    const p = op_arg(args, 0, "")
+    path_abs(p)
+}
+
+func op_path_clean(args) {
+    const p = op_arg(args, 0, "")
+    // Simple path cleaning: remove double slashes and trailing slashes
+    let result = p.replace("//", "/")
+    while result.ends_with("/") && len(result) > 1 {
+        result = result.slice(0, len(result) - 1)
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Concurrency Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_spawn(args) {
+    const expr = op_arg(args, 0, null)
+    spawn(expr)
+}
+
+func op_await_task(args) {
+    const task_id = op_arg(args, 0, "")
+    await_task(task_id)
+}
+
+func op_channel(args) {
+    const capacity = op_arg(args, 0, 0)
+    channel(capacity)
+}
+
+func op_chan_send(args) {
+    const ch = op_arg(args, 0, null)
+    const val = op_arg(args, 1, null)
+    chan_send(ch, val)
+}
+
+func op_chan_recv(args) {
+    const ch = op_arg(args, 0, null)
+    chan_recv(ch)
+}
+
+func op_chan_close(args) {
+    const ch = op_arg(args, 0, null)
+    chan_close(ch)
+    null
+}
+
+func op_mutex_new(args) {
+    mutex_new()
+}
+
+func op_mutex_lock(args) {
+    const m = op_arg(args, 0, null)
+    mutex_lock(m)
+}
+
+func op_mutex_unlock(args) {
+    const m = op_arg(args, 0, null)
+    mutex_unlock(m)
+}
+
+func op_atomic_new(args) {
+    const val = op_arg(args, 0, 0)
+    atomic_new(val)
+}
+
+func op_atomic_load(args) {
+    const a = op_arg(args, 0, null)
+    atomic_load(a)
+}
+
+func op_atomic_store(args) {
+    const a = op_arg(args, 0, null)
+    const val = op_arg(args, 1, 0)
+    atomic_store(a, val)
+}
+
+func op_atomic_add(args) {
+    const a = op_arg(args, 0, null)
+    const val = op_arg(args, 1, 1)
+    atomic_add(a, val)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Extended dispatch: add new operations to the main eval_operation
+// ══════════════════════════════════════════════════════════════════
+
+func eval_operation_extended(op_name, args) {
+    match op_name {
+    // HTTP
+    "http_get" => op_http_get(args),
+    "http_post" => op_http_post(args),
+    "http_put" => op_http_put(args),
+    "http_delete" => op_http_delete(args),
+    "http_patch" => op_http_patch(args),
+    "http_head" => op_http_head(args),
+    "http_options" => op_http_options(args),
+    "http_request" => op_http_request(args),
+
+    // Certificates
+    "cert_generate" | "cert_self_signed" => op_cert_generate(args),
+    "cert_parse" => op_cert_parse(args),
+    "cert_info" => op_cert_info(args),
+    "cert_verify" => op_cert_verify(args),
+    "key_generate" => op_key_generate(args),
+
+    // WebSocket
+    "ws_connect" | "websocket_connect" => op_ws_connect(args),
+    "ws_send" | "websocket_send" => op_ws_send(args),
+    "ws_receive" | "websocket_receive" | "ws_read" => op_ws_receive(args),
+    "ws_close" | "websocket_close" => op_ws_close(args),
+
+    // SSE
+    "sse_connect" => op_sse_connect(args),
+    "sse_read_event" => op_sse_read_event(args),
+    "sse_close" => op_sse_close(args),
+
+    // HTTP Server
+    "http_server_start" => op_http_server_start(args),
+    "http_server_receive" => op_http_server_receive(args),
+    "http_server_respond" => op_http_server_respond(args),
+    "http_server_stop" => op_http_server_stop(args),
+
+    // TCP
+    "tcp_connect" => op_tcp_connect(args),
+    "tcp_write" => op_tcp_write(args),
+    "tcp_read" => op_tcp_read(args),
+    "tcp_close" => op_tcp_close(args),
+
+    // UDP
+    "udp_bind" => op_udp_bind(args),
+    "udp_send" => op_udp_send(args),
+    "udp_recv" => op_udp_recv(args),
+    "udp_close" => op_udp_close(args),
+
+    // TLS
+    "tls_connect" => op_tls_connect(args),
+    "tls_write" => op_tls_write(args),
+    "tls_read" => op_tls_read(args),
+    "tls_close" => op_tls_close(args),
+
+    // DNS
+    "dns_lookup" => op_dns_lookup(args),
+    "dns_reverse" => op_dns_reverse(args),
+
+    // Compression
+    "compress_zstd" => op_compress_zstd(args),
+    "decompress_zstd" => op_decompress_zstd(args),
+    "compress_gzip" => op_compress_gzip(args),
+    "decompress_gzip" => op_decompress_gzip(args),
+    "compress_lz4" => op_compress_lz4(args),
+    "decompress_lz4" => op_decompress_lz4(args),
+
+    // Encoding
+    "base64_encode" => op_base64_encode(args),
+    "base64_decode" => op_base64_decode(args),
+    "hex_encode" => op_hex_encode(args),
+    "hex_decode" => op_hex_decode(args),
+    "url_encode" => op_url_encode(args),
+    "url_decode" => op_url_decode(args),
+
+    // Hashing
+    "sha256" | "hash_sha256" => op_hash_sha256(args),
+    "sha512" | "hash_sha512" => op_hash_sha512(args),
+    "md5" | "hash_md5" => op_hash_md5(args),
+    "blake3" | "hash_blake3" => op_hash_blake3(args),
+    "hmac" => op_hmac(args),
+
+    // UUID
+    "uuid_v4" | "uuid" => op_uuid_v4(args),
+    "uuid_v7" => op_uuid_v7(args),
+    "uuid_parse" => op_uuid_parse(args),
+
+    // Time
+    "time_now" => op_time_now(args),
+    "time_unix" => op_time_unix(args),
+    "time_format" => op_time_format(args),
+    "time_parse" => op_time_parse(args),
+    "time_diff" => op_time_diff(args),
+    "sleep" => op_sleep(args),
+
+    // Regex
+    "regex_match" => op_regex_match(args),
+    "regex_test" => op_regex_test(args),
+    "regex_find" => op_regex_find(args),
+    "regex_find_all" => op_regex_find_all(args),
+    "regex_replace" => op_regex_replace(args),
+    "regex_split" => op_regex_split(args),
+
+    // JSON/YAML/TOML/CSV
+    "json_parse" => op_json_parse(args),
+    "json_stringify" => op_json_stringify(args),
+    "yaml_parse" => op_yaml_parse(args),
+    "yaml_stringify" => op_yaml_stringify(args),
+    "toml_parse" => op_toml_parse(args),
+    "toml_stringify" => op_toml_stringify(args),
+    "csv_parse" => op_csv_parse(args),
+    "csv_stringify" => op_csv_stringify(args),
+
+    // Process/OS
+    "exec" | "command" | "os_exec" => op_exec(args),
+    "env_get" | "getenv" | "os_getenv" => op_env_get(args),
+    "env_set" | "setenv" | "os_setenv" => op_env_set(args),
+    "env_all" | "os_environ" => op_env_all(args),
+    "exit" | "os_exit" => op_os_exit(args),
+    "os_args" | "args" => op_os_args(args),
+    "os_pid" | "pid" => op_os_pid(args),
+    "os_hostname" | "hostname" => op_os_hostname(args),
+    "os_cwd" | "cwd" => op_os_cwd(args),
+
+    // File System
+    "fs_read" | "read_file" | "file_read" => op_fs_read(args),
+    "fs_write" | "write_file" | "file_write" => op_fs_write(args),
+    "fs_append" | "file_append" => op_fs_append(args),
+    "fs_exists" | "file_exists" | "path_exists" => op_fs_exists(args),
+    "fs_remove" | "file_remove" | "file_delete" => op_fs_remove(args),
+    "fs_rename" | "file_rename" => op_fs_rename(args),
+    "fs_mkdir" | "mkdir" | "mkdirp" => op_fs_mkdir(args),
+    "fs_readdir" | "readdir" | "ls" => op_fs_readdir(args),
+    "fs_stat" | "file_stat" | "stat" => op_fs_stat(args),
+    "fs_is_dir" | "is_dir" => op_fs_is_dir(args),
+    "fs_is_file" | "is_file" => op_fs_is_file(args),
+    "fs_copy" | "file_copy" | "cp" => op_fs_copy(args),
+    "fs_glob" | "glob" => op_fs_glob(args),
+    "fs_temp_file" | "temp_file" => op_fs_temp_file(args),
+    "fs_temp_dir" | "temp_dir" => op_fs_temp_dir(args),
+
+    // Path
+    "path_join" => op_path_join(args),
+    "path_dir" | "dirname" => op_path_dir(args),
+    "path_base" | "basename" => op_path_base(args),
+    "path_ext" | "extname" => op_path_ext(args),
+    "path_stem" => op_path_stem(args),
+    "path_abs" | "abspath" => op_path_abs(args),
+    "path_clean" | "filepath_clean" => op_path_clean(args),
+
+    // Concurrency
+    "spawn" => op_spawn(args),
+    "await" | "await_task" => op_await_task(args),
+    "channel" | "chan_new" => op_channel(args),
+    "chan_send" => op_chan_send(args),
+    "chan_recv" => op_chan_recv(args),
+    "chan_close" => op_chan_close(args),
+    "mutex_new" => op_mutex_new(args),
+    "mutex_lock" => op_mutex_lock(args),
+    "mutex_unlock" => op_mutex_unlock(args),
+    "atomic_new" => op_atomic_new(args),
+    "atomic_load" => op_atomic_load(args),
+    "atomic_store" => op_atomic_store(args),
+    "atomic_add" | "atomic_fetch_add" => op_atomic_add(args),
+
+    _ => null,
+    }
+}

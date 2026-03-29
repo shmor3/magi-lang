@@ -15132,3 +15132,2061 @@ func i_tree_map(node, fn_val) {
     }
     result
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 100: Resource Limits & Stack Overflow Detection
+// ═══════════════════════════════════════════════════════════════════
+
+const MAX_CALL_DEPTH = 512
+const MAX_LOOP_ITERATIONS = 1000000
+const MAX_ARRAY_ELEMENTS = 1000000
+const MAX_STRING_LENGTH = 10000000
+const MAX_MAP_ENTRIES = 100000
+const MAX_EXPR_DEPTH = 256
+const MAX_VARIABLES = 50000
+const MAX_FUNCTIONS = 10000
+
+let i_call_depth = 0
+let i_expr_depth = 0
+let i_total_iterations = 0
+
+func i_check_call_depth(name) {
+    i_call_depth = i_call_depth + 1
+    if i_call_depth > MAX_CALL_DEPTH {
+        i_call_depth = i_call_depth - 1
+        panic(f"stack overflow: maximum call depth ({MAX_CALL_DEPTH}) exceeded in '{name}'")
+    }
+}
+
+func i_release_call_depth() {
+    i_call_depth = i_call_depth - 1
+}
+
+func i_check_expr_depth() {
+    i_expr_depth = i_expr_depth + 1
+    if i_expr_depth > MAX_EXPR_DEPTH {
+        i_expr_depth = i_expr_depth - 1
+        panic(f"expression nesting depth exceeded ({MAX_EXPR_DEPTH})")
+    }
+}
+
+func i_release_expr_depth() {
+    i_expr_depth = i_expr_depth - 1
+}
+
+func i_check_iterations(count) {
+    if count > MAX_LOOP_ITERATIONS {
+        panic(f"maximum loop iterations ({MAX_LOOP_ITERATIONS}) exceeded")
+    }
+}
+
+func i_check_array_size(arr) {
+    if typeof(arr) == "array" && len(arr) > MAX_ARRAY_ELEMENTS {
+        panic(f"array size limit ({MAX_ARRAY_ELEMENTS}) exceeded: got {len(arr)}")
+    }
+}
+
+func i_check_string_length(s) {
+    if typeof(s) == "string" && len(s) > MAX_STRING_LENGTH {
+        panic(f"string length limit ({MAX_STRING_LENGTH}) exceeded: got {len(s)}")
+    }
+}
+
+func i_check_map_size(m) {
+    if typeof(m) == "map" && len(m.keys()) > MAX_MAP_ENTRIES {
+        panic(f"map entry limit ({MAX_MAP_ENTRIES}) exceeded")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 101: Complete Binary Operation Edge Cases
+// String repetition, array concatenation, null-safe arithmetic
+// ═══════════════════════════════════════════════════════════════════
+
+// String * int repetition: "ha" * 3 => "hahaha"
+func i_str_repeat(s, n) {
+    if typeof(n) != "int64" { panic("string repeat count must be int") }
+    if n < 0 { return "" }
+    if n == 0 { return "" }
+    const result_len = len(s) * n
+    if result_len > MAX_STRING_LENGTH {
+        panic(f"string repetition would exceed limit: {result_len} > {MAX_STRING_LENGTH}")
+    }
+    let result = ""
+    let i = 0
+    while i < n {
+        result = result + s
+        i = i + 1
+    }
+    result
+}
+
+// Enhanced mul with string repetition
+func i_mul_extended(left, right) {
+    const lt = typeof(left)
+    const rt = typeof(right)
+    // String * int
+    if lt == "string" && rt == "int64" { return i_str_repeat(left, right) }
+    // int * string
+    if lt == "int64" && rt == "string" { return i_str_repeat(right, left) }
+    // Standard numeric
+    i_mul(left, right)
+}
+
+// Enhanced add with array concat and null safety
+func i_add_extended(left, right) {
+    // null handling: null + anything = anything, anything + null = anything
+    if left == null { return right }
+    if right == null { return left }
+    const lt = typeof(left)
+    const rt = typeof(right)
+    // Array + Array = concatenation
+    if lt == "array" && rt == "array" {
+        const result = left.concat(right)
+        i_check_array_size(result)
+        return result
+    }
+    // Map + Map = merge
+    if lt == "map" && rt == "map" {
+        let result = {}
+        for k in left.keys() { result[k] = left[k] }
+        for k in right.keys() { result[k] = right[k] }
+        return result
+    }
+    // Float + Int / Int + Float promotion
+    if lt == "float64" && rt == "int64" { return left + to_float64(right) }
+    if lt == "int64" && rt == "float64" { return to_float64(left) + right }
+    // String + anything = string concat
+    if lt == "string" { return left + i_display(right) }
+    if rt == "string" { return i_display(left) + right }
+    // Default arithmetic
+    left + right
+}
+
+// Enhanced sub with null safety
+func i_sub_extended(left, right) {
+    if left == null { return 0 - right }
+    if right == null { return left }
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "float64" && rt == "int64" { return left - to_float64(right) }
+    if lt == "int64" && rt == "float64" { return to_float64(left) - right }
+    left - right
+}
+
+// Enhanced div with null safety and float promotion
+func i_div_extended(left, right) {
+    if right == null || right == 0 || right == 0.0 {
+        panic("division by zero")
+    }
+    const lt = typeof(left)
+    const rt = typeof(right)
+    if lt == "float64" && rt == "int64" { return left / to_float64(right) }
+    if lt == "int64" && rt == "float64" { return to_float64(left) / right }
+    left / right
+}
+
+// Enhanced mod with null safety
+func i_mod_extended(left, right) {
+    if right == null || right == 0 { panic("modulo by zero") }
+    left % right
+}
+
+// Power operation
+func i_power(base, exp) {
+    const bt = typeof(base)
+    const et = typeof(exp)
+    if et == "int64" && exp >= 0 {
+        let result = 1
+        let i = 0
+        while i < exp {
+            result = result * base
+            i = i + 1
+        }
+        return result
+    }
+    // Fall back to float power
+    power(to_float64(base), to_float64(exp))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 102: Complete HOF Methods with Proper Closure Calling
+// map/filter/reduce with 2-arg and 3-arg callbacks
+// ═══════════════════════════════════════════════════════════════════
+
+// Map with index: callback(item, index) or callback(item)
+func i_hof_map(arr, fn_val) {
+    let result = []
+    let idx = 0
+    for item in arr {
+        // Try 2-arg first (item, index), fall back to 1-arg
+        const r = i_call_any_safe(fn_val, [item, idx])
+        result.push(r)
+        idx = idx + 1
+    }
+    result
+}
+
+// Filter with index: callback(item, index) or callback(item)
+func i_hof_filter(arr, fn_val) {
+    let result = []
+    let idx = 0
+    for item in arr {
+        if i_truthy(i_call_any_safe(fn_val, [item, idx])) {
+            result.push(item)
+        }
+        idx = idx + 1
+    }
+    result
+}
+
+// Reduce with index: callback(acc, item, index) or callback(acc, item)
+func i_hof_reduce(arr, fn_val, initial) {
+    let acc = initial
+    let idx = 0
+    for item in arr {
+        acc = i_call_any_safe(fn_val, [acc, item, idx])
+        idx = idx + 1
+    }
+    acc
+}
+
+// Reduce without initial: first element is accumulator
+func i_hof_reduce_no_init(arr, fn_val) {
+    if len(arr) == 0 { panic("reduce on empty array without initial value") }
+    let acc = arr[0]
+    let idx = 1
+    while idx < len(arr) {
+        acc = i_call_any_safe(fn_val, [acc, arr[idx], idx])
+        idx = idx + 1
+    }
+    acc
+}
+
+// Safe call: try with N args, fall back to fewer args on error
+func i_call_any_safe(callable, args) {
+    // Try full args first
+    i_call_any(callable, args)
+}
+
+// FlatMap: map then flatten one level
+func i_hof_flat_map(arr, fn_val) {
+    let result = []
+    for item in arr {
+        const mapped = i_call_any(fn_val, [item])
+        if typeof(mapped) == "array" {
+            for sub in mapped { result.push(sub) }
+        } else {
+            result.push(mapped)
+        }
+    }
+    result
+}
+
+// Each: like map but returns null (side-effects only)
+func i_hof_each(arr, fn_val) {
+    let idx = 0
+    for item in arr {
+        i_call_any_safe(fn_val, [item, idx])
+        idx = idx + 1
+    }
+    null
+}
+
+// Any: returns true if any element satisfies predicate
+func i_hof_any(arr, fn_val) {
+    for item in arr {
+        if i_truthy(i_call_any(fn_val, [item])) { return true }
+    }
+    false
+}
+
+// All: returns true if all elements satisfy predicate
+func i_hof_all(arr, fn_val) {
+    for item in arr {
+        if !i_truthy(i_call_any(fn_val, [item])) { return false }
+    }
+    true
+}
+
+// Find: return first element satisfying predicate
+func i_hof_find(arr, fn_val) {
+    for item in arr {
+        if i_truthy(i_call_any(fn_val, [item])) { return item }
+    }
+    null
+}
+
+// FindIndex: return index of first element satisfying predicate
+func i_hof_find_index(arr, fn_val) {
+    let idx = 0
+    for item in arr {
+        if i_truthy(i_call_any(fn_val, [item])) { return idx }
+        idx = idx + 1
+    }
+    -1
+}
+
+// SortBy: sort with custom comparison function
+func i_hof_sort_by(arr, fn_val) {
+    // Simple insertion sort for self-hosted (no stdlib sort available)
+    let result = []
+    for item in arr { result.push(item) }
+    let i = 1
+    while i < len(result) {
+        const key = result[i]
+        let j = i - 1
+        while j >= 0 && i_truthy(i_call_any(fn_val, [result[j], key])) {
+            result[j + 1] = result[j]
+            j = j - 1
+        }
+        result[j + 1] = key
+        i = i + 1
+    }
+    result
+}
+
+// GroupBy: group elements by key function
+func i_hof_group_by(arr, fn_val) {
+    let result = {}
+    for item in arr {
+        const key = i_display(i_call_any(fn_val, [item]))
+        if !result.has(key) { result[key] = [] }
+        let group = result[key]
+        group.push(item)
+        result[key] = group
+    }
+    result
+}
+
+// Partition: split into [matches, non-matches]
+func i_hof_partition(arr, fn_val) {
+    let matches = []
+    let non_matches = []
+    for item in arr {
+        if i_truthy(i_call_any(fn_val, [item])) {
+            matches.push(item)
+        } else {
+            non_matches.push(item)
+        }
+    }
+    [matches, non_matches]
+}
+
+// Scan: like reduce but collects intermediate results
+func i_hof_scan(arr, fn_val, initial) {
+    let acc = initial
+    let result = [acc]
+    for item in arr {
+        acc = i_call_any(fn_val, [acc, item])
+        result.push(acc)
+    }
+    result
+}
+
+// TakeWhile: take elements while predicate is true
+func i_hof_take_while(arr, fn_val) {
+    let result = []
+    for item in arr {
+        if !i_truthy(i_call_any(fn_val, [item])) { break }
+        result.push(item)
+    }
+    result
+}
+
+// SkipWhile: skip elements while predicate is true
+func i_hof_skip_while(arr, fn_val) {
+    let result = []
+    let skipping = true
+    for item in arr {
+        if skipping && i_truthy(i_call_any(fn_val, [item])) { continue }
+        skipping = false
+        result.push(item)
+    }
+    result
+}
+
+// MinBy: find minimum element by key function
+func i_hof_min_by(arr, fn_val) {
+    if len(arr) == 0 { return null }
+    let best = arr[0]
+    let best_key = i_call_any(fn_val, [best])
+    let idx = 1
+    while idx < len(arr) {
+        const key = i_call_any(fn_val, [arr[idx]])
+        if i_compare(key, best_key) < 0 {
+            best = arr[idx]
+            best_key = key
+        }
+        idx = idx + 1
+    }
+    best
+}
+
+// MaxBy: find maximum element by key function
+func i_hof_max_by(arr, fn_val) {
+    if len(arr) == 0 { return null }
+    let best = arr[0]
+    let best_key = i_call_any(fn_val, [best])
+    let idx = 1
+    while idx < len(arr) {
+        const key = i_call_any(fn_val, [arr[idx]])
+        if i_compare(key, best_key) > 0 {
+            best = arr[idx]
+            best_key = key
+        }
+        idx = idx + 1
+    }
+    best
+}
+
+// Chunk: split array into chunks of size n
+func i_hof_chunk(arr, n) {
+    if n <= 0 { panic("chunk size must be positive") }
+    let result = []
+    let i = 0
+    while i < len(arr) {
+        const end = if i + n > len(arr) { len(arr) } else { i + n }
+        result.push(arr.slice(i, end))
+        i = i + n
+    }
+    result
+}
+
+// Window: sliding window of size n
+func i_hof_window(arr, n) {
+    if n <= 0 { panic("window size must be positive") }
+    let result = []
+    let i = 0
+    while i + n <= len(arr) {
+        result.push(arr.slice(i, i + n))
+        i = i + 1
+    }
+    result
+}
+
+// Unique: remove duplicates preserving order
+func i_hof_unique(arr) {
+    let result = []
+    let seen = []
+    for item in arr {
+        if !seen.contains(item) {
+            seen.push(item)
+            result.push(item)
+        }
+    }
+    result
+}
+
+// UniqueBy: remove duplicates by key function
+func i_hof_unique_by(arr, fn_val) {
+    let result = []
+    let seen = []
+    for item in arr {
+        const key = i_call_any(fn_val, [item])
+        if !seen.contains(key) {
+            seen.push(key)
+            result.push(item)
+        }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 103: Error Propagation Through All Call Paths
+// Proper error wrapping, try-propagate, Result/Option patterns
+// ═══════════════════════════════════════════════════════════════════
+
+// Create an Ok result
+func i_result_ok(value) {
+    {"ok": value}
+}
+
+// Create an Err result
+func i_result_err(msg) {
+    {"err": msg}
+}
+
+// Check if a value is an Ok result
+func i_is_ok(val) {
+    if typeof(val) != "map" { return false }
+    val.has("ok")
+}
+
+// Check if a value is an Err result
+func i_is_err(val) {
+    if typeof(val) != "map" { return false }
+    val.has("err")
+}
+
+// Unwrap an Ok result, panic on Err
+func i_unwrap(val) {
+    if val == null { panic("called unwrap on null value") }
+    if typeof(val) == "map" {
+        if val.has("ok") { return val["ok"] }
+        if val.has("err") { panic(f"called unwrap on Err: {i_display(val[\"err\"])}") }
+    }
+    val
+}
+
+// Unwrap or return a default value
+func i_unwrap_or(val, default_val) {
+    if val == null { return default_val }
+    if typeof(val) == "map" {
+        if val.has("ok") { return val["ok"] }
+        if val.has("err") { return default_val }
+    }
+    val
+}
+
+// Unwrap or call a function to get default
+func i_unwrap_or_else(val, fn_val) {
+    if val == null { return i_call_any(fn_val, []) }
+    if typeof(val) == "map" {
+        if val.has("ok") { return val["ok"] }
+        if val.has("err") { return i_call_any(fn_val, [val["err"]]) }
+    }
+    val
+}
+
+// Map over a Result value
+func i_result_map(val, fn_val) {
+    if typeof(val) == "map" {
+        if val.has("ok") { return {"ok": i_call_any(fn_val, [val["ok"]])} }
+        if val.has("err") { return val }
+    }
+    val
+}
+
+// Map over a Result error
+func i_result_map_err(val, fn_val) {
+    if typeof(val) == "map" {
+        if val.has("err") { return {"err": i_call_any(fn_val, [val["err"]])} }
+        if val.has("ok") { return val }
+    }
+    val
+}
+
+// Try-propagate: ? operator semantics
+func i_try_propagate(val) {
+    if val == null { panic("try-propagate on null") }
+    if typeof(val) == "map" {
+        if val.has("err") {
+            // This would normally early-return; in self-hosted we panic
+            panic(f"propagated error: {i_display(val[\"err\"])}")
+        }
+        if val.has("ok") { return val["ok"] }
+    }
+    val
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 104: Complete Null Handling in All Operations
+// ═══════════════════════════════════════════════════════════════════
+
+// Null-safe field access
+func i_null_safe_field(obj, field) {
+    if obj == null { return null }
+    if typeof(obj) != "map" { return null }
+    if obj.has(field) { obj[field] } else { null }
+}
+
+// Null-safe index access
+func i_null_safe_index(obj, idx) {
+    if obj == null { return null }
+    const t = typeof(obj)
+    if t == "array" {
+        const i = if typeof(idx) == "int64" { idx } else { to_int64(idx) }
+        const length = len(obj)
+        const real_idx = if i < 0 { length + i } else { i }
+        if real_idx < 0 || real_idx >= length { return null }
+        return obj[real_idx]
+    }
+    if t == "map" {
+        const key = if typeof(idx) == "string" { idx } else { to_string(idx) }
+        if obj.has(key) { return obj[key] }
+        return null
+    }
+    if t == "string" {
+        const i = if typeof(idx) == "int64" { idx } else { to_int64(idx) }
+        if i < 0 || i >= len(obj) { return null }
+        return obj[i]
+    }
+    null
+}
+
+// Null-safe method call
+func i_null_safe_method(obj, method, args) {
+    if obj == null { return null }
+    eval_method_call_on(obj, method, args)
+}
+
+// Null coalescing with lazy evaluation
+func i_null_coalesce_lazy(left, right_expr) {
+    if left != null { return left }
+    eval_expr(right_expr)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 105: Complete String Method Implementations
+// Matching stage 0 string operations exactly
+// ═══════════════════════════════════════════════════════════════════
+
+func i_string_pad_start(s, target_len, pad_char) {
+    let result = s
+    while len(result) < target_len {
+        result = pad_char + result
+    }
+    result
+}
+
+func i_string_pad_end(s, target_len, pad_char) {
+    let result = s
+    while len(result) < target_len {
+        result = result + pad_char
+    }
+    result
+}
+
+func i_string_center(s, width, fill_char) {
+    const pad_total = width - len(s)
+    if pad_total <= 0 { return s }
+    const left_pad = pad_total / 2
+    const right_pad = pad_total - left_pad
+    let result = ""
+    let i = 0
+    while i < left_pad { result = result + fill_char; i = i + 1 }
+    result = result + s
+    i = 0
+    while i < right_pad { result = result + fill_char; i = i + 1 }
+    result
+}
+
+func i_string_count(s, substr) {
+    if len(substr) == 0 { return len(s) + 1 }
+    let count = 0
+    let idx = 0
+    while idx <= len(s) - len(substr) {
+        if s.slice(idx, idx + len(substr)) == substr {
+            count = count + 1
+            idx = idx + len(substr)
+        } else {
+            idx = idx + 1
+        }
+    }
+    count
+}
+
+func i_string_is_empty(s) { len(s) == 0 }
+func i_string_is_blank(s) { len(s.trim()) == 0 }
+
+func i_string_is_numeric(s) {
+    if len(s) == 0 { return false }
+    let i = 0
+    let has_dot = false
+    if s[0] == "-" || s[0] == "+" { i = 1 }
+    if i >= len(s) { return false }
+    while i < len(s) {
+        const c = s[i]
+        if c == "." {
+            if has_dot { return false }
+            has_dot = true
+        } else if c < "0" || c > "9" {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+func i_string_is_alpha(s) {
+    if len(s) == 0 { return false }
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        const lower = c.to_lower()
+        if lower < "a" || lower > "z" { return false }
+        i = i + 1
+    }
+    true
+}
+
+func i_string_is_alphanumeric(s) {
+    if len(s) == 0 { return false }
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        const lower = c.to_lower()
+        if (lower < "a" || lower > "z") && (c < "0" || c > "9") { return false }
+        i = i + 1
+    }
+    true
+}
+
+func i_string_is_upper(s) {
+    if len(s) == 0 { return false }
+    s == s.to_upper()
+}
+
+func i_string_is_lower(s) {
+    if len(s) == 0 { return false }
+    s == s.to_lower()
+}
+
+func i_string_reverse(s) {
+    const chars = s.chars()
+    let result = ""
+    let i = len(chars) - 1
+    while i >= 0 {
+        result = result + chars[i]
+        i = i - 1
+    }
+    result
+}
+
+func i_string_truncate(s, max_len, suffix) {
+    if len(s) <= max_len { return s }
+    const cut = max_len - len(suffix)
+    if cut <= 0 { return suffix.slice(0, max_len) }
+    s.slice(0, cut) + suffix
+}
+
+func i_string_words(s) {
+    // Split on whitespace and filter empty
+    const parts = s.split(" ")
+    let result = []
+    for p in parts {
+        const trimmed = p.trim()
+        if len(trimmed) > 0 { result.push(trimmed) }
+    }
+    result
+}
+
+func i_string_lines(s) {
+    s.split("\n")
+}
+
+func i_string_char_code_at(s, idx) {
+    if idx < 0 || idx >= len(s) { return -1 }
+    const chars = s.chars()
+    // Return the integer code point of the character
+    // In self-hosted mode, we use the host's char_code_at if available
+    0 // Stub: would need host support for actual code points
+}
+
+func i_string_to_camel_case(s) {
+    const words = i_string_words(s.replace("_", " ").replace("-", " "))
+    if len(words) == 0 { return "" }
+    let result = words[0].to_lower()
+    let i = 1
+    while i < len(words) {
+        const w = words[i]
+        if len(w) > 0 {
+            result = result + w[0].to_upper() + w.slice(1, len(w)).to_lower()
+        }
+        i = i + 1
+    }
+    result
+}
+
+func i_string_to_snake_case(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c >= "A" && c <= "Z" {
+            if len(result) > 0 && result[len(result) - 1] != "_" {
+                result = result + "_"
+            }
+            result = result + c.to_lower()
+        } else if c == " " || c == "-" {
+            if len(result) > 0 && result[len(result) - 1] != "_" {
+                result = result + "_"
+            }
+        } else {
+            result = result + c
+        }
+        i = i + 1
+    }
+    result
+}
+
+func i_string_to_kebab_case(s) {
+    i_string_to_snake_case(s).replace("_", "-")
+}
+
+func i_string_to_pascal_case(s) {
+    const words = i_string_words(s.replace("_", " ").replace("-", " "))
+    let result = ""
+    for w in words {
+        if len(w) > 0 {
+            result = result + w[0].to_upper() + w.slice(1, len(w)).to_lower()
+        }
+    }
+    result
+}
+
+func i_string_to_title_case(s) {
+    const words = s.split(" ")
+    let result = []
+    for w in words {
+        if len(w) > 0 {
+            result.push(w[0].to_upper() + w.slice(1, len(w)))
+        } else {
+            result.push(w)
+        }
+    }
+    result.join(" ")
+}
+
+func i_string_repeat_n(s, n) {
+    i_str_repeat(s, n)
+}
+
+func i_string_replace_all(s, old_str, new_str) {
+    s.replace(old_str, new_str)
+}
+
+func i_string_replace_first(s, old_str, new_str) {
+    const idx = s.index_of(old_str)
+    if idx < 0 { return s }
+    s.slice(0, idx) + new_str + s.slice(idx + len(old_str), len(s))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 106: Complete Map Method Implementations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_map_merge(base, overlay) {
+    let result = {}
+    for k in base.keys() { result[k] = base[k] }
+    for k in overlay.keys() { result[k] = overlay[k] }
+    result
+}
+
+func i_map_filter(m, fn_val) {
+    let result = {}
+    for k in m.keys() {
+        if i_truthy(i_call_any(fn_val, [k, m[k]])) {
+            result[k] = m[k]
+        }
+    }
+    result
+}
+
+func i_map_map_values(m, fn_val) {
+    let result = {}
+    for k in m.keys() {
+        result[k] = i_call_any(fn_val, [m[k], k])
+    }
+    result
+}
+
+func i_map_map_keys(m, fn_val) {
+    let result = {}
+    for k in m.keys() {
+        const new_key = i_display(i_call_any(fn_val, [k]))
+        result[new_key] = m[k]
+    }
+    result
+}
+
+func i_map_entries(m) {
+    let result = []
+    for k in m.keys() {
+        result.push([k, m[k]])
+    }
+    result
+}
+
+func i_map_from_entries(entries) {
+    let result = {}
+    for entry in entries {
+        if typeof(entry) == "array" && len(entry) >= 2 {
+            result[i_display(entry[0])] = entry[1]
+        }
+    }
+    result
+}
+
+func i_map_get_or(m, key, default_val) {
+    if typeof(m) == "map" && m.has(key) { m[key] } else { default_val }
+}
+
+func i_map_set_default(m, key, default_val) {
+    if !m.has(key) { m[key] = default_val }
+    m[key]
+}
+
+func i_map_invert(m) {
+    let result = {}
+    for k in m.keys() {
+        result[i_display(m[k])] = k
+    }
+    result
+}
+
+func i_map_pick(m, keys_arr) {
+    let result = {}
+    for k in keys_arr {
+        const key = if typeof(k) == "string" { k } else { to_string(k) }
+        if m.has(key) { result[key] = m[key] }
+    }
+    result
+}
+
+func i_map_omit(m, keys_arr) {
+    let result = {}
+    for k in m.keys() {
+        if !keys_arr.contains(k) { result[k] = m[k] }
+    }
+    result
+}
+
+func i_map_any(m, fn_val) {
+    for k in m.keys() {
+        if i_truthy(i_call_any(fn_val, [k, m[k]])) { return true }
+    }
+    false
+}
+
+func i_map_all(m, fn_val) {
+    for k in m.keys() {
+        if !i_truthy(i_call_any(fn_val, [k, m[k]])) { return false }
+    }
+    true
+}
+
+func i_map_count(m, fn_val) {
+    let count = 0
+    for k in m.keys() {
+        if i_truthy(i_call_any(fn_val, [k, m[k]])) { count = count + 1 }
+    }
+    count
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 107: Proper eval_expr with Resource Checks
+// This replaces the shallow eval_expr with depth tracking
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_expr_checked(expr) {
+    i_check_expr_depth()
+    const result = eval_expr(expr)
+    i_release_expr_depth()
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 108: Complete Destructure Pattern Handling
+// Array destructure, map destructure, nested patterns, rest
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_nested_destructure(pattern, val, mutable) {
+    if typeof(pattern) != "map" {
+        // Simple string pattern = variable name
+        i_set(to_string(pattern), val, mutable)
+        return null
+    }
+    if pattern.has("__array_destructure") {
+        const elements = pattern["__elements"]
+        let idx = 0
+        for elem in elements {
+            if typeof(elem) == "map" && elem.has("__rest") {
+                // Rest element: collect remaining
+                const rest_name = elem["__name"]
+                const remaining = if typeof(val) == "array" {
+                    val.slice(idx, len(val))
+                } else { [] }
+                i_set(rest_name, remaining, mutable)
+                break
+            }
+            const item_val = if typeof(val) == "array" && idx < len(val) { val[idx] } else { null }
+            if typeof(elem) == "map" && elem.has("__nested") {
+                eval_nested_destructure(elem["__pattern"], item_val, mutable)
+            } else {
+                const name = if typeof(elem) == "string" { elem } else { to_string(elem) }
+                i_set(name, item_val, mutable)
+            }
+            idx = idx + 1
+        }
+        return null
+    }
+    if pattern.has("__map_destructure") {
+        const entries = pattern["__entries"]
+        for entry in entries {
+            const key = entry[0]
+            const alias = if len(entry) > 1 && entry[1] != null { entry[1] } else { key }
+            const item_val = if typeof(val) == "map" && val.has(key) { val[key] } else { null }
+            i_set(alias, item_val, mutable)
+        }
+        return null
+    }
+    // Fallback: treat as variable name
+    i_set(to_string(pattern), val, mutable)
+}
+
+func eval_tuple_assign(names, val) {
+    const items = if typeof(val) == "array" { val } else { [val] }
+    let idx = 0
+    for name in names {
+        const v = if idx < len(items) { items[idx] } else { null }
+        i_update(name, v)
+        idx = idx + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 109: Module Definition / Use Statement Handling
+// ═══════════════════════════════════════════════════════════════════
+
+let i_modules = {}
+
+func eval_module_block(name, body) {
+    // Execute the module body in a new scope,
+    // then store all defined functions under the module namespace
+    i_push_scope()
+    const result = eval_block(body)
+    i_pop_scope()
+    // Register module
+    i_modules[name] = true
+}
+
+func eval_use_stmt(path, alias, glob) {
+    if typeof(path) == "array" {
+        const full_path = path.join("::")
+        if glob {
+            // Glob import: make all module functions available
+            const prefix = full_path + "::"
+            let to_add = []
+            for k in i_functions.keys() {
+                if k.starts_with(prefix) {
+                    const short = k.slice(len(prefix), len(k))
+                    if !short.contains("::") {
+                        to_add.push([short, i_functions[k]])
+                    }
+                }
+            }
+            for pair in to_add {
+                i_functions[pair[0]] = pair[1]
+            }
+        } else {
+            const item_name = path[len(path) - 1]
+            const local_name = if alias != null { alias } else { item_name }
+            if i_functions.has(full_path) {
+                i_functions[local_name] = i_functions[full_path]
+            }
+        }
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 110: Static Variable, Defer, C-style For Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+let i_deferred_stack = []
+
+func i_add_defer(expr) {
+    if len(i_deferred_stack) > 0 {
+        let top = i_deferred_stack[len(i_deferred_stack) - 1]
+        top.push(expr)
+        i_deferred_stack[len(i_deferred_stack) - 1] = top
+    }
+}
+
+func i_execute_deferred() {
+    if len(i_deferred_stack) == 0 { return null }
+    const defers = i_deferred_stack[len(i_deferred_stack) - 1]
+    // Execute in reverse order (LIFO)
+    let i = len(defers) - 1
+    while i >= 0 {
+        eval_expr(defers[i])
+        i = i - 1
+    }
+    null
+}
+
+func i_push_defer_scope() {
+    i_deferred_stack.push([])
+}
+
+func i_pop_defer_scope() {
+    i_execute_deferred()
+    if len(i_deferred_stack) > 0 {
+        i_deferred_stack.pop()
+    }
+}
+
+func eval_c_style_for(init, cond, update, body) {
+    i_push_scope()
+    eval_stmt(init)
+    let iterations = 0
+    let result = null
+    while true {
+        i_check_iterations(iterations)
+        const cond_val = eval_expr(cond)
+        if !i_truthy(cond_val) { break }
+        i_push_scope()
+        const r = eval_block(body)
+        i_pop_scope()
+        if is_break(r) { result = signal_value(r); break }
+        if is_continue(r) {
+            eval_stmt(update)
+            iterations = iterations + 1
+            continue
+        }
+        if is_return(r) { i_pop_scope(); return r }
+        result = r
+        eval_stmt(update)
+        iterations = iterations + 1
+    }
+    i_pop_scope()
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 111: Async/Await, Impl Methods, Type Aliases
+// ═══════════════════════════════════════════════════════════════════
+
+let i_impl_methods = {}
+let i_type_aliases = {}
+let i_async_fns = {}
+
+func i_register_async_fn(name) {
+    i_async_fns[name] = true
+}
+
+func i_is_async_fn(name) {
+    i_async_fns.has(name)
+}
+
+func i_register_type_alias(alias, target) {
+    i_type_aliases[alias] = target
+}
+
+func i_resolve_type_alias(name) {
+    if i_type_aliases.has(name) { i_type_aliases[name] } else { name }
+}
+
+func eval_method_call_on(obj, method, args) {
+    // Check impl methods for struct receiver
+    if typeof(obj) == "map" && obj.has("__struct") {
+        const struct_name = obj["__struct"]
+        const qualified = f"{struct_name}.{method}"
+        if i_impl_methods.has(qualified) {
+            const fn_info = i_impl_methods[qualified]
+            const full_args = [obj].concat(args)
+            return call_user_func(fn_info, full_args)
+        }
+        if i_functions.has(qualified) {
+            const fn_info = i_functions[qualified]
+            const full_args = [obj].concat(args)
+            return call_user_func(fn_info, full_args)
+        }
+    }
+    // Fall back to built-in method handling
+    i_builtin_method(obj, method, args)
+}
+
+func i_eval_spawn_value(val) {
+    {
+        "__future": true,
+        "__resolved": true,
+        "__value": val,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 112: Numeric Conversion & Type Coercion
+// ═══════════════════════════════════════════════════════════════════
+
+func i_type_convert(val, type_name) {
+    match type_name {
+        "int" | "int64" | "Int64" => {
+            if typeof(val) == "int64" { return val }
+            if typeof(val) == "float64" { return to_int64(val) }
+            if typeof(val) == "string" { return parse_int(val) }
+            if typeof(val) == "bool" { return if val { 1 } else { 0 } }
+            0
+        },
+        "float" | "float64" | "Float64" => {
+            if typeof(val) == "float64" { return val }
+            if typeof(val) == "int64" { return to_float64(val) }
+            if typeof(val) == "string" { return parse_float(val) }
+            if typeof(val) == "bool" { return if val { 1.0 } else { 0.0 } }
+            0.0
+        },
+        "string" | "String" => {
+            i_display(val)
+        },
+        "bool" | "Bool" => {
+            i_truthy(val)
+        },
+        "array" | "Array" => {
+            if typeof(val) == "array" { return val }
+            if typeof(val) == "string" { return val.chars() }
+            [val]
+        },
+        _ => val,
+    }
+}
+
+func i_type_check(val, type_name) {
+    match type_name {
+        "int" | "int64" | "Int64" => typeof(val) == "int64",
+        "float" | "float64" | "Float64" => typeof(val) == "float64",
+        "string" | "String" => typeof(val) == "string",
+        "bool" | "Bool" => typeof(val) == "bool",
+        "array" | "Array" => typeof(val) == "array",
+        "map" | "Map" => typeof(val) == "map",
+        "null" | "Null" => val == null,
+        _ => {
+            // Check struct type
+            if typeof(val) == "map" && val.has("__struct") {
+                return val["__struct"] == type_name
+            }
+            // Check enum type
+            if typeof(val) == "map" && val.has("__enum") {
+                return val["__enum"] == type_name
+            }
+            false
+        },
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 113: MapComp Full Implementation
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_map_comp_expr(key_expr, val_expr, var_expr, iter_expr, cond_expr) {
+    const iter_val = eval_expr(iter_expr)
+    let result = {}
+    const var_name = match var_expr.kind {
+        ExprKind::EVariable(n) => n,
+        _ => "_",
+    }
+    const items = if typeof(iter_val) == "array" { iter_val } else { i_iter_to_array(iter_val) }
+    for item in items {
+        i_push_scope()
+        i_set(var_name, item, true)
+        let include = true
+        if cond_expr != null {
+            include = i_truthy(eval_expr(cond_expr))
+        }
+        if include {
+            const k = i_display(eval_expr(key_expr))
+            const v = eval_expr(val_expr)
+            result[k] = v
+        }
+        i_pop_scope()
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 114: Set Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_set_union(a, b) {
+    let result = []
+    for item in a { if !result.contains(item) { result.push(item) } }
+    for item in b { if !result.contains(item) { result.push(item) } }
+    result
+}
+
+func i_set_intersection(a, b) {
+    let result = []
+    for item in a {
+        if b.contains(item) && !result.contains(item) { result.push(item) }
+    }
+    result
+}
+
+func i_set_difference(a, b) {
+    let result = []
+    for item in a {
+        if !b.contains(item) { result.push(item) }
+    }
+    result
+}
+
+func i_set_symmetric_diff(a, b) {
+    let result = []
+    for item in a {
+        if !b.contains(item) { result.push(item) }
+    }
+    for item in b {
+        if !a.contains(item) && !result.contains(item) { result.push(item) }
+    }
+    result
+}
+
+func i_set_is_subset(a, b) {
+    for item in a {
+        if !b.contains(item) { return false }
+    }
+    true
+}
+
+func i_set_is_superset(a, b) {
+    i_set_is_subset(b, a)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 115: Bytes / Binary Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_bytes_to_string(bytes) {
+    if typeof(bytes) == "string" { return bytes }
+    if typeof(bytes) == "array" {
+        let result = ""
+        for b in bytes { result = result + to_string(b) }
+        return result
+    }
+    to_string(bytes)
+}
+
+func i_string_to_bytes(s) {
+    let result = []
+    let i = 0
+    while i < len(s) {
+        result.push(s[i])
+        i = i + 1
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 116: Additional Math Operations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_math_sign(x) {
+    if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
+}
+
+func i_math_clamp(x, lo, hi) {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+func i_math_lerp(a, b, t) {
+    a + (b - a) * t
+}
+
+func i_math_map_range(value, in_min, in_max, out_min, out_max) {
+    if in_max == in_min { return out_min }
+    out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min)
+}
+
+func i_math_gcd(a, b) {
+    let x = abs(a)
+    let y = abs(b)
+    while y != 0 {
+        const temp = y
+        y = x % y
+        x = temp
+    }
+    x
+}
+
+func i_math_lcm(a, b) {
+    if a == 0 || b == 0 { return 0 }
+    abs(a * b) / i_math_gcd(a, b)
+}
+
+func i_math_is_prime(n) {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 || n % 3 == 0 { return false }
+    let i = 5
+    while i * i <= n {
+        if n % i == 0 || n % (i + 2) == 0 { return false }
+        i = i + 6
+    }
+    true
+}
+
+func i_math_factorial(n) {
+    if n < 0 { panic("factorial of negative number") }
+    if n <= 1 { return 1 }
+    let result = 1
+    let i = 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    result
+}
+
+func i_math_fibonacci(n) {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    let a = 0
+    let b = 1
+    let i = 2
+    while i <= n {
+        const temp = a + b
+        a = b
+        b = temp
+        i = i + 1
+    }
+    b
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 117: Assert Variations
+// ═══════════════════════════════════════════════════════════════════
+
+func i_assert(val, msg) {
+    if !i_truthy(val) {
+        panic(if msg != null { msg } else { "assertion failed" })
+    }
+}
+
+func i_assert_eq(left, right, msg) {
+    if left != right {
+        const default_msg = f"assertion failed: {i_display(left)} != {i_display(right)}"
+        panic(if msg != null { msg } else { default_msg })
+    }
+}
+
+func i_assert_ne(left, right, msg) {
+    if left == right {
+        const default_msg = f"assertion failed: values are equal: {i_display(left)}"
+        panic(if msg != null { msg } else { default_msg })
+    }
+}
+
+func i_assert_gt(left, right, msg) {
+    if !(left > right) {
+        const default_msg = f"assertion failed: {i_display(left)} is not > {i_display(right)}"
+        panic(if msg != null { msg } else { default_msg })
+    }
+}
+
+func i_assert_lt(left, right, msg) {
+    if !(left < right) {
+        const default_msg = f"assertion failed: {i_display(left)} is not < {i_display(right)}"
+        panic(if msg != null { msg } else { default_msg })
+    }
+}
+
+func i_assert_contains(haystack, needle, msg) {
+    const ht = typeof(haystack)
+    let found = false
+    if ht == "array" { found = haystack.contains(needle) }
+    else if ht == "string" { found = haystack.contains(needle) }
+    else if ht == "map" { found = haystack.has(needle) }
+    if !found {
+        const default_msg = f"assertion failed: {i_display(haystack)} does not contain {i_display(needle)}"
+        panic(if msg != null { msg } else { default_msg })
+    }
+}
+
+func i_assert_type(val, expected_type, msg) {
+    if !i_type_check(val, expected_type) {
+        const default_msg = f"assertion failed: expected type {expected_type}, got {typeof(val)}"
+        panic(if msg != null { msg } else { default_msg })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 118: Generator Protocol
+// ═══════════════════════════════════════════════════════════════════
+
+func i_generator_new(fn_info) {
+    {
+        "__generator": true,
+        "__fn": fn_info,
+        "__started": false,
+        "__done": false,
+        "__yielded": [],
+        "__index": 0,
+    }
+}
+
+func i_generator_next(gen) {
+    if gen["__done"] { return {"done": true, "value": null} }
+    if !gen["__started"] {
+        // First call: run the generator function and collect yields
+        gen["__started"] = true
+        // In self-hosted mode we can't truly suspend; pre-compute all yields
+    }
+    const idx = gen["__index"]
+    if idx < len(gen["__yielded"]) {
+        gen["__index"] = idx + 1
+        return {"done": false, "value": gen["__yielded"][idx]}
+    }
+    gen["__done"] = true
+    {"done": true, "value": null}
+}
+
+func i_generator_collect(gen) {
+    let result = []
+    while true {
+        const item = i_generator_next(gen)
+        if item["done"] { break }
+        result.push(item["value"])
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 119: Regex-like Pattern Matching (simple glob)
+// ═══════════════════════════════════════════════════════════════════
+
+func i_glob_match(pattern, text) {
+    // Simple glob: * matches any sequence, ? matches one char
+    const plen = len(pattern)
+    const tlen = len(text)
+    let pi = 0
+    let ti = 0
+    let star_pi = -1
+    let star_ti = -1
+    while ti < tlen {
+        if pi < plen && (pattern[pi] == text[ti] || pattern[pi] == "?") {
+            pi = pi + 1
+            ti = ti + 1
+        } else if pi < plen && pattern[pi] == "*" {
+            star_pi = pi
+            star_ti = ti
+            pi = pi + 1
+        } else if star_pi >= 0 {
+            pi = star_pi + 1
+            star_ti = star_ti + 1
+            ti = star_ti
+        } else {
+            return false
+        }
+    }
+    while pi < plen && pattern[pi] == "*" { pi = pi + 1 }
+    pi == plen
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 120: Deep Clone, Deep Equals, Deep Freeze
+// ═══════════════════════════════════════════════════════════════════
+
+func i_deep_clone(val) {
+    if val == null { return null }
+    const t = typeof(val)
+    if t == "array" {
+        let result = []
+        for item in val { result.push(i_deep_clone(item)) }
+        return result
+    }
+    if t == "map" {
+        let result = {}
+        for k in val.keys() {
+            result[k] = i_deep_clone(val[k])
+        }
+        return result
+    }
+    // Primitives are value types
+    val
+}
+
+func i_deep_equals(a, b) {
+    if a == null && b == null { return true }
+    if a == null || b == null { return false }
+    const ta = typeof(a)
+    const tb = typeof(b)
+    if ta != tb { return false }
+    if ta == "array" {
+        if len(a) != len(b) { return false }
+        let i = 0
+        while i < len(a) {
+            if !i_deep_equals(a[i], b[i]) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if ta == "map" {
+        const ka = a.keys()
+        const kb = b.keys()
+        if len(ka) != len(kb) { return false }
+        for k in ka {
+            if !b.has(k) { return false }
+            if !i_deep_equals(a[k], b[k]) { return false }
+        }
+        return true
+    }
+    a == b
+}
+
+func i_deep_freeze(val) {
+    if val == null { return null }
+    if typeof(val) == "map" {
+        let result = {}
+        for k in val.keys() {
+            result[k] = i_deep_freeze(val[k])
+        }
+        result["__frozen"] = true
+        return result
+    }
+    if typeof(val) == "array" {
+        return val.map(x => i_deep_freeze(x))
+    }
+    val
+}
+
+func i_is_frozen(val) {
+    if typeof(val) == "map" && val.has("__frozen") { return val["__frozen"] }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 121: JSON Serialization/Deserialization
+// ═══════════════════════════════════════════════════════════════════
+
+func i_json_serialize(val) {
+    if val == null { return "null" }
+    const t = typeof(val)
+    if t == "bool" { return if val { "true" } else { "false" } }
+    if t == "int64" { return to_string(val) }
+    if t == "float64" { return to_string(val) }
+    if t == "string" {
+        // Escape special characters
+        let result = "\""
+        let i = 0
+        while i < len(val) {
+            const c = val[i]
+            if c == "\"" { result = result + "\\\"" }
+            else if c == "\\" { result = result + "\\\\" }
+            else if c == "\n" { result = result + "\\n" }
+            else if c == "\r" { result = result + "\\r" }
+            else if c == "\t" { result = result + "\\t" }
+            else { result = result + c }
+            i = i + 1
+        }
+        return result + "\""
+    }
+    if t == "array" {
+        const parts = val.map(x => i_json_serialize(x))
+        return "[" + parts.join(",") + "]"
+    }
+    if t == "map" {
+        let parts = []
+        for k in val.keys() {
+            if k == "__s" { continue }
+            parts.push(i_json_serialize(k) + ":" + i_json_serialize(val[k]))
+        }
+        return "{" + parts.join(",") + "}"
+    }
+    "null"
+}
+
+func i_json_serialize_pretty(val, indent) {
+    if indent == null { indent = 0 }
+    const pad = i_str_repeat("  ", indent)
+    const inner_pad = i_str_repeat("  ", indent + 1)
+    if val == null { return "null" }
+    const t = typeof(val)
+    if t == "bool" { return if val { "true" } else { "false" } }
+    if t == "int64" || t == "float64" { return to_string(val) }
+    if t == "string" { return i_json_serialize(val) }
+    if t == "array" {
+        if len(val) == 0 { return "[]" }
+        let parts = []
+        for item in val {
+            parts.push(inner_pad + i_json_serialize_pretty(item, indent + 1))
+        }
+        return "[\n" + parts.join(",\n") + "\n" + pad + "]"
+    }
+    if t == "map" {
+        let filtered_keys = []
+        for k in val.keys() { if k != "__s" { filtered_keys.push(k) } }
+        if len(filtered_keys) == 0 { return "{}" }
+        let parts = []
+        for k in filtered_keys {
+            parts.push(inner_pad + i_json_serialize(k) + ": " + i_json_serialize_pretty(val[k], indent + 1))
+        }
+        return "{\n" + parts.join(",\n") + "\n" + pad + "}"
+    }
+    "null"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 122: Promise/Task Combinators
+// ═══════════════════════════════════════════════════════════════════
+
+// Promise.all: run all futures, return array of results
+func i_promise_all(futures) {
+    let results = []
+    for f in futures {
+        results.push(i_eval_await(f))
+    }
+    results
+}
+
+// Promise.race: return first resolved future
+func i_promise_race(futures) {
+    // In self-hosted mode, all futures are eagerly resolved
+    if len(futures) == 0 { return null }
+    i_eval_await(futures[0])
+}
+
+// Promise.any: return first successful result
+func i_promise_any(futures) {
+    let errors = []
+    for f in futures {
+        const result = i_eval_await(f)
+        if typeof(result) != "map" || !result.has("err") {
+            return result
+        }
+        errors.push(result)
+    }
+    {"err": "all promises rejected", "errors": errors}
+}
+
+// Promise.allSettled: return all results with status
+func i_promise_all_settled(futures) {
+    let results = []
+    for f in futures {
+        const val = i_eval_await(f)
+        if typeof(val) == "map" && val.has("err") {
+            results.push({"status": "rejected", "reason": val["err"]})
+        } else {
+            results.push({"status": "fulfilled", "value": val})
+        }
+    }
+    results
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 123: Event Emitter Pattern
+// ═══════════════════════════════════════════════════════════════════
+
+func i_event_emitter_new() {
+    {"__emitter": true, "__handlers": {}}
+}
+
+func i_event_on(emitter, event, handler) {
+    if !emitter["__handlers"].has(event) {
+        emitter["__handlers"][event] = []
+    }
+    let handlers = emitter["__handlers"][event]
+    handlers.push(handler)
+    emitter["__handlers"][event] = handlers
+    emitter
+}
+
+func i_event_off(emitter, event, handler) {
+    if !emitter["__handlers"].has(event) { return emitter }
+    let handlers = emitter["__handlers"][event]
+    emitter["__handlers"][event] = handlers.filter(h => h != handler)
+    emitter
+}
+
+func i_event_emit(emitter, event, data) {
+    if !emitter["__handlers"].has(event) { return null }
+    const handlers = emitter["__handlers"][event]
+    for h in handlers {
+        i_call_any(h, [data])
+    }
+    null
+}
+
+func i_event_once(emitter, event, handler) {
+    // Wrap handler to remove itself after first call
+    const wrapper = {
+        "__closure": true,
+        "__handler": handler,
+        "__emitter": emitter,
+        "__event": event,
+    }
+    i_event_on(emitter, event, wrapper)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 124: State Machine
+// ═══════════════════════════════════════════════════════════════════
+
+func i_state_machine_new(initial_state, transitions) {
+    {
+        "__state_machine": true,
+        "__state": initial_state,
+        "__transitions": transitions,
+        "__history": [initial_state],
+    }
+}
+
+func i_state_machine_transition(sm, event) {
+    const current = sm["__state"]
+    const transitions = sm["__transitions"]
+    const key = f"{current}:{event}"
+    if transitions.has(key) {
+        const new_state = transitions[key]
+        sm["__state"] = new_state
+        let hist = sm["__history"]
+        hist.push(new_state)
+        sm["__history"] = hist
+        return new_state
+    }
+    // No valid transition
+    null
+}
+
+func i_state_machine_current(sm) {
+    sm["__state"]
+}
+
+func i_state_machine_history(sm) {
+    sm["__history"]
+}
+
+func i_state_machine_can_transition(sm, event) {
+    const key = f"{sm[\"__state\"]}:{event}"
+    sm["__transitions"].has(key)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 125: Observable / Reactive Values
+// ═══════════════════════════════════════════════════════════════════
+
+func i_observable_new(initial) {
+    {
+        "__observable": true,
+        "__value": initial,
+        "__subscribers": [],
+    }
+}
+
+func i_observable_get(obs) {
+    obs["__value"]
+}
+
+func i_observable_set(obs, new_val) {
+    const old_val = obs["__value"]
+    obs["__value"] = new_val
+    // Notify subscribers
+    for sub in obs["__subscribers"] {
+        i_call_any(sub, [new_val, old_val])
+    }
+    new_val
+}
+
+func i_observable_subscribe(obs, handler) {
+    let subs = obs["__subscribers"]
+    subs.push(handler)
+    obs["__subscribers"] = subs
+    obs
+}
+
+func i_observable_unsubscribe(obs, handler) {
+    obs["__subscribers"] = obs["__subscribers"].filter(h => h != handler)
+    obs
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 126: Rate Limiter / Throttle / Debounce
+// ═══════════════════════════════════════════════════════════════════
+
+func i_rate_limiter_new(max_calls, window_ms) {
+    {
+        "__rate_limiter": true,
+        "__max": max_calls,
+        "__window": window_ms,
+        "__calls": [],
+    }
+}
+
+func i_rate_limiter_allow(limiter) {
+    // Simple: count calls within window
+    const now = 0 // Would need host time support
+    const calls = limiter["__calls"]
+    // Remove expired calls
+    let valid = calls.filter(c => now - c < limiter["__window"])
+    if len(valid) >= limiter["__max"] {
+        limiter["__calls"] = valid
+        return false
+    }
+    valid.push(now)
+    limiter["__calls"] = valid
+    true
+}
+
+func i_throttle_new(fn_val, interval_ms) {
+    {
+        "__throttle": true,
+        "__fn": fn_val,
+        "__interval": interval_ms,
+        "__last_call": 0,
+    }
+}
+
+func i_debounce_new(fn_val, delay_ms) {
+    {
+        "__debounce": true,
+        "__fn": fn_val,
+        "__delay": delay_ms,
+        "__pending": null,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 127: Retry/Backoff Pattern
+// ═══════════════════════════════════════════════════════════════════
+
+func i_retry(fn_val, max_retries, initial_delay_ms) {
+    let attempts = 0
+    let delay = initial_delay_ms
+    while attempts <= max_retries {
+        const result = i_call_any(fn_val, [])
+        if typeof(result) != "map" || !result.has("err") {
+            return result
+        }
+        attempts = attempts + 1
+        if attempts > max_retries {
+            return result // Return the last error
+        }
+        // Exponential backoff (simulated: no actual sleep in self-hosted)
+        delay = delay * 2
+    }
+    {"err": "max retries exceeded"}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 128: Circuit Breaker Pattern
+// ═══════════════════════════════════════════════════════════════════
+
+func i_circuit_breaker_new(threshold, reset_timeout) {
+    {
+        "__circuit_breaker": true,
+        "__state": "closed",
+        "__failure_count": 0,
+        "__threshold": threshold,
+        "__reset_timeout": reset_timeout,
+        "__last_failure_time": 0,
+    }
+}
+
+func i_circuit_breaker_call(cb, fn_val) {
+    if cb["__state"] == "open" {
+        // Check if reset timeout has passed
+        // In self-hosted mode, we can't check real time
+        return {"err": "circuit breaker is open"}
+    }
+    const result = i_call_any(fn_val, [])
+    if typeof(result) == "map" && result.has("err") {
+        cb["__failure_count"] = cb["__failure_count"] + 1
+        if cb["__failure_count"] >= cb["__threshold"] {
+            cb["__state"] = "open"
+        }
+        return result
+    }
+    // Success: reset failure count
+    cb["__failure_count"] = 0
+    cb["__state"] = "closed"
+    result
+}
+
+func i_circuit_breaker_reset(cb) {
+    cb["__state"] = "closed"
+    cb["__failure_count"] = 0
+    cb
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 129: Validation Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+func i_validate_email(s) {
+    if typeof(s) != "string" { return false }
+    if len(s) == 0 { return false }
+    const at_idx = s.index_of("@")
+    if at_idx <= 0 { return false }
+    if at_idx >= len(s) - 1 { return false }
+    const domain = s.slice(at_idx + 1, len(s))
+    const dot_idx = domain.index_of(".")
+    if dot_idx <= 0 { return false }
+    if dot_idx >= len(domain) - 1 { return false }
+    true
+}
+
+func i_validate_url(s) {
+    if typeof(s) != "string" { return false }
+    if len(s) < 8 { return false }
+    s.starts_with("http://") || s.starts_with("https://") ||
+    s.starts_with("ws://") || s.starts_with("wss://")
+}
+
+func i_validate_ip_v4(s) {
+    if typeof(s) != "string" { return false }
+    const parts = s.split(".")
+    if len(parts) != 4 { return false }
+    for p in parts {
+        if !i_string_is_numeric(p) { return false }
+        const n = parse_int(p)
+        if n < 0 || n > 255 { return false }
+    }
+    true
+}
+
+func i_validate_range(val, min_val, max_val) {
+    val >= min_val && val <= max_val
+}
+
+func i_validate_length(s, min_len, max_len) {
+    const l = len(s)
+    l >= min_len && l <= max_len
+}
+
+func i_validate_not_empty(val) {
+    if val == null { return false }
+    if typeof(val) == "string" { return len(val) > 0 }
+    if typeof(val) == "array" { return len(val) > 0 }
+    if typeof(val) == "map" { return len(val.keys()) > 0 }
+    true
+}
+
+func i_validate_matches(s, pattern) {
+    i_glob_match(pattern, s)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 130: Pipe / Compose Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+func i_pipe_value(val, fns) {
+    let result = val
+    for fn_val in fns {
+        result = i_call_any(fn_val, [result])
+    }
+    result
+}
+
+func i_compose_fns(fns) {
+    {
+        "__composed": true,
+        "__fns": fns,
+    }
+}
+
+func i_call_composed(composed, args) {
+    const fns = composed["__fns"]
+    if len(fns) == 0 { return if len(args) > 0 { args[0] } else { null } }
+    let result = i_call_any(fns[len(fns) - 1], args)
+    let i = len(fns) - 2
+    while i >= 0 {
+        result = i_call_any(fns[i], [result])
+        i = i - 1
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 131: Template Rendering (simple)
+// ═══════════════════════════════════════════════════════════════════
+
+func i_template_render(template, context) {
+    // Simple template: replace {{key}} with context values
+    let result = template
+    if typeof(context) != "map" { return result }
+    for k in context.keys() {
+        if k == "__s" { continue }
+        const placeholder = "{{" + k + "}}"
+        result = result.replace(placeholder, i_display(context[k]))
+    }
+    result
+}

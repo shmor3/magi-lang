@@ -5001,3 +5001,2006 @@ func tc_error_undefined_func(name, line) {
         tc_error_at(line, f"undefined function '{name}'")
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Complete Type Inference for ALL Expression Types
+// ═══════════════════════════════════════════════════════════════════
+
+// Type representation constants
+const TYPE_NULL = "null"
+const TYPE_INT = "int64"
+const TYPE_FLOAT = "float64"
+const TYPE_STRING = "string"
+const TYPE_BOOL = "bool"
+const TYPE_ARRAY = "array"
+const TYPE_MAP = "map"
+const TYPE_SET = "set"
+const TYPE_BYTES = "bytes"
+const TYPE_TUPLE = "tuple"
+const TYPE_FUNCTION = "function"
+const TYPE_FUTURE = "future"
+
+// Infer the type of any expression
+func tc_infer_expr(expr) {
+    if expr == null { return TYPE_NULL }
+    match expr.kind {
+        ExprKind::ELiteral(lit) => tc_infer_literal(lit),
+        ExprKind::EVariable(name) => tc_infer_variable(name, expr),
+        ExprKind::EBinaryOp(op, left, right) => tc_infer_binop(op, left, right),
+        ExprKind::EUnaryOp(op, operand) => tc_infer_unaryop(op, operand),
+        ExprKind::ECall(name, args, _) => tc_infer_call(name, args, expr),
+        ExprKind::EMethodCall(obj, method, args, _) => tc_infer_method_call(obj, method, args),
+        ExprKind::EPipe(left, right) => tc_infer_expr(right),
+        ExprKind::EIfElse(cond, then_block, else_block) => tc_infer_if_else(cond, then_block, else_block),
+        ExprKind::EBlock(block) => tc_infer_block_type(block),
+        ExprKind::EIndex(obj, idx) => tc_infer_index(obj, idx),
+        ExprKind::EFieldAccess(obj, field) => tc_infer_field_access(obj, field),
+        ExprKind::ERange(_, _, _) => TYPE_ARRAY,
+        ExprKind::ELambda(_, _) => TYPE_FUNCTION,
+        ExprKind::EMatch(subject, arms) => tc_infer_match(subject, arms),
+        ExprKind::EStringInterp(_) => TYPE_STRING,
+        ExprKind::ENullCoalesce(left, right) => tc_infer_null_coalesce(left, right),
+        ExprKind::EOptionalChain(_, _) => TYPE_NULL,
+        ExprKind::ESpread(inner) => tc_infer_expr(inner),
+        ExprKind::EEnumConstruct(_, _, _) => TYPE_MAP,
+        ExprKind::EStructConstruct(_, _) => TYPE_MAP,
+        ExprKind::ETupleLiteral(_) => TYPE_TUPLE,
+        ExprKind::ELoop(_) => TYPE_NULL,
+        ExprKind::EListComp(_, _, _, _) => TYPE_ARRAY,
+        ExprKind::EMapComp(_, _, _, _, _) => TYPE_MAP,
+        ExprKind::EPlaceholder => TYPE_NULL,
+        ExprKind::EAwait(inner) => tc_infer_expr(inner),
+        ExprKind::ESpawn(_) => TYPE_FUTURE,
+        ExprKind::EYield(_) => TYPE_NULL,
+        ExprKind::ETryCatch(try_expr, _, _) => tc_infer_expr(try_expr),
+        ExprKind::ETryPropagate(inner) => tc_infer_expr(inner),
+        ExprKind::ECast(_, type_name) => type_name,
+        ExprKind::EIs(_, _) => TYPE_BOOL,
+        ExprKind::ETernary(_, then_expr, else_expr) => tc_unify_types(tc_infer_expr(then_expr), tc_infer_expr(else_expr)),
+        ExprKind::EChain(exprs) => if len(exprs) > 0 { tc_infer_expr(exprs[len(exprs) - 1]) } else { TYPE_NULL },
+        ExprKind::EPower(_, _) => TYPE_FLOAT,
+        ExprKind::EStringMul(_, _) => TYPE_STRING,
+        ExprKind::ESlice(obj, _, _) => tc_infer_expr(obj),
+        ExprKind::EAssert(_, _) => TYPE_NULL,
+        ExprKind::ETypeOf(_) => TYPE_STRING,
+        _ => TYPE_NULL,
+    }
+}
+
+func tc_infer_literal(lit) {
+    match lit {
+        Literal::IntLit(_) => TYPE_INT,
+        Literal::FloatLit(_) => TYPE_FLOAT,
+        Literal::StringLit(_) => TYPE_STRING,
+        Literal::BoolLit(_) => TYPE_BOOL,
+        Literal::NullLit => TYPE_NULL,
+        Literal::ArrayLit(_) => TYPE_ARRAY,
+        Literal::MapLit(_) => TYPE_MAP,
+        Literal::SetLit(_) => TYPE_SET,
+    }
+}
+
+func tc_infer_variable(name, expr) {
+    if name == "None" || name == "null" { return TYPE_NULL }
+    if name == "true" || name == "false" { return TYPE_BOOL }
+    // Look up variable in scope stack
+    let idx = len(tc_scopes) - 1
+    while idx >= 0 {
+        if tc_scopes[idx].has(name) {
+            const info = tc_scopes[idx][name]
+            info["used"] = true
+            tc_scopes[idx][name] = info
+            return info["typ"]
+        }
+        idx = idx - 1
+    }
+    // Check functions
+    if tc_functions.has(name) { return TYPE_FUNCTION }
+    // Check enums
+    if tc_enums.has(name) { return TYPE_MAP }
+    // Check structs
+    if tc_structs.has(name) { return TYPE_MAP }
+    TYPE_NULL
+}
+
+func tc_infer_binop(op, left, right) {
+    const lt = tc_infer_expr(left)
+    const rt = tc_infer_expr(right)
+    match op {
+        // Comparison operators always return bool
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt |
+        BinOp::LtEq | BinOp::GtEq | BinOp::In => TYPE_BOOL,
+        // Logical operators return the type of the first truthy/falsy value
+        BinOp::And | BinOp::Or => tc_unify_types(lt, rt),
+        // Arithmetic with type promotion
+        BinOp::Add => tc_infer_add(lt, rt),
+        BinOp::Sub | BinOp::Div | BinOp::Mod => tc_infer_arithmetic(lt, rt),
+        BinOp::Mul => tc_infer_mul(lt, rt),
+        // Bitwise operations return int
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor |
+        BinOp::Shl | BinOp::Shr | BinOp::AndNot => TYPE_INT,
+    }
+}
+
+func tc_infer_add(lt, rt) {
+    // String + anything = string
+    if lt == TYPE_STRING || rt == TYPE_STRING { return TYPE_STRING }
+    // Array + array = array
+    if lt == TYPE_ARRAY && rt == TYPE_ARRAY { return TYPE_ARRAY }
+    // Map + map = map
+    if lt == TYPE_MAP && rt == TYPE_MAP { return TYPE_MAP }
+    // Numeric promotion
+    tc_infer_arithmetic(lt, rt)
+}
+
+func tc_infer_mul(lt, rt) {
+    // String * int = string repetition
+    if lt == TYPE_STRING && rt == TYPE_INT { return TYPE_STRING }
+    if lt == TYPE_INT && rt == TYPE_STRING { return TYPE_STRING }
+    // Numeric
+    tc_infer_arithmetic(lt, rt)
+}
+
+func tc_infer_arithmetic(lt, rt) {
+    if lt == TYPE_FLOAT || rt == TYPE_FLOAT { return TYPE_FLOAT }
+    if lt == TYPE_INT && rt == TYPE_INT { return TYPE_INT }
+    if lt == TYPE_INT || rt == TYPE_INT { return TYPE_INT }
+    TYPE_NULL
+}
+
+func tc_infer_unaryop(op, operand) {
+    match op {
+        UnOp::Not => TYPE_BOOL,
+        UnOp::Neg => {
+            const t = tc_infer_expr(operand)
+            if t == TYPE_FLOAT { TYPE_FLOAT }
+            else if t == TYPE_INT { TYPE_INT }
+            else { TYPE_NULL }
+        },
+    }
+}
+
+func tc_infer_call(name, args, expr) {
+    // User-defined function
+    if tc_functions.has(name) {
+        const fn_info = tc_functions[name]
+        // Check arity
+        const n_args = len(args)
+        if fn_info.has("arity") {
+            const expected = fn_info["arity"]
+            const min_arity = if fn_info.has("min_arity") { fn_info["min_arity"] } else { expected }
+            if n_args < min_arity || (n_args > expected && !fn_info.has("has_rest")) {
+                const line = if expr.has("line") { expr["line"] } else { 0 }
+                tc_error_at(line, f"function '{name}' expects {expected} arguments, got {n_args}")
+            }
+        }
+        if fn_info.has("return_type") { return fn_info["return_type"] }
+        return TYPE_NULL
+    }
+    // Built-in functions
+    tc_infer_builtin_call(name, args)
+}
+
+func tc_infer_builtin_call(name, args) {
+    match name {
+        "len" => TYPE_INT,
+        "typeof" | "type_name" => TYPE_STRING,
+        "println" | "print" | "debug_log" | "output" => {
+            if len(args) > 0 { tc_infer_expr(args[0]) } else { TYPE_NULL }
+        },
+        "assert" | "assert_eq" | "assert_ne" | "assert_throws" => TYPE_NULL,
+        "to_string" | "format" | "to_json" => TYPE_STRING,
+        "to_int" | "to_int64" | "parse_int" => TYPE_INT,
+        "to_float" | "to_float64" | "parse_float" => TYPE_FLOAT,
+        "to_bool" => TYPE_BOOL,
+        "is_null" | "is_int" | "is_float" | "is_string" | "is_bool" |
+        "is_array" | "is_map" | "is_some" | "is_none" | "is_ok" | "is_err" |
+        "is_error" | "is_frozen" | "contains" | "contains_key" |
+        "starts_with" | "ends_with" | "implements" => TYPE_BOOL,
+        "abs" | "min" | "max" | "floor" | "ceil" | "round" => {
+            if len(args) > 0 { tc_infer_expr(args[0]) } else { TYPE_NULL }
+        },
+        "sqrt" | "pow" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" |
+        "asin" | "acos" | "atan" | "atan2" | "exp" | "cbrt" | "hypot" => TYPE_FLOAT,
+        "range" => TYPE_ARRAY,
+        "map" | "filter" | "sort" | "reverse" | "append" | "slice" |
+        "keys" | "values" | "chars" | "split" | "flatten" => TYPE_ARRAY,
+        "reduce" => TYPE_NULL,
+        "join" | "trim" | "replace" | "to_upper" | "to_lower" |
+        "substring" | "repeat" | "char_at" => TYPE_STRING,
+        "index_of" => TYPE_INT,
+        "push" | "pop" => TYPE_NULL,
+        "error" => TYPE_MAP,
+        "unwrap" | "unwrap_or" => {
+            if len(args) > 0 { tc_infer_expr(args[0]) } else { TYPE_NULL }
+        },
+        "Some" => if len(args) > 0 { tc_infer_expr(args[0]) } else { TYPE_NULL },
+        "None" => TYPE_NULL,
+        "Ok" | "Err" => TYPE_MAP,
+        "Set" => TYPE_SET,
+        "Tuple" | "tuple" => TYPE_TUPLE,
+        "clone" | "freeze" => {
+            if len(args) > 0 { tc_infer_expr(args[0]) } else { TYPE_NULL }
+        },
+        "hash" => TYPE_INT,
+        "input" | "stdin_read" => TYPE_STRING,
+        "channel" => TYPE_ARRAY,
+        "spawn" => TYPE_FUTURE,
+        // Known stdlib operations
+        "json_parse" | "yaml_parse" | "toml_parse" => TYPE_MAP,
+        "json_stringify" | "yaml_stringify" | "toml_stringify" => TYPE_STRING,
+        "regex_match" | "regex_test" => TYPE_BOOL,
+        "regex_find" | "regex_find_all" => TYPE_ARRAY,
+        "regex_replace" => TYPE_STRING,
+        "time_now" | "time_unix" => TYPE_INT,
+        "time_format" => TYPE_STRING,
+        "uuid" | "uuid_v4" => TYPE_STRING,
+        "base64_encode" | "hex_encode" | "url_encode" => TYPE_STRING,
+        "base64_decode" | "hex_decode" | "url_decode" => TYPE_STRING,
+        "http_get" | "http_post" | "http_put" | "http_delete" |
+        "http_patch" | "http_head" | "http_options" | "http_request" => TYPE_MAP,
+        "env_get" | "getenv" | "os_getenv" => TYPE_STRING,
+        "env_all" | "os_environ" => TYPE_MAP,
+        "fs_read" | "read_file" | "file_read" => TYPE_STRING,
+        "fs_readdir" | "readdir" => TYPE_ARRAY,
+        "fs_exists" | "file_exists" | "path_exists" | "is_dir" | "is_file" => TYPE_BOOL,
+        "fs_stat" | "file_stat" => TYPE_MAP,
+        "path_join" | "path_dir" | "path_base" | "path_ext" | "path_abs" => TYPE_STRING,
+        "exec" | "command" | "os_exec" => TYPE_MAP,
+        "args" | "os_args" => TYPE_ARRAY,
+        _ => TYPE_NULL,
+    }
+}
+
+func tc_infer_method_call(obj, method, args) {
+    const obj_type = tc_infer_expr(obj)
+    tc_infer_method_return(obj_type, method, args)
+}
+
+func tc_infer_method_return(obj_type, method, args) {
+    // String methods
+    if obj_type == TYPE_STRING {
+        return match method {
+            "len" | "length" | "index_of" | "last_index_of" | "count" => TYPE_INT,
+            "contains" | "starts_with" | "ends_with" | "is_empty" |
+            "is_blank" | "is_numeric" | "is_alpha" | "is_alphanumeric" |
+            "is_upper" | "is_lower" => TYPE_BOOL,
+            "trim" | "trim_start" | "trim_end" | "to_upper" | "to_lower" |
+            "replace" | "replace_all" | "replace_first" |
+            "pad_start" | "pad_end" | "center" | "reverse" |
+            "slice" | "substring" | "repeat" | "char_at" |
+            "to_camel_case" | "to_snake_case" | "to_kebab_case" |
+            "to_pascal_case" | "to_title_case" | "truncate" |
+            "to_string" | "to_json" => TYPE_STRING,
+            "split" | "lines" | "words" | "chars" | "bytes" |
+            "matches" | "match_all" => TYPE_ARRAY,
+            "to_int" | "to_int64" | "parse_int" => TYPE_INT,
+            "to_float" | "to_float64" | "parse_float" => TYPE_FLOAT,
+            _ => TYPE_NULL,
+        }
+    }
+    // Array methods
+    if obj_type == TYPE_ARRAY {
+        return match method {
+            "len" | "length" | "index_of" | "last_index_of" | "count" => TYPE_INT,
+            "contains" | "is_empty" | "any" | "all" | "every" | "some" => TYPE_BOOL,
+            "push" | "pop" | "shift" | "unshift" | "each" | "for_each" => TYPE_NULL,
+            "map" | "filter" | "flat_map" | "sort" | "sort_by" | "reverse" |
+            "slice" | "concat" | "flatten" | "unique" | "unique_by" |
+            "take" | "skip" | "take_while" | "skip_while" |
+            "enumerate" | "zip" | "chunk" | "window" |
+            "scan" | "partition" | "keys" | "values" => TYPE_ARRAY,
+            "join" | "to_string" | "to_json" => TYPE_STRING,
+            "reduce" | "fold" | "find" | "first" | "last" | "min" | "max" |
+            "min_by" | "max_by" | "sum" | "product" => TYPE_NULL,
+            "group_by" => TYPE_MAP,
+            _ => TYPE_NULL,
+        }
+    }
+    // Map methods
+    if obj_type == TYPE_MAP {
+        return match method {
+            "len" | "size" | "count" => TYPE_INT,
+            "has" | "contains_key" | "is_empty" | "any" | "all" => TYPE_BOOL,
+            "keys" | "values" | "entries" => TYPE_ARRAY,
+            "get" | "get_or" | "delete" | "remove" => TYPE_NULL,
+            "set" | "insert" | "merge" | "filter" | "map_values" |
+            "map_keys" | "pick" | "omit" | "invert" | "clone" => TYPE_MAP,
+            "to_string" | "to_json" => TYPE_STRING,
+            _ => TYPE_NULL,
+        }
+    }
+    // Numeric methods
+    if obj_type == TYPE_INT || obj_type == TYPE_FLOAT {
+        return match method {
+            "to_string" => TYPE_STRING,
+            "to_int" | "to_int64" => TYPE_INT,
+            "to_float" | "to_float64" => TYPE_FLOAT,
+            "to_bool" => TYPE_BOOL,
+            "abs" | "sign" | "clamp" | "min" | "max" => obj_type,
+            "pow" | "sqrt" | "cbrt" | "log" | "log2" | "log10" | "exp" => TYPE_FLOAT,
+            "is_nan" | "is_infinite" | "is_finite" | "is_zero" | "is_positive" | "is_negative" => TYPE_BOOL,
+            _ => TYPE_NULL,
+        }
+    }
+    // Bool methods
+    if obj_type == TYPE_BOOL {
+        return match method {
+            "to_string" => TYPE_STRING,
+            "to_int" => TYPE_INT,
+            _ => TYPE_NULL,
+        }
+    }
+    TYPE_NULL
+}
+
+func tc_infer_if_else(cond, then_block, else_block) {
+    // Check condition type
+    tc_check_expr(cond)
+    const then_type = tc_infer_block_type(then_block)
+    if else_block == null { return TYPE_NULL }
+    const else_type = tc_infer_block_type(else_block)
+    tc_unify_types(then_type, else_type)
+}
+
+func tc_infer_block_type(block) {
+    if block == null { return TYPE_NULL }
+    if typeof(block) == "map" && block.has("statements") {
+        const stmts = block["statements"]
+        if len(stmts) > 0 {
+            const last = stmts[len(stmts) - 1]
+            if typeof(last) == "map" && last.has("kind") {
+                match last.kind {
+                    StmtKind::SExprStmt(expr) => return tc_infer_expr(expr),
+                    StmtKind::SReturn(expr) => {
+                        if expr != null { return tc_infer_expr(expr) }
+                        return TYPE_NULL
+                    },
+                    _ => return TYPE_NULL,
+                }
+            }
+        }
+    }
+    TYPE_NULL
+}
+
+func tc_infer_index(obj, idx) {
+    const obj_type = tc_infer_expr(obj)
+    const idx_type = tc_infer_expr(idx)
+    // Check array index should be int
+    if obj_type == TYPE_ARRAY && idx_type != TYPE_INT && idx_type != TYPE_NULL {
+        // Warn about non-integer index
+    }
+    if obj_type == TYPE_ARRAY { return TYPE_NULL }
+    if obj_type == TYPE_MAP { return TYPE_NULL }
+    if obj_type == TYPE_STRING { return TYPE_STRING }
+    TYPE_NULL
+}
+
+func tc_infer_field_access(obj, field) {
+    const obj_type = tc_infer_expr(obj)
+    // String properties
+    if obj_type == TYPE_STRING {
+        if field == "length" { return TYPE_INT }
+    }
+    // Array properties
+    if obj_type == TYPE_ARRAY {
+        if field == "length" { return TYPE_INT }
+    }
+    // Map field access is always unknown type
+    TYPE_NULL
+}
+
+func tc_infer_match(subject, arms) {
+    const subject_type = tc_infer_expr(subject)
+    let arm_types = []
+    for arm in arms {
+        if typeof(arm) == "map" && arm.has("body") {
+            arm_types.push(tc_infer_block_type(arm["body"]))
+        }
+    }
+    if len(arm_types) == 0 { return TYPE_NULL }
+    // Unify all arm types
+    let result = arm_types[0]
+    let i = 1
+    while i < len(arm_types) {
+        result = tc_unify_types(result, arm_types[i])
+        i = i + 1
+    }
+    result
+}
+
+func tc_infer_null_coalesce(left, right) {
+    const lt = tc_infer_expr(left)
+    const rt = tc_infer_expr(right)
+    tc_unify_types(lt, rt)
+}
+
+// Type unification: given two types, produce a common supertype
+func tc_unify_types(a, b) {
+    if a == b { return a }
+    if a == TYPE_NULL { return b }
+    if b == TYPE_NULL { return a }
+    // Numeric promotion: int + float = float
+    if (a == TYPE_INT && b == TYPE_FLOAT) || (a == TYPE_FLOAT && b == TYPE_INT) {
+        return TYPE_FLOAT
+    }
+    // If types are incompatible, return null (unknown)
+    TYPE_NULL
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Generic Constraint Propagation Through Call Chains
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_generic_params = {}
+let tc_generic_constraints = {}
+
+func tc_register_generic_param(name, constraints) {
+    tc_generic_params[name] = true
+    if len(constraints) > 0 {
+        tc_generic_constraints[name] = constraints
+    }
+}
+
+func tc_is_generic_param(name) {
+    tc_generic_params.has(name)
+}
+
+func tc_resolve_generic(name) {
+    if tc_generic_params.has(name) {
+        // Check if we have a concrete binding
+        if tc_generic_constraints.has(name) {
+            const constraints = tc_generic_constraints[name]
+            if len(constraints) > 0 { return constraints[0] }
+        }
+        return TYPE_NULL
+    }
+    name
+}
+
+func tc_propagate_generics(fn_name, type_args, arg_types) {
+    if !tc_functions.has(fn_name) { return null }
+    const fn_info = tc_functions[fn_name]
+    if !fn_info.has("type_params") { return null }
+    const type_params = fn_info["type_params"]
+    // Bind type params to actual types from arguments
+    let bindings = {}
+    let i = 0
+    while i < len(type_params) && i < len(arg_types) {
+        bindings[type_params[i]] = arg_types[i]
+        i = i + 1
+    }
+    // Override with explicit type args
+    i = 0
+    while i < len(type_args) && i < len(type_params) {
+        bindings[type_params[i]] = type_args[i]
+        i = i + 1
+    }
+    bindings
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Interface Method Resolution with This-Type Substitution
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_traits = {}
+let tc_trait_impls = {}
+
+func tc_register_trait(name, methods) {
+    tc_traits[name] = methods
+}
+
+func tc_register_trait_impl(type_name, trait_name, methods) {
+    const key = f"{type_name}::{trait_name}"
+    tc_trait_impls[key] = methods
+}
+
+func tc_check_trait_implementation(type_name, trait_name) {
+    if !tc_traits.has(trait_name) { return true }
+    const trait_methods = tc_traits[trait_name]
+    const impl_key = f"{type_name}::{trait_name}"
+    if !tc_trait_impls.has(impl_key) { return false }
+    const impl_methods = tc_trait_impls[impl_key]
+    // Check that all trait methods are implemented
+    for method in trait_methods {
+        const method_name = if typeof(method) == "map" { method["name"] } else { method }
+        let found = false
+        for impl_m in impl_methods {
+            const impl_name = if typeof(impl_m) == "map" { impl_m["name"] } else { impl_m }
+            if impl_name == method_name { found = true; break }
+        }
+        if !found { return false }
+    }
+    true
+}
+
+func tc_resolve_method_for_trait(type_name, method_name) {
+    // Check if any trait impl for this type provides this method
+    for key in tc_trait_impls.keys() {
+        if key.starts_with(f"{type_name}::") {
+            const impl_methods = tc_trait_impls[key]
+            for m in impl_methods {
+                const mname = if typeof(m) == "map" { m["name"] } else { m }
+                if mname == method_name { return m }
+            }
+        }
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Null Flow Analysis Through If/Else/Match Branches
+// ═══════════════════════════════════════════════════════════════════
+
+// Track which variables are known to be non-null in a given branch
+let tc_non_null_vars = {}
+
+func tc_push_null_state() {
+    // Save current null state
+    let saved = {}
+    for k in tc_non_null_vars.keys() {
+        saved[k] = tc_non_null_vars[k]
+    }
+    saved
+}
+
+func tc_restore_null_state(saved) {
+    tc_non_null_vars = saved
+}
+
+func tc_mark_non_null(name) {
+    tc_non_null_vars[name] = true
+}
+
+func tc_is_known_non_null(name) {
+    tc_non_null_vars.has(name)
+}
+
+// Analyze null checks in conditions to narrow types
+func tc_analyze_null_check(cond) {
+    if typeof(cond) != "map" || !cond.has("kind") { return null }
+    match cond.kind {
+        // x != null narrowing
+        ExprKind::EBinaryOp(op, left, right) => {
+            match op {
+                BinOp::NotEq => {
+                    // x != null
+                    if typeof(right) == "map" {
+                        match right.kind {
+                            ExprKind::ELiteral(Literal::NullLit) => {
+                                match left.kind {
+                                    ExprKind::EVariable(name) => return {"var": name, "non_null": true},
+                                    _ => {},
+                                }
+                            },
+                            _ => {},
+                        }
+                    }
+                    // null != x
+                    if typeof(left) == "map" {
+                        match left.kind {
+                            ExprKind::ELiteral(Literal::NullLit) => {
+                                match right.kind {
+                                    ExprKind::EVariable(name) => return {"var": name, "non_null": true},
+                                    _ => {},
+                                }
+                            },
+                            _ => {},
+                        }
+                    }
+                },
+                BinOp::Eq => {
+                    // x == null (in else branch, x is non-null)
+                    if typeof(right) == "map" {
+                        match right.kind {
+                            ExprKind::ELiteral(Literal::NullLit) => {
+                                match left.kind {
+                                    ExprKind::EVariable(name) => return {"var": name, "null_in_then": true},
+                                    _ => {},
+                                }
+                            },
+                            _ => {},
+                        }
+                    }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Pattern Type Narrowing in Match Arms
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_narrow_type_from_pattern(pattern, subject_type) {
+    if typeof(pattern) != "map" || !pattern.has("kind") { return subject_type }
+    // Literal patterns narrow to the literal type
+    match pattern {
+        // Integer literal pattern
+        Pattern::Literal(Literal::IntLit(_)) => TYPE_INT,
+        Pattern::Literal(Literal::FloatLit(_)) => TYPE_FLOAT,
+        Pattern::Literal(Literal::StringLit(_)) => TYPE_STRING,
+        Pattern::Literal(Literal::BoolLit(_)) => TYPE_BOOL,
+        Pattern::Literal(Literal::NullLit) => TYPE_NULL,
+        // Enum variant pattern narrows to the enum type
+        Pattern::EnumVariant(_, _, _) => TYPE_MAP,
+        // Struct pattern narrows to struct type
+        Pattern::Struct(_, _) => TYPE_MAP,
+        // Wildcard and variable patterns don't narrow
+        _ => subject_type,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Type Widening for Union-Like Assignments
+// ═══════════════════════════════════════════════════════════════════
+
+// When a variable is assigned different types in different branches,
+// widen to a union-like type
+func tc_widen_type(current, new_type) {
+    if current == TYPE_NULL { return new_type }
+    if new_type == TYPE_NULL { return current }
+    if current == new_type { return current }
+    // Numeric widening: int -> float
+    if current == TYPE_INT && new_type == TYPE_FLOAT { return TYPE_FLOAT }
+    if current == TYPE_FLOAT && new_type == TYPE_INT { return TYPE_FLOAT }
+    // Incompatible types: return null (any)
+    TYPE_NULL
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Complete Error Code Mapping (E100-E409)
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_error_code_message(code) {
+    match code {
+        "E100" => "type error",
+        "E101" => "condition must be boolean",
+        "E102" => "undefined function or operation",
+        "E103" => "type mismatch in operation argument",
+        "E104" => "division by zero",
+        "E105" => "non-exhaustive match expression",
+        "E106" => "index into empty collection",
+        "E107" => "duplicate key in map literal",
+        "E108" => "break with value outside loop expression",
+        "E200" => "undefined variable",
+        "E201" => "undefined function",
+        "E202" => "unknown method",
+        "E300" => "break outside loop",
+        "E301" => "continue outside loop",
+        "E302" => "return outside function",
+        "E303" => "placeholder outside pipe",
+        "E304" => "yield outside generator",
+        "E400" => "duplicate variable definition",
+        "E401" => "duplicate function definition",
+        "E402" => "duplicate enum variant",
+        "E403" => "duplicate struct field",
+        "E404" => "assignment to immutable variable",
+        "E405" => "wrong number of arguments",
+        "E406" => "missing required field",
+        "E407" => "extra field in struct literal",
+        "E408" => "duplicate parameter name",
+        "E409" => "circular type alias",
+        _ => f"error {code}",
+    }
+}
+
+func tc_error_code_help_text(code) {
+    match code {
+        "E100" => "Check that the types are compatible. Use explicit conversion if needed.",
+        "E101" => "Conditions must evaluate to a boolean value.",
+        "E102" => "Make sure the function is defined or imported. Check spelling.",
+        "E103" => "The argument type does not match the expected parameter type.",
+        "E104" => "Check that the divisor is not zero. Add a guard condition.",
+        "E105" => "Add a wildcard '_' pattern or cover all possible values.",
+        "E106" => "The collection is empty, so indexing will always fail.",
+        "E107" => "Each key in a map literal must be unique.",
+        "E200" => "Make sure the variable is defined before use. Check spelling and scope.",
+        "E201" => "Make sure the function is defined or imported. Check spelling.",
+        "E202" => "The method is not available on this type. Check the type's available methods.",
+        "E300" => "'break' can only be used inside a loop (for, while, loop).",
+        "E301" => "'continue' can only be used inside a loop.",
+        "E302" => "'return' can only be used inside a function body.",
+        "E303" => "The placeholder '_' is only valid inside pipe expressions (|>).",
+        "E400" => "Use a different name or remove the duplicate.",
+        "E401" => "Each function name must be unique in the same scope.",
+        "E404" => "Declare the variable with 'let' instead of 'const' to allow reassignment.",
+        "E405" => "Check the function signature for the expected number of parameters.",
+        "E409" => "A type alias cannot reference itself, directly or indirectly.",
+        _ => null,
+    }
+}
+
+func tc_emit_error(code, line, msg) {
+    const help = tc_error_code_help_text(code)
+    tc_errors.push({
+        "code": code,
+        "line": line,
+        "message": msg,
+        "help": help,
+    })
+}
+
+func tc_emit_warning_code(code, line, msg) {
+    const help = tc_error_code_help_text(code)
+    tc_warnings.push({
+        "code": code,
+        "line": line,
+        "message": msg,
+        "help": help,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Circular Dependency Detection in Type Aliases
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_type_alias_map = {}
+
+func tc_register_type_alias(alias, target) {
+    tc_type_alias_map[alias] = target
+}
+
+func tc_check_circular_alias(alias) {
+    let visited = []
+    let current = alias
+    while tc_type_alias_map.has(current) {
+        if visited.contains(current) {
+            const chain = visited.join(" -> ") + " -> " + current
+            tc_emit_error("E409", 0, f"circular type alias detected: {chain}")
+            return true
+        }
+        visited.push(current)
+        current = tc_type_alias_map[current]
+    }
+    false
+}
+
+func tc_resolve_type_alias(name) {
+    let visited = []
+    let current = name
+    while tc_type_alias_map.has(current) {
+        if visited.contains(current) { return name }
+        visited.push(current)
+        current = tc_type_alias_map[current]
+    }
+    current
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Lint Rule Integration with Configurable Severity
+// ═══════════════════════════════════════════════════════════════════
+
+const LINT_WARN = "warn"
+const LINT_ERROR = "error"
+const LINT_OFF = "off"
+
+// Default lint configuration
+let tc_lint_config = {
+    "W100": LINT_WARN,   // unused variable
+    "W101": LINT_WARN,   // unused import
+    "W102": LINT_WARN,   // unused function
+    "W103": LINT_WARN,   // dead code after return
+    "W104": LINT_WARN,   // empty block
+    "W105": LINT_WARN,   // while true without break
+    "W106": LINT_WARN,   // double negation
+    "W107": LINT_WARN,   // empty range
+    "W108": LINT_WARN,   // unnecessary return
+    "W109": LINT_WARN,   // unused parameter
+    "W110": LINT_WARN,   // mutable but never reassigned
+    "W111": LINT_WARN,   // implicit return
+    "W112": LINT_WARN,   // default param type mismatch
+    "W113": LINT_WARN,   // redundant type annotation
+    "W114": LINT_WARN,   // deprecated item
+    "W200": LINT_WARN,   // comparison to self
+    "W201": LINT_WARN,   // assignment to same value
+    "W202": LINT_WARN,   // unreachable pattern
+    "W203": LINT_WARN,   // non-exhaustive match
+    "W204": LINT_WARN,   // infinite loop without break
+    "W205": LINT_WARN,   // self-comparison
+    "W206": LINT_WARN,   // empty match/block
+    "W260": LINT_WARN,   // null dereference
+    "__s": true,
+}
+
+func tc_set_lint_severity(code, severity) {
+    tc_lint_config[code] = severity
+}
+
+func tc_get_lint_severity(code) {
+    if tc_lint_config.has(code) { tc_lint_config[code] } else { LINT_WARN }
+}
+
+func tc_should_report(code) {
+    tc_get_lint_severity(code) != LINT_OFF
+}
+
+func tc_lint_emit(code, line, msg) {
+    if !tc_should_report(code) { return null }
+    const severity = tc_get_lint_severity(code)
+    if severity == LINT_ERROR {
+        tc_emit_error(code, line, msg)
+    } else {
+        tc_emit_warning_code(code, line, msg)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Complete Statement Checking
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_statement(stmt) {
+    if typeof(stmt) != "map" || !stmt.has("kind") { return null }
+    const line = if stmt.has("line") { stmt["line"] } else { 0 }
+    match stmt.kind {
+        StmtKind::SConst(name, expr) => {
+            const typ = tc_infer_expr(expr)
+            tc_define_var(name, false, typ, line)
+        },
+        StmtKind::SLet(name, expr) => {
+            const typ = tc_infer_expr(expr)
+            tc_define_var(name, false, typ, line)
+        },
+        StmtKind::SLetMut(name, expr) => {
+            const typ = tc_infer_expr(expr)
+            tc_define_var(name, true, typ, line)
+        },
+        StmtKind::SAssignment(name, expr) => {
+            const typ = tc_infer_expr(expr)
+            tc_check_assignment(name, typ, line)
+        },
+        StmtKind::SCompoundAssign(name, op, expr) => {
+            tc_check_var_exists(name, line)
+            tc_check_var_mutable(name, line)
+            tc_infer_expr(expr)
+        },
+        StmtKind::SFieldAssign(obj_expr, field, val_expr) => {
+            tc_infer_expr(obj_expr)
+            tc_infer_expr(val_expr)
+        },
+        StmtKind::SIndexAssign(obj_expr, idx_expr, val_expr) => {
+            tc_infer_expr(obj_expr)
+            tc_infer_expr(idx_expr)
+            tc_infer_expr(val_expr)
+        },
+        StmtKind::SFuncDef(fdef) => {
+            tc_register_function(fdef)
+            tc_check_function_body(fdef)
+        },
+        StmtKind::SAsyncFuncDef(fdef) => {
+            tc_register_function(fdef)
+            tc_check_function_body(fdef)
+        },
+        StmtKind::SReturn(expr) => {
+            if tc_func_depth == 0 {
+                tc_emit_error("E302", line, "'return' used outside of a function")
+            }
+            if expr != null { tc_infer_expr(expr) }
+        },
+        StmtKind::SBreak(_, _) => {
+            if tc_loop_depth == 0 {
+                tc_emit_error("E300", line, "'break' used outside of a loop")
+            }
+        },
+        StmtKind::SContinue(_) => {
+            if tc_loop_depth == 0 {
+                tc_emit_error("E301", line, "'continue' used outside of a loop")
+            }
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            const cond_type = tc_infer_expr(cond)
+            tc_loop_depth = tc_loop_depth + 1
+            tc_push_scope()
+            tc_check_block(body)
+            tc_pop_scope()
+            tc_loop_depth = tc_loop_depth - 1
+        },
+        StmtKind::SForLoop(_, var_expr, iter_expr, body) => {
+            const iter_type = tc_infer_expr(iter_expr)
+            tc_loop_depth = tc_loop_depth + 1
+            tc_push_scope()
+            const var_name = match var_expr {
+                ExprKind::EVariable(n) => n,
+                _ => "_",
+            }
+            tc_define_var(var_name, false, TYPE_NULL, line)
+            tc_check_block(body)
+            tc_pop_scope()
+            tc_loop_depth = tc_loop_depth - 1
+        },
+        StmtKind::SDoWhile(_, body, cond) => {
+            tc_loop_depth = tc_loop_depth + 1
+            tc_push_scope()
+            tc_check_block(body)
+            tc_pop_scope()
+            tc_infer_expr(cond)
+            tc_loop_depth = tc_loop_depth - 1
+        },
+        StmtKind::SMatch(subject, arms) => {
+            tc_infer_expr(subject)
+            tc_check_match_arms(arms)
+        },
+        StmtKind::SOutput(expr) => { tc_infer_expr(expr) },
+        StmtKind::SExprStmt(expr) => { tc_infer_expr(expr) },
+        StmtKind::SStructDef(name, fields, _) => {
+            tc_structs[name] = fields
+        },
+        StmtKind::SEnumDef(name, variants, _) => {
+            tc_enums[name] = variants
+            tc_check_enum_variants(name, variants, line)
+        },
+        StmtKind::SThrow(expr) => { tc_infer_expr(expr) },
+        StmtKind::STryCatch(try_block, catch_var, catch_block, finally_block) => {
+            tc_push_scope()
+            tc_check_block(try_block)
+            tc_pop_scope()
+            tc_push_scope()
+            if catch_var != null { tc_define_var(catch_var, false, TYPE_NULL, line) }
+            tc_check_block(catch_block)
+            tc_pop_scope()
+            if finally_block != null {
+                tc_push_scope()
+                tc_check_block(finally_block)
+                tc_pop_scope()
+            }
+        },
+        StmtKind::STestDef(_, body) => {
+            tc_push_scope()
+            tc_check_block(body)
+            tc_pop_scope()
+        },
+        StmtKind::SImplBlock(_, methods) => {
+            for m in methods { tc_check_function_body(m) }
+        },
+        StmtKind::SImplTrait(_, _, methods) => {
+            for m in methods { tc_check_function_body(m) }
+        },
+        StmtKind::STypeAlias(alias, target) => {
+            tc_register_type_alias(alias, target)
+            tc_check_circular_alias(alias)
+        },
+        StmtKind::SLetDestructure(pattern, _, expr) => {
+            tc_infer_expr(expr)
+        },
+        StmtKind::SIncrement(name) => {
+            tc_check_var_exists(name, line)
+            tc_check_var_mutable(name, line)
+        },
+        StmtKind::SDecrement(name) => {
+            tc_check_var_exists(name, line)
+            tc_check_var_mutable(name, line)
+        },
+        _ => {},
+    }
+}
+
+func tc_check_assignment(name, typ, line) {
+    // Check existence
+    let found = false
+    let is_mutable = false
+    let idx = len(tc_scopes) - 1
+    while idx >= 0 {
+        if tc_scopes[idx].has(name) {
+            found = true
+            const info = tc_scopes[idx][name]
+            is_mutable = info["mutable"]
+            // Update type and mark used/mutated
+            info["typ"] = typ
+            info["used"] = true
+            tc_scopes[idx][name] = info
+            break
+        }
+        idx = idx - 1
+    }
+    if !found {
+        tc_error_undefined_var(name, line)
+    } else if !is_mutable {
+        tc_emit_error("E404", line, f"cannot assign to immutable variable '{name}'")
+    }
+}
+
+func tc_check_var_exists(name, line) {
+    let idx = len(tc_scopes) - 1
+    while idx >= 0 {
+        if tc_scopes[idx].has(name) {
+            const info = tc_scopes[idx][name]
+            info["used"] = true
+            tc_scopes[idx][name] = info
+            return true
+        }
+        idx = idx - 1
+    }
+    tc_error_undefined_var(name, line)
+    false
+}
+
+func tc_check_var_mutable(name, line) {
+    let idx = len(tc_scopes) - 1
+    while idx >= 0 {
+        if tc_scopes[idx].has(name) {
+            const info = tc_scopes[idx][name]
+            if !info["mutable"] {
+                tc_emit_error("E404", line, f"cannot assign to immutable variable '{name}'")
+                return false
+            }
+            return true
+        }
+        idx = idx - 1
+    }
+    false
+}
+
+func tc_register_function(fdef) {
+    if fdef == null { return null }
+    const name = fdef["name"]
+    const params = if fdef.has("params") { fdef["params"] } else { [] }
+    const n_params = len(params)
+    // Count required params (no default value, not rest)
+    let min_arity = 0
+    let has_rest = false
+    for p in params {
+        if typeof(p) == "map" {
+            if p.has("rest") && p["rest"] { has_rest = true }
+            else if !p.has("default") || p["default"] == null { min_arity = min_arity + 1 }
+        } else {
+            min_arity = min_arity + 1
+        }
+    }
+    tc_functions[name] = {
+        "arity": n_params,
+        "min_arity": min_arity,
+        "has_rest": has_rest,
+        "line": 0,
+    }
+}
+
+func tc_check_function_body(fdef) {
+    if fdef == null { return null }
+    tc_push_scope()
+    tc_func_depth = tc_func_depth + 1
+    const saved_loop = tc_loop_depth
+    tc_loop_depth = 0
+    // Define params
+    const params = if fdef.has("params") { fdef["params"] } else { [] }
+    for p in params {
+        const pname = if typeof(p) == "map" { p["name"] } else { to_string(p) }
+        tc_define_var(pname, false, TYPE_NULL, 0)
+    }
+    // Check body
+    if fdef.has("body") {
+        tc_check_block(fdef["body"])
+    }
+    tc_loop_depth = saved_loop
+    tc_func_depth = tc_func_depth - 1
+    tc_pop_scope()
+}
+
+func tc_check_block(block) {
+    if block == null { return null }
+    if typeof(block) == "map" && block.has("statements") {
+        for stmt in block["statements"] {
+            tc_check_statement(stmt)
+        }
+    }
+}
+
+func tc_check_expr(expr) {
+    tc_infer_expr(expr)
+}
+
+func tc_check_match_arms(arms) {
+    let has_wildcard = false
+    for arm in arms {
+        if typeof(arm) == "map" {
+            if arm.has("pattern") {
+                const p = arm["pattern"]
+                if p == "_" || p == "wildcard" { has_wildcard = true }
+            }
+            if arm.has("body") {
+                tc_push_scope()
+                tc_check_block(arm["body"])
+                tc_pop_scope()
+            }
+        }
+    }
+    if !has_wildcard && len(arms) > 0 {
+        tc_lint_emit("W203", 0, "non-exhaustive match: consider adding a wildcard '_' arm")
+    }
+}
+
+func tc_check_enum_variants(name, variants, line) {
+    let seen = []
+    for v in variants {
+        const vname = if typeof(v) == "map" && v.has("name") { v["name"] } else { to_string(v) }
+        if seen.contains(vname) {
+            tc_emit_error("E402", line, f"duplicate variant '{vname}' in enum '{name}'")
+        }
+        seen.push(vname)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Complete Type Check Entry Point
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_program(prog) {
+    // Reset state
+    tc_scopes = [tc_new_scope()]
+    tc_errors = []
+    tc_warnings = []
+    tc_functions = {"__s": true}
+    tc_enums = {"__s": true}
+    tc_structs = {"__s": true}
+    tc_loop_depth = 0
+    tc_func_depth = 0
+    tc_type_alias_map = {"__s": true}
+    tc_generic_params = {"__s": true}
+    tc_generic_constraints = {"__s": true}
+    tc_traits = {"__s": true}
+    tc_trait_impls = {"__s": true}
+    tc_non_null_vars = {"__s": true}
+
+    // First pass: collect all function definitions and type declarations
+    if prog.has("statements") {
+        for stmt in prog["statements"] {
+            tc_collect_declarations(stmt)
+        }
+    }
+
+    // Second pass: check all statements
+    if prog.has("statements") {
+        for stmt in prog["statements"] {
+            tc_check_statement(stmt)
+        }
+    }
+
+    // Pop global scope to generate unused variable warnings
+    tc_pop_scope()
+
+    {
+        "errors": tc_errors,
+        "warnings": tc_warnings,
+    }
+}
+
+func tc_collect_declarations(stmt) {
+    if typeof(stmt) != "map" || !stmt.has("kind") { return null }
+    match stmt.kind {
+        StmtKind::SFuncDef(fdef) => { tc_register_function(fdef) },
+        StmtKind::SAsyncFuncDef(fdef) => { tc_register_function(fdef) },
+        StmtKind::SStructDef(name, fields, _) => { tc_structs[name] = fields },
+        StmtKind::SEnumDef(name, variants, _) => { tc_enums[name] = variants },
+        StmtKind::SInterfaceDef(name, methods, _) => { tc_register_trait(name, methods) },
+        StmtKind::STypeAlias(alias, target) => { tc_register_type_alias(alias, target) },
+        _ => {},
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Dead Code Detection
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_dead_code(stmts) {
+    let found_terminator = false
+    let terminator_line = 0
+    for stmt in stmts {
+        if found_terminator {
+            const line = if typeof(stmt) == "map" && stmt.has("line") { stmt["line"] } else { 0 }
+            tc_lint_emit("W103", line, f"unreachable code after line {terminator_line}")
+            break
+        }
+        if typeof(stmt) == "map" && stmt.has("kind") {
+            match stmt.kind {
+                StmtKind::SReturn(_) => {
+                    found_terminator = true
+                    terminator_line = if stmt.has("line") { stmt["line"] } else { 0 }
+                },
+                StmtKind::SThrow(_) => {
+                    found_terminator = true
+                    terminator_line = if stmt.has("line") { stmt["line"] } else { 0 }
+                },
+                StmtKind::SBreak(_, _) => {
+                    found_terminator = true
+                    terminator_line = if stmt.has("line") { stmt["line"] } else { 0 }
+                },
+                StmtKind::SContinue(_) => {
+                    found_terminator = true
+                    terminator_line = if stmt.has("line") { stmt["line"] } else { 0 }
+                },
+                _ => {},
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Constant Folding / Propagation
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_const_values = {}
+
+func tc_register_const(name, value) {
+    tc_const_values[name] = value
+}
+
+func tc_get_const(name) {
+    if tc_const_values.has(name) { tc_const_values[name] } else { null }
+}
+
+func tc_try_fold_expr(expr) {
+    if typeof(expr) != "map" || !expr.has("kind") { return null }
+    match expr.kind {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(n) => n,
+                Literal::FloatLit(f) => f,
+                Literal::StringLit(s) => s,
+                Literal::BoolLit(b) => b,
+                _ => null,
+            }
+        },
+        ExprKind::EVariable(name) => tc_get_const(name),
+        ExprKind::EBinaryOp(op, left, right) => {
+            const lv = tc_try_fold_expr(left)
+            const rv = tc_try_fold_expr(right)
+            if lv == null || rv == null { return null }
+            tc_fold_binop(op, lv, rv)
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const v = tc_try_fold_expr(operand)
+            if v == null { return null }
+            match op {
+                UnOp::Neg => 0 - v,
+                UnOp::Not => !v,
+            }
+        },
+        _ => null,
+    }
+}
+
+func tc_fold_binop(op, lv, rv) {
+    match op {
+        BinOp::Add => lv + rv,
+        BinOp::Sub => lv - rv,
+        BinOp::Mul => lv * rv,
+        BinOp::Div => if rv != 0 { lv / rv } else { null },
+        BinOp::Mod => if rv != 0 { lv % rv } else { null },
+        BinOp::Eq => lv == rv,
+        BinOp::NotEq => lv != rv,
+        BinOp::Lt => lv < rv,
+        BinOp::Gt => lv > rv,
+        BinOp::LtEq => lv <= rv,
+        BinOp::GtEq => lv >= rv,
+        _ => null,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Binary Operation Literal Checks
+// Warning on self-comparison, division by zero, etc.
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_binop_literals(op, left, right, line) {
+    // W205: comparing a value to itself
+    if (op == BinOp::Eq || op == BinOp::NotEq || op == BinOp::Lt || op == BinOp::Gt) {
+        if tc_exprs_identical(left, right) {
+            tc_lint_emit("W205", line, "comparing a value to itself is always true (==) or false (!=)")
+        }
+    }
+    // E104: division by zero literal
+    if op == BinOp::Div || op == BinOp::Mod {
+        if typeof(right) == "map" && right.has("kind") {
+            match right.kind {
+                ExprKind::ELiteral(Literal::IntLit(0)) => {
+                    tc_emit_error("E104", line, "division by zero")
+                },
+                ExprKind::ELiteral(Literal::FloatLit(0.0)) => {
+                    tc_emit_error("E104", line, "division by zero (float)")
+                },
+                _ => {},
+            }
+        }
+    }
+}
+
+func tc_exprs_identical(a, b) {
+    // Simple identity check: both are the same variable
+    if typeof(a) == "map" && typeof(b) == "map" && a.has("kind") && b.has("kind") {
+        match a.kind {
+            ExprKind::EVariable(name_a) => {
+                match b.kind {
+                    ExprKind::EVariable(name_b) => return name_a == name_b,
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+    }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Struct Field Validation
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_struct_construct(name, fields, line) {
+    if !tc_structs.has(name) { return null }
+    const def_fields = tc_structs[name]
+    if typeof(def_fields) != "array" { return null }
+    // Check for missing required fields
+    let provided = []
+    for f in fields {
+        const fname = if typeof(f) == "array" { f[0] } else { to_string(f) }
+        provided.push(fname)
+    }
+    for df in def_fields {
+        const dname = if typeof(df) == "map" && df.has("name") { df["name"] } else { to_string(df) }
+        const has_default = typeof(df) == "map" && df.has("default") && df["default"] != null
+        if !provided.contains(dname) && !has_default {
+            tc_emit_error("E406", line, f"missing required field '{dname}' in struct '{name}'")
+        }
+    }
+    // Check for extra fields
+    let def_names = []
+    for df in def_fields {
+        const dname = if typeof(df) == "map" && df.has("name") { df["name"] } else { to_string(df) }
+        def_names.push(dname)
+    }
+    for p in provided {
+        if !def_names.contains(p) {
+            tc_lint_emit("W114", line, f"extra field '{p}' not defined in struct '{name}'")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Enum Exhaustiveness Checking
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_match_exhaustive(subject_type, arms) {
+    // Check if all enum variants are covered
+    if typeof(subject_type) != "string" { return true }
+    // Look for the enum name from the subject type
+    if !tc_enums.has(subject_type) { return true }
+    const variants = tc_enums[subject_type]
+    if typeof(variants) != "array" { return true }
+    let covered = []
+    let has_wildcard = false
+    for arm in arms {
+        if typeof(arm) != "map" { continue }
+        if arm.has("pattern") {
+            const p = arm["pattern"]
+            if p == "_" || p == "wildcard" { has_wildcard = true }
+            if typeof(p) == "map" && p.has("variant") {
+                covered.push(p["variant"])
+            }
+        }
+    }
+    if has_wildcard { return true }
+    // Check if all variants are covered
+    for v in variants {
+        const vname = if typeof(v) == "map" && v.has("name") { v["name"] } else { to_string(v) }
+        if !covered.contains(vname) { return false }
+    }
+    true
+}
+
+func tc_check_bool_exhaustive(arms) {
+    let has_true = false
+    let has_false = false
+    let has_wildcard = false
+    for arm in arms {
+        if typeof(arm) != "map" { continue }
+        if arm.has("pattern") {
+            const p = arm["pattern"]
+            if p == "_" || p == "wildcard" { has_wildcard = true }
+            if typeof(p) == "map" && p.has("kind") {
+                match p.kind {
+                    ExprKind::ELiteral(Literal::BoolLit(true)) => { has_true = true },
+                    ExprKind::ELiteral(Literal::BoolLit(false)) => { has_false = true },
+                    _ => {},
+                }
+            }
+        }
+    }
+    has_wildcard || (has_true && has_false)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Import Validation
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_used_imports = {}
+let tc_import_locations = {}
+
+func tc_register_import(module_name, line) {
+    // Check if it's a known stdlib module
+    if !KNOWN_STDLIB_MODULES.contains(module_name) {
+        tc_lint_emit("W101", line, f"unknown stdlib module '{module_name}'")
+    }
+    tc_import_locations[module_name] = line
+}
+
+func tc_mark_import_used(module_name) {
+    tc_used_imports[module_name] = true
+}
+
+func tc_check_unused_imports() {
+    for module in tc_import_locations.keys() {
+        if module == "__s" { continue }
+        if !tc_used_imports.has(module) {
+            const line = tc_import_locations[module]
+            tc_lint_emit("W101", line, f"unused import '{module}'")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Unused Function Detection
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_used_functions = {}
+
+func tc_mark_function_used(name) {
+    tc_used_functions[name] = true
+}
+
+func tc_check_unused_functions() {
+    for name in tc_functions.keys() {
+        if name == "__s" { continue }
+        if starts_with(name, "_") { continue }
+        if starts_with(name, "test_") { continue }
+        if name == "main" { continue }
+        if !tc_used_functions.has(name) {
+            const fn_info = tc_functions[name]
+            const line = if typeof(fn_info) == "map" && fn_info.has("line") { fn_info["line"] } else { 0 }
+            tc_lint_emit("W102", line, f"unused function '{name}'")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Type Annotation Resolution
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_resolve_type_annotation(annotation) {
+    if annotation == null { return TYPE_NULL }
+    const s = to_string(annotation)
+    // Check aliases first
+    const resolved = tc_resolve_type_alias(s)
+    match resolved {
+        "int" | "Int" | "int64" | "Int64" | "i64" => TYPE_INT,
+        "float" | "Float" | "float64" | "Float64" | "f64" => TYPE_FLOAT,
+        "string" | "String" | "str" => TYPE_STRING,
+        "bool" | "Bool" | "boolean" => TYPE_BOOL,
+        "array" | "Array" | "List" => TYPE_ARRAY,
+        "map" | "Map" | "Dict" | "Object" => TYPE_MAP,
+        "null" | "Null" | "void" | "Void" | "()" => TYPE_NULL,
+        "set" | "Set" => TYPE_SET,
+        "bytes" | "Bytes" => TYPE_BYTES,
+        "tuple" | "Tuple" => TYPE_TUPLE,
+        _ => {
+            // Check if it's a known struct or enum
+            if tc_structs.has(resolved) { return TYPE_MAP }
+            if tc_enums.has(resolved) { return TYPE_MAP }
+            // Check generic params
+            if tc_is_generic_param(resolved) { return tc_resolve_generic(resolved) }
+            TYPE_NULL
+        },
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Redundant Code Detection
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_redundant_if(cond, line) {
+    // Check for `if true` or `if false`
+    if typeof(cond) == "map" && cond.has("kind") {
+        match cond.kind {
+            ExprKind::ELiteral(Literal::BoolLit(true)) => {
+                tc_lint_emit("W204", line, "condition is always true")
+            },
+            ExprKind::ELiteral(Literal::BoolLit(false)) => {
+                tc_lint_emit("W204", line, "condition is always false; code is unreachable")
+            },
+            _ => {},
+        }
+    }
+}
+
+func tc_check_redundant_assignment(name, expr, line) {
+    // Check for `x = x` (self-assignment)
+    if typeof(expr) == "map" && expr.has("kind") {
+        match expr.kind {
+            ExprKind::EVariable(rhs_name) => {
+                if name == rhs_name {
+                    tc_lint_emit("W201", line, f"assigning variable '{name}' to itself")
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Shadowing Detection
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_shadowing(name, line) {
+    // Check if this variable shadows one in an outer scope
+    let depth = len(tc_scopes) - 2  // Skip current scope
+    while depth >= 0 {
+        if tc_scopes[depth].has(name) {
+            const outer = tc_scopes[depth][name]
+            const outer_line = outer["line"]
+            // Don't warn for variables starting with _
+            if !starts_with(name, "_") {
+                tc_lint_emit("W113", line, f"variable '{name}' shadows outer variable declared at line {outer_line}")
+            }
+            return true
+        }
+        depth = depth - 1
+    }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Unreachable Pattern Detection in Match
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_unreachable_patterns(arms) {
+    let seen_patterns = []
+    let wildcard_idx = -1
+    let idx = 0
+    for arm in arms {
+        if typeof(arm) != "map" { idx = idx + 1; continue }
+        const p = if arm.has("pattern") { arm["pattern"] } else { null }
+        if p == "_" || p == "wildcard" {
+            if wildcard_idx >= 0 {
+                tc_lint_emit("W202", 0, f"duplicate wildcard pattern in match arm {idx + 1}")
+            }
+            wildcard_idx = idx
+        }
+        // Check if subsequent arms after wildcard are unreachable
+        if wildcard_idx >= 0 && idx > wildcard_idx {
+            tc_lint_emit("W202", 0, f"unreachable pattern in match arm {idx + 1} (wildcard at arm {wildcard_idx + 1})")
+        }
+        // Check for duplicate literal patterns
+        const p_str = to_string(p)
+        if seen_patterns.contains(p_str) && p != "_" && p != "wildcard" {
+            tc_lint_emit("W202", 0, f"duplicate pattern in match arm {idx + 1}")
+        }
+        seen_patterns.push(p_str)
+        idx = idx + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Method Resolution Lookup Table
+// Maps (receiver_type, method_name) -> operation name for type checking
+// ═══════════════════════════════════════════════════════════════════
+
+const MUTATING_METHODS = [
+    "push", "pop", "set", "remove", "insert",
+    "delete", "merge", "sort", "reverse",
+    "shift", "filter_nulls",
+]
+
+func tc_is_mutating_method(method) {
+    MUTATING_METHODS.contains(method)
+}
+
+func tc_check_method_receiver_mutability(obj_expr, method, line) {
+    if !tc_is_mutating_method(method) { return null }
+    if typeof(obj_expr) == "map" && obj_expr.has("kind") {
+        match obj_expr.kind {
+            ExprKind::EVariable(name) => {
+                let idx = len(tc_scopes) - 1
+                while idx >= 0 {
+                    if tc_scopes[idx].has(name) {
+                        const info = tc_scopes[idx][name]
+                        if !info["mutable"] {
+                            tc_emit_error("E404", line, f"calling mutating method '.{method}()' on immutable variable '{name}'")
+                        }
+                        return null
+                    }
+                    idx = idx - 1
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Complete Finalize — check unused items
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_finalize() {
+    tc_check_unused_imports()
+    tc_check_unused_functions()
+    {
+        "errors": tc_errors,
+        "warnings": tc_warnings,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Return Type Inference from Function Bodies
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_infer_function_return_type(fdef) {
+    if fdef == null { return TYPE_NULL }
+    // If explicit return type is declared, use it
+    if typeof(fdef) == "map" && fdef.has("return_type") && fdef["return_type"] != null {
+        return tc_resolve_type_annotation(fdef["return_type"])
+    }
+    // Collect all return statement types and body tail type
+    let return_types = []
+    if fdef.has("body") {
+        const body = fdef["body"]
+        const body_type = tc_infer_block_type(body)
+        if body_type != TYPE_NULL { return_types.push(body_type) }
+        // Scan for return statements
+        tc_collect_return_types(body, return_types)
+    }
+    if len(return_types) == 0 { return TYPE_NULL }
+    // Unify all return types
+    let result = return_types[0]
+    let i = 1
+    while i < len(return_types) {
+        result = tc_unify_types(result, return_types[i])
+        i = i + 1
+    }
+    result
+}
+
+func tc_collect_return_types(block, types) {
+    if typeof(block) != "map" || !block.has("statements") { return null }
+    for stmt in block["statements"] {
+        if typeof(stmt) != "map" || !stmt.has("kind") { continue }
+        match stmt.kind {
+            StmtKind::SReturn(expr) => {
+                if expr != null {
+                    types.push(tc_infer_expr(expr))
+                } else {
+                    types.push(TYPE_NULL)
+                }
+            },
+            StmtKind::SIf(_, then_block, else_block) => {
+                tc_collect_return_types(then_block, types)
+                if else_block != null { tc_collect_return_types(else_block, types) }
+            },
+            StmtKind::SWhileLoop(_, _, body) => {
+                tc_collect_return_types(body, types)
+            },
+            StmtKind::SForLoop(_, _, _, body) => {
+                tc_collect_return_types(body, types)
+            },
+            StmtKind::STryCatch(try_block, _, catch_block, _) => {
+                tc_collect_return_types(try_block, types)
+                tc_collect_return_types(catch_block, types)
+            },
+            _ => {},
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Param-Argument Type Compatibility Checking
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_arg_types(fn_name, params, args, line) {
+    let i = 0
+    while i < len(params) && i < len(args) {
+        const param = params[i]
+        const arg = args[i]
+        const param_type = if typeof(param) == "map" && param.has("type") {
+            tc_resolve_type_annotation(param["type"])
+        } else { TYPE_NULL }
+        if param_type == TYPE_NULL { i = i + 1; continue }
+        const arg_type = tc_infer_expr(arg)
+        if arg_type == TYPE_NULL { i = i + 1; continue }
+        if arg_type != param_type && !tc_types_compatible(arg_type, param_type) {
+            const pname = if typeof(param) == "map" && param.has("name") { param["name"] } else { f"arg{i}" }
+            tc_emit_error("E103", line, f"type mismatch on '{pname}': got {arg_type} but expected {param_type}")
+        }
+        i = i + 1
+    }
+}
+
+func tc_types_compatible(actual, expected) {
+    if actual == expected { return true }
+    if actual == TYPE_NULL || expected == TYPE_NULL { return true }
+    // int is compatible with float
+    if actual == TYPE_INT && expected == TYPE_FLOAT { return true }
+    // array/tuple compatibility
+    if actual == TYPE_TUPLE && expected == TYPE_ARRAY { return true }
+    if actual == TYPE_ARRAY && expected == TYPE_TUPLE { return true }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Struct Method Resolution
+// ═══════════════════════════════════════════════════════════════════
+
+let tc_struct_methods = {}
+
+func tc_register_struct_method(struct_name, method_name, params, return_type) {
+    const key = f"{struct_name}.{method_name}"
+    tc_struct_methods[key] = {
+        "params": params,
+        "return_type": return_type,
+    }
+}
+
+func tc_resolve_struct_method(struct_name, method_name) {
+    const key = f"{struct_name}.{method_name}"
+    if tc_struct_methods.has(key) { return tc_struct_methods[key] }
+    null
+}
+
+func tc_infer_struct_method_return(struct_name, method_name) {
+    const m = tc_resolve_struct_method(struct_name, method_name)
+    if m != null && m.has("return_type") { return m["return_type"] }
+    TYPE_NULL
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Enum Variant Type Inference
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_infer_enum_variant_type(enum_name, variant_name) {
+    if !tc_enums.has(enum_name) { return TYPE_NULL }
+    const variants = tc_enums[enum_name]
+    if typeof(variants) != "array" { return TYPE_NULL }
+    for v in variants {
+        const vname = if typeof(v) == "map" && v.has("name") { v["name"] } else { to_string(v) }
+        if vname == variant_name {
+            // Enum variant with fields returns a map
+            if typeof(v) == "map" && v.has("fields") && len(v["fields"]) > 0 {
+                return TYPE_MAP
+            }
+            // Enum variant without fields returns a map with metadata
+            return TYPE_MAP
+        }
+    }
+    TYPE_NULL
+}
+
+func tc_check_enum_construct(enum_name, variant_name, args, line) {
+    if !tc_enums.has(enum_name) {
+        tc_emit_error("E201", line, f"undefined enum '{enum_name}'")
+        return null
+    }
+    const variants = tc_enums[enum_name]
+    if typeof(variants) != "array" { return null }
+    let found = false
+    let expected_fields = 0
+    for v in variants {
+        const vname = if typeof(v) == "map" && v.has("name") { v["name"] } else { to_string(v) }
+        if vname == variant_name {
+            found = true
+            if typeof(v) == "map" && v.has("fields") {
+                expected_fields = len(v["fields"])
+            }
+            break
+        }
+    }
+    if !found {
+        tc_emit_error("E201", line, f"undefined variant '{variant_name}' in enum '{enum_name}'")
+        return null
+    }
+    if len(args) != expected_fields {
+        tc_emit_error("E405", line, f"enum variant '{enum_name}::{variant_name}' expects {expected_fields} fields, got {len(args)}")
+    }
+    // Infer all arg types for side effects
+    for a in args { tc_infer_expr(a) }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Integer Overflow Detection
+// ═══════════════════════════════════════════════════════════════════
+
+const MAX_SAFE_INT = 9007199254740991
+const MIN_SAFE_INT = -9007199254740991
+
+func tc_check_integer_overflow(val, line) {
+    if typeof(val) == "int64" {
+        if val > MAX_SAFE_INT || val < MIN_SAFE_INT {
+            tc_lint_emit("W114", line, f"integer literal {val} may cause precision loss in some contexts")
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Recursive Type Detection
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_recursive_struct(name) {
+    if !tc_structs.has(name) { return false }
+    const fields = tc_structs[name]
+    if typeof(fields) != "array" { return false }
+    // Check if any field directly references this struct
+    for f in fields {
+        const ftype = if typeof(f) == "map" && f.has("type") { f["type"] } else { null }
+        if ftype != null && to_string(ftype) == name {
+            return true
+        }
+    }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Utility — diagnostic formatting
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_format_diagnostic(diag) {
+    const severity = if diag.has("code") && diag["code"].starts_with("W") { "warning" } else { "error" }
+    const code = if diag.has("code") { f"[{diag[\"code\"]}] " } else { "" }
+    const line = if diag.has("line") && diag["line"] > 0 { f"line {diag[\"line\"]}: " } else { "" }
+    const msg = if diag.has("message") { diag["message"] } else { "unknown" }
+    f"{severity}: {line}{code}{msg}"
+}
+
+func tc_format_all_diagnostics(result) {
+    let lines = []
+    if result.has("errors") {
+        for e in result["errors"] {
+            lines.push(tc_format_diagnostic(e))
+        }
+    }
+    if result.has("warnings") {
+        for w in result["warnings"] {
+            lines.push(tc_format_diagnostic(w))
+        }
+    }
+    lines.join("\n")
+}
+
+func tc_has_errors(result) {
+    result.has("errors") && len(result["errors"]) > 0
+}
+
+func tc_error_count(result) {
+    if result.has("errors") { len(result["errors"]) } else { 0 }
+}
+
+func tc_warning_count(result) {
+    if result.has("warnings") { len(result["warnings"]) } else { 0 }
+}
+
+func tc_total_diagnostic_count(result) {
+    tc_error_count(result) + tc_warning_count(result)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Numeric Type Promotion Rules
+// ═══════════════════════════════════════════════════════════════════
+
+// Full numeric type lattice for promotion:
+// int32 < int64 < float64
+// uint32 < uint64 < float64
+// float32 < float64
+
+func tc_promote_numeric(a, b) {
+    if a == b { return a }
+    if a == TYPE_NULL || b == TYPE_NULL { return TYPE_NULL }
+    // Float always wins
+    if a == TYPE_FLOAT || b == TYPE_FLOAT { return TYPE_FLOAT }
+    if a == "float32" || b == "float32" { return TYPE_FLOAT }
+    // Int64 wins over smaller ints
+    if a == TYPE_INT || b == TYPE_INT { return TYPE_INT }
+    if a == "int32" || b == "int32" { return TYPE_INT }
+    if a == "uint64" || b == "uint64" { return TYPE_INT }
+    if a == "uint32" || b == "uint32" { return TYPE_INT }
+    TYPE_NULL
+}
+
+func tc_is_numeric_type(t) {
+    t == TYPE_INT || t == TYPE_FLOAT ||
+    t == "int32" || t == "uint32" || t == "uint64" ||
+    t == "float32" || t == "i32" || t == "u32" ||
+    t == "u64" || t == "f32" || t == "f64"
+}
+
+func tc_is_integer_type(t) {
+    t == TYPE_INT || t == "int32" || t == "uint32" || t == "uint64" ||
+    t == "i32" || t == "u32" || t == "u64" || t == "i64"
+}
+
+func tc_is_float_type(t) {
+    t == TYPE_FLOAT || t == "float32" || t == "f32" || t == "f64"
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Comprehensive Expression Checking with Side Effects
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_check_all_exprs_in_block(block) {
+    if block == null { return null }
+    if typeof(block) != "map" || !block.has("statements") { return null }
+    for stmt in block["statements"] {
+        if typeof(stmt) != "map" || !stmt.has("kind") { continue }
+        const line = if stmt.has("line") { stmt["line"] } else { 0 }
+        match stmt.kind {
+            StmtKind::SExprStmt(expr) => {
+                // Check for pure expressions used as statements (no side effects)
+                const is_pure = tc_is_pure_expr(expr)
+                if is_pure {
+                    tc_lint_emit("W111", line, "expression result is unused")
+                }
+                tc_infer_expr(expr)
+            },
+            _ => tc_check_statement(stmt),
+        }
+    }
+}
+
+func tc_is_pure_expr(expr) {
+    if typeof(expr) != "map" || !expr.has("kind") { return false }
+    match expr.kind {
+        ExprKind::ELiteral(_) => true,
+        ExprKind::EVariable(_) => true,
+        ExprKind::EBinaryOp(_, _, _) => true,
+        ExprKind::EUnaryOp(_, _) => true,
+        ExprKind::EFieldAccess(_, _) => true,
+        ExprKind::EIndex(_, _) => true,
+        // Calls, method calls, assignments have side effects
+        ExprKind::ECall(_, _, _) => false,
+        ExprKind::EMethodCall(_, _, _, _) => false,
+        // Blocks, ifs, matches may have side effects
+        ExprKind::EBlock(_) => false,
+        ExprKind::EIfElse(_, _, _) => false,
+        _ => false,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: For-Loop Variable Type Inference
+// Infer the iteration variable type from the iterable
+// ═══════════════════════════════════════════════════════════════════
+
+func tc_infer_iteration_var_type(iterable_type) {
+    match iterable_type {
+        "array" => TYPE_NULL,      // Element type unknown
+        "string" => TYPE_STRING,   // Characters are strings
+        "map" => TYPE_MAP,         // Map entries are {key, value} maps
+        "set" => TYPE_NULL,        // Element type unknown
+        _ => TYPE_NULL,
+    }
+}
+
+func tc_infer_range_element_type(start_type, end_type) {
+    if start_type == TYPE_INT && end_type == TYPE_INT { return TYPE_INT }
+    if tc_is_numeric_type(start_type) || tc_is_numeric_type(end_type) { return TYPE_INT }
+    TYPE_INT
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: API — check a source string end-to-end
+// ═══════════════════════════════════════════════════════════════════
+
+func type_check_source(code) {
+    const prog = parse(code)
+    tc_check_program(prog)
+}
+
+func type_check_and_format(code) {
+    const result = type_check_source(code)
+    tc_format_all_diagnostics(result)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION: Quick-check entry point — returns bool
+// ═══════════════════════════════════════════════════════════════════
+
+func type_check_ok(code) {
+    const result = type_check_source(code)
+    !tc_has_errors(result)
+}
