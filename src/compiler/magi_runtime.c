@@ -608,8 +608,19 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     }
 
     // Comparison
-    if (strcmp(name, "__eq") == 0) return magi_make_bool(a == b);
-    if (strcmp(name, "__ne") == 0) return magi_make_bool(a != b);
+    if (strcmp(name, "__eq") == 0) {
+        if (a == b) return magi_make_bool(1);
+        // String content equality: two different string pointers may have same content
+        if (magi_get_tag(a) == TAG_STRING && magi_get_tag(b) == TAG_STRING)
+            return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) == 0);
+        return magi_make_bool(0);
+    }
+    if (strcmp(name, "__ne") == 0) {
+        if (a == b) return magi_make_bool(0);
+        if (magi_get_tag(a) == TAG_STRING && magi_get_tag(b) == TAG_STRING)
+            return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) != 0);
+        return magi_make_bool(1);
+    }
     if (strcmp(name, "__lt") == 0) {
         if (magi_get_tag(a) == TAG_I64 && magi_get_tag(b) == TAG_I64)
             return magi_make_bool(magi_sext48(magi_get_payload(a)) < magi_sext48(magi_get_payload(b)));
