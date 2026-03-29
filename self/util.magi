@@ -5877,9 +5877,9 @@ func regex_replace_backrefs(match_result, replacement) {
     if match_result == null { return result }
     let i = 0
     while i < len(match_result) {
-        const ref = "\\" + to_string(i)
-        if result.contains(ref) {
-            result = result.replace(ref, to_string(match_result[i]))
+        const backref = "\\" + to_string(i)
+        if result.contains(backref) {
+            result = result.replace(backref, to_string(match_result[i]))
         }
         i = i + 1
     }

@@ -6403,11 +6403,11 @@ func op_array_partition(args) {
 func op_array_scan(args) {
     const arr = args[0]
     const init = args[1]
-    const fn = args[2]
+    const cb = args[2]
     let acc = init
     let result = [acc]
     for item in arr {
-        acc = fn(acc, item)
+        acc = cb(acc, item)
         result.push(acc)
     }
     result
@@ -6417,11 +6417,11 @@ func op_array_scan(args) {
 
 func op_map_map_keys(args) {
     const m = args[0]
-    const fn = args[1]
+    const cb = args[1]
     let result = {"__s": true}
     for key in m.keys() {
         if key == "__s" { continue }
-        const new_key = to_string(fn(key))
+        const new_key = to_string(cb(key))
         result[new_key] = m[key]
     }
     result
@@ -6429,11 +6429,11 @@ func op_map_map_keys(args) {
 
 func op_map_map_values(args) {
     const m = args[0]
-    const fn = args[1]
+    const cb = args[1]
     let result = {"__s": true}
     for key in m.keys() {
         if key == "__s" { continue }
-        result[key] = fn(m[key])
+        result[key] = cb(m[key])
     }
     result
 }
@@ -6848,10 +6848,10 @@ func op_reflect_implements(args) {
 }
 
 func op_reflect_arity(args) {
-    const fn = args[0]
-    if typeof(fn) != "map" { return -1 }
-    if fn.has("params") { return len(fn["params"]) }
-    if fn.has("__lambda") && fn.has("params") { return len(fn["params"]) }
+    const cb = args[0]
+    if typeof(fn_val) != "map" { return -1 }
+    if fn_val.has("params") { return len(fn_val["params"]) }
+    if fn_val.has("__lambda") && fn_val.has("params") { return len(fn_val["params"]) }
     -1
 }
 
