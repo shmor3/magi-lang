@@ -4693,3 +4693,561 @@ func parse_postfix(expr) {
     }
     result
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Error Message Generation with Suggestions ──────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Generate a detailed error message with fix suggestions
+func p_error_with_suggestion(msg, suggestion) {
+    const tok = p_peek()
+    const base = f"parse error at {tok.line}:{tok.col}: {msg}"
+    const full = if suggestion != null { f"{base}\n  hint: {suggestion}" } else { base }
+    p_errors.push(full)
+}
+
+// Error for unexpected token
+func p_error_unexpected(expected) {
+    const tok = p_peek()
+    const got = if tok.text != "" { f"'{tok.text}'" } else { token_kind_name(tok.kind) }
+    const msg = f"expected {expected}, got {got}"
+
+    let suggestion = null
+    // Common mistake suggestions
+    if expected == "';'" && tok.kind == TokenKind::LBrace {
+        suggestion = "did you forget a semicolon before this block?"
+    }
+    if expected == "')'" && tok.kind == TokenKind::Semicolon {
+        suggestion = "unmatched parenthesis — check for missing ')'"
+    }
+    if expected == "'{'" && tok.kind == TokenKind::FatArrow {
+        suggestion = "use '{' for block bodies, not '=>'"
+    }
+    if expected == "identifier" && tok.kind == TokenKind::Let {
+        suggestion = "'let' is a keyword; choose a different variable name"
+    }
+    if expected == "identifier" && tok.kind == TokenKind::Func {
+        suggestion = "unexpected 'func' — maybe a missing closing brace above?"
+    }
+    if expected == "expression" && tok.kind == TokenKind::RBrace {
+        suggestion = "empty block or missing expression before '}'"
+    }
+    if expected == "expression" && tok.kind == TokenKind::Eof {
+        suggestion = "unexpected end of file — check for unclosed braces/parens"
+    }
+
+    p_error_with_suggestion(msg, suggestion)
+}
+
+// Error for mismatched delimiters
+func p_error_mismatched(open, close, open_line, open_col) {
+    const tok = p_peek()
+    const msg = f"expected closing '{close}' to match '{open}' opened at {open_line}:{open_col}"
+    p_error_with_suggestion(msg, f"add '{close}' to close the {open}...{close} pair")
+}
+
+// Error for invalid expression
+func p_error_invalid_expr(context) {
+    const tok = p_peek()
+    const got = if tok.text != "" { f"'{tok.text}'" } else { token_kind_name(tok.kind) }
+    let suggestion = null
+    match got {
+        "'='" => {
+            suggestion = "use '==' for comparison, '=' is for assignment"
+        },
+        "'!'" => {
+            suggestion = "use 'not' or '!' before an expression, not standalone"
+        },
+        "'=>'" => {
+            suggestion = "'=>' is only valid in match arms or arrow functions"
+        },
+        _ => {},
+    }
+    p_error_with_suggestion(f"invalid expression in {context}: unexpected {got}", suggestion)
+}
+
+// Error for duplicate declaration
+func p_error_duplicate(name, kind) {
+    p_error_with_suggestion(
+        f"duplicate {kind} '{name}' in this scope",
+        f"rename one of the '{name}' declarations or use a different scope"
+    )
+}
+
+// Error for invalid pattern in match arm
+func p_error_invalid_pattern() {
+    const tok = p_peek()
+    const got = if tok.text != "" { f"'{tok.text}'" } else { token_kind_name(tok.kind) }
+    p_error_with_suggestion(
+        f"invalid match pattern: unexpected {got}",
+        "valid patterns: literal, variable, Enum::Variant, [a, b, ..], {{key: val}}, _"
+    )
+}
+
+// Get human-readable name for token kind
+func token_kind_name(kind) {
+    match kind {
+        TokenKind::Eof => "end of file",
+        TokenKind::Ident => "identifier",
+        TokenKind::IntLit => "integer",
+        TokenKind::FloatLit => "float",
+        TokenKind::StringLit => "string",
+        TokenKind::LParen => "'('",
+        TokenKind::RParen => "')'",
+        TokenKind::LBrace => "'{'",
+        TokenKind::RBrace => "'}'",
+        TokenKind::LBracket => "'['",
+        TokenKind::RBracket => "']'",
+        TokenKind::Comma => "','",
+        TokenKind::Semicolon => "';'",
+        TokenKind::Colon => "':'",
+        TokenKind::Dot => "'.'",
+        TokenKind::Eq => "'='",
+        TokenKind::EqEq => "'=='",
+        TokenKind::FatArrow => "'=>'",
+        TokenKind::Arrow => "'->'",
+        TokenKind::Func => "'func'",
+        TokenKind::Let => "'let'",
+        TokenKind::Const => "'const'",
+        TokenKind::If => "'if'",
+        TokenKind::Else => "'else'",
+        TokenKind::While => "'while'",
+        TokenKind::For => "'for'",
+        TokenKind::In => "'in'",
+        TokenKind::Return => "'return'",
+        TokenKind::Match => "'match'",
+        TokenKind::Break => "'break'",
+        TokenKind::Continue => "'continue'",
+        TokenKind::Import => "'import'",
+        TokenKind::Struct => "'struct'",
+        TokenKind::Enum => "'enum'",
+        TokenKind::Trait => "'trait'",
+        TokenKind::Impl => "'impl'",
+        _ => "token",
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── AST Pretty Printer for Debugging ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Pretty print an AST node for debugging
+func ast_pretty_print(node) {
+    ast_pp(node, 0)
+}
+
+func ast_pp(node, indent) {
+    const prefix = "  ".repeat(indent)
+
+    if node == null {
+        return prefix + "null"
+    }
+
+    if typeof(node) != "map" {
+        return prefix + to_string(node)
+    }
+
+    if node.has("kind") {
+        return ast_pp_expr(node, indent)
+    }
+
+    if node.has("stmts") {
+        return ast_pp_program(node, indent)
+    }
+
+    prefix + to_string(node)
+}
+
+func ast_pp_program(prog, indent) {
+    const prefix = "  ".repeat(indent)
+    let lines = [prefix + "Program"]
+    if prog.has("stmts") {
+        for stmt in prog["stmts"] {
+            lines.push(ast_pp(stmt, indent + 1))
+        }
+    }
+    lines.join("\n")
+}
+
+func ast_pp_expr(expr, indent) {
+    const prefix = "  ".repeat(indent)
+    const kind = expr.kind
+
+    match kind {
+        ExprKind::ELiteral(val) => {
+            const t = typeof(val)
+            match t {
+                "string" => prefix + f"Literal(\"{val}\")",
+                "null" => prefix + "Literal(null)",
+                _ => prefix + f"Literal({val})",
+            }
+        },
+        ExprKind::EVariable(name) => prefix + f"Var({name})",
+        ExprKind::EBinary(op, left, right) => {
+            let lines = [prefix + f"Binary({op})"]
+            lines.push(ast_pp(left, indent + 1))
+            lines.push(ast_pp(right, indent + 1))
+            lines.join("\n")
+        },
+        ExprKind::EUnary(op, operand) => {
+            let lines = [prefix + f"Unary({op})"]
+            lines.push(ast_pp(operand, indent + 1))
+            lines.join("\n")
+        },
+        ExprKind::ECall(name, args, _) => {
+            let lines = [prefix + f"Call({name})"]
+            for arg in args {
+                lines.push(ast_pp(arg, indent + 1))
+            }
+            lines.join("\n")
+        },
+        ExprKind::ELambda(params, body) => {
+            let lines = [prefix + f"Lambda({params.join(\", \")})"]
+            lines.push(ast_pp(body, indent + 1))
+            lines.join("\n")
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            let lines = [prefix + f"FieldAccess(.{field})"]
+            lines.push(ast_pp(obj, indent + 1))
+            lines.join("\n")
+        },
+        ExprKind::EIndex(obj, idx) => {
+            let lines = [prefix + "Index"]
+            lines.push(ast_pp(obj, indent + 1))
+            lines.push(ast_pp(idx, indent + 1))
+            lines.join("\n")
+        },
+        ExprKind::EMatch(subject, arms) => {
+            let lines = [prefix + "Match"]
+            lines.push(ast_pp(subject, indent + 1))
+            for arm in arms {
+                lines.push(prefix + "  Arm:")
+                if arm.has("pattern") { lines.push(ast_pp(arm["pattern"], indent + 2)) }
+                if arm.has("body") { lines.push(ast_pp(arm["body"], indent + 2)) }
+            }
+            lines.join("\n")
+        },
+        ExprKind::EArrayLiteral(elems) => {
+            let lines = [prefix + f"Array({len(elems)} elements)"]
+            for elem in elems {
+                lines.push(ast_pp(elem, indent + 1))
+            }
+            lines.join("\n")
+        },
+        ExprKind::EMapLiteral(entries) => {
+            let lines = [prefix + f"Map({len(entries)} entries)"]
+            for entry in entries {
+                lines.push(prefix + "  Entry:")
+                if typeof(entry) == "array" && len(entry) >= 2 {
+                    lines.push(ast_pp(entry[0], indent + 2))
+                    lines.push(ast_pp(entry[1], indent + 2))
+                }
+            }
+            lines.join("\n")
+        },
+        ExprKind::EIf(cond, then_br, else_br) => {
+            let lines = [prefix + "If"]
+            lines.push(prefix + "  Condition:")
+            lines.push(ast_pp(cond, indent + 2))
+            lines.push(prefix + "  Then:")
+            lines.push(ast_pp(then_br, indent + 2))
+            if else_br != null {
+                lines.push(prefix + "  Else:")
+                lines.push(ast_pp(else_br, indent + 2))
+            }
+            lines.join("\n")
+        },
+        ExprKind::EStringInterp(parts) => {
+            let lines = [prefix + "StringInterp"]
+            for part in parts {
+                lines.push(ast_pp(part, indent + 1))
+            }
+            lines.join("\n")
+        },
+        ExprKind::EStructConstruct(name, fields) => {
+            let lines = [prefix + f"Struct({name})"]
+            for f in fields {
+                if typeof(f) == "array" && len(f) >= 2 {
+                    lines.push(prefix + f"  {f[0]}:")
+                    lines.push(ast_pp(f[1], indent + 2))
+                }
+            }
+            lines.join("\n")
+        },
+        ExprKind::EEnumConstruct(enum_name, variant, args) => {
+            let lines = [prefix + f"Enum({enum_name}::{variant})"]
+            for arg in args {
+                lines.push(ast_pp(arg, indent + 1))
+            }
+            lines.join("\n")
+        },
+        _ => prefix + f"Expr({kind})",
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Parser Combinators ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Combinator: try to parse, backtrack on failure
+func p_try(parser_fn) {
+    const saved_pos = p_pos
+    const saved_errors = len(p_errors)
+    const result = parser_fn()
+    if result == null {
+        // Backtrack
+        p_pos = saved_pos
+        // Remove errors added during the failed attempt
+        while len(p_errors) > saved_errors { p_errors.pop() }
+        return null
+    }
+    result
+}
+
+// Combinator: sequence of parsers (all must succeed)
+func p_sequence(parsers) {
+    const saved_pos = p_pos
+    let results = []
+    for parser in parsers {
+        const result = parser()
+        if result == null {
+            p_pos = saved_pos
+            return null
+        }
+        results.push(result)
+    }
+    results
+}
+
+// Combinator: choice (try each alternative)
+func p_choice(parsers) {
+    for parser in parsers {
+        const result = p_try(parser)
+        if result != null { return result }
+    }
+    null
+}
+
+// Combinator: optional (returns null if no match, no error)
+func p_optional(parser_fn) {
+    const result = p_try(parser_fn)
+    result // null is fine
+}
+
+// Combinator: many (zero or more matches)
+func p_many(parser_fn) {
+    let results = []
+    while true {
+        const result = p_try(parser_fn)
+        if result == null { break }
+        results.push(result)
+    }
+    results
+}
+
+// Combinator: many1 (one or more matches)
+func p_many1(parser_fn) {
+    const first = parser_fn()
+    if first == null { return null }
+    let results = [first]
+    while true {
+        const result = p_try(parser_fn)
+        if result == null { break }
+        results.push(result)
+    }
+    results
+}
+
+// Combinator: separated_by (items separated by delimiter)
+func p_separated_by(item_fn, sep_kind) {
+    let results = []
+    const first = p_try(item_fn)
+    if first == null { return results }
+    results.push(first)
+
+    while p_at(sep_kind) {
+        p_advance()
+        const next = item_fn()
+        if next == null { break }
+        results.push(next)
+    }
+    results
+}
+
+// Combinator: separated_by with trailing separator allowed
+func p_separated_by_trailing(item_fn, sep_kind) {
+    let results = []
+    const first = p_try(item_fn)
+    if first == null { return results }
+    results.push(first)
+
+    while p_at(sep_kind) {
+        p_advance()
+        const next = p_try(item_fn)
+        if next == null { break }
+        results.push(next)
+    }
+    results
+}
+
+// Combinator: delimited (open + content + close)
+func p_delimited(open_kind, content_fn, close_kind) {
+    if !p_at(open_kind) { return null }
+    p_advance()
+    const content = content_fn()
+    p_expect(close_kind)
+    content
+}
+
+// Combinator: between (wrapper for delimited with better error messages)
+func p_between(open_kind, close_kind, content_fn) {
+    p_delimited(open_kind, content_fn, close_kind)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Source Map Generation ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Generate a source map from parsed AST
+func generate_source_map(ast, source_file) {
+    let mappings = []
+    let sources = [source_file]
+    let names = []
+
+    collect_source_mappings(ast, mappings, names)
+
+    {
+        "version": 3,
+        "file": source_file.replace(".magi", ".js"),
+        "sourceRoot": "",
+        "sources": sources,
+        "names": names,
+        "mappings": encode_vlq_mappings(mappings),
+    }
+}
+
+// Collect source position mappings from AST
+func collect_source_mappings(node, mappings, names) {
+    if node == null { return }
+    if typeof(node) != "map" { return }
+
+    if node.has("span") {
+        const span = node["span"]
+        let name = null
+        if node.has("kind") {
+            const kind = node.kind
+            match kind {
+                ExprKind::EVariable(n) => { name = n },
+                ExprKind::ECall(n, _, _) => { name = n },
+                _ => {},
+            }
+        }
+
+        let name_idx = -1
+        if name != null {
+            name_idx = names.index_of(name)
+            if name_idx == null || name_idx < 0 {
+                names.push(name)
+                name_idx = len(names) - 1
+            }
+        }
+
+        mappings.push({
+            "generated_line": span["start_line"],
+            "generated_col": span["start_col"],
+            "source_idx": 0,
+            "source_line": span["start_line"],
+            "source_col": span["start_col"],
+            "name_idx": name_idx,
+        })
+    }
+
+    // Recurse
+    if node.has("stmts") {
+        for stmt in node["stmts"] { collect_source_mappings(stmt, mappings, names) }
+    }
+    if node.has("body") {
+        const body = node["body"]
+        if typeof(body) == "array" {
+            for item in body { collect_source_mappings(item, mappings, names) }
+        } else {
+            collect_source_mappings(body, mappings, names)
+        }
+    }
+    if node.has("expr") { collect_source_mappings(node["expr"], mappings, names) }
+    if node.has("left") { collect_source_mappings(node["left"], mappings, names) }
+    if node.has("right") { collect_source_mappings(node["right"], mappings, names) }
+    if node.has("args") {
+        for arg in node["args"] { collect_source_mappings(arg, mappings, names) }
+    }
+}
+
+// Encode VLQ mappings string (simplified)
+func encode_vlq_mappings(mappings) {
+    if len(mappings) == 0 { return "" }
+
+    // Sort by generated line then col
+    mappings.sort((a, b) => {
+        if a["generated_line"] != b["generated_line"] {
+            a["generated_line"] - b["generated_line"]
+        } else {
+            a["generated_col"] - b["generated_col"]
+        }
+    })
+
+    let result = ""
+    let prev_line = 0
+    let prev_col = 0
+    let prev_src_line = 0
+    let prev_src_col = 0
+    let prev_name = 0
+
+    let current_line = 0
+    for m in mappings {
+        // Add semicolons for line gaps
+        while current_line < m["generated_line"] {
+            result = result + ";"
+            current_line = current_line + 1
+            prev_col = 0
+        }
+
+        if result.ends_with(";") || len(result) == 0 {
+            // First segment on this line
+        } else {
+            result = result + ","
+        }
+
+        // Encode: generated_col, source_idx, source_line, source_col, [name_idx]
+        result = result + vlq_encode(m["generated_col"] - prev_col)
+        result = result + vlq_encode(m["source_idx"])
+        result = result + vlq_encode(m["source_line"] - prev_src_line)
+        result = result + vlq_encode(m["source_col"] - prev_src_col)
+
+        if m["name_idx"] >= 0 {
+            result = result + vlq_encode(m["name_idx"] - prev_name)
+            prev_name = m["name_idx"]
+        }
+
+        prev_col = m["generated_col"]
+        prev_src_line = m["source_line"]
+        prev_src_col = m["source_col"]
+    }
+
+    result
+}
+
+// VLQ (Variable Length Quantity) encoding for source maps
+const VLQ_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+func vlq_encode(value) {
+    let vlq = if value < 0 { (-value * 2) + 1 } else { value * 2 }
+    let result = ""
+    while true {
+        let digit = vlq % 32
+        vlq = vlq / 32
+        if vlq > 0 { digit = digit + 32 } // continuation bit
+        result = result + VLQ_CHARS[digit]
+        if vlq == 0 { break }
+    }
+    result
+}

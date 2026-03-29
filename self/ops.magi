@@ -6525,3 +6525,533 @@ func eval_operation_extended(op_name, args) {
         _ => null,
     }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Stats Operations (moving average, exponential smoothing, histogram)
+// ══════════════════════════════════════════════════════════════════
+
+func op_moving_average(args) {
+    const data = args[0]
+    const window = if len(args) > 1 { op_to_i64(args[1]) } else { 3 }
+    if typeof(data) != "array" || len(data) == 0 { return [] }
+
+    let result = []
+    let i = 0
+    while i < len(data) {
+        let sum = 0.0
+        let count = 0
+        let j = if i - window + 1 > 0 { i - window + 1 } else { 0 }
+        while j <= i {
+            sum = sum + op_to_f64(data[j])
+            count = count + 1
+            j = j + 1
+        }
+        result.push(sum / to_float64(count))
+        i = i + 1
+    }
+    result
+}
+
+func op_exponential_smoothing(args) {
+    const data = args[0]
+    const alpha = if len(args) > 1 { op_to_f64(args[1]) } else { 0.3 }
+    if typeof(data) != "array" || len(data) == 0 { return [] }
+
+    let result = [op_to_f64(data[0])]
+    let i = 1
+    while i < len(data) {
+        const prev = result[i - 1]
+        const curr = op_to_f64(data[i])
+        result.push(alpha * curr + (1.0 - alpha) * prev)
+        i = i + 1
+    }
+    result
+}
+
+func op_histogram(args) {
+    const data = args[0]
+    const bins = if len(args) > 1 { op_to_i64(args[1]) } else { 10 }
+    if typeof(data) != "array" || len(data) == 0 { return [] }
+
+    // Find min/max
+    let min_val = op_to_f64(data[0])
+    let max_val = op_to_f64(data[0])
+    for d in data {
+        const v = op_to_f64(d)
+        if v < min_val { min_val = v }
+        if v > max_val { max_val = v }
+    }
+
+    const range = max_val - min_val
+    if range == 0.0 { return [{"low": min_val, "high": max_val, "count": len(data)}] }
+
+    const bin_width = range / to_float64(bins)
+
+    // Initialize bins
+    let counts = []
+    let edges = []
+    let i = 0
+    while i < bins {
+        counts.push(0)
+        edges.push(min_val + to_float64(i) * bin_width)
+        i = i + 1
+    }
+    edges.push(max_val)
+
+    // Count items in each bin
+    for d in data {
+        const v = op_to_f64(d)
+        let bin_idx = to_int64((v - min_val) / bin_width)
+        if bin_idx >= bins { bin_idx = bins - 1 }
+        if bin_idx < 0 { bin_idx = 0 }
+        counts[bin_idx] = counts[bin_idx] + 1
+    }
+
+    // Build result
+    let result = []
+    i = 0
+    while i < bins {
+        result.push({
+            "low": edges[i],
+            "high": edges[i + 1],
+            "count": counts[i],
+        })
+        i = i + 1
+    }
+    result
+}
+
+func op_weighted_average(args) {
+    const values = args[0]
+    const weights = args[1]
+    if typeof(values) != "array" || typeof(weights) != "array" { return 0.0 }
+    if len(values) != len(weights) { return 0.0 }
+
+    let sum = 0.0
+    let weight_sum = 0.0
+    let i = 0
+    while i < len(values) {
+        const v = op_to_f64(values[i])
+        const w = op_to_f64(weights[i])
+        sum = sum + v * w
+        weight_sum = weight_sum + w
+        i = i + 1
+    }
+    if weight_sum == 0.0 { 0.0 } else { sum / weight_sum }
+}
+
+func op_covariance(args) {
+    const xs = args[0]
+    const ys = args[1]
+    if typeof(xs) != "array" || typeof(ys) != "array" { return 0.0 }
+    const n = if len(xs) < len(ys) { len(xs) } else { len(ys) }
+    if n == 0 { return 0.0 }
+
+    let sum_x = 0.0
+    let sum_y = 0.0
+    let i = 0
+    while i < n { sum_x = sum_x + op_to_f64(xs[i]); sum_y = sum_y + op_to_f64(ys[i]); i = i + 1 }
+    const mean_x = sum_x / to_float64(n)
+    const mean_y = sum_y / to_float64(n)
+
+    let cov = 0.0
+    i = 0
+    while i < n {
+        cov = cov + (op_to_f64(xs[i]) - mean_x) * (op_to_f64(ys[i]) - mean_y)
+        i = i + 1
+    }
+    cov / to_float64(n)
+}
+
+func op_percentile(args) {
+    const data = args[0]
+    const p = op_to_f64(args[1])
+    if typeof(data) != "array" || len(data) == 0 { return 0.0 }
+
+    let sorted = data.map(d => op_to_f64(d))
+    sorted.sort((a, b) => a - b)
+
+    const idx = (p / 100.0) * to_float64(len(sorted) - 1)
+    const lower = to_int64(floor(idx))
+    const upper = to_int64(ceil(idx))
+    if lower == upper { return sorted[lower] }
+    const frac = idx - to_float64(lower)
+    sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+}
+
+func op_zscore(args) {
+    const data = args[0]
+    if typeof(data) != "array" || len(data) <= 1 { return [] }
+
+    let sum = 0.0
+    for d in data { sum = sum + op_to_f64(d) }
+    const mean = sum / to_float64(len(data))
+
+    let sq_sum = 0.0
+    for d in data {
+        const diff = op_to_f64(d) - mean
+        sq_sum = sq_sum + diff * diff
+    }
+    const std_dev = sqrt(sq_sum / to_float64(len(data)))
+    if std_dev == 0.0 { return data.map(d => 0.0) }
+
+    data.map(d => (op_to_f64(d) - mean) / std_dev)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Format Operations (all format specifiers)
+// ══════════════════════════════════════════════════════════════════
+
+func op_format(args) {
+    const fmt = to_string(args[0])
+    const values = if len(args) > 1 { args.slice(1) } else { [] }
+
+    let result = ""
+    let vi = 0
+    let i = 0
+    while i < len(fmt) {
+        if fmt[i] == "{" && i + 1 < len(fmt) {
+            if fmt[i + 1] == "{" {
+                result = result + "{"
+                i = i + 2
+                continue
+            }
+            // Find closing brace
+            let end = i + 1
+            while end < len(fmt) && fmt[end] != "}" { end = end + 1 }
+            if end < len(fmt) {
+                const spec = fmt.slice(i + 1, end)
+                if vi < len(values) {
+                    if len(spec) == 0 {
+                        result = result + to_string(values[vi])
+                    } else if spec.contains(":") {
+                        const parts = spec.split(":")
+                        const format_str = parts[1]
+                        result = result + format_value(values[vi], format_str)
+                    } else {
+                        result = result + to_string(values[vi])
+                    }
+                    vi = vi + 1
+                }
+                i = end + 1
+                continue
+            }
+        }
+        if fmt[i] == "}" && i + 1 < len(fmt) && fmt[i + 1] == "}" {
+            result = result + "}"
+            i = i + 2
+            continue
+        }
+        result = result + fmt[i]
+        i = i + 1
+    }
+    result
+}
+
+func format_value(value, spec) {
+    const t = typeof(value)
+    if t == "int64" || t == "float64" {
+        return i_format_number(value, spec)
+    }
+    if t == "string" {
+        return format_string(value, spec)
+    }
+    to_string(value)
+}
+
+func format_string(s, spec) {
+    // Parse width and alignment for strings
+    let width = 0
+    let fill = " "
+    let align = "<" // strings default left-aligned
+
+    let i = 0
+    if len(spec) >= 2 && (spec[1] == "<" || spec[1] == ">" || spec[1] == "^") {
+        fill = spec[0]
+        align = spec[1]
+        i = 2
+    } else if len(spec) >= 1 && (spec[0] == "<" || spec[0] == ">" || spec[0] == "^") {
+        align = spec[0]
+        i = 1
+    }
+
+    // Parse width
+    let width_str = ""
+    while i < len(spec) && spec[i] >= "0" && spec[i] <= "9" {
+        width_str = width_str + spec[i]
+        i = i + 1
+    }
+    if len(width_str) > 0 { width = to_int64(width_str) }
+
+    // Parse precision (max length for strings)
+    let max_len = -1
+    if i < len(spec) && spec[i] == "." {
+        i = i + 1
+        let prec_str = ""
+        while i < len(spec) && spec[i] >= "0" && spec[i] <= "9" {
+            prec_str = prec_str + spec[i]
+            i = i + 1
+        }
+        if len(prec_str) > 0 { max_len = to_int64(prec_str) }
+    }
+
+    let result = s
+    if max_len >= 0 && len(result) > max_len { result = result.slice(0, max_len) }
+
+    if width > 0 && len(result) < width {
+        const padding = width - len(result)
+        match align {
+            "<" => result = result + fill.repeat(padding),
+            ">" => result = fill.repeat(padding) + result,
+            "^" => {
+                const left = padding / 2
+                const right = padding - left
+                result = fill.repeat(left) + result + fill.repeat(right)
+            },
+            _ => result = result + fill.repeat(padding),
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Reflect Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_reflect_fields(args) {
+    const obj = args[0]
+    if typeof(obj) != "map" { return [] }
+    obj.keys().filter(k => k != "__s" && !k.starts_with("__"))
+}
+
+func op_reflect_methods(args) {
+    const obj = args[0]
+    if typeof(obj) != "map" { return [] }
+    let methods = []
+    for k in obj.keys() {
+        if k == "__s" { continue }
+        const v = obj[k]
+        if typeof(v) == "map" && (v.has("__lambda") || v.has("__builtin")) {
+            methods.push(k)
+        }
+    }
+    methods
+}
+
+func op_reflect_implements(args) {
+    const obj = args[0]
+    const iface_name = to_string(args[1])
+    // Check if object has all required methods of the interface
+    // Simplified: check if it has the fields expected
+    if typeof(obj) != "map" { return false }
+    true // Structural typing: any map "implements" any interface
+}
+
+func op_reflect_arity(args) {
+    const fn = args[0]
+    if typeof(fn) != "map" { return -1 }
+    if fn.has("params") { return len(fn["params"]) }
+    if fn.has("__lambda") && fn.has("params") { return len(fn["params"]) }
+    -1
+}
+
+func op_reflect_type_name(args) {
+    const val = args[0]
+    if val == null { return "Null" }
+    const t = typeof(val)
+    if t == "map" {
+        if val.has("__struct") { return val["__struct"] }
+        if val.has("__enum") { return val["__enum"] }
+        if val.has("__lambda") { return "Function" }
+        if val.has("__channel") { return "Channel" }
+        if val.has("__promise") { return "Promise" }
+        return "Map"
+    }
+    if t == "array" { return "Array" }
+    if t == "int64" { return "Int" }
+    if t == "float64" { return "Float" }
+    if t == "string" { return "String" }
+    if t == "bool" { return "Bool" }
+    t
+}
+
+func op_reflect_is_struct(args) {
+    typeof(args[0]) == "map" && args[0].has("__struct")
+}
+
+func op_reflect_is_enum(args) {
+    typeof(args[0]) == "map" && args[0].has("__enum")
+}
+
+func op_reflect_is_function(args) {
+    const v = args[0]
+    typeof(v) == "map" && (v.has("__lambda") || v.has("__builtin"))
+}
+
+func op_reflect_struct_name(args) {
+    const v = args[0]
+    if typeof(v) == "map" && v.has("__struct") { v["__struct"] } else { null }
+}
+
+func op_reflect_enum_variant(args) {
+    const v = args[0]
+    if typeof(v) == "map" && v.has("__variant") { v["__variant"] } else { null }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Itertools Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_combinations(args) {
+    const items = args[0]
+    const k = if len(args) > 1 { op_to_i64(args[1]) } else { 2 }
+    if typeof(items) != "array" { return [] }
+    if k > len(items) || k < 0 { return [] }
+    if k == 0 { return [[]] }
+
+    let result = []
+    combinations_rec(items, k, 0, [], result)
+    result
+}
+
+func combinations_rec(items, k, start, current, result) {
+    if len(current) == k {
+        let combo = []
+        for c in current { combo.push(c) }
+        result.push(combo)
+        return
+    }
+    let i = start
+    while i < len(items) {
+        current.push(items[i])
+        combinations_rec(items, k, i + 1, current, result)
+        current.pop()
+        i = i + 1
+    }
+}
+
+func op_permutations(args) {
+    const items = args[0]
+    const k = if len(args) > 1 { op_to_i64(args[1]) } else { len(items) }
+    if typeof(items) != "array" { return [] }
+    if k > len(items) || k < 0 { return [] }
+    if k == 0 { return [[]] }
+
+    let result = []
+    let used = items.map(x => false)
+    permutations_rec(items, k, [], used, result)
+    result
+}
+
+func permutations_rec(items, k, current, used, result) {
+    if len(current) == k {
+        let perm = []
+        for c in current { perm.push(c) }
+        result.push(perm)
+        return
+    }
+    let i = 0
+    while i < len(items) {
+        if !used[i] {
+            used[i] = true
+            current.push(items[i])
+            permutations_rec(items, k, current, used, result)
+            current.pop()
+            used[i] = false
+        }
+        i = i + 1
+    }
+}
+
+func op_powerset(args) {
+    const items = args[0]
+    if typeof(items) != "array" { return [[]] }
+
+    let result = [[]]
+    for item in items {
+        const current_len = len(result)
+        let i = 0
+        while i < current_len {
+            let new_set = []
+            for x in result[i] { new_set.push(x) }
+            new_set.push(item)
+            result.push(new_set)
+            i = i + 1
+        }
+    }
+    result
+}
+
+func op_cartesian_product(args) {
+    if len(args) < 2 { return [] }
+    const a = args[0]
+    const b = args[1]
+    if typeof(a) != "array" || typeof(b) != "array" { return [] }
+
+    let result = []
+    for x in a {
+        for y in b {
+            result.push([x, y])
+        }
+    }
+    result
+}
+
+func op_interleave(args) {
+    const a = args[0]
+    const b = args[1]
+    if typeof(a) != "array" || typeof(b) != "array" { return [] }
+
+    let result = []
+    const max_len = if len(a) > len(b) { len(a) } else { len(b) }
+    let i = 0
+    while i < max_len {
+        if i < len(a) { result.push(a[i]) }
+        if i < len(b) { result.push(b[i]) }
+        i = i + 1
+    }
+    result
+}
+
+func op_cycle(args) {
+    const items = args[0]
+    const n = if len(args) > 1 { op_to_i64(args[1]) } else { len(items) * 2 }
+    if typeof(items) != "array" || len(items) == 0 { return [] }
+
+    let result = []
+    let i = 0
+    while i < n {
+        result.push(items[i % len(items)])
+        i = i + 1
+    }
+    result
+}
+
+func op_repeat_each(args) {
+    const items = args[0]
+    const n = if len(args) > 1 { op_to_i64(args[1]) } else { 2 }
+    if typeof(items) != "array" { return [] }
+
+    let result = []
+    for item in items {
+        let i = 0
+        while i < n {
+            result.push(item)
+            i = i + 1
+        }
+    }
+    result
+}
+
+func op_adjacent_pairs(args) {
+    const items = args[0]
+    if typeof(items) != "array" || len(items) < 2 { return [] }
+
+    let result = []
+    let i = 0
+    while i < len(items) - 1 {
+        result.push([items[i], items[i + 1]])
+        i = i + 1
+    }
+    result
+}

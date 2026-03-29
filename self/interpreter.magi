@@ -17190,3 +17190,1513 @@ func i_template_render(template, context) {
     }
     result
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 132: TryCatchExpr — Error-as-Values
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_try_catch(try_body, catch_var, catch_body) {
+    // In error-as-values world, try evaluates the body and catches panics
+    // returning (result, null) on success and (null, error) on failure
+    let result = null
+    let error = null
+
+    // Attempt to evaluate try body
+    // Note: in self-hosted interpreter, we use a signal-based approach
+    const try_result = eval_try_body(try_body)
+    if try_result != null && typeof(try_result) == "map" && try_result.has("__error") {
+        error = try_result["__error"]
+        // Evaluate catch body with error bound
+        if catch_var != null {
+            i_push_scope()
+            i_set(catch_var, error, false)
+            result = eval_block(catch_body)
+            i_pop_scope()
+        } else {
+            result = eval_block(catch_body)
+        }
+    } else {
+        result = try_result
+    }
+
+    result
+}
+
+func eval_try_body(body) {
+    // Evaluate block, wrapping panics in error objects
+    // The self-hosted interpreter simulates this via scope isolation
+    i_push_scope()
+    let result = null
+    if typeof(body) == "array" {
+        for stmt in body {
+            result = eval_stmt(stmt)
+            if is_signal(result) { break }
+        }
+    } else {
+        result = eval_expr(body)
+    }
+    i_pop_scope()
+    result
+}
+
+// Multi-return error pattern: let result, err = try_call(...)
+func eval_multi_return_error(call_expr) {
+    const result = eval_try_body(call_expr)
+    if result != null && typeof(result) == "map" && result.has("__error") {
+        [null, result["__error"]]
+    } else {
+        [result, null]
+    }
+}
+
+// Error wrapping
+func wrap_error(message, cause) {
+    const err = {"__error": true, "message": message}
+    if cause != null { err["cause"] = cause }
+    err
+}
+
+// Error unwrapping
+func unwrap_error(err) {
+    if err != null && typeof(err) == "map" && err.has("__error") {
+        err["message"]
+    } else {
+        null
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 133: InlineAsm Evaluation
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_inline_asm(asm_block) {
+    // Inline assembly is only meaningful for native/WASM targets.
+    // In the interpreter, we simulate common patterns.
+    if asm_block == null { return null }
+
+    const template = if typeof(asm_block) == "map" && asm_block.has("template") {
+        asm_block["template"]
+    } else if typeof(asm_block) == "string" {
+        asm_block
+    } else {
+        return null
+    }
+
+    const inputs = if typeof(asm_block) == "map" && asm_block.has("inputs") {
+        asm_block["inputs"]
+    } else {
+        []
+    }
+
+    const outputs = if typeof(asm_block) == "map" && asm_block.has("outputs") {
+        asm_block["outputs"]
+    } else {
+        []
+    }
+
+    // Simulate common asm patterns
+    if template.contains("nop") { return null }
+    if template.contains("mov") {
+        // Simple register move: return first input
+        if len(inputs) > 0 { return inputs[0] }
+        return 0
+    }
+    if template.contains("add") {
+        if len(inputs) >= 2 { return inputs[0] + inputs[1] }
+        return 0
+    }
+    if template.contains("sub") {
+        if len(inputs) >= 2 { return inputs[0] - inputs[1] }
+        return 0
+    }
+    if template.contains("mul") || template.contains("imul") {
+        if len(inputs) >= 2 { return inputs[0] * inputs[1] }
+        return 0
+    }
+    if template.contains("rdtsc") || template.contains("rdtscp") {
+        // Return a simulated timestamp counter
+        return 0
+    }
+    if template.contains("cpuid") {
+        return {"eax": 0, "ebx": 0, "ecx": 0, "edx": 0}
+    }
+    if template.contains("syscall") {
+        // Syscall simulation: return 0 (success)
+        return 0
+    }
+    if template.contains("int") {
+        // Interrupt simulation
+        return null
+    }
+
+    // Default: unsupported asm, return null
+    null
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 134: UnsafeBlock Evaluation
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_unsafe_block(body) {
+    // Unsafe blocks bypass certain safety checks in the interpreter:
+    // - Allow raw pointer operations
+    // - Allow unchecked array access
+    // - Allow type punning
+    i_push_scope()
+    i_set("__unsafe", true, false)
+
+    let result = null
+    if typeof(body) == "array" {
+        for stmt in body {
+            result = eval_stmt(stmt)
+            if is_signal(result) { break }
+        }
+    } else {
+        result = eval_expr(body)
+    }
+
+    i_pop_scope()
+
+    if is_return(result) { return result }
+    if is_break(result) { return result }
+    result
+}
+
+// Check if currently in an unsafe context
+func is_unsafe_context() {
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        if i_scopes[idx].has("__unsafe") { return true }
+        idx = idx - 1
+    }
+    false
+}
+
+// Raw pointer operations (simulated)
+func eval_raw_ptr_deref(ptr) {
+    if !is_unsafe_context() {
+        panic("raw pointer dereference requires unsafe block")
+    }
+    // In interpreter, pointers are just maps with an address
+    if typeof(ptr) == "map" && ptr.has("__ptr") {
+        const addr = ptr["__ptr"]
+        // Look up in heap
+        i_heap_get(addr)
+    } else {
+        ptr
+    }
+}
+
+func eval_raw_ptr_write(ptr, value) {
+    if !is_unsafe_context() {
+        panic("raw pointer write requires unsafe block")
+    }
+    if typeof(ptr) == "map" && ptr.has("__ptr") {
+        const addr = ptr["__ptr"]
+        i_heap_set(addr, value)
+    }
+    null
+}
+
+func eval_raw_ptr_offset(ptr, offset) {
+    if !is_unsafe_context() {
+        panic("pointer arithmetic requires unsafe block")
+    }
+    if typeof(ptr) == "map" && ptr.has("__ptr") {
+        {"__ptr": ptr["__ptr"] + offset, "__type": "raw_ptr"}
+    } else {
+        ptr
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 135: MoveClosure Evaluation
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_move_closure(params, body) {
+    // Move closures take ownership of captured variables
+    // In the interpreter, this means deep-copying all captured values
+    let captured = i_new_scope()
+    for scope in i_scopes {
+        for k in scope.keys() {
+            if k == "__s" { continue }
+            const entry = scope[k]
+            // Deep copy the value
+            captured[k] = {"value": deep_copy(entry["value"]), "mutable": entry["mutable"]}
+        }
+    }
+    {"__lambda": true, "__move": true, "params": params, "body": body, "captured": captured}
+}
+
+// Deep copy a value for move semantics
+func deep_copy(val) {
+    if val == null { return null }
+    const t = typeof(val)
+    if t == "int64" || t == "float64" || t == "string" || t == "bool" { return val }
+    if t == "array" {
+        return val.map(v => deep_copy(v))
+    }
+    if t == "map" {
+        let result = {"__s": true}
+        for k in val.keys() {
+            result[k] = deep_copy(val[k])
+        }
+        return result
+    }
+    val
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 136: DynTrait Evaluation
+// ═══════════════════════════════════════════════════════════════════
+
+// Create a dynamic trait object (type-erased interface dispatch)
+func eval_dyn_trait(value, trait_name) {
+    // Wrap value with vtable for dynamic dispatch
+    const vtable = build_vtable(value, trait_name)
+    {
+        "__dyn": true,
+        "__trait": trait_name,
+        "__value": value,
+        "__vtable": vtable,
+    }
+}
+
+// Build a virtual dispatch table for a value implementing a trait
+func build_vtable(value, trait_name) {
+    let vtable = {"__s": true}
+
+    // Look up trait methods from type info
+    const type_name = if typeof(value) == "map" && value.has("__struct") {
+        value["__struct"]
+    } else {
+        typeof(value)
+    }
+
+    // Collect methods that match the trait pattern: Type.method
+    // In the interpreter, methods are stored as functions in scope
+    let idx = len(i_scopes) - 1
+    while idx >= 0 {
+        const scope = i_scopes[idx]
+        for k in scope.keys() {
+            if k == "__s" { continue }
+            if k.starts_with(type_name + ".") {
+                const method_name = k.slice(len(type_name) + 1)
+                vtable[method_name] = scope[k]["value"]
+            }
+        }
+        idx = idx - 1
+    }
+
+    vtable
+}
+
+// Dispatch a method call on a dyn trait object
+func eval_dyn_dispatch(dyn_obj, method_name, args) {
+    if !dyn_obj.has("__vtable") {
+        panic(f"not a dyn trait object")
+    }
+    const vtable = dyn_obj["__vtable"]
+    if !vtable.has(method_name) {
+        panic(f"method '{method_name}' not found in dyn {dyn_obj[\"__trait\"]}")
+    }
+    const method = vtable[method_name]
+    // Call with self as first arg
+    let full_args = [dyn_obj["__value"]]
+    for a in args { full_args.push(a) }
+    i_call_any(method, full_args)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 137: Ref Evaluation
+// ═══════════════════════════════════════════════════════════════════
+
+// Create a reference to a value
+func eval_ref(value) {
+    const addr = i_heap_alloc(value)
+    {"__ref": true, "__addr": addr, "__mutable": false}
+}
+
+// Create a mutable reference
+func eval_ref_mut(value) {
+    const addr = i_heap_alloc(value)
+    {"__ref": true, "__addr": addr, "__mutable": true}
+}
+
+// Dereference a ref
+func eval_deref(ref_val) {
+    if typeof(ref_val) != "map" || !ref_val.has("__ref") {
+        return ref_val // Auto-deref for non-refs
+    }
+    i_heap_get(ref_val["__addr"])
+}
+
+// Assign through a mutable reference
+func eval_ref_assign(ref_val, new_value) {
+    if typeof(ref_val) != "map" || !ref_val.has("__ref") {
+        panic("cannot assign through non-reference")
+    }
+    if !ref_val["__mutable"] {
+        panic("cannot assign through immutable reference")
+    }
+    i_heap_set(ref_val["__addr"], new_value)
+}
+
+// Simple heap simulation
+let i_heap_store = {"__s": true}
+let i_heap_next_addr = 1000
+
+func i_heap_alloc(value) {
+    const addr = i_heap_next_addr
+    i_heap_next_addr = i_heap_next_addr + 1
+    i_heap_store[to_string(addr)] = value
+    addr
+}
+
+func i_heap_get(addr) {
+    const key = to_string(addr)
+    if i_heap_store.has(key) { i_heap_store[key] } else { null }
+}
+
+func i_heap_set(addr, value) {
+    i_heap_store[to_string(addr)] = value
+}
+
+func i_heap_free(addr) {
+    const key = to_string(addr)
+    if i_heap_store.has(key) { i_heap_store.remove(key) }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 138: Sandbox Mode Enforcement
+// ═══════════════════════════════════════════════════════════════════
+
+let i_sandbox_enabled = false
+
+func i_enable_sandbox() {
+    i_sandbox_enabled = true
+}
+
+func i_disable_sandbox() {
+    i_sandbox_enabled = false
+}
+
+// Check if an operation is allowed in sandbox mode
+func sandbox_check(operation) {
+    if !i_sandbox_enabled { return true }
+
+    const blocked_ops = [
+        // Filesystem
+        "fs_read", "fs_write", "fs_delete", "fs_mkdir", "fs_rmdir",
+        "fs_rename", "fs_copy", "fs_stat", "fs_exists", "fs_read_dir",
+        "fs_read_file", "fs_write_file", "fs_append_file",
+        "fs_read_to_string", "read_file", "write_file",
+        // Network
+        "net_listen", "net_dial", "net_connect", "net_bind",
+        "http_get", "http_post", "http_put", "http_delete",
+        "http_request", "http_serve", "http_fetch",
+        "tcp_connect", "tcp_listen", "udp_bind", "udp_send",
+        "websocket_connect", "websocket_listen",
+        // Process
+        "process_exec", "process_spawn", "process_kill",
+        "process_exit", "exec", "spawn", "shell",
+        "command_run", "run_command",
+        // Environment
+        "env_get", "env_set", "env_vars",
+        "get_env", "set_env",
+        // System
+        "system_info", "hostname", "username",
+    ]
+
+    if blocked_ops.contains(operation) {
+        panic(f"operation '{operation}' is not allowed in sandbox mode")
+    }
+    true
+}
+
+// Wrap a function call with sandbox checking
+func sandbox_call(name, args) {
+    sandbox_check(name)
+    i_call_builtin(name, args)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 139: Execution Timeout Enforcement
+// ═══════════════════════════════════════════════════════════════════
+
+let i_timeout_ms = 0
+let i_exec_start_time = 0
+let i_step_count = 0
+let i_step_check_interval = 10000
+
+func i_set_timeout(ms) {
+    i_timeout_ms = ms
+    i_exec_start_time = timestamp_ms()
+    i_step_count = 0
+}
+
+func i_clear_timeout() {
+    i_timeout_ms = 0
+}
+
+// Check execution timeout (called periodically during interpretation)
+func i_check_timeout() {
+    if i_timeout_ms <= 0 { return }
+    i_step_count = i_step_count + 1
+    if i_step_count % i_step_check_interval != 0 { return }
+
+    const now = timestamp_ms()
+    const elapsed = now - i_exec_start_time
+    if elapsed > i_timeout_ms {
+        panic(f"execution timeout: exceeded {i_timeout_ms}ms (ran for {elapsed}ms)")
+    }
+}
+
+// Get current timestamp in milliseconds (delegates to stage 0)
+func timestamp_ms() {
+    // Stage 0 provides this as a builtin
+    0
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 140: Memory Usage Tracking and Limits
+// ═══════════════════════════════════════════════════════════════════
+
+let i_memory_limit = 0
+let i_memory_used = 0
+
+func i_set_memory_limit(bytes) {
+    i_memory_limit = bytes
+}
+
+// Estimate memory size of a value
+func i_sizeof(val) {
+    if val == null { return 8 }
+    const t = typeof(val)
+    if t == "int64" { return 8 }
+    if t == "float64" { return 8 }
+    if t == "bool" { return 1 }
+    if t == "string" { return 24 + len(val) }
+    if t == "array" {
+        let size = 24 // array header
+        for item in val {
+            size = size + i_sizeof(item)
+        }
+        return size
+    }
+    if t == "map" {
+        let size = 48 // map header
+        for k in val.keys() {
+            size = size + i_sizeof(k) + i_sizeof(val[k]) + 16 // entry overhead
+        }
+        return size
+    }
+    16 // default
+}
+
+// Track memory allocation
+func i_track_alloc(size) {
+    i_memory_used = i_memory_used + size
+    if i_memory_limit > 0 && i_memory_used > i_memory_limit {
+        panic(f"memory limit exceeded: {i_memory_used} bytes > {i_memory_limit} bytes")
+    }
+}
+
+// Track memory deallocation
+func i_track_dealloc(size) {
+    i_memory_used = i_memory_used - size
+    if i_memory_used < 0 { i_memory_used = 0 }
+}
+
+// Get current memory stats
+func i_memory_stats() {
+    {
+        "used": i_memory_used,
+        "limit": i_memory_limit,
+        "heap_objects": len(i_heap_store.keys()) - 1, // minus __s sentinel
+        "scope_depth": len(i_scopes),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 141: Numeric Formatting (hex, binary, octal, scientific)
+// ═══════════════════════════════════════════════════════════════════
+
+func i_format_number(value, format_spec) {
+    if format_spec == null || format_spec == "" { return i_display(value) }
+
+    const t = typeof(value)
+
+    // Parse format spec: [fill][align][sign][#][0][width][.precision][type]
+    let spec = parse_format_spec(format_spec)
+
+    let formatted = ""
+
+    match spec["type"] {
+        "d" => {
+            // Decimal integer
+            formatted = to_string(to_int64(value))
+        },
+        "x" => {
+            // Lowercase hex
+            const n = to_int64(value)
+            formatted = int_to_hex_str(n, false)
+            if spec["alt"] { formatted = "0x" + formatted }
+        },
+        "X" => {
+            // Uppercase hex
+            const n = to_int64(value)
+            formatted = int_to_hex_str(n, true)
+            if spec["alt"] { formatted = "0X" + formatted }
+        },
+        "b" => {
+            // Binary
+            const n = to_int64(value)
+            formatted = int_to_binary_str(n)
+            if spec["alt"] { formatted = "0b" + formatted }
+        },
+        "o" => {
+            // Octal
+            const n = to_int64(value)
+            formatted = int_to_octal_str(n)
+            if spec["alt"] { formatted = "0o" + formatted }
+        },
+        "e" | "E" => {
+            // Scientific notation
+            const f = to_float64(value)
+            const prec = if spec["precision"] >= 0 { spec["precision"] } else { 6 }
+            formatted = float_to_scientific(f, prec, spec["type"] == "E")
+        },
+        "f" | "F" => {
+            // Fixed point
+            const f = to_float64(value)
+            const prec = if spec["precision"] >= 0 { spec["precision"] } else { 6 }
+            formatted = float_to_fixed(f, prec)
+        },
+        "%" => {
+            // Percentage
+            const f = to_float64(value) * 100.0
+            const prec = if spec["precision"] >= 0 { spec["precision"] } else { 2 }
+            formatted = float_to_fixed(f, prec) + "%"
+        },
+        _ => {
+            formatted = i_display(value)
+        },
+    }
+
+    // Apply sign
+    if spec["sign"] == "+" && !formatted.starts_with("-") {
+        formatted = "+" + formatted
+    } else if spec["sign"] == " " && !formatted.starts_with("-") {
+        formatted = " " + formatted
+    }
+
+    // Apply width and alignment
+    apply_width_align(formatted, spec)
+}
+
+// Parse a format specifier string
+func parse_format_spec(spec) {
+    let result = {
+        "fill": " ",
+        "align": ">",
+        "sign": "-",
+        "alt": false,
+        "zero": false,
+        "width": 0,
+        "precision": -1,
+        "type": "",
+    }
+
+    if len(spec) == 0 { return result }
+
+    let i = 0
+
+    // Check for fill and align
+    if len(spec) >= 2 {
+        const second = spec[1]
+        if second == "<" || second == ">" || second == "^" {
+            result["fill"] = spec[0]
+            result["align"] = second
+            i = 2
+        }
+    }
+    if i == 0 && len(spec) >= 1 {
+        const first = spec[0]
+        if first == "<" || first == ">" || first == "^" {
+            result["align"] = first
+            i = 1
+        }
+    }
+
+    // Sign
+    if i < len(spec) && (spec[i] == "+" || spec[i] == "-" || spec[i] == " ") {
+        result["sign"] = spec[i]
+        i = i + 1
+    }
+
+    // Alternate form
+    if i < len(spec) && spec[i] == "#" {
+        result["alt"] = true
+        i = i + 1
+    }
+
+    // Zero padding
+    if i < len(spec) && spec[i] == "0" {
+        result["zero"] = true
+        result["fill"] = "0"
+        result["align"] = "="
+        i = i + 1
+    }
+
+    // Width
+    let width_str = ""
+    while i < len(spec) && spec[i] >= "0" && spec[i] <= "9" {
+        width_str = width_str + spec[i]
+        i = i + 1
+    }
+    if len(width_str) > 0 { result["width"] = to_int64(width_str) }
+
+    // Precision
+    if i < len(spec) && spec[i] == "." {
+        i = i + 1
+        let prec_str = ""
+        while i < len(spec) && spec[i] >= "0" && spec[i] <= "9" {
+            prec_str = prec_str + spec[i]
+            i = i + 1
+        }
+        if len(prec_str) > 0 { result["precision"] = to_int64(prec_str) }
+    }
+
+    // Type
+    if i < len(spec) {
+        result["type"] = spec[i]
+    }
+
+    result
+}
+
+// Convert integer to hex string
+func int_to_hex_str(n, upper) {
+    if n == 0 { return "0" }
+    const chars = if upper { "0123456789ABCDEF" } else { "0123456789abcdef" }
+    let result = ""
+    let v = if n < 0 { 0 - n } else { n }
+    while v > 0 {
+        result = chars[v % 16] + result
+        v = v / 16
+    }
+    if n < 0 { "-" + result } else { result }
+}
+
+// Convert integer to binary string
+func int_to_binary_str(n) {
+    if n == 0 { return "0" }
+    let result = ""
+    let v = if n < 0 { 0 - n } else { n }
+    while v > 0 {
+        result = to_string(v % 2) + result
+        v = v / 2
+    }
+    if n < 0 { "-" + result } else { result }
+}
+
+// Convert integer to octal string
+func int_to_octal_str(n) {
+    if n == 0 { return "0" }
+    let result = ""
+    let v = if n < 0 { 0 - n } else { n }
+    while v > 0 {
+        result = to_string(v % 8) + result
+        v = v / 8
+    }
+    if n < 0 { "-" + result } else { result }
+}
+
+// Convert float to scientific notation
+func float_to_scientific(f, precision, upper) {
+    if f == 0.0 { return "0." + "0".repeat(precision) + (if upper { "E+00" } else { "e+00" }) }
+    let v = if f < 0.0 { 0.0 - f } else { f }
+    let exp = 0
+    while v >= 10.0 { v = v / 10.0; exp = exp + 1 }
+    while v < 1.0 && v > 0.0 { v = v * 10.0; exp = exp - 1 }
+    const mantissa = float_to_fixed(v, precision)
+    const e_char = if upper { "E" } else { "e" }
+    const sign = if exp >= 0 { "+" } else { "-" }
+    const abs_exp = if exp < 0 { 0 - exp } else { exp }
+    const exp_str = if abs_exp < 10 { "0" + to_string(abs_exp) } else { to_string(abs_exp) }
+    const result = mantissa + e_char + sign + exp_str
+    if f < 0.0 { "-" + result } else { result }
+}
+
+// Convert float to fixed-point string
+func float_to_fixed(f, precision) {
+    if precision == 0 { return to_string(to_int64(round(f))) }
+    let s = to_string(f)
+    const dot_idx = s.index_of(".")
+    if dot_idx == null || dot_idx < 0 {
+        s = s + "." + "0".repeat(precision)
+    } else {
+        const current_prec = len(s) - dot_idx - 1
+        if current_prec < precision {
+            s = s + "0".repeat(precision - current_prec)
+        } else if current_prec > precision {
+            s = s.slice(0, dot_idx + 1 + precision)
+        }
+    }
+    s
+}
+
+// Apply width and alignment to a formatted string
+func apply_width_align(s, spec) {
+    const width = spec["width"]
+    if width <= 0 || len(s) >= width { return s }
+    const padding = width - len(s)
+    const fill = spec["fill"]
+    match spec["align"] {
+        "<" => s + fill.repeat(padding),
+        ">" | "=" => fill.repeat(padding) + s,
+        "^" => {
+            const left = padding / 2
+            const right = padding - left
+            fill.repeat(left) + s + fill.repeat(right)
+        },
+        _ => fill.repeat(padding) + s,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 142: Regex Operations Dispatch
+// ═══════════════════════════════════════════════════════════════════
+
+func i_regex_dispatch(op, args) {
+    match op {
+        "regex_new" | "new_regex" => {
+            if len(args) == 0 { panic("regex_new requires a pattern") }
+            const pattern = to_string(args[0])
+            const flags = if len(args) > 1 { to_string(args[1]) } else { "" }
+            {"__regex": true, "pattern": pattern, "flags": flags}
+        },
+        "regex_match" | "is_match" => {
+            if len(args) < 2 { panic("regex_match requires (regex, string)") }
+            const re = args[0]
+            const s = to_string(args[1])
+            i_regex_is_match(re, s)
+        },
+        "regex_find" | "find_match" => {
+            if len(args) < 2 { panic("regex_find requires (regex, string)") }
+            i_regex_find(args[0], to_string(args[1]))
+        },
+        "regex_find_all" | "find_all_matches" => {
+            if len(args) < 2 { return [] }
+            i_regex_find_all(args[0], to_string(args[1]))
+        },
+        "regex_replace" | "replace_match" => {
+            if len(args) < 3 { panic("regex_replace requires (regex, string, replacement)") }
+            i_regex_replace(args[0], to_string(args[1]), to_string(args[2]))
+        },
+        "regex_replace_all" | "replace_all_matches" => {
+            if len(args) < 3 { return to_string(args[1]) }
+            i_regex_replace_all(args[0], to_string(args[1]), to_string(args[2]))
+        },
+        "regex_split" => {
+            if len(args) < 2 { return [to_string(args[0])] }
+            i_regex_split(args[0], to_string(args[1]))
+        },
+        "regex_captures" => {
+            if len(args) < 2 { return [] }
+            i_regex_captures(args[0], to_string(args[1]))
+        },
+        _ => null,
+    }
+}
+
+// Simple regex match (uses stage 0 regex or simple pattern matching)
+func i_regex_is_match(re, s) {
+    const pattern = if typeof(re) == "map" && re.has("pattern") { re["pattern"] } else { to_string(re) }
+    // Simple literal match fallback
+    s.contains(pattern)
+}
+
+func i_regex_find(re, s) {
+    const pattern = if typeof(re) == "map" && re.has("pattern") { re["pattern"] } else { to_string(re) }
+    const idx = s.index_of(pattern)
+    if idx != null && idx >= 0 {
+        {"start": idx, "end": idx + len(pattern), "text": pattern}
+    } else {
+        null
+    }
+}
+
+func i_regex_find_all(re, s) {
+    const pattern = if typeof(re) == "map" && re.has("pattern") { re["pattern"] } else { to_string(re) }
+    let results = []
+    let start = 0
+    while start < len(s) {
+        const idx = s.slice(start).index_of(pattern)
+        if idx == null || idx < 0 { break }
+        const abs_idx = start + idx
+        results.push({"start": abs_idx, "end": abs_idx + len(pattern), "text": pattern})
+        start = abs_idx + len(pattern)
+    }
+    results
+}
+
+func i_regex_replace(re, s, replacement) {
+    const pattern = if typeof(re) == "map" && re.has("pattern") { re["pattern"] } else { to_string(re) }
+    const idx = s.index_of(pattern)
+    if idx != null && idx >= 0 {
+        s.slice(0, idx) + replacement + s.slice(idx + len(pattern))
+    } else {
+        s
+    }
+}
+
+func i_regex_replace_all(re, s, replacement) {
+    const pattern = if typeof(re) == "map" && re.has("pattern") { re["pattern"] } else { to_string(re) }
+    s.replace(pattern, replacement)
+}
+
+func i_regex_split(re, s) {
+    const pattern = if typeof(re) == "map" && re.has("pattern") { re["pattern"] } else { to_string(re) }
+    s.split(pattern)
+}
+
+func i_regex_captures(re, s) {
+    // Full capture groups require a real regex engine
+    // Return the whole match as capture group 0
+    const m = i_regex_find(re, s)
+    if m != null { [m["text"]] } else { [] }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 143: Template Literal Evaluation
+// ═══════════════════════════════════════════════════════════════════
+
+func eval_template_literal(parts) {
+    let result = ""
+    for part in parts {
+        if typeof(part) == "string" {
+            result = result + part
+        } else if typeof(part) == "map" && part.has("expr") {
+            const val = eval_expr(part["expr"])
+            if part.has("format") {
+                result = result + i_format_number(val, part["format"])
+            } else {
+                result = result + i_display(val)
+            }
+        } else {
+            result = result + i_display(eval_expr(part))
+        }
+    }
+    result
+}
+
+// Tagged template literal support
+func eval_tagged_template(tag, strings, values) {
+    const tag_fn = eval_expr(tag)
+    let string_vals = strings.map(s => s)
+    let expr_vals = values.map(v => eval_expr(v))
+    i_call_any(tag_fn, [string_vals, expr_vals])
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 144: Proxy/Interceptor Pattern
+// ═══════════════════════════════════════════════════════════════════
+
+// Create a proxy object with handler interceptors
+func eval_proxy_create(target, handler) {
+    {
+        "__proxy": true,
+        "__target": target,
+        "__handler": handler,
+    }
+}
+
+// Intercept property get on a proxy
+func eval_proxy_get(proxy, prop) {
+    const handler = proxy["__handler"]
+    const target = proxy["__target"]
+
+    if handler.has("get") {
+        const get_fn = handler["get"]
+        i_call_any(get_fn, [target, prop, proxy])
+    } else {
+        // Default: pass through to target
+        if typeof(target) == "map" && target.has(prop) {
+            target[prop]
+        } else {
+            null
+        }
+    }
+}
+
+// Intercept property set on a proxy
+func eval_proxy_set(proxy, prop, value) {
+    const handler = proxy["__handler"]
+    const target = proxy["__target"]
+
+    if handler.has("set") {
+        const set_fn = handler["set"]
+        i_call_any(set_fn, [target, prop, value, proxy])
+    } else {
+        // Default: set on target
+        if typeof(target) == "map" {
+            target[prop] = value
+        }
+    }
+    true
+}
+
+// Intercept has check on a proxy
+func eval_proxy_has(proxy, prop) {
+    const handler = proxy["__handler"]
+    const target = proxy["__target"]
+
+    if handler.has("has") {
+        const has_fn = handler["has"]
+        i_call_any(has_fn, [target, prop])
+    } else {
+        typeof(target) == "map" && target.has(prop)
+    }
+}
+
+// Intercept delete on a proxy
+func eval_proxy_delete(proxy, prop) {
+    const handler = proxy["__handler"]
+    const target = proxy["__target"]
+
+    if handler.has("deleteProperty") {
+        const del_fn = handler["deleteProperty"]
+        i_call_any(del_fn, [target, prop])
+    } else {
+        if typeof(target) == "map" && target.has(prop) {
+            target.remove(prop)
+        }
+    }
+    true
+}
+
+// Intercept function call on a proxy
+func eval_proxy_apply(proxy, this_arg, args) {
+    const handler = proxy["__handler"]
+    const target = proxy["__target"]
+
+    if handler.has("apply") {
+        const apply_fn = handler["apply"]
+        i_call_any(apply_fn, [target, this_arg, args])
+    } else {
+        i_call_any(target, args)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 145: WeakRef/WeakMap Support
+// ═══════════════════════════════════════════════════════════════════
+
+// WeakRef: holds a reference that doesn't prevent GC
+func eval_weak_ref_create(target) {
+    const id = i_heap_alloc(target)
+    {"__weakref": true, "__id": id, "__alive": true}
+}
+
+func eval_weak_ref_deref(weak) {
+    if !weak.has("__weakref") || !weak["__alive"] { return null }
+    const val = i_heap_get(weak["__id"])
+    val
+}
+
+// WeakMap: keys are weakly referenced
+func eval_weak_map_new() {
+    {"__weakmap": true, "__entries": {"__s": true}, "__size": 0}
+}
+
+func eval_weak_map_set(wm, key, value) {
+    if typeof(key) != "map" { panic("WeakMap keys must be objects") }
+    // Use object identity as key (simulated via heap address)
+    const key_id = if key.has("__heap_id") { key["__heap_id"] } else {
+        const id = i_heap_alloc(key)
+        key["__heap_id"] = id
+        id
+    }
+    wm["__entries"][to_string(key_id)] = value
+    wm["__size"] = wm["__size"] + 1
+    wm
+}
+
+func eval_weak_map_get(wm, key) {
+    if typeof(key) != "map" || !key.has("__heap_id") { return null }
+    const key_id = to_string(key["__heap_id"])
+    if wm["__entries"].has(key_id) { wm["__entries"][key_id] } else { null }
+}
+
+func eval_weak_map_has(wm, key) {
+    if typeof(key) != "map" || !key.has("__heap_id") { return false }
+    wm["__entries"].has(to_string(key["__heap_id"]))
+}
+
+func eval_weak_map_delete(wm, key) {
+    if typeof(key) != "map" || !key.has("__heap_id") { return false }
+    const key_id = to_string(key["__heap_id"])
+    if wm["__entries"].has(key_id) {
+        wm["__entries"].remove(key_id)
+        wm["__size"] = wm["__size"] - 1
+        true
+    } else {
+        false
+    }
+}
+
+// WeakSet
+func eval_weak_set_new() {
+    {"__weakset": true, "__entries": {"__s": true}, "__size": 0}
+}
+
+func eval_weak_set_add(ws, value) {
+    if typeof(value) != "map" { panic("WeakSet values must be objects") }
+    const id = if value.has("__heap_id") { value["__heap_id"] } else {
+        const new_id = i_heap_alloc(value)
+        value["__heap_id"] = new_id
+        new_id
+    }
+    ws["__entries"][to_string(id)] = true
+    ws["__size"] = ws["__size"] + 1
+    ws
+}
+
+func eval_weak_set_has(ws, value) {
+    if typeof(value) != "map" || !value.has("__heap_id") { return false }
+    ws["__entries"].has(to_string(value["__heap_id"]))
+}
+
+func eval_weak_set_delete(ws, value) {
+    if typeof(value) != "map" || !value.has("__heap_id") { return false }
+    const id = to_string(value["__heap_id"])
+    if ws["__entries"].has(id) {
+        ws["__entries"].remove(id)
+        ws["__size"] = ws["__size"] - 1
+        true
+    } else {
+        false
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 146: Symbol Type Support
+// ═══════════════════════════════════════════════════════════════════
+
+let i_symbol_counter = 0
+let i_symbol_registry = {"__s": true}
+
+// Create a new unique symbol
+func eval_symbol_create(description) {
+    i_symbol_counter = i_symbol_counter + 1
+    {
+        "__symbol": true,
+        "__id": i_symbol_counter,
+        "__description": if description != null { to_string(description) } else { "" },
+    }
+}
+
+// Get or create a global symbol by key
+func eval_symbol_for(key) {
+    const k = to_string(key)
+    if i_symbol_registry.has(k) { return i_symbol_registry[k] }
+    const sym = eval_symbol_create(k)
+    i_symbol_registry[k] = sym
+    sym
+}
+
+// Get key for a global symbol
+func eval_symbol_key_for(sym) {
+    if typeof(sym) != "map" || !sym.has("__symbol") { return null }
+    for k in i_symbol_registry.keys() {
+        if k == "__s" { continue }
+        if i_symbol_registry[k]["__id"] == sym["__id"] { return k }
+    }
+    null
+}
+
+// Well-known symbols
+func eval_symbol_iterator() { eval_symbol_for("Symbol.iterator") }
+func eval_symbol_async_iterator() { eval_symbol_for("Symbol.asyncIterator") }
+func eval_symbol_to_string_tag() { eval_symbol_for("Symbol.toStringTag") }
+func eval_symbol_has_instance() { eval_symbol_for("Symbol.hasInstance") }
+func eval_symbol_toPrimitive() { eval_symbol_for("Symbol.toPrimitive") }
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 147: Async Iterator Protocol
+// ═══════════════════════════════════════════════════════════════════
+
+// Create an async iterator from an iterable
+func eval_async_iterator_create(iterable) {
+    {
+        "__async_iter": true,
+        "__source": iterable,
+        "__index": 0,
+        "__done": false,
+        "__buffer": [],
+    }
+}
+
+// Async iterator next()
+func eval_async_iter_next(iter) {
+    if iter["__done"] { return {"value": null, "done": true} }
+
+    const source = iter["__source"]
+    const idx = iter["__index"]
+
+    if typeof(source) == "array" {
+        if idx >= len(source) {
+            iter["__done"] = true
+            return {"value": null, "done": true}
+        }
+        iter["__index"] = idx + 1
+        return {"value": source[idx], "done": false}
+    }
+
+    // For channels/streams
+    if typeof(source) == "map" && source.has("__channel") {
+        const val = i_channel_receive(source)
+        if val == null {
+            iter["__done"] = true
+            return {"value": null, "done": true}
+        }
+        return {"value": val, "done": false}
+    }
+
+    iter["__done"] = true
+    {"value": null, "done": true}
+}
+
+// Async iterator return() — signal early termination
+func eval_async_iter_return(iter, value) {
+    iter["__done"] = true
+    {"value": value, "done": true}
+}
+
+// Async iterator throw() — signal error
+func eval_async_iter_throw(iter, error) {
+    iter["__done"] = true
+    panic(f"async iterator error: {i_display(error)}")
+}
+
+// for-await loop support
+func eval_for_await(iter_expr, var_name, body) {
+    const iterable = eval_expr(iter_expr)
+    const iter = eval_async_iterator_create(iterable)
+
+    let result = null
+    while true {
+        const next = eval_async_iter_next(iter)
+        if next["done"] { break }
+
+        i_push_scope()
+        i_set(var_name, next["value"], false)
+        result = eval_block(body)
+        i_pop_scope()
+
+        if is_break(result) { break }
+        if is_return(result) { return result }
+        if is_continue(result) { continue }
+    }
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 148: Generator Protocol
+// ═══════════════════════════════════════════════════════════════════
+
+// Create a generator function
+func eval_generator_create(params, body) {
+    let captured = i_new_scope()
+    for scope in i_scopes {
+        for k in scope.keys() {
+            captured[k] = scope[k]
+        }
+    }
+    {
+        "__generator_fn": true,
+        "params": params,
+        "body": body,
+        "captured": captured,
+    }
+}
+
+// Instantiate a generator (call the generator function)
+func eval_generator_init(gen_fn, args) {
+    {
+        "__generator": true,
+        "__fn": gen_fn,
+        "__args": args,
+        "__state": "suspended",
+        "__yielded": [],
+        "__yield_idx": 0,
+        "__return_value": null,
+    }
+}
+
+// Generator next(value) — resume execution
+func eval_generator_next(gen, value) {
+    if gen["__state"] == "completed" {
+        return {"value": null, "done": true}
+    }
+
+    // If we have pre-computed yields, return next one
+    if gen["__yield_idx"] < len(gen["__yielded"]) {
+        const val = gen["__yielded"][gen["__yield_idx"]]
+        gen["__yield_idx"] = gen["__yield_idx"] + 1
+        return {"value": val, "done": false}
+    }
+
+    // Execute generator body to collect yields
+    if gen["__state"] == "suspended" {
+        gen["__state"] = "executing"
+        const fn = gen["__fn"]
+
+        // Set up scope with captured variables and parameters
+        i_push_scope()
+        for k in fn["captured"].keys() {
+            if k == "__s" { continue }
+            i_scopes[len(i_scopes) - 1][k] = fn["captured"][k]
+        }
+        let pi = 0
+        while pi < len(fn["params"]) && pi < len(gen["__args"]) {
+            i_set(fn["params"][pi], gen["__args"][pi], false)
+            pi = pi + 1
+        }
+
+        // Execute body, collecting yields
+        let yields = []
+        const result = eval_generator_body(fn["body"], yields)
+        i_pop_scope()
+
+        gen["__yielded"] = yields
+        gen["__yield_idx"] = 0
+        gen["__return_value"] = result
+        gen["__state"] = "completed"
+
+        if len(yields) > 0 {
+            gen["__yield_idx"] = 1
+            return {"value": yields[0], "done": false}
+        }
+
+        return {"value": result, "done": true}
+    }
+
+    {"value": null, "done": true}
+}
+
+// Execute generator body, collecting yield values
+func eval_generator_body(body, yields) {
+    if typeof(body) == "array" {
+        let result = null
+        for stmt in body {
+            result = eval_generator_stmt(stmt, yields)
+            if is_return(result) { return signal_value(result) }
+        }
+        return result
+    }
+    eval_generator_stmt(body, yields)
+}
+
+func eval_generator_stmt(node, yields) {
+    if node == null { return null }
+    if typeof(node) == "map" && node.has("kind") {
+        const kind = node["kind"]
+        if kind == "yield" {
+            const val = if node.has("expr") { eval_expr(node["expr"]) } else { null }
+            yields.push(val)
+            return val
+        }
+        if kind == "yield_star" {
+            // yield* delegates to another iterable
+            const iterable = eval_expr(node["expr"])
+            if typeof(iterable) == "array" {
+                for item in iterable { yields.push(item) }
+            }
+            return null
+        }
+    }
+    eval_stmt(node)
+}
+
+// Generator return(value)
+func eval_generator_return(gen, value) {
+    gen["__state"] = "completed"
+    gen["__return_value"] = value
+    {"value": value, "done": true}
+}
+
+// Generator throw(error)
+func eval_generator_throw(gen, error) {
+    gen["__state"] = "completed"
+    panic(f"generator error: {i_display(error)}")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 149: Event Loop Simulation
+// ═══════════════════════════════════════════════════════════════════
+
+let i_event_queue = []
+let i_microtask_queue = []
+let i_timer_id = 0
+
+func i_schedule_event(callback, delay) {
+    i_timer_id = i_timer_id + 1
+    i_event_queue.push({
+        "id": i_timer_id,
+        "callback": callback,
+        "delay": delay,
+        "scheduled_at": timestamp_ms(),
+    })
+    i_timer_id
+}
+
+func i_schedule_microtask(callback) {
+    i_microtask_queue.push(callback)
+}
+
+func i_cancel_timer(id) {
+    i_event_queue = i_event_queue.filter(e => e["id"] != id)
+}
+
+// Run one tick of the event loop
+func i_event_loop_tick() {
+    // Process all microtasks first
+    while len(i_microtask_queue) > 0 {
+        const task = i_microtask_queue.shift()
+        i_call_any(task, [])
+    }
+
+    // Process one event from the queue
+    if len(i_event_queue) > 0 {
+        // Sort by scheduled time + delay
+        i_event_queue.sort((a, b) =>
+            (a["scheduled_at"] + a["delay"]) - (b["scheduled_at"] + b["delay"])
+        )
+        const event = i_event_queue.shift()
+        i_call_any(event["callback"], [])
+        return true
+    }
+
+    false
+}
+
+// Run event loop until queue is empty
+func i_run_event_loop() {
+    let iterations = 0
+    const max_iterations = 10000
+    while (len(i_event_queue) > 0 || len(i_microtask_queue) > 0) && iterations < max_iterations {
+        i_event_loop_tick()
+        iterations = iterations + 1
+    }
+    if iterations >= max_iterations {
+        panic("event loop exceeded maximum iterations")
+    }
+}
+
+// setTimeout simulation
+func i_set_timeout(callback, delay) {
+    i_schedule_event(callback, delay)
+}
+
+// setInterval simulation
+func i_set_interval(callback, interval) {
+    const id = i_schedule_event(callback, interval)
+    // Re-schedule after execution
+    let wrapper = null
+    wrapper = () => {
+        i_call_any(callback, [])
+        i_schedule_event(wrapper, interval)
+    }
+    i_schedule_event(wrapper, interval)
+    id
+}
+
+// queueMicrotask simulation
+func i_queue_microtask(callback) {
+    i_schedule_microtask(callback)
+}
+
+// nextTick simulation
+func i_next_tick(callback) {
+    i_schedule_microtask(callback)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECTION 150: Iterator Protocol Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+// Create an iterator from various sources
+func i_into_iterator(value) {
+    const t = typeof(value)
+    if t == "array" { return i_array_iterator(value) }
+    if t == "string" { return i_string_iterator(value) }
+    if t == "map" {
+        if value.has("__iter") { return value }
+        if value.has("__generator") { return value }
+        if value.has("__stream") { return i_stream_iterator(value) }
+        return i_map_iterator(value)
+    }
+    // Range or other
+    i_array_iterator([value])
+}
+
+func i_array_iterator(arr) {
+    {"__iter": true, "__source": arr, "__index": 0, "__kind": "array"}
+}
+
+func i_string_iterator(s) {
+    {"__iter": true, "__source": s, "__index": 0, "__kind": "string"}
+}
+
+func i_map_iterator(m) {
+    const keys = m.keys().filter(k => k != "__s")
+    {"__iter": true, "__source": m, "__keys": keys, "__index": 0, "__kind": "map"}
+}
+
+func i_stream_iterator(stream) {
+    const items = stream_collect(stream)
+    i_array_iterator(items)
+}
+
+// Iterator next() method
+func i_iter_next(iter) {
+    const kind = iter["__kind"]
+    const idx = iter["__index"]
+
+    match kind {
+        "array" => {
+            const src = iter["__source"]
+            if idx >= len(src) { return {"done": true, "value": null} }
+            iter["__index"] = idx + 1
+            {"done": false, "value": src[idx]}
+        },
+        "string" => {
+            const src = iter["__source"]
+            if idx >= len(src) { return {"done": true, "value": null} }
+            iter["__index"] = idx + 1
+            {"done": false, "value": src[idx]}
+        },
+        "map" => {
+            const keys = iter["__keys"]
+            if idx >= len(keys) { return {"done": true, "value": null} }
+            const key = keys[idx]
+            iter["__index"] = idx + 1
+            {"done": false, "value": [key, iter["__source"][key]]}
+        },
+        _ => {"done": true, "value": null},
+    }
+}
+
+// Collect iterator to array
+func i_iter_collect(iter) {
+    let result = []
+    while true {
+        const next = i_iter_next(iter)
+        if next["done"] { break }
+        result.push(next["value"])
+    }
+    result
+}

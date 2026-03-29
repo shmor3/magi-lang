@@ -7840,3 +7840,1170 @@ func rb_inorder(tree) {
 func rb_size(tree) {
     tree["size"]
 }
+
+// ════════════════════════════════════════════════════════════════════
+// 13. MessagePack Encoder/Decoder
+// ════════════════════════════════════════════════════════════════════
+
+// MessagePack format type codes
+const MSGPACK_NIL = 0xc0
+const MSGPACK_FALSE = 0xc2
+const MSGPACK_TRUE = 0xc3
+const MSGPACK_UINT8 = 0xcc
+const MSGPACK_UINT16 = 0xcd
+const MSGPACK_UINT32 = 0xce
+const MSGPACK_UINT64 = 0xcf
+const MSGPACK_INT8 = 0xd0
+const MSGPACK_INT16 = 0xd1
+const MSGPACK_INT32 = 0xd2
+const MSGPACK_INT64 = 0xd3
+const MSGPACK_FLOAT32 = 0xca
+const MSGPACK_FLOAT64 = 0xcb
+const MSGPACK_STR8 = 0xd9
+const MSGPACK_STR16 = 0xda
+const MSGPACK_STR32 = 0xdb
+const MSGPACK_ARRAY16 = 0xdc
+const MSGPACK_ARRAY32 = 0xdd
+const MSGPACK_MAP16 = 0xde
+const MSGPACK_MAP32 = 0xdf
+
+// Encode a MAGI value to MessagePack bytes (as array of ints 0-255)
+func msgpack_encode(value) {
+    let bytes = []
+    msgpack_encode_value(value, bytes)
+    bytes
+}
+
+func msgpack_encode_value(value, bytes) {
+    if value == null {
+        bytes.push(MSGPACK_NIL)
+        return
+    }
+
+    const t = typeof(value)
+
+    if t == "bool" {
+        bytes.push(if value { MSGPACK_TRUE } else { MSGPACK_FALSE })
+        return
+    }
+
+    if t == "int64" {
+        msgpack_encode_int(value, bytes)
+        return
+    }
+
+    if t == "float64" {
+        msgpack_encode_float(value, bytes)
+        return
+    }
+
+    if t == "string" {
+        msgpack_encode_string(value, bytes)
+        return
+    }
+
+    if t == "array" {
+        msgpack_encode_array(value, bytes)
+        return
+    }
+
+    if t == "map" {
+        msgpack_encode_map(value, bytes)
+        return
+    }
+
+    // Default: encode as string representation
+    msgpack_encode_string(to_string(value), bytes)
+}
+
+func msgpack_encode_int(n, bytes) {
+    if n >= 0 && n <= 127 {
+        // Positive fixint
+        bytes.push(n)
+    } else if n >= -32 && n < 0 {
+        // Negative fixint
+        bytes.push(256 + n)
+    } else if n >= -128 && n <= 127 {
+        bytes.push(MSGPACK_INT8)
+        bytes.push(if n < 0 { 256 + n } else { n })
+    } else if n >= -32768 && n <= 32767 {
+        bytes.push(MSGPACK_INT16)
+        const u = if n < 0 { 65536 + n } else { n }
+        bytes.push((u / 256) % 256)
+        bytes.push(u % 256)
+    } else if n >= -2147483648 && n <= 2147483647 {
+        bytes.push(MSGPACK_INT32)
+        const u = if n < 0 { 4294967296 + n } else { n }
+        bytes.push((u / 16777216) % 256)
+        bytes.push((u / 65536) % 256)
+        bytes.push((u / 256) % 256)
+        bytes.push(u % 256)
+    } else {
+        bytes.push(MSGPACK_INT64)
+        // Encode 8 bytes big-endian
+        let v = if n < 0 { 0 - n } else { n }
+        let buf = []
+        let i = 0
+        while i < 8 {
+            buf.push(v % 256)
+            v = v / 256
+            i = i + 1
+        }
+        buf.reverse()
+        if n < 0 { buf[0] = buf[0] + 128 } // Set sign bit
+        for b in buf { bytes.push(b) }
+    }
+}
+
+func msgpack_encode_float(f, bytes) {
+    bytes.push(MSGPACK_FLOAT64)
+    // IEEE 754 double: simplified encoding (8 bytes big-endian)
+    // In practice, would use bitwise ops; here encode as string hack
+    let i = 0
+    while i < 8 {
+        bytes.push(0)
+        i = i + 1
+    }
+}
+
+func msgpack_encode_string(s, bytes) {
+    const n = len(s)
+    if n <= 31 {
+        // fixstr
+        bytes.push(0xa0 + n)
+    } else if n <= 255 {
+        bytes.push(MSGPACK_STR8)
+        bytes.push(n)
+    } else if n <= 65535 {
+        bytes.push(MSGPACK_STR16)
+        bytes.push(n / 256)
+        bytes.push(n % 256)
+    } else {
+        bytes.push(MSGPACK_STR32)
+        bytes.push((n / 16777216) % 256)
+        bytes.push((n / 65536) % 256)
+        bytes.push((n / 256) % 256)
+        bytes.push(n % 256)
+    }
+    // Encode UTF-8 bytes
+    let i = 0
+    while i < n {
+        bytes.push(char_code_at(s, i))
+        i = i + 1
+    }
+}
+
+func msgpack_encode_array(arr, bytes) {
+    const n = len(arr)
+    if n <= 15 {
+        bytes.push(0x90 + n)
+    } else if n <= 65535 {
+        bytes.push(MSGPACK_ARRAY16)
+        bytes.push(n / 256)
+        bytes.push(n % 256)
+    } else {
+        bytes.push(MSGPACK_ARRAY32)
+        bytes.push((n / 16777216) % 256)
+        bytes.push((n / 65536) % 256)
+        bytes.push((n / 256) % 256)
+        bytes.push(n % 256)
+    }
+    for item in arr {
+        msgpack_encode_value(item, bytes)
+    }
+}
+
+func msgpack_encode_map(m, bytes) {
+    const keys = m.keys().filter(k => k != "__s")
+    const n = len(keys)
+    if n <= 15 {
+        bytes.push(0x80 + n)
+    } else if n <= 65535 {
+        bytes.push(MSGPACK_MAP16)
+        bytes.push(n / 256)
+        bytes.push(n % 256)
+    } else {
+        bytes.push(MSGPACK_MAP32)
+        bytes.push((n / 16777216) % 256)
+        bytes.push((n / 65536) % 256)
+        bytes.push((n / 256) % 256)
+        bytes.push(n % 256)
+    }
+    for k in keys {
+        msgpack_encode_string(k, bytes)
+        msgpack_encode_value(m[k], bytes)
+    }
+}
+
+// Decode MessagePack bytes to a MAGI value
+func msgpack_decode(bytes) {
+    let pos = [0] // Use array for pass-by-reference
+    msgpack_decode_value(bytes, pos)
+}
+
+func msgpack_decode_value(bytes, pos) {
+    if pos[0] >= len(bytes) { return null }
+    const b = bytes[pos[0]]
+    pos[0] = pos[0] + 1
+
+    // Positive fixint
+    if b <= 0x7f { return b }
+
+    // Negative fixint
+    if b >= 0xe0 { return b - 256 }
+
+    // fixstr
+    if b >= 0xa0 && b <= 0xbf {
+        const n = b - 0xa0
+        return msgpack_read_string(bytes, pos, n)
+    }
+
+    // fixarray
+    if b >= 0x90 && b <= 0x9f {
+        const n = b - 0x90
+        return msgpack_read_array(bytes, pos, n)
+    }
+
+    // fixmap
+    if b >= 0x80 && b <= 0x8f {
+        const n = b - 0x80
+        return msgpack_read_map(bytes, pos, n)
+    }
+
+    match b {
+        MSGPACK_NIL => null,
+        MSGPACK_FALSE => false,
+        MSGPACK_TRUE => true,
+        MSGPACK_UINT8 => { const v = bytes[pos[0]]; pos[0] = pos[0] + 1; v },
+        MSGPACK_INT8 => {
+            const v = bytes[pos[0]]; pos[0] = pos[0] + 1
+            if v >= 128 { v - 256 } else { v }
+        },
+        MSGPACK_UINT16 => {
+            const hi = bytes[pos[0]]; const lo = bytes[pos[0] + 1]
+            pos[0] = pos[0] + 2
+            hi * 256 + lo
+        },
+        MSGPACK_INT16 => {
+            const hi = bytes[pos[0]]; const lo = bytes[pos[0] + 1]
+            pos[0] = pos[0] + 2
+            const v = hi * 256 + lo
+            if v >= 32768 { v - 65536 } else { v }
+        },
+        MSGPACK_UINT32 => {
+            let v = 0
+            let i = 0
+            while i < 4 { v = v * 256 + bytes[pos[0] + i]; i = i + 1 }
+            pos[0] = pos[0] + 4
+            v
+        },
+        MSGPACK_INT32 => {
+            let v = 0
+            let i = 0
+            while i < 4 { v = v * 256 + bytes[pos[0] + i]; i = i + 1 }
+            pos[0] = pos[0] + 4
+            if v >= 2147483648 { v - 4294967296 } else { v }
+        },
+        MSGPACK_INT64 | MSGPACK_UINT64 => {
+            let v = 0
+            let i = 0
+            while i < 8 { v = v * 256 + bytes[pos[0] + i]; i = i + 1 }
+            pos[0] = pos[0] + 8
+            v
+        },
+        MSGPACK_FLOAT32 => {
+            pos[0] = pos[0] + 4
+            0.0 // Simplified: would need IEEE 754 decode
+        },
+        MSGPACK_FLOAT64 => {
+            pos[0] = pos[0] + 8
+            0.0 // Simplified: would need IEEE 754 decode
+        },
+        MSGPACK_STR8 => {
+            const n = bytes[pos[0]]; pos[0] = pos[0] + 1
+            msgpack_read_string(bytes, pos, n)
+        },
+        MSGPACK_STR16 => {
+            const n = bytes[pos[0]] * 256 + bytes[pos[0] + 1]; pos[0] = pos[0] + 2
+            msgpack_read_string(bytes, pos, n)
+        },
+        MSGPACK_STR32 => {
+            let n = 0; let i = 0
+            while i < 4 { n = n * 256 + bytes[pos[0] + i]; i = i + 1 }
+            pos[0] = pos[0] + 4
+            msgpack_read_string(bytes, pos, n)
+        },
+        MSGPACK_ARRAY16 => {
+            const n = bytes[pos[0]] * 256 + bytes[pos[0] + 1]; pos[0] = pos[0] + 2
+            msgpack_read_array(bytes, pos, n)
+        },
+        MSGPACK_ARRAY32 => {
+            let n = 0; let i = 0
+            while i < 4 { n = n * 256 + bytes[pos[0] + i]; i = i + 1 }
+            pos[0] = pos[0] + 4
+            msgpack_read_array(bytes, pos, n)
+        },
+        MSGPACK_MAP16 => {
+            const n = bytes[pos[0]] * 256 + bytes[pos[0] + 1]; pos[0] = pos[0] + 2
+            msgpack_read_map(bytes, pos, n)
+        },
+        MSGPACK_MAP32 => {
+            let n = 0; let i = 0
+            while i < 4 { n = n * 256 + bytes[pos[0] + i]; i = i + 1 }
+            pos[0] = pos[0] + 4
+            msgpack_read_map(bytes, pos, n)
+        },
+        _ => null,
+    }
+}
+
+func msgpack_read_string(bytes, pos, n) {
+    let result = ""
+    let i = 0
+    while i < n && pos[0] < len(bytes) {
+        result = result + char_from_code(bytes[pos[0]])
+        pos[0] = pos[0] + 1
+        i = i + 1
+    }
+    result
+}
+
+func msgpack_read_array(bytes, pos, n) {
+    let result = []
+    let i = 0
+    while i < n {
+        result.push(msgpack_decode_value(bytes, pos))
+        i = i + 1
+    }
+    result
+}
+
+func msgpack_read_map(bytes, pos, n) {
+    let result = {"__s": true}
+    let i = 0
+    while i < n {
+        const key = msgpack_decode_value(bytes, pos)
+        const val = msgpack_decode_value(bytes, pos)
+        result[to_string(key)] = val
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 14. CBOR Encoder/Decoder
+// ════════════════════════════════════════════════════════════════════
+
+// CBOR major types
+const CBOR_UNSIGNED = 0
+const CBOR_NEGATIVE = 1
+const CBOR_BYTES = 2
+const CBOR_TEXT = 3
+const CBOR_ARRAY = 4
+const CBOR_MAP = 5
+const CBOR_TAG = 6
+const CBOR_SIMPLE = 7
+
+func cbor_encode(value) {
+    let bytes = []
+    cbor_encode_value(value, bytes)
+    bytes
+}
+
+func cbor_encode_value(value, bytes) {
+    if value == null {
+        bytes.push(0xf6) // null
+        return
+    }
+    const t = typeof(value)
+    if t == "bool" {
+        bytes.push(if value { 0xf5 } else { 0xf4 })
+        return
+    }
+    if t == "int64" {
+        if value >= 0 {
+            cbor_encode_uint(CBOR_UNSIGNED, value, bytes)
+        } else {
+            cbor_encode_uint(CBOR_NEGATIVE, -1 - value, bytes)
+        }
+        return
+    }
+    if t == "float64" {
+        bytes.push(0xfb) // float64
+        let i = 0
+        while i < 8 { bytes.push(0); i = i + 1 } // Simplified
+        return
+    }
+    if t == "string" {
+        cbor_encode_uint(CBOR_TEXT, len(value), bytes)
+        let i = 0
+        while i < len(value) {
+            bytes.push(char_code_at(value, i))
+            i = i + 1
+        }
+        return
+    }
+    if t == "array" {
+        cbor_encode_uint(CBOR_ARRAY, len(value), bytes)
+        for item in value { cbor_encode_value(item, bytes) }
+        return
+    }
+    if t == "map" {
+        const keys = value.keys().filter(k => k != "__s")
+        cbor_encode_uint(CBOR_MAP, len(keys), bytes)
+        for k in keys {
+            cbor_encode_value(k, bytes)
+            cbor_encode_value(value[k], bytes)
+        }
+        return
+    }
+    cbor_encode_value(to_string(value), bytes)
+}
+
+func cbor_encode_uint(major, n, bytes) {
+    const mt = major * 32
+    if n <= 23 {
+        bytes.push(mt + n)
+    } else if n <= 255 {
+        bytes.push(mt + 24)
+        bytes.push(n)
+    } else if n <= 65535 {
+        bytes.push(mt + 25)
+        bytes.push(n / 256)
+        bytes.push(n % 256)
+    } else if n <= 4294967295 {
+        bytes.push(mt + 26)
+        bytes.push((n / 16777216) % 256)
+        bytes.push((n / 65536) % 256)
+        bytes.push((n / 256) % 256)
+        bytes.push(n % 256)
+    } else {
+        bytes.push(mt + 27)
+        let v = n
+        let buf = []
+        let i = 0
+        while i < 8 { buf.push(v % 256); v = v / 256; i = i + 1 }
+        buf.reverse()
+        for b in buf { bytes.push(b) }
+    }
+}
+
+func cbor_decode(bytes) {
+    let pos = [0]
+    cbor_decode_value(bytes, pos)
+}
+
+func cbor_decode_value(bytes, pos) {
+    if pos[0] >= len(bytes) { return null }
+    const b = bytes[pos[0]]
+    pos[0] = pos[0] + 1
+    const major = b / 32
+    const info = b % 32
+
+    const n = cbor_read_uint(info, bytes, pos)
+
+    match major {
+        CBOR_UNSIGNED => n,
+        CBOR_NEGATIVE => -1 - n,
+        CBOR_BYTES => {
+            let result = []
+            let i = 0
+            while i < n { result.push(bytes[pos[0] + i]); i = i + 1 }
+            pos[0] = pos[0] + n
+            result
+        },
+        CBOR_TEXT => msgpack_read_string(bytes, pos, n),
+        CBOR_ARRAY => {
+            let result = []
+            let i = 0
+            while i < n { result.push(cbor_decode_value(bytes, pos)); i = i + 1 }
+            result
+        },
+        CBOR_MAP => {
+            let result = {"__s": true}
+            let i = 0
+            while i < n {
+                const key = cbor_decode_value(bytes, pos)
+                const val = cbor_decode_value(bytes, pos)
+                result[to_string(key)] = val
+                i = i + 1
+            }
+            result
+        },
+        CBOR_SIMPLE => {
+            match b {
+                0xf4 => false,
+                0xf5 => true,
+                0xf6 => null,
+                0xf7 => null, // undefined
+                0xfb => { pos[0] = pos[0] + 8; 0.0 }, // float64
+                0xfa => { pos[0] = pos[0] + 4; 0.0 }, // float32
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+}
+
+func cbor_read_uint(info, bytes, pos) {
+    if info <= 23 { return info }
+    if info == 24 { const v = bytes[pos[0]]; pos[0] = pos[0] + 1; return v }
+    if info == 25 {
+        const v = bytes[pos[0]] * 256 + bytes[pos[0] + 1]
+        pos[0] = pos[0] + 2
+        return v
+    }
+    if info == 26 {
+        let v = 0; let i = 0
+        while i < 4 { v = v * 256 + bytes[pos[0] + i]; i = i + 1 }
+        pos[0] = pos[0] + 4
+        return v
+    }
+    if info == 27 {
+        let v = 0; let i = 0
+        while i < 8 { v = v * 256 + bytes[pos[0] + i]; i = i + 1 }
+        pos[0] = pos[0] + 8
+        return v
+    }
+    0
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 15. Date/Time Library (Full)
+// ════════════════════════════════════════════════════════════════════
+
+// Days in each month (non-leap)
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November", "December"]
+const MONTH_ABBREV = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+const DAY_ABBREV = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+func is_leap_year(year) {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+func days_in_month(year, month) {
+    if month == 2 && is_leap_year(year) { 29 }
+    else { DAYS_IN_MONTH[month - 1] }
+}
+
+func days_in_year(year) {
+    if is_leap_year(year) { 366 } else { 365 }
+}
+
+// Create a datetime
+func datetime_new(year, month, day, hour, minute, second) {
+    {
+        "year": year, "month": month, "day": day,
+        "hour": if hour != null { hour } else { 0 },
+        "minute": if minute != null { minute } else { 0 },
+        "second": if second != null { second } else { 0 },
+        "tz_offset": 0,
+    }
+}
+
+// Day of week (Zeller's congruence): 0=Sunday, 6=Saturday
+func day_of_week(year, month, day) {
+    let y = year
+    let m = month
+    if m < 3 { m = m + 12; y = y - 1 }
+    const q = day
+    const k = y % 100
+    const j = y / 100
+    const h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7
+    ((h + 6) % 7)
+}
+
+// Day of year (1-based)
+func day_of_year(year, month, day) {
+    let doy = 0
+    let m = 1
+    while m < month {
+        doy = doy + days_in_month(year, m)
+        m = m + 1
+    }
+    doy + day
+}
+
+// ISO week number
+func iso_week(year, month, day) {
+    const doy = day_of_year(year, month, day)
+    const dow = day_of_week(year, month, day)
+    const dow_jan1 = day_of_week(year, 1, 1)
+    const week = (doy - dow + dow_jan1 + 6) / 7
+    if week < 1 { 52 }
+    else if week > 52 { 1 }
+    else { week }
+}
+
+// Format a datetime using strftime-like format string
+func datetime_format(dt, fmt) {
+    let result = ""
+    let i = 0
+    while i < len(fmt) {
+        if fmt[i] == "%" && i + 1 < len(fmt) {
+            const spec = fmt[i + 1]
+            result = result + datetime_format_spec(dt, spec)
+            i = i + 2
+        } else {
+            result = result + fmt[i]
+            i = i + 1
+        }
+    }
+    result
+}
+
+func datetime_format_spec(dt, spec) {
+    match spec {
+        "Y" => pad_number(dt["year"], 4),
+        "m" => pad_number(dt["month"], 2),
+        "d" => pad_number(dt["day"], 2),
+        "H" => pad_number(dt["hour"], 2),
+        "M" => pad_number(dt["minute"], 2),
+        "S" => pad_number(dt["second"], 2),
+        "A" => DAY_NAMES[day_of_week(dt["year"], dt["month"], dt["day"])],
+        "a" => DAY_ABBREV[day_of_week(dt["year"], dt["month"], dt["day"])],
+        "B" => MONTH_NAMES[dt["month"] - 1],
+        "b" => MONTH_ABBREV[dt["month"] - 1],
+        "j" => pad_number(day_of_year(dt["year"], dt["month"], dt["day"]), 3),
+        "u" => {
+            const dow = day_of_week(dt["year"], dt["month"], dt["day"])
+            to_string(if dow == 0 { 7 } else { dow })
+        },
+        "w" => to_string(day_of_week(dt["year"], dt["month"], dt["day"])),
+        "W" => pad_number(iso_week(dt["year"], dt["month"], dt["day"]), 2),
+        "p" => if dt["hour"] < 12 { "AM" } else { "PM" },
+        "I" => {
+            const h = dt["hour"] % 12
+            pad_number(if h == 0 { 12 } else { h }, 2)
+        },
+        "Z" => {
+            const off = dt["tz_offset"]
+            if off == 0 { "UTC" }
+            else {
+                const sign = if off > 0 { "+" } else { "-" }
+                const abs_off = if off < 0 { 0 - off } else { off }
+                f"{sign}{pad_number(abs_off / 60, 2)}:{pad_number(abs_off % 60, 2)}"
+            }
+        },
+        "%" => "%",
+        _ => "%" + spec,
+    }
+}
+
+func pad_number(n, width) {
+    let s = to_string(n)
+    while len(s) < width { s = "0" + s }
+    s
+}
+
+// Parse a datetime from string
+func datetime_parse(s, fmt) {
+    let year = 2000
+    let month = 1
+    let day = 1
+    let hour = 0
+    let minute = 0
+    let second = 0
+
+    let si = 0
+    let fi = 0
+    while fi < len(fmt) && si < len(s) {
+        if fmt[fi] == "%" && fi + 1 < len(fmt) {
+            const spec = fmt[fi + 1]
+            fi = fi + 2
+            match spec {
+                "Y" => { year = parse_digits(s, si, 4); si = si + 4 },
+                "m" => { month = parse_digits(s, si, 2); si = si + 2 },
+                "d" => { day = parse_digits(s, si, 2); si = si + 2 },
+                "H" => { hour = parse_digits(s, si, 2); si = si + 2 },
+                "M" => { minute = parse_digits(s, si, 2); si = si + 2 },
+                "S" => { second = parse_digits(s, si, 2); si = si + 2 },
+                _ => {},
+            }
+        } else {
+            fi = fi + 1
+            si = si + 1
+        }
+    }
+
+    datetime_new(year, month, day, hour, minute, second)
+}
+
+func parse_digits(s, start, count) {
+    let num_str = ""
+    let i = start
+    while i < start + count && i < len(s) {
+        num_str = num_str + s[i]
+        i = i + 1
+    }
+    to_int64(num_str)
+}
+
+// Datetime arithmetic
+func datetime_add_days(dt, days) {
+    let y = dt["year"]
+    let m = dt["month"]
+    let d = dt["day"] + days
+
+    while d > days_in_month(y, m) {
+        d = d - days_in_month(y, m)
+        m = m + 1
+        if m > 12 { m = 1; y = y + 1 }
+    }
+    while d < 1 {
+        m = m - 1
+        if m < 1 { m = 12; y = y - 1 }
+        d = d + days_in_month(y, m)
+    }
+
+    datetime_new(y, m, d, dt["hour"], dt["minute"], dt["second"])
+}
+
+func datetime_add_hours(dt, hours) {
+    let total_seconds = dt["hour"] * 3600 + dt["minute"] * 60 + dt["second"]
+    total_seconds = total_seconds + hours * 3600
+
+    let extra_days = total_seconds / 86400
+    let remaining = total_seconds % 86400
+    if remaining < 0 { remaining = remaining + 86400; extra_days = extra_days - 1 }
+
+    let result = datetime_add_days(dt, extra_days)
+    result["hour"] = remaining / 3600
+    result["minute"] = (remaining % 3600) / 60
+    result["second"] = remaining % 60
+    result
+}
+
+func datetime_diff_days(a, b) {
+    // Simplified: count days from epoch for each
+    let da = date_to_epoch_days(a["year"], a["month"], a["day"])
+    let db = date_to_epoch_days(b["year"], b["month"], b["day"])
+    da - db
+}
+
+func date_to_epoch_days(year, month, day) {
+    // Days from year 0 (simplified Julian day count)
+    let y = year
+    let m = month
+    if m <= 2 { y = y - 1; m = m + 12 }
+    const A = y / 100
+    const B = 2 - A + A / 4
+    (365 * (y + 4716)) / 1 + (30 * (m + 1) + 3) / 5 + day + B - 1524
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 16. Path Library (Full)
+// ════════════════════════════════════════════════════════════════════
+
+func path_normalize(path) {
+    let parts = path.split("/")
+    let result = []
+    for part in parts {
+        if part == "." || part == "" {
+            if len(result) == 0 && path.starts_with("/") {
+                result.push("")
+            }
+            continue
+        }
+        if part == ".." {
+            if len(result) > 0 && result[len(result) - 1] != ".." {
+                result.pop()
+            } else {
+                result.push("..")
+            }
+        } else {
+            result.push(part)
+        }
+    }
+    const normalized = result.join("/")
+    if path.starts_with("/") && !normalized.starts_with("/") {
+        "/" + normalized
+    } else if len(normalized) == 0 {
+        "."
+    } else {
+        normalized
+    }
+}
+
+func path_join(parts) {
+    path_normalize(parts.join("/"))
+}
+
+func path_dirname(path) {
+    const last_sep = path.last_index_of("/")
+    if last_sep == null || last_sep < 0 { return "." }
+    if last_sep == 0 { return "/" }
+    path.slice(0, last_sep)
+}
+
+func path_basename(path) {
+    const last_sep = path.last_index_of("/")
+    if last_sep == null || last_sep < 0 { return path }
+    path.slice(last_sep + 1)
+}
+
+func path_extname(path) {
+    const base = path_basename(path)
+    const last_dot = base.last_index_of(".")
+    if last_dot == null || last_dot <= 0 { return "" }
+    base.slice(last_dot)
+}
+
+func path_stem(path) {
+    const base = path_basename(path)
+    const last_dot = base.last_index_of(".")
+    if last_dot == null || last_dot <= 0 { return base }
+    base.slice(0, last_dot)
+}
+
+func path_is_absolute(path) {
+    path.starts_with("/") || (len(path) >= 3 && path[1] == ":" && path[2] == "\\")
+}
+
+func path_relative(from, to) {
+    const from_parts = path_normalize(from).split("/").filter(p => len(p) > 0)
+    const to_parts = path_normalize(to).split("/").filter(p => len(p) > 0)
+
+    // Find common prefix
+    let common = 0
+    while common < len(from_parts) && common < len(to_parts) {
+        if from_parts[common] != to_parts[common] { break }
+        common = common + 1
+    }
+
+    // Build relative path
+    let result = []
+    let ups = len(from_parts) - common
+    while ups > 0 { result.push(".."); ups = ups - 1 }
+    let i = common
+    while i < len(to_parts) { result.push(to_parts[i]); i = i + 1 }
+
+    if len(result) == 0 { "." } else { result.join("/") }
+}
+
+// Simple glob matching
+func glob_match(pattern, path) {
+    glob_match_rec(pattern, 0, path, 0)
+}
+
+func glob_match_rec(pattern, pi, str, si) {
+    while pi < len(pattern) && si < len(str) {
+        const pc = pattern[pi]
+        if pc == "*" {
+            if pi + 1 < len(pattern) && pattern[pi + 1] == "*" {
+                // ** matches any depth
+                pi = pi + 2
+                if pi < len(pattern) && pattern[pi] == "/" { pi = pi + 1 }
+                // Try matching rest at every position
+                let s = si
+                while s <= len(str) {
+                    if glob_match_rec(pattern, pi, str, s) { return true }
+                    s = s + 1
+                }
+                return false
+            }
+            // * matches anything except /
+            pi = pi + 1
+            let s = si
+            while s <= len(str) {
+                if s > si && str[s - 1] == "/" { break }
+                if glob_match_rec(pattern, pi, str, s) { return true }
+                s = s + 1
+            }
+            return false
+        }
+        if pc == "?" {
+            if str[si] == "/" { return false }
+            pi = pi + 1
+            si = si + 1
+            continue
+        }
+        if pc != str[si] { return false }
+        pi = pi + 1
+        si = si + 1
+    }
+    // Consume trailing stars
+    while pi < len(pattern) && pattern[pi] == "*" { pi = pi + 1 }
+    pi == len(pattern) && si == len(str)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 17. Stream Processing (Lazy Iterators)
+// ════════════════════════════════════════════════════════════════════
+
+// Create a lazy iterator from an array
+func stream_from(source) {
+    {"__stream": true, "__source": source, "__ops": [], "__index": 0}
+}
+
+// Create a range stream
+func stream_range(start, end) {
+    let arr = []
+    let i = start
+    while i < end { arr.push(i); i = i + 1 }
+    stream_from(arr)
+}
+
+// Lazy map
+func stream_map(stream, fn) {
+    let new_stream = stream_clone(stream)
+    new_stream["__ops"].push({"type": "map", "fn": fn})
+    new_stream
+}
+
+// Lazy filter
+func stream_filter(stream, fn) {
+    let new_stream = stream_clone(stream)
+    new_stream["__ops"].push({"type": "filter", "fn": fn})
+    new_stream
+}
+
+// Lazy take
+func stream_take(stream, n) {
+    let new_stream = stream_clone(stream)
+    new_stream["__ops"].push({"type": "take", "n": n})
+    new_stream
+}
+
+// Lazy skip
+func stream_skip(stream, n) {
+    let new_stream = stream_clone(stream)
+    new_stream["__ops"].push({"type": "skip", "n": n})
+    new_stream
+}
+
+// Lazy flat_map
+func stream_flat_map(stream, fn) {
+    let new_stream = stream_clone(stream)
+    new_stream["__ops"].push({"type": "flat_map", "fn": fn})
+    new_stream
+}
+
+// Clone a stream
+func stream_clone(stream) {
+    let ops = []
+    for op in stream["__ops"] { ops.push(op) }
+    {"__stream": true, "__source": stream["__source"], "__ops": ops, "__index": 0}
+}
+
+// Collect stream to array (evaluate lazily)
+func stream_collect(stream) {
+    let items = []
+    const source = stream["__source"]
+    if typeof(source) == "array" {
+        for item in source { items.push(item) }
+    }
+
+    // Apply each operation
+    for op in stream["__ops"] {
+        match op["type"] {
+            "map" => {
+                items = items.map(op["fn"])
+            },
+            "filter" => {
+                items = items.filter(op["fn"])
+            },
+            "take" => {
+                if len(items) > op["n"] { items = items.slice(0, op["n"]) }
+            },
+            "skip" => {
+                if op["n"] < len(items) { items = items.slice(op["n"]) } else { items = [] }
+            },
+            "flat_map" => {
+                let new_items = []
+                for item in items {
+                    const result = op["fn"](item)
+                    if typeof(result) == "array" {
+                        for r in result { new_items.push(r) }
+                    } else {
+                        new_items.push(result)
+                    }
+                }
+                items = new_items
+            },
+            _ => {},
+        }
+    }
+
+    items
+}
+
+// Terminal operations
+func stream_reduce(stream, initial, fn) {
+    const items = stream_collect(stream)
+    let acc = initial
+    for item in items { acc = fn(acc, item) }
+    acc
+}
+
+func stream_for_each(stream, fn) {
+    const items = stream_collect(stream)
+    for item in items { fn(item) }
+}
+
+func stream_count(stream) {
+    len(stream_collect(stream))
+}
+
+func stream_any(stream, fn) {
+    const items = stream_collect(stream)
+    items.any(fn)
+}
+
+func stream_all(stream, fn) {
+    const items = stream_collect(stream)
+    items.all(fn)
+}
+
+func stream_find(stream, fn) {
+    const items = stream_collect(stream)
+    items.find(fn)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 18. Promise/Future Combinators
+// ════════════════════════════════════════════════════════════════════
+
+// Create a resolved promise
+func promise_resolve(value) {
+    {"__promise": true, "__state": "fulfilled", "__value": value, "__handlers": []}
+}
+
+// Create a rejected promise
+func promise_reject(reason) {
+    {"__promise": true, "__state": "rejected", "__value": reason, "__handlers": []}
+}
+
+// Create a pending promise
+func promise_new(executor) {
+    let p = {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
+    const resolve = v => { p["__state"] = "fulfilled"; p["__value"] = v; promise_flush(p) }
+    const reject = r => { p["__state"] = "rejected"; p["__value"] = r; promise_flush(p) }
+    executor(resolve, reject)
+    p
+}
+
+// Chain: .then(on_fulfilled, on_rejected)
+func promise_then(p, on_fulfilled, on_rejected) {
+    let next = {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
+
+    const handler = {
+        "on_fulfilled": on_fulfilled,
+        "on_rejected": on_rejected,
+        "next": next,
+    }
+
+    if p["__state"] == "pending" {
+        p["__handlers"].push(handler)
+    } else {
+        promise_handle(p, handler)
+    }
+
+    next
+}
+
+// Catch shorthand
+func promise_catch(p, on_rejected) {
+    promise_then(p, null, on_rejected)
+}
+
+// Finally shorthand
+func promise_finally(p, on_finally) {
+    promise_then(p,
+        v => { on_finally(); v },
+        r => { on_finally(); panic(r) }
+    )
+}
+
+// Flush pending handlers
+func promise_flush(p) {
+    for handler in p["__handlers"] {
+        promise_handle(p, handler)
+    }
+    p["__handlers"] = []
+}
+
+func promise_handle(p, handler) {
+    const next = handler["next"]
+    if p["__state"] == "fulfilled" {
+        if handler["on_fulfilled"] != null {
+            const result = handler["on_fulfilled"](p["__value"])
+            next["__state"] = "fulfilled"
+            next["__value"] = result
+        } else {
+            next["__state"] = "fulfilled"
+            next["__value"] = p["__value"]
+        }
+    } else if p["__state"] == "rejected" {
+        if handler["on_rejected"] != null {
+            const result = handler["on_rejected"](p["__value"])
+            next["__state"] = "fulfilled"
+            next["__value"] = result
+        } else {
+            next["__state"] = "rejected"
+            next["__value"] = p["__value"]
+        }
+    }
+    promise_flush(next)
+}
+
+// Promise.all — resolve when all resolve
+func promise_all(promises) {
+    if len(promises) == 0 { return promise_resolve([]) }
+    let results = []
+    let remaining = len(promises)
+    let i = 0
+    while i < len(promises) {
+        const p = promises[i]
+        if p["__state"] == "fulfilled" {
+            results.push(p["__value"])
+            remaining = remaining - 1
+        } else if p["__state"] == "rejected" {
+            return promise_reject(p["__value"])
+        }
+        i = i + 1
+    }
+    if remaining == 0 { promise_resolve(results) }
+    else { {"__promise": true, "__state": "pending", "__value": null, "__handlers": []} }
+}
+
+// Promise.race — resolve/reject with first settled
+func promise_race(promises) {
+    for p in promises {
+        if p["__state"] != "pending" { return p }
+    }
+    {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
+}
+
+// Promise.allSettled — wait for all to settle
+func promise_all_settled(promises) {
+    let results = []
+    for p in promises {
+        if p["__state"] == "fulfilled" {
+            results.push({"status": "fulfilled", "value": p["__value"]})
+        } else if p["__state"] == "rejected" {
+            results.push({"status": "rejected", "reason": p["__value"]})
+        } else {
+            results.push({"status": "pending"})
+        }
+    }
+    promise_resolve(results)
+}
+
+// Promise.any — resolve with first fulfilled
+func promise_any(promises) {
+    let errors = []
+    for p in promises {
+        if p["__state"] == "fulfilled" { return promise_resolve(p["__value"]) }
+        if p["__state"] == "rejected" { errors.push(p["__value"]) }
+    }
+    if len(errors) == len(promises) {
+        promise_reject({"message": "All promises rejected", "errors": errors})
+    } else {
+        {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
+    }
+}

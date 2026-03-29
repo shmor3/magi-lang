@@ -11468,3 +11468,2412 @@ func lsp_signature_help(func_name, active_param, user_functions) {
 
     null
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Completion — Trigger Character Handling ─────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Handle trigger character context for completion
+func completion_trigger_context(trigger_char, line_text, position) {
+    const col = position["character"]
+    const prefix = if col > 0 { line_text.slice(0, col) } else { "" }
+
+    match trigger_char {
+        "." => {
+            // Method/field completion after dot
+            const before_dot = prefix.slice(0, len(prefix) - 1).trim_end()
+            {"kind": "dot", "receiver": before_dot, "prefix": ""}
+        },
+        ":" => {
+            // Enum variant or type annotation after colon
+            if len(prefix) >= 2 && prefix.slice(len(prefix) - 2) == "::" {
+                const before_colons = prefix.slice(0, len(prefix) - 2).trim_end()
+                {"kind": "enum_variant", "enum_name": before_colons, "prefix": ""}
+            } else {
+                {"kind": "type_annotation", "prefix": ""}
+            }
+        },
+        "(" => {
+            // Parameter hint after opening paren
+            {"kind": "call_params", "prefix": ""}
+        },
+        "{" => {
+            // Struct field completion after opening brace
+            {"kind": "struct_fields", "prefix": ""}
+        },
+        "/" => {
+            // Path completion
+            {"kind": "path", "prefix": prefix}
+        },
+        "@" => {
+            // Decorator/annotation completion
+            {"kind": "decorator", "prefix": ""}
+        },
+        "#" => {
+            // Attribute completion
+            {"kind": "attribute", "prefix": ""}
+        },
+        _ => {
+            // Generic identifier completion
+            {"kind": "identifier", "prefix": extract_identifier_prefix(prefix)}
+        },
+    }
+}
+
+// Extract identifier prefix from line text ending at cursor
+func extract_identifier_prefix(text) {
+    let end = len(text)
+    let start = end
+    while start > 0 {
+        const c = text[start - 1]
+        if is_ident_char(c) {
+            start = start - 1
+        } else {
+            break
+        }
+    }
+    if start < end { text.slice(start, end) } else { "" }
+}
+
+func is_ident_char(c) {
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+}
+
+// Build completion items with commit characters
+func build_completion_with_commits(label, kind, detail, insert_text, commit_chars) {
+    const item = {
+        "label": label,
+        "kind": kind,
+    }
+    if detail != null { item["detail"] = detail }
+    if insert_text != null {
+        item["insertText"] = insert_text
+        item["insertTextFormat"] = 2 // Snippet
+    }
+    if commit_chars != null && len(commit_chars) > 0 {
+        item["commitCharacters"] = commit_chars
+    }
+    item
+}
+
+// Default commit characters by completion kind
+func default_commit_chars(kind) {
+    match kind {
+        CIK_FUNCTION => ["(", "."],
+        CIK_METHOD => ["(", "."],
+        CIK_PROPERTY => [".", "="],
+        CIK_FIELD => [".", "=", ","],
+        CIK_VARIABLE => [".", "(", "[", " "],
+        CIK_MODULE => ["."],
+        CIK_CLASS => ["(", ".", "{"],
+        CIK_ENUM => [":"],
+        CIK_KEYWORD => [" "],
+        _ => [],
+    }
+}
+
+// Build additional text edits for auto-imports
+func build_auto_import_edits(uri, symbol_name, module_path) {
+    let edits = []
+    const doc = get_document(uri)
+    if doc == null { return edits }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+
+    // Find last import line
+    let last_import_line = -1
+    let line_idx = 0
+    for line in lines {
+        const trimmed = line.trim()
+        if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
+            last_import_line = line_idx
+        }
+        line_idx = line_idx + 1
+    }
+
+    // Check if already imported
+    let already_imported = false
+    for line in lines {
+        if line.contains(module_path) && line.contains(symbol_name) {
+            already_imported = true
+            break
+        }
+    }
+
+    if !already_imported {
+        const import_line = f"import {module_path}"
+        const insert_pos = if last_import_line >= 0 { last_import_line + 1 } else { 0 }
+        edits.push(lsp_text_edit(
+            lsp_range(insert_pos, 0, insert_pos, 0),
+            import_line + "\n"
+        ))
+    }
+
+    edits
+}
+
+// Complete dot access on receiver type
+func complete_dot_access(receiver_type, prefix) {
+    let items = []
+
+    // String methods
+    if receiver_type == "string" || receiver_type == "String" {
+        const str_methods = [
+            ["len", "Length of string", CIK_METHOD],
+            ["trim", "Remove whitespace from both ends", CIK_METHOD],
+            ["trim_start", "Remove leading whitespace", CIK_METHOD],
+            ["trim_end", "Remove trailing whitespace", CIK_METHOD],
+            ["to_upper", "Convert to uppercase", CIK_METHOD],
+            ["to_lower", "Convert to lowercase", CIK_METHOD],
+            ["starts_with", "Check if starts with prefix", CIK_METHOD],
+            ["ends_with", "Check if ends with suffix", CIK_METHOD],
+            ["contains", "Check if contains substring", CIK_METHOD],
+            ["replace", "Replace occurrences", CIK_METHOD],
+            ["split", "Split by separator", CIK_METHOD],
+            ["chars", "Get character array", CIK_METHOD],
+            ["bytes", "Get byte array", CIK_METHOD],
+            ["repeat", "Repeat N times", CIK_METHOD],
+            ["reverse", "Reverse string", CIK_METHOD],
+            ["slice", "Extract substring", CIK_METHOD],
+            ["index_of", "Find first occurrence", CIK_METHOD],
+            ["last_index_of", "Find last occurrence", CIK_METHOD],
+            ["pad_start", "Pad from start", CIK_METHOD],
+            ["pad_end", "Pad from end", CIK_METHOD],
+        ]
+        for m in str_methods {
+            if prefix == "" || m[0].starts_with(prefix) {
+                items.push(build_completion_with_commits(
+                    m[0], m[2], m[1], m[0] + "($0)", ["("]
+                ))
+            }
+        }
+    }
+
+    // Array methods
+    if receiver_type == "array" || receiver_type == "Array" {
+        const arr_methods = [
+            ["len", "Length of array", CIK_METHOD],
+            ["push", "Append element", CIK_METHOD],
+            ["pop", "Remove and return last", CIK_METHOD],
+            ["shift", "Remove and return first", CIK_METHOD],
+            ["unshift", "Prepend element", CIK_METHOD],
+            ["map", "Transform each element", CIK_METHOD],
+            ["filter", "Filter by predicate", CIK_METHOD],
+            ["reduce", "Fold to single value", CIK_METHOD],
+            ["find", "Find first matching", CIK_METHOD],
+            ["any", "Check if any match", CIK_METHOD],
+            ["all", "Check if all match", CIK_METHOD],
+            ["sort", "Sort array", CIK_METHOD],
+            ["reverse", "Reverse array", CIK_METHOD],
+            ["join", "Join to string", CIK_METHOD],
+            ["slice", "Extract subarray", CIK_METHOD],
+            ["contains", "Check membership", CIK_METHOD],
+            ["flatten", "Flatten nested arrays", CIK_METHOD],
+            ["zip", "Zip with another array", CIK_METHOD],
+            ["enumerate", "Pairs of (index, value)", CIK_METHOD],
+            ["unique", "Remove duplicates", CIK_METHOD],
+            ["chunk", "Split into chunks", CIK_METHOD],
+            ["window", "Sliding windows", CIK_METHOD],
+            ["group_by", "Group by key function", CIK_METHOD],
+        ]
+        for m in arr_methods {
+            if prefix == "" || m[0].starts_with(prefix) {
+                items.push(build_completion_with_commits(
+                    m[0], m[2], m[1], m[0] + "($0)", ["("]
+                ))
+            }
+        }
+    }
+
+    // Map methods
+    if receiver_type == "map" || receiver_type == "Map" {
+        const map_methods = [
+            ["has", "Check if key exists", CIK_METHOD],
+            ["keys", "Get all keys", CIK_METHOD],
+            ["values", "Get all values", CIK_METHOD],
+            ["entries", "Get key-value pairs", CIK_METHOD],
+            ["remove", "Remove key", CIK_METHOD],
+            ["merge", "Merge with another map", CIK_METHOD],
+            ["len", "Number of entries", CIK_METHOD],
+        ]
+        for m in map_methods {
+            if prefix == "" || m[0].starts_with(prefix) {
+                items.push(build_completion_with_commits(
+                    m[0], m[2], m[1], m[0] + "($0)", ["("]
+                ))
+            }
+        }
+    }
+
+    items
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Hover — Full Markdown Rendering ────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Render hover information as markdown for all expression types
+func hover_markdown_for_expr(expr, symbol_table) {
+    if expr == null { return null }
+
+    const kind = expr.kind
+    match kind {
+        ExprKind::EVariable(name) => {
+            hover_for_variable(name, symbol_table)
+        },
+        ExprKind::ELiteral(val) => {
+            hover_for_literal(val)
+        },
+        ExprKind::ECall(name, args, _) => {
+            hover_for_call(name, args, symbol_table)
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            hover_for_field(obj, field, symbol_table)
+        },
+        ExprKind::EMethodCall(obj, method, args, _) => {
+            hover_for_method(obj, method, args, symbol_table)
+        },
+        ExprKind::EBinary(op, left, right) => {
+            hover_for_binary(op, left, right, symbol_table)
+        },
+        ExprKind::EUnary(op, operand) => {
+            hover_for_unary(op, operand, symbol_table)
+        },
+        ExprKind::ELambda(params, body) => {
+            hover_for_lambda(params, body)
+        },
+        ExprKind::EMatch(_, arms) => {
+            hover_for_match(arms, symbol_table)
+        },
+        ExprKind::EIndex(obj, idx) => {
+            hover_for_index(obj, idx, symbol_table)
+        },
+        ExprKind::EStructConstruct(name, fields) => {
+            hover_for_struct_construct(name, fields, symbol_table)
+        },
+        ExprKind::EEnumConstruct(enum_name, variant, _) => {
+            hover_for_enum_construct(enum_name, variant, symbol_table)
+        },
+        ExprKind::ERange(start, end, inclusive) => {
+            hover_for_range(start, end, inclusive)
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            const types = elems.map(e => infer_expr_type(e, symbol_table))
+            lsp_markup_content("markdown", f"```magi\n({types.join(\", \")})\n```\nTuple with {len(elems)} elements")
+        },
+        ExprKind::EStringInterp(_) => {
+            lsp_markup_content("markdown", "```magi\nString\n```\nInterpolated string expression")
+        },
+        ExprKind::ENullCoalesce(_, _) => {
+            lsp_markup_content("markdown", "```magi\n??\n```\nNull coalescing: returns left if non-null, otherwise right")
+        },
+        ExprKind::EOptionalChain(_, field) => {
+            lsp_markup_content("markdown", f"```magi\n?.{field}\n```\nOptional chaining: returns null if receiver is null")
+        },
+        ExprKind::ESpread(_) => {
+            lsp_markup_content("markdown", "```magi\n...expr\n```\nSpread: expands iterable elements inline")
+        },
+        _ => null,
+    }
+}
+
+// Hover info for a variable name
+func hover_for_variable(name, symbol_table) {
+    if symbol_table.has(name) {
+        const entry = symbol_table[name]
+        const type_str = if entry.has("type") { entry["type"] } else { "unknown" }
+        const mutable = if entry.has("mutable") && entry["mutable"] { "let" } else { "const" }
+        const doc = if entry.has("doc") { "\n\n" + entry["doc"] } else { "" }
+        lsp_markup_content("markdown", f"```magi\n{mutable} {name}: {type_str}\n```{doc}")
+    } else if is_builtin_function(name) {
+        const sig = builtin_signature(name)
+        const doc = if BUILTIN_DOCS.has(name) { "\n\n" + BUILTIN_DOCS[name] } else { "" }
+        lsp_markup_content("markdown", f"```magi\nfunc {name}{sig}\n```\n*(built-in)*{doc}")
+    } else {
+        lsp_markup_content("markdown", f"```magi\n{name}\n```\n*(unresolved)*")
+    }
+}
+
+// Hover info for a literal value
+func hover_for_literal(val) {
+    const t = typeof(val)
+    match t {
+        "int64" => lsp_markup_content("markdown", f"```magi\n{val}: Int\n```"),
+        "float64" => lsp_markup_content("markdown", f"```magi\n{val}: Float\n```"),
+        "string" => {
+            const display = if len(val) > 40 { val.slice(0, 40) + "..." } else { val }
+            lsp_markup_content("markdown", f"```magi\n\"{display}\": String\n```")
+        },
+        "bool" => lsp_markup_content("markdown", f"```magi\n{val}: Bool\n```"),
+        _ => {
+            if val == null {
+                lsp_markup_content("markdown", "```magi\nnull: Null\n```")
+            } else {
+                lsp_markup_content("markdown", f"```magi\n{t}\n```")
+            }
+        },
+    }
+}
+
+// Hover info for a function call
+func hover_for_call(name, args, symbol_table) {
+    let sig = ""
+    if symbol_table.has(name) {
+        const entry = symbol_table[name]
+        if entry.has("params") {
+            sig = "(" + entry["params"].join(", ") + ")"
+        }
+        if entry.has("return_type") {
+            sig = sig + " -> " + entry["return_type"]
+        }
+    } else if is_builtin_function(name) {
+        sig = builtin_signature(name)
+    }
+    const doc = if BUILTIN_DOCS.has(name) { "\n\n" + BUILTIN_DOCS[name] } else { "" }
+    lsp_markup_content("markdown", f"```magi\nfunc {name}{sig}\n```{doc}")
+}
+
+// Hover info for field access
+func hover_for_field(obj, field, symbol_table) {
+    const obj_type = infer_expr_type(obj, symbol_table)
+    lsp_markup_content("markdown", f"```magi\n.{field}\n```\nField access on `{obj_type}`")
+}
+
+// Hover info for method call
+func hover_for_method(obj, method, args, symbol_table) {
+    const obj_type = infer_expr_type(obj, symbol_table)
+    const arity = len(args)
+    lsp_markup_content("markdown", f"```magi\nfunc {obj_type}.{method}(...) [{arity} args]\n```\nMethod call on `{obj_type}`")
+}
+
+// Hover info for binary expression
+func hover_for_binary(op, left, right, symbol_table) {
+    const left_type = infer_expr_type(left, symbol_table)
+    const right_type = infer_expr_type(right, symbol_table)
+    const result_type = binary_result_type(op, left_type, right_type)
+    lsp_markup_content("markdown", f"```magi\n{left_type} {op} {right_type} -> {result_type}\n```")
+}
+
+// Hover info for unary expression
+func hover_for_unary(op, operand, symbol_table) {
+    const operand_type = infer_expr_type(operand, symbol_table)
+    lsp_markup_content("markdown", f"```magi\n{op}{operand_type} -> {operand_type}\n```")
+}
+
+// Hover info for lambda
+func hover_for_lambda(params, body) {
+    const param_str = params.join(", ")
+    lsp_markup_content("markdown", f"```magi\n({param_str}) => ...\n```\nClosure / anonymous function")
+}
+
+// Hover info for match expression
+func hover_for_match(arms, symbol_table) {
+    const arm_count = len(arms)
+    lsp_markup_content("markdown", f"```magi\nmatch {{ ... }}\n```\nMatch expression with {arm_count} arms")
+}
+
+// Hover info for index expression
+func hover_for_index(obj, idx, symbol_table) {
+    const obj_type = infer_expr_type(obj, symbol_table)
+    lsp_markup_content("markdown", f"```magi\n{obj_type}[...]\n```\nIndex access on `{obj_type}`")
+}
+
+// Hover info for struct construction
+func hover_for_struct_construct(name, fields, symbol_table) {
+    let field_strs = []
+    for f in fields {
+        field_strs.push(f[0])
+    }
+    lsp_markup_content("markdown", f"```magi\nstruct {name} {{\n  {field_strs.join(\",\\n  \")}\n}}\n```\nStruct construction")
+}
+
+// Hover info for enum construction
+func hover_for_enum_construct(enum_name, variant, symbol_table) {
+    lsp_markup_content("markdown", f"```magi\n{enum_name}::{variant}\n```\nEnum variant construction")
+}
+
+// Hover info for range expression
+func hover_for_range(start, end, inclusive) {
+    const op = if inclusive { "..=" } else { ".." }
+    lsp_markup_content("markdown", f"```magi\nRange ({op})\n```\nRange expression")
+}
+
+// Infer expression type from AST (simple heuristic)
+func infer_expr_type(expr, symbol_table) {
+    if expr == null { return "unknown" }
+    const kind = expr.kind
+    match kind {
+        ExprKind::EVariable(name) => {
+            if symbol_table.has(name) && symbol_table[name].has("type") {
+                symbol_table[name]["type"]
+            } else { "unknown" }
+        },
+        ExprKind::ELiteral(val) => {
+            const t = typeof(val)
+            match t {
+                "int64" => "Int",
+                "float64" => "Float",
+                "string" => "String",
+                "bool" => "Bool",
+                _ => if val == null { "Null" } else { "unknown" },
+            }
+        },
+        ExprKind::EStringInterp(_) => "String",
+        ExprKind::EArrayLiteral(_) => "Array",
+        ExprKind::EMapLiteral(_) => "Map",
+        ExprKind::ETupleLiteral(_) => "Tuple",
+        ExprKind::ERange(_, _, _) => "Range",
+        ExprKind::ELambda(_, _) => "Function",
+        ExprKind::EStructConstruct(name, _) => name,
+        ExprKind::EEnumConstruct(name, _, _) => name,
+        _ => "unknown",
+    }
+}
+
+// Determine binary operation result type
+func binary_result_type(op, left_type, right_type) {
+    match op {
+        "+" | "-" | "*" | "/" | "%" | "**" => {
+            if left_type == "Float" || right_type == "Float" { "Float" }
+            else if left_type == "Int" && right_type == "Int" { "Int" }
+            else if left_type == "String" && op == "+" { "String" }
+            else { "unknown" }
+        },
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => "Bool",
+        "&&" | "||" => "Bool",
+        ".." | "..=" => "Range",
+        _ => "unknown",
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Workspace Symbol — Fuzzy Matching and Scoring ──────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Score a symbol against a query using fuzzy matching
+func symbol_fuzzy_score(symbol_name, query) {
+    if query == "" { return 100 }
+    const name_lower = symbol_name.to_lower()
+    const query_lower = query.to_lower()
+
+    // Exact match
+    if name_lower == query_lower { return 1000 }
+
+    // Prefix match
+    if name_lower.starts_with(query_lower) { return 800 + (100 - len(symbol_name)) }
+
+    // Substring match
+    if name_lower.contains(query_lower) {
+        const idx = name_lower.index_of(query_lower)
+        return 500 + (100 - idx)
+    }
+
+    // Camel case / word boundary match
+    const word_score = word_boundary_score(symbol_name, query)
+    if word_score > 0 { return 300 + word_score }
+
+    // Character-by-character fuzzy match
+    const fuzzy = fuzzy_char_match(name_lower, query_lower)
+    if fuzzy > 0 { return fuzzy }
+
+    0
+}
+
+// Score based on word boundaries (camelCase, snake_case)
+func word_boundary_score(name, query) {
+    let boundaries = [0]
+    let i = 1
+    while i < len(name) {
+        const c = name[i]
+        const prev = name[i - 1]
+        // Uppercase after lowercase = boundary
+        if c >= "A" && c <= "Z" && prev >= "a" && prev <= "z" {
+            boundaries.push(i)
+        }
+        // After underscore = boundary
+        if prev == "_" && c != "_" {
+            boundaries.push(i)
+        }
+        i = i + 1
+    }
+
+    // Check if query matches initials of boundary words
+    const query_lower = query.to_lower()
+    let qi = 0
+    let matched = 0
+    for bi in boundaries {
+        if qi >= len(query_lower) { break }
+        if bi < len(name) && name[bi].to_lower() == query_lower[qi] {
+            qi = qi + 1
+            matched = matched + 1
+        }
+    }
+
+    if qi == len(query_lower) {
+        matched * 20
+    } else {
+        0
+    }
+}
+
+// Character-by-character fuzzy matching
+func fuzzy_char_match(name, query) {
+    let ni = 0
+    let qi = 0
+    let score = 0
+    let consecutive = 0
+    let last_match = -1
+
+    while ni < len(name) && qi < len(query) {
+        if name[ni] == query[qi] {
+            score = score + 10
+            if last_match == ni - 1 {
+                consecutive = consecutive + 1
+                score = score + consecutive * 5
+            } else {
+                consecutive = 0
+            }
+            last_match = ni
+            qi = qi + 1
+        }
+        ni = ni + 1
+    }
+
+    if qi == len(query) { score } else { 0 }
+}
+
+// Get symbol kind icon/name for display
+func symbol_kind_display(kind) {
+    match kind {
+        SK_FILE => "file",
+        SK_MODULE => "module",
+        SK_NAMESPACE => "namespace",
+        SK_PACKAGE => "package",
+        SK_CLASS => "class",
+        SK_METHOD => "method",
+        SK_PROPERTY => "property",
+        SK_FIELD => "field",
+        SK_CONSTRUCTOR => "constructor",
+        SK_ENUM => "enum",
+        SK_INTERFACE => "interface",
+        SK_FUNCTION => "function",
+        SK_VARIABLE => "variable",
+        SK_CONSTANT => "constant",
+        SK_STRING => "string",
+        SK_NUMBER => "number",
+        SK_BOOLEAN => "boolean",
+        SK_ARRAY => "array",
+        SK_STRUCT => "struct",
+        SK_EVENT => "event",
+        SK_OPERATOR => "operator",
+        SK_TYPE_PARAMETER => "type_parameter",
+        _ => "unknown",
+    }
+}
+
+// Full workspace symbol search with fuzzy matching
+func workspace_symbol_search(query, documents) {
+    let all_symbols = []
+
+    for uri in documents.keys() {
+        const doc = documents[uri]
+        if !doc.has("symbols") { continue }
+        const symbols = doc["symbols"]
+        for sym in symbols {
+            const name = sym["name"]
+            const score = symbol_fuzzy_score(name, query)
+            if score > 0 {
+                all_symbols.push({
+                    "name": name,
+                    "kind": sym["kind"],
+                    "location": lsp_location(uri, sym["range"]),
+                    "containerName": if sym.has("container") { sym["container"] } else { null },
+                    "__score": score,
+                })
+            }
+        }
+    }
+
+    // Sort by score descending
+    all_symbols.sort((a, b) => b["__score"] - a["__score"])
+
+    // Limit results
+    const max_results = 250
+    if len(all_symbols) > max_results {
+        all_symbols = all_symbols.slice(0, max_results)
+    }
+
+    // Remove internal score field
+    for sym in all_symbols {
+        sym.remove("__score")
+    }
+
+    all_symbols
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Linked Editing Ranges ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Find linked editing ranges for paired constructs
+func compute_linked_editing_ranges(uri, position) {
+    const doc = get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    const line = position["line"]
+    const col = position["character"]
+
+    if line >= len(lines) { return null }
+    const line_text = lines[line]
+
+    let ranges = []
+
+    // Check for string quotes (paired editing)
+    const quote_ranges = find_quote_pairs(lines, line, col)
+    if quote_ranges != null { return {"ranges": quote_ranges, "wordPattern": null} }
+
+    // Check for matching braces
+    const brace_ranges = find_brace_pairs(lines, line, col)
+    if brace_ranges != null { return {"ranges": brace_ranges, "wordPattern": null} }
+
+    // Check for variable/function name at cursor for rename-like linked editing
+    const word = word_at_position(line_text, col)
+    if word != null && len(word) > 0 {
+        const word_ranges = find_all_word_ranges(lines, word)
+        if len(word_ranges) > 1 {
+            return {"ranges": word_ranges, "wordPattern": "[a-zA-Z_][a-zA-Z0-9_]*"}
+        }
+    }
+
+    null
+}
+
+// Find paired quote ranges
+func find_quote_pairs(lines, target_line, target_col) {
+    const line = lines[target_line]
+    let ranges = []
+
+    // Check if cursor is on a quote character
+    if target_col < len(line) {
+        const ch = line[target_col]
+        if ch == "\"" || ch == "'" || ch == "`" {
+            // Find matching quote
+            let i = target_col + 1
+            while i < len(line) {
+                if line[i] == ch && (i == 0 || line[i - 1] != "\\") {
+                    ranges.push(lsp_range(target_line, target_col, target_line, target_col + 1))
+                    ranges.push(lsp_range(target_line, i, target_line, i + 1))
+                    return ranges
+                }
+                i = i + 1
+            }
+        }
+    }
+
+    null
+}
+
+// Find paired brace ranges
+func find_brace_pairs(lines, target_line, target_col) {
+    const line = lines[target_line]
+    if target_col >= len(line) { return null }
+    const ch = line[target_col]
+
+    const open_chars = "({["
+    const close_chars = ")}]"
+
+    let open_idx = open_chars.index_of(ch)
+    if open_idx != null && open_idx >= 0 {
+        const close_ch = close_chars[open_idx]
+        const match_pos = find_matching_close(lines, target_line, target_col, ch, close_ch)
+        if match_pos != null {
+            return [
+                lsp_range(target_line, target_col, target_line, target_col + 1),
+                lsp_range(match_pos[0], match_pos[1], match_pos[0], match_pos[1] + 1),
+            ]
+        }
+    }
+
+    let close_idx = close_chars.index_of(ch)
+    if close_idx != null && close_idx >= 0 {
+        const open_ch = open_chars[close_idx]
+        const match_pos = find_matching_open(lines, target_line, target_col, open_ch, ch)
+        if match_pos != null {
+            return [
+                lsp_range(match_pos[0], match_pos[1], match_pos[0], match_pos[1] + 1),
+                lsp_range(target_line, target_col, target_line, target_col + 1),
+            ]
+        }
+    }
+
+    null
+}
+
+// Find matching closing brace
+func find_matching_close(lines, start_line, start_col, open, close) {
+    let depth = 1
+    let line = start_line
+    let col = start_col + 1
+    while line < len(lines) {
+        while col < len(lines[line]) {
+            const c = lines[line][col]
+            if c == open { depth = depth + 1 }
+            if c == close {
+                depth = depth - 1
+                if depth == 0 { return [line, col] }
+            }
+            col = col + 1
+        }
+        line = line + 1
+        col = 0
+    }
+    null
+}
+
+// Find matching opening brace
+func find_matching_open(lines, start_line, start_col, open, close) {
+    let depth = 1
+    let line = start_line
+    let col = start_col - 1
+    while line >= 0 {
+        while col >= 0 {
+            const c = lines[line][col]
+            if c == close { depth = depth + 1 }
+            if c == open {
+                depth = depth - 1
+                if depth == 0 { return [line, col] }
+            }
+            col = col - 1
+        }
+        line = line - 1
+        if line >= 0 { col = len(lines[line]) - 1 }
+    }
+    null
+}
+
+// Find all ranges of a word in the document
+func find_all_word_ranges(lines, word) {
+    let ranges = []
+    let line_idx = 0
+    for line in lines {
+        let start = 0
+        while start < len(line) {
+            const idx = line.slice(start).index_of(word)
+            if idx == null || idx < 0 { break }
+            const abs_idx = start + idx
+            // Check word boundaries
+            const before_ok = abs_idx == 0 || !is_ident_char(line[abs_idx - 1])
+            const after_idx = abs_idx + len(word)
+            const after_ok = after_idx >= len(line) || !is_ident_char(line[after_idx])
+            if before_ok && after_ok {
+                ranges.push(lsp_range(line_idx, abs_idx, line_idx, after_idx))
+            }
+            start = abs_idx + len(word)
+        }
+        line_idx = line_idx + 1
+    }
+    ranges
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Selection Range Tree ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Build full selection range tree from AST
+func build_selection_range_tree(ast, position) {
+    if ast == null { return null }
+
+    let ranges = []
+    collect_selection_ranges(ast, position, ranges)
+
+    // Sort by range size (smallest first)
+    ranges.sort((a, b) => range_size(a) - range_size(b))
+
+    // Build nested chain from innermost to outermost
+    if len(ranges) == 0 { return null }
+
+    let result = {"range": ranges[0]}
+    let current = result
+    let i = 1
+    while i < len(ranges) {
+        const parent = {"range": ranges[i]}
+        current["parent"] = parent
+        current = parent
+        i = i + 1
+    }
+
+    result
+}
+
+// Compute range size for sorting
+func range_size(range) {
+    const start = range["start"]
+    const end = range["end"]
+    (end["line"] - start["line"]) * 10000 + (end["character"] - start["character"])
+}
+
+// Collect all ranges containing position
+func collect_selection_ranges(node, position, out) {
+    if node == null { return }
+    if typeof(node) != "map" { return }
+
+    // Check if node has a span/range that contains position
+    if node.has("span") {
+        const span = node["span"]
+        const range = span_to_range(span)
+        if range_contains_position(range, position) {
+            out.push(range)
+        }
+    }
+
+    // Recurse into child nodes
+    if node.has("stmts") {
+        for stmt in node["stmts"] {
+            collect_selection_ranges(stmt, position, out)
+        }
+    }
+    if node.has("body") {
+        const body = node["body"]
+        if typeof(body) == "array" {
+            for item in body { collect_selection_ranges(item, position, out) }
+        } else {
+            collect_selection_ranges(body, position, out)
+        }
+    }
+    if node.has("expr") {
+        collect_selection_ranges(node["expr"], position, out)
+    }
+    if node.has("left") { collect_selection_ranges(node["left"], position, out) }
+    if node.has("right") { collect_selection_ranges(node["right"], position, out) }
+    if node.has("condition") { collect_selection_ranges(node["condition"], position, out) }
+    if node.has("then_branch") { collect_selection_ranges(node["then_branch"], position, out) }
+    if node.has("else_branch") { collect_selection_ranges(node["else_branch"], position, out) }
+    if node.has("args") {
+        for arg in node["args"] { collect_selection_ranges(arg, position, out) }
+    }
+    if node.has("params") {
+        for param in node["params"] {
+            if typeof(param) == "map" { collect_selection_ranges(param, position, out) }
+        }
+    }
+}
+
+// Convert span to LSP range
+func span_to_range(span) {
+    if span.has("start_line") {
+        lsp_range(span["start_line"], span["start_col"], span["end_line"], span["end_col"])
+    } else if span.has("line") {
+        lsp_range(span["line"], span["col"], span["line"], span["col"] + span["len"])
+    } else {
+        lsp_range(0, 0, 0, 0)
+    }
+}
+
+// Check if a range contains a position
+func range_contains_position(range, position) {
+    const start = range["start"]
+    const end = range["end"]
+    const line = position["line"]
+    const col = position["character"]
+
+    if line < start["line"] || line > end["line"] { return false }
+    if line == start["line"] && col < start["character"] { return false }
+    if line == end["line"] && col > end["character"] { return false }
+    true
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Code Lens Resolve ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Resolve a code lens with lazy-loaded command
+func resolve_code_lens(lens) {
+    if lens == null { return null }
+    if !lens.has("data") { return lens }
+
+    const data = lens["data"]
+    const lens_type = if data.has("type") { data["type"] } else { "unknown" }
+
+    match lens_type {
+        "references" => {
+            // Resolve reference count
+            const uri = data["uri"]
+            const name = data["name"]
+            const refs = count_references(uri, name)
+            lens["command"] = {
+                "title": f"{refs} references",
+                "command": "magi.showReferences",
+                "arguments": [uri, lens["range"]["start"], null],
+            }
+        },
+        "run" => {
+            // Resolve runnable test/main
+            const uri = data["uri"]
+            const name = data["name"]
+            lens["command"] = {
+                "title": "Run",
+                "command": "magi.run",
+                "arguments": [uri, name],
+            }
+        },
+        "debug" => {
+            const uri = data["uri"]
+            const name = data["name"]
+            lens["command"] = {
+                "title": "Debug",
+                "command": "magi.debug",
+                "arguments": [uri, name],
+            }
+        },
+        "test" => {
+            const uri = data["uri"]
+            const name = data["name"]
+            const result = if data.has("result") { data["result"] } else { null }
+            const title = if result == "pass" { "Test Passed" }
+                         else if result == "fail" { "Test Failed" }
+                         else { "Run Test" }
+            lens["command"] = {
+                "title": title,
+                "command": "magi.runTest",
+                "arguments": [uri, name],
+            }
+        },
+        "implementations" => {
+            const name = data["name"]
+            const count = if data.has("count") { data["count"] } else { 0 }
+            lens["command"] = {
+                "title": f"{count} implementations",
+                "command": "magi.showImplementations",
+                "arguments": [data["uri"], lens["range"]["start"]],
+            }
+        },
+        _ => {
+            lens["command"] = {
+                "title": "Unknown",
+                "command": "",
+                "arguments": [],
+            }
+        },
+    }
+
+    lens
+}
+
+// Count references to a symbol across all documents
+func count_references(uri, name) {
+    let count = 0
+    const doc = get_document(uri)
+    if doc == null { return 0 }
+    const source = doc["text"]
+    const lines = source.split("\n")
+    for line in lines {
+        let start = 0
+        while start < len(line) {
+            const idx = line.slice(start).index_of(name)
+            if idx == null || idx < 0 { break }
+            const abs_idx = start + idx
+            const before_ok = abs_idx == 0 || !is_ident_char(line[abs_idx - 1])
+            const after_idx = abs_idx + len(name)
+            const after_ok = after_idx >= len(line) || !is_ident_char(line[after_idx])
+            if before_ok && after_ok { count = count + 1 }
+            start = abs_idx + len(name)
+        }
+    }
+    count
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Diagnostic Related Information ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Build full diagnostic with related information
+func build_diagnostic_with_related(range, severity, message, source, code, related) {
+    const diag = lsp_diagnostic(range, severity, message, source, code)
+    if related != null && len(related) > 0 {
+        diag["relatedInformation"] = related
+    }
+    diag
+}
+
+// Create a related information entry
+func diagnostic_related_info(uri, range, message) {
+    {
+        "location": lsp_location(uri, range),
+        "message": message,
+    }
+}
+
+// Enrich diagnostics with related location information
+func enrich_diagnostics(uri, diagnostics, symbol_table) {
+    let enriched = []
+    for diag in diagnostics {
+        const message = diag["message"]
+        let related = []
+
+        // For "undefined variable" errors, suggest similar names
+        if message.contains("undefined") {
+            const name = extract_name_from_error(message)
+            if name != null {
+                const suggestions = find_similar_names(name, symbol_table)
+                for sug in suggestions {
+                    if symbol_table.has(sug) && symbol_table[sug].has("range") {
+                        related.push(diagnostic_related_info(
+                            uri, symbol_table[sug]["range"],
+                            f"Did you mean '{sug}'?"
+                        ))
+                    }
+                }
+            }
+        }
+
+        // For "type mismatch" errors, point to the declaration
+        if message.contains("type mismatch") || message.contains("expected") {
+            const name = extract_name_from_error(message)
+            if name != null && symbol_table.has(name) && symbol_table[name].has("range") {
+                related.push(diagnostic_related_info(
+                    uri, symbol_table[name]["range"],
+                    f"'{name}' declared here"
+                ))
+            }
+        }
+
+        // For "unused variable" warnings, mark the declaration
+        if message.contains("unused") {
+            const name = extract_name_from_error(message)
+            if name != null && symbol_table.has(name) && symbol_table[name].has("range") {
+                related.push(diagnostic_related_info(
+                    uri, symbol_table[name]["range"],
+                    f"'{name}' is declared but never used"
+                ))
+            }
+        }
+
+        // For shadowing warnings
+        if message.contains("shadows") {
+            const name = extract_name_from_error(message)
+            if name != null && symbol_table.has(name) && symbol_table[name].has("range") {
+                related.push(diagnostic_related_info(
+                    uri, symbol_table[name]["range"],
+                    f"Previous declaration of '{name}'"
+                ))
+            }
+        }
+
+        if len(related) > 0 {
+            diag["relatedInformation"] = related
+        }
+        enriched.push(diag)
+    }
+    enriched
+}
+
+// Extract variable/function name from an error message
+func extract_name_from_error(message) {
+    // Try pattern: 'name'
+    let start = message.index_of("'")
+    if start != null && start >= 0 {
+        let end = message.slice(start + 1).index_of("'")
+        if end != null && end >= 0 {
+            return message.slice(start + 1, start + 1 + end)
+        }
+    }
+    // Try pattern: `name`
+    start = message.index_of("`")
+    if start != null && start >= 0 {
+        let end = message.slice(start + 1).index_of("`")
+        if end != null && end >= 0 {
+            return message.slice(start + 1, start + 1 + end)
+        }
+    }
+    null
+}
+
+// Find similar names for "did you mean" suggestions
+func find_similar_names(name, symbol_table) {
+    let suggestions = []
+    for key in symbol_table.keys() {
+        if key == "__s" { continue }
+        const dist = levenshtein_distance(name, key)
+        if dist <= 2 && dist > 0 {
+            suggestions.push(key)
+        }
+    }
+    suggestions.sort((a, b) => levenshtein_distance(name, a) - levenshtein_distance(name, b))
+    if len(suggestions) > 3 { suggestions.slice(0, 3) } else { suggestions }
+}
+
+// Simple Levenshtein distance
+func levenshtein_distance(a, b) {
+    const m = len(a)
+    const n = len(b)
+    if m == 0 { return n }
+    if n == 0 { return m }
+
+    // Use two-row approach
+    let prev = []
+    let curr = []
+    let i = 0
+    while i <= n {
+        prev.push(i)
+        curr.push(0)
+        i = i + 1
+    }
+
+    i = 1
+    while i <= m {
+        curr[0] = i
+        let j = 1
+        while j <= n {
+            const cost = if a[i - 1] == b[j - 1] { 0 } else { 1 }
+            const del = prev[j] + 1
+            const ins = curr[j - 1] + 1
+            const sub = prev[j - 1] + cost
+            curr[j] = min3(del, ins, sub)
+            j = j + 1
+        }
+        // Swap rows
+        let temp = prev
+        prev = curr
+        curr = temp
+        i = i + 1
+    }
+
+    prev[n]
+}
+
+func min3(a, b, c) {
+    if a <= b && a <= c { a }
+    else if b <= c { b }
+    else { c }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Notebook Support Stubs ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Notebook document capabilities
+func notebook_document_sync_options() {
+    {
+        "notebookSelector": [
+            {
+                "notebook": {
+                    "notebookType": "magi-notebook",
+                    "scheme": "file",
+                    "pattern": "**/*.maginb",
+                },
+                "cells": [
+                    {"language": "magi"},
+                ],
+            },
+        ],
+    }
+}
+
+// Handle notebook document open
+func handle_notebook_did_open(params) {
+    const nb_doc = params["notebookDocument"]
+    const uri = nb_doc["uri"]
+    const cells = if nb_doc.has("cells") { nb_doc["cells"] } else { [] }
+
+    let cell_texts = []
+    for cell in cells {
+        if cell.has("document") {
+            const cell_doc = cell["document"]
+            if cell_doc.has("text") {
+                cell_texts.push(cell_doc["text"])
+            }
+        }
+    }
+
+    // Store combined source for analysis
+    store_notebook(uri, cell_texts)
+    null
+}
+
+// Handle notebook cell changes
+func handle_notebook_did_change(params) {
+    const nb_doc = params["notebookDocument"]
+    const uri = nb_doc["uri"]
+
+    if params.has("change") {
+        const change = params["change"]
+        if change.has("cells") {
+            // Re-analyze affected cells
+            const cell_changes = change["cells"]
+            update_notebook_cells(uri, cell_changes)
+        }
+    }
+    null
+}
+
+// Handle notebook document close
+func handle_notebook_did_close(params) {
+    const nb_doc = params["notebookDocument"]
+    const uri = nb_doc["uri"]
+    remove_notebook(uri)
+    null
+}
+
+// Notebook storage
+let lsp_notebooks = {"__s": true}
+
+func store_notebook(uri, cell_texts) {
+    lsp_notebooks[uri] = {"cells": cell_texts}
+}
+
+func update_notebook_cells(uri, changes) {
+    if !lsp_notebooks.has(uri) { return }
+    // Simplified: just mark as needing re-analysis
+    lsp_notebooks[uri]["dirty"] = true
+}
+
+func remove_notebook(uri) {
+    if lsp_notebooks.has(uri) { lsp_notebooks.remove(uri) }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Inline Value Provider ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Provide inline values for debugging
+func compute_inline_values(uri, range, context) {
+    const doc = get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    let values = []
+
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+
+    let line_idx = start_line
+    while line_idx <= end_line && line_idx < len(lines) {
+        const line = lines[line_idx]
+        const trimmed = line.trim()
+
+        // Find variable assignments
+        if trimmed.starts_with("let ") || trimmed.starts_with("const ") {
+            const parts = trimmed.split("=")
+            if len(parts) >= 2 {
+                const decl = parts[0].trim()
+                const name = if decl.starts_with("let ") {
+                    decl.slice(4).trim()
+                } else {
+                    decl.slice(6).trim()
+                }
+                const col = line.index_of(name)
+                if col != null && col >= 0 {
+                    values.push({
+                        "range": lsp_range(line_idx, col, line_idx, col + len(name)),
+                        "variableName": name,
+                        "caseSensitiveLookup": true,
+                    })
+                }
+            }
+        }
+
+        // Find variable references in expressions
+        const vars = extract_variables_from_line(line)
+        for v in vars {
+            values.push({
+                "range": lsp_range(line_idx, v["col"], line_idx, v["col"] + len(v["name"])),
+                "variableName": v["name"],
+                "caseSensitiveLookup": true,
+            })
+        }
+
+        line_idx = line_idx + 1
+    }
+
+    values
+}
+
+// Extract variable references from a line of code
+func extract_variables_from_line(line) {
+    let vars = []
+    let i = 0
+    while i < len(line) {
+        if is_ident_start(line[i]) {
+            let start = i
+            while i < len(line) && is_ident_char(line[i]) {
+                i = i + 1
+            }
+            const name = line.slice(start, i)
+            // Skip keywords
+            if !is_keyword(name) {
+                vars.push({"name": name, "col": start})
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    vars
+}
+
+func is_ident_start(c) {
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_"
+}
+
+func is_keyword(name) {
+    const keywords = ["func", "let", "const", "if", "else", "while", "for", "in",
+                      "return", "match", "break", "continue", "true", "false", "null",
+                      "import", "from", "struct", "enum", "trait", "impl", "interface",
+                      "async", "await", "spawn", "yield", "try", "catch", "throw",
+                      "type", "as", "is", "not", "and", "or", "typeof", "sizeof"]
+    keywords.contains(name)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Type Definition Provider ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Go to type definition from a variable or expression
+func compute_type_definition(uri, position) {
+    const doc = get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    const line = position["line"]
+    const col = position["character"]
+
+    if line >= len(lines) { return null }
+    const word = word_at_position(lines[line], col)
+    if word == null || len(word) == 0 { return null }
+
+    // Look up the variable's type
+    const symbol_info = lookup_symbol(uri, word)
+    if symbol_info == null { return null }
+
+    const type_name = if symbol_info.has("type") { symbol_info["type"] } else { null }
+    if type_name == null { return null }
+
+    // Search for type definition
+    const type_loc = find_type_definition(type_name)
+    if type_loc != null { return type_loc }
+
+    null
+}
+
+// Find where a type is defined
+func find_type_definition(type_name) {
+    // Search all documents for struct/enum/type with this name
+    const docs = get_all_documents()
+    for uri in docs.keys() {
+        const doc = docs[uri]
+        if !doc.has("symbols") { continue }
+        for sym in doc["symbols"] {
+            if sym["name"] == type_name {
+                const kind = sym["kind"]
+                if kind == SK_CLASS || kind == SK_STRUCT || kind == SK_ENUM ||
+                   kind == SK_INTERFACE || kind == SK_TYPE_PARAMETER {
+                    return lsp_location(uri, sym["range"])
+                }
+            }
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Implementation Provider ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Find implementations of an interface or trait
+func compute_implementations(uri, position) {
+    const doc = get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    const line = position["line"]
+    const col = position["character"]
+
+    if line >= len(lines) { return [] }
+    const word = word_at_position(lines[line], col)
+    if word == null || len(word) == 0 { return [] }
+
+    // Find all implementations of this interface/trait
+    let locations = []
+    const docs = get_all_documents()
+    for doc_uri in docs.keys() {
+        const d = docs[doc_uri]
+        const src = d["text"]
+        const doc_lines = src.split("\n")
+
+        let li = 0
+        for dl in doc_lines {
+            const trimmed = dl.trim()
+            // Look for impl blocks: impl TraitName for Type { ... }
+            if trimmed.starts_with("impl ") && trimmed.contains(word) {
+                // Check if it's implementing our interface
+                if trimmed.contains(f"impl {word}") || trimmed.contains(f"for {word}") {
+                    const col_start = dl.index_of("impl")
+                    if col_start != null && col_start >= 0 {
+                        locations.push(lsp_location(doc_uri,
+                            lsp_range(li, col_start, li, col_start + len(trimmed))))
+                    }
+                }
+            }
+            // Also check struct/class that might implicitly implement interface
+            if trimmed.starts_with("struct ") || trimmed.starts_with("class ") {
+                const struct_name = extract_type_name_from_decl(trimmed)
+                if struct_name != null && implements_interface(doc_uri, struct_name, word) {
+                    const col_start = dl.index_of(struct_name)
+                    if col_start != null && col_start >= 0 {
+                        locations.push(lsp_location(doc_uri,
+                            lsp_range(li, col_start, li, col_start + len(struct_name))))
+                    }
+                }
+            }
+            li = li + 1
+        }
+    }
+
+    locations
+}
+
+// Extract type name from a declaration line
+func extract_type_name_from_decl(decl) {
+    const trimmed = decl.trim()
+    let prefix = null
+    if trimmed.starts_with("struct ") { prefix = "struct " }
+    else if trimmed.starts_with("class ") { prefix = "class " }
+    else if trimmed.starts_with("enum ") { prefix = "enum " }
+    else if trimmed.starts_with("interface ") { prefix = "interface " }
+    else if trimmed.starts_with("trait ") { prefix = "trait " }
+    else { return null }
+
+    const rest = trimmed.slice(len(prefix))
+    let end = 0
+    while end < len(rest) && is_ident_char(rest[end]) {
+        end = end + 1
+    }
+    if end > 0 { rest.slice(0, end) } else { null }
+}
+
+// Check if a struct implements an interface (structural typing check)
+func implements_interface(uri, struct_name, interface_name) {
+    // In MAGI with implicit interfaces, check method signatures
+    const docs = get_all_documents()
+    let interface_methods = []
+    let struct_methods = []
+
+    // Find interface methods
+    for doc_uri in docs.keys() {
+        const src = docs[doc_uri]["text"]
+        const lines = src.split("\n")
+        let in_interface = false
+        for line in lines {
+            const trimmed = line.trim()
+            if trimmed.starts_with(f"interface {interface_name}") {
+                in_interface = true
+                continue
+            }
+            if in_interface {
+                if trimmed.starts_with("}") { in_interface = false; continue }
+                if trimmed.starts_with("func ") {
+                    const method_name = extract_method_name(trimmed)
+                    if method_name != null { interface_methods.push(method_name) }
+                }
+            }
+        }
+    }
+
+    // Find struct methods
+    for doc_uri in docs.keys() {
+        const src = docs[doc_uri]["text"]
+        const lines = src.split("\n")
+        for line in lines {
+            const trimmed = line.trim()
+            if trimmed.starts_with(f"func {struct_name}.") {
+                const method_name = extract_receiver_method_name(trimmed, struct_name)
+                if method_name != null { struct_methods.push(method_name) }
+            }
+        }
+    }
+
+    // Check all interface methods are implemented
+    for im in interface_methods {
+        if !struct_methods.contains(im) { return false }
+    }
+    len(interface_methods) > 0
+}
+
+// Extract method name from "func name(...)"
+func extract_method_name(decl) {
+    const trimmed = decl.trim()
+    if !trimmed.starts_with("func ") { return null }
+    const rest = trimmed.slice(5)
+    let end = 0
+    while end < len(rest) && rest[end] != "(" && rest[end] != " " {
+        end = end + 1
+    }
+    if end > 0 { rest.slice(0, end) } else { null }
+}
+
+// Extract method name from "func Type.method(...)"
+func extract_receiver_method_name(decl, type_name) {
+    const prefix = f"func {type_name}."
+    if !decl.trim().starts_with(prefix) { return null }
+    const rest = decl.trim().slice(len(prefix))
+    let end = 0
+    while end < len(rest) && rest[end] != "(" && rest[end] != " " {
+        end = end + 1
+    }
+    if end > 0 { rest.slice(0, end) } else { null }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Declaration Provider ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Go to declaration (distinct from definition for forward declarations)
+func compute_declaration(uri, position) {
+    const doc = get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    const line = position["line"]
+    const col = position["character"]
+
+    if line >= len(lines) { return null }
+    const word = word_at_position(lines[line], col)
+    if word == null || len(word) == 0 { return null }
+
+    // Search for the first declaration (not definition/implementation)
+    const docs = get_all_documents()
+    let first_decl = null
+    let first_decl_line = 999999
+
+    for doc_uri in docs.keys() {
+        const d = docs[doc_uri]
+        const src = d["text"]
+        const doc_lines = src.split("\n")
+
+        let li = 0
+        for dl in doc_lines {
+            const trimmed = dl.trim()
+            // Function declaration
+            if trimmed.starts_with(f"func {word}(") || trimmed.starts_with(f"func {word} (") {
+                if first_decl == null || li < first_decl_line {
+                    first_decl = lsp_location(doc_uri,
+                        lsp_range(li, 0, li, len(dl)))
+                    first_decl_line = li
+                }
+            }
+            // Variable declaration
+            if (trimmed.starts_with(f"let {word}") || trimmed.starts_with(f"const {word}")) {
+                if first_decl == null || li < first_decl_line {
+                    first_decl = lsp_location(doc_uri,
+                        lsp_range(li, 0, li, len(dl)))
+                    first_decl_line = li
+                }
+            }
+            // Type declaration
+            if (trimmed.starts_with(f"struct {word}") || trimmed.starts_with(f"enum {word}") ||
+                trimmed.starts_with(f"type {word}") || trimmed.starts_with(f"interface {word}")) {
+                if first_decl == null || li < first_decl_line {
+                    first_decl = lsp_location(doc_uri,
+                        lsp_range(li, 0, li, len(dl)))
+                    first_decl_line = li
+                }
+            }
+            li = li + 1
+        }
+    }
+
+    first_decl
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Moniker Provider ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Provide monikers for cross-repository navigation
+func compute_monikers(uri, position) {
+    const doc = get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    const line = position["line"]
+    const col = position["character"]
+
+    if line >= len(lines) { return [] }
+    const word = word_at_position(lines[line], col)
+    if word == null || len(word) == 0 { return [] }
+
+    let monikers = []
+
+    // Extract package/module context
+    const module_path = uri_to_module_path(uri)
+
+    // Local moniker
+    monikers.push({
+        "scheme": "magi",
+        "identifier": f"{module_path}::{word}",
+        "unique": "document",
+        "kind": "local",
+    })
+
+    // Export moniker if the symbol is public
+    const symbol_info = lookup_symbol(uri, word)
+    if symbol_info != null {
+        const is_public = if symbol_info.has("public") { symbol_info["public"] } else { true }
+        if is_public {
+            monikers.push({
+                "scheme": "magi",
+                "identifier": f"{module_path}::{word}",
+                "unique": "scheme",
+                "kind": "export",
+            })
+        }
+    }
+
+    monikers
+}
+
+// Convert URI to module path
+func uri_to_module_path(uri) {
+    let path = uri
+    if path.starts_with("file://") { path = path.slice(7) }
+
+    // Remove extension
+    if path.ends_with(".magi") { path = path.slice(0, len(path) - 5) }
+
+    // Convert path separators to module separators
+    path.replace("/", ".").replace("\\", ".")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Document Color Provider (Full) ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Find all color references in a document
+func compute_document_colors(uri) {
+    const doc = get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    let colors = []
+
+    let line_idx = 0
+    for line in lines {
+        // Detect hex colors: #RGB, #RRGGBB, #RRGGBBAA
+        let col = 0
+        while col < len(line) {
+            if line[col] == "#" {
+                const hex_color = try_parse_hex_color(line, col)
+                if hex_color != null {
+                    const hex_len = hex_color["len"]
+                    colors.push({
+                        "range": lsp_range(line_idx, col, line_idx, col + hex_len),
+                        "color": hex_color["color"],
+                    })
+                    col = col + hex_len
+                    continue
+                }
+            }
+
+            // Detect rgb() and rgba() functions
+            if col + 3 < len(line) && line.slice(col, col + 4) == "rgb(" {
+                const rgb = try_parse_rgb_function(line, col)
+                if rgb != null {
+                    colors.push({
+                        "range": lsp_range(line_idx, col, line_idx, col + rgb["len"]),
+                        "color": rgb["color"],
+                    })
+                    col = col + rgb["len"]
+                    continue
+                }
+            }
+            if col + 4 < len(line) && line.slice(col, col + 5) == "rgba(" {
+                const rgba = try_parse_rgba_function(line, col)
+                if rgba != null {
+                    colors.push({
+                        "range": lsp_range(line_idx, col, line_idx, col + rgba["len"]),
+                        "color": rgba["color"],
+                    })
+                    col = col + rgba["len"]
+                    continue
+                }
+            }
+
+            // Detect named colors
+            if is_ident_start(line[col]) {
+                let end = col
+                while end < len(line) && is_ident_char(line[end]) { end = end + 1 }
+                const word = line.slice(col, end)
+                const named = named_color_to_rgba(word)
+                if named != null {
+                    colors.push({
+                        "range": lsp_range(line_idx, col, line_idx, end),
+                        "color": named,
+                    })
+                }
+                col = end
+                continue
+            }
+
+            col = col + 1
+        }
+        line_idx = line_idx + 1
+    }
+
+    colors
+}
+
+// Try to parse a hex color at position
+func try_parse_hex_color(line, start) {
+    if start >= len(line) || line[start] != "#" { return null }
+    let hex = ""
+    let i = start + 1
+    while i < len(line) && is_hex_char(line[i]) {
+        hex = hex + line[i]
+        i = i + 1
+    }
+
+    const hex_len = len(hex)
+    if hex_len == 3 {
+        // #RGB -> expand to RRGGBB
+        const r = hex_digit_val(hex[0]) * 17
+        const g = hex_digit_val(hex[1]) * 17
+        const b = hex_digit_val(hex[2]) * 17
+        return {"color": {"red": r / 255.0, "green": g / 255.0, "blue": b / 255.0, "alpha": 1.0}, "len": 4}
+    }
+    if hex_len == 6 {
+        const r = hex_digit_val(hex[0]) * 16 + hex_digit_val(hex[1])
+        const g = hex_digit_val(hex[2]) * 16 + hex_digit_val(hex[3])
+        const b = hex_digit_val(hex[4]) * 16 + hex_digit_val(hex[5])
+        return {"color": {"red": r / 255.0, "green": g / 255.0, "blue": b / 255.0, "alpha": 1.0}, "len": 7}
+    }
+    if hex_len == 8 {
+        const r = hex_digit_val(hex[0]) * 16 + hex_digit_val(hex[1])
+        const g = hex_digit_val(hex[2]) * 16 + hex_digit_val(hex[3])
+        const b = hex_digit_val(hex[4]) * 16 + hex_digit_val(hex[5])
+        const a = hex_digit_val(hex[6]) * 16 + hex_digit_val(hex[7])
+        return {"color": {"red": r / 255.0, "green": g / 255.0, "blue": b / 255.0, "alpha": a / 255.0}, "len": 9}
+    }
+
+    null
+}
+
+func is_hex_char(c) {
+    (c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F")
+}
+
+func hex_digit_val(c) {
+    if c >= "0" && c <= "9" { return char_code_at(c, 0) - char_code_at("0", 0) }
+    if c >= "a" && c <= "f" { return char_code_at(c, 0) - char_code_at("a", 0) + 10 }
+    if c >= "A" && c <= "F" { return char_code_at(c, 0) - char_code_at("A", 0) + 10 }
+    0
+}
+
+// Try to parse rgb(r, g, b) at position
+func try_parse_rgb_function(line, start) {
+    const prefix = "rgb("
+    if !line.slice(start).starts_with(prefix) { return null }
+    let i = start + len(prefix)
+    const nums = parse_color_numbers(line, i, 3)
+    if nums == null { return null }
+    const values = nums["values"]
+    return {
+        "color": {"red": values[0] / 255.0, "green": values[1] / 255.0, "blue": values[2] / 255.0, "alpha": 1.0},
+        "len": nums["end"] - start,
+    }
+}
+
+// Try to parse rgba(r, g, b, a) at position
+func try_parse_rgba_function(line, start) {
+    const prefix = "rgba("
+    if !line.slice(start).starts_with(prefix) { return null }
+    let i = start + len(prefix)
+    const nums = parse_color_numbers(line, i, 4)
+    if nums == null { return null }
+    const values = nums["values"]
+    const alpha = if values[3] > 1.0 { values[3] / 255.0 } else { values[3] }
+    return {
+        "color": {"red": values[0] / 255.0, "green": values[1] / 255.0, "blue": values[2] / 255.0, "alpha": alpha},
+        "len": nums["end"] - start,
+    }
+}
+
+// Parse N comma-separated numbers from a color function
+func parse_color_numbers(line, start, count) {
+    let values = []
+    let i = start
+    let parsed = 0
+    while parsed < count && i < len(line) {
+        // Skip whitespace
+        while i < len(line) && (line[i] == " " || line[i] == "\t") { i = i + 1 }
+        // Parse number
+        let num_str = ""
+        while i < len(line) && (line[i] >= "0" && line[i] <= "9" || line[i] == ".") {
+            num_str = num_str + line[i]
+            i = i + 1
+        }
+        if len(num_str) == 0 { return null }
+        values.push(to_float64(num_str))
+        parsed = parsed + 1
+        // Skip comma and whitespace
+        while i < len(line) && (line[i] == " " || line[i] == "\t" || line[i] == ",") { i = i + 1 }
+    }
+    // Expect closing paren
+    if i < len(line) && line[i] == ")" {
+        {"values": values, "end": i + 1}
+    } else {
+        null
+    }
+}
+
+// Named CSS colors to RGBA
+func named_color_to_rgba(name) {
+    const lower = name.to_lower()
+    match lower {
+        "red" => {"red": 1.0, "green": 0.0, "blue": 0.0, "alpha": 1.0},
+        "green" => {"red": 0.0, "green": 0.5, "blue": 0.0, "alpha": 1.0},
+        "blue" => {"red": 0.0, "green": 0.0, "blue": 1.0, "alpha": 1.0},
+        "white" => {"red": 1.0, "green": 1.0, "blue": 1.0, "alpha": 1.0},
+        "black" => {"red": 0.0, "green": 0.0, "blue": 0.0, "alpha": 1.0},
+        "yellow" => {"red": 1.0, "green": 1.0, "blue": 0.0, "alpha": 1.0},
+        "cyan" => {"red": 0.0, "green": 1.0, "blue": 1.0, "alpha": 1.0},
+        "magenta" => {"red": 1.0, "green": 0.0, "blue": 1.0, "alpha": 1.0},
+        "orange" => {"red": 1.0, "green": 0.647, "blue": 0.0, "alpha": 1.0},
+        "purple" => {"red": 0.5, "green": 0.0, "blue": 0.5, "alpha": 1.0},
+        "pink" => {"red": 1.0, "green": 0.753, "blue": 0.796, "alpha": 1.0},
+        "brown" => {"red": 0.647, "green": 0.165, "blue": 0.165, "alpha": 1.0},
+        "gray" | "grey" => {"red": 0.5, "green": 0.5, "blue": 0.5, "alpha": 1.0},
+        "silver" => {"red": 0.753, "green": 0.753, "blue": 0.753, "alpha": 1.0},
+        "gold" => {"red": 1.0, "green": 0.843, "blue": 0.0, "alpha": 1.0},
+        "navy" => {"red": 0.0, "green": 0.0, "blue": 0.5, "alpha": 1.0},
+        "teal" => {"red": 0.0, "green": 0.5, "blue": 0.5, "alpha": 1.0},
+        "maroon" => {"red": 0.5, "green": 0.0, "blue": 0.0, "alpha": 1.0},
+        "olive" => {"red": 0.5, "green": 0.5, "blue": 0.0, "alpha": 1.0},
+        "aqua" => {"red": 0.0, "green": 1.0, "blue": 1.0, "alpha": 1.0},
+        "lime" => {"red": 0.0, "green": 1.0, "blue": 0.0, "alpha": 1.0},
+        "coral" => {"red": 1.0, "green": 0.498, "blue": 0.314, "alpha": 1.0},
+        "salmon" => {"red": 0.98, "green": 0.502, "blue": 0.447, "alpha": 1.0},
+        "indigo" => {"red": 0.294, "green": 0.0, "blue": 0.51, "alpha": 1.0},
+        "violet" => {"red": 0.933, "green": 0.51, "blue": 0.933, "alpha": 1.0},
+        "crimson" => {"red": 0.863, "green": 0.078, "blue": 0.235, "alpha": 1.0},
+        "turquoise" => {"red": 0.251, "green": 0.878, "blue": 0.816, "alpha": 1.0},
+        "khaki" => {"red": 0.941, "green": 0.902, "blue": 0.549, "alpha": 1.0},
+        "ivory" => {"red": 1.0, "green": 1.0, "blue": 0.941, "alpha": 1.0},
+        "beige" => {"red": 0.961, "green": 0.961, "blue": 0.863, "alpha": 1.0},
+        _ => null,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Completion Preselect and Sort Text ─────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Assign preselect and sort text to completion items based on context
+func assign_completion_priority(items, context) {
+    let idx = 0
+    for item in items {
+        const kind = if item.has("kind") { item["kind"] } else { CIK_TEXT }
+        const label = item["label"]
+
+        // Priority tiers: lower sort text = higher priority
+        let tier = "5"
+        match context["kind"] {
+            "dot" => {
+                // Methods/fields get highest priority in dot context
+                if kind == CIK_METHOD || kind == CIK_FIELD || kind == CIK_PROPERTY {
+                    tier = "0"
+                    item["preselect"] = (idx == 0)
+                }
+            },
+            "identifier" => {
+                // Local variables > functions > types > keywords
+                if kind == CIK_VARIABLE { tier = "0" }
+                else if kind == CIK_FUNCTION || kind == CIK_METHOD { tier = "1" }
+                else if kind == CIK_CLASS || kind == CIK_STRUCT || kind == CIK_ENUM { tier = "2" }
+                else if kind == CIK_KEYWORD { tier = "3" }
+                else if kind == CIK_MODULE { tier = "4" }
+            },
+            "enum_variant" => {
+                if kind == CIK_ENUM_MEMBER { tier = "0"; item["preselect"] = true }
+            },
+            "type_annotation" => {
+                if kind == CIK_CLASS || kind == CIK_STRUCT || kind == CIK_ENUM {
+                    tier = "0"
+                }
+                if kind == CIK_INTERFACE { tier = "1" }
+            },
+            _ => {},
+        }
+
+        // Sort text: tier + label for stable alphabetical within tier
+        item["sortText"] = tier + "_" + label
+
+        // Filter text for fuzzy matching
+        if !item.has("filterText") {
+            item["filterText"] = label
+        }
+
+        idx = idx + 1
+    }
+    items
+}
+
+// Build snippet for function parameters
+func build_function_snippet(name, params) {
+    if params == null || len(params) == 0 {
+        return name + "()$0"
+    }
+    let snippet = name + "("
+    let i = 0
+    for p in params {
+        if i > 0 { snippet = snippet + ", " }
+        i = i + 1
+        snippet = snippet + f"${{{i}:{p}}}"
+    }
+    snippet = snippet + ")$0"
+    snippet
+}
+
+// Build snippet for struct construction
+func build_struct_snippet(name, fields) {
+    if fields == null || len(fields) == 0 {
+        return name + " {$0}"
+    }
+    let snippet = name + " {\n"
+    let i = 0
+    for f in fields {
+        if i > 0 { snippet = snippet + ",\n" }
+        i = i + 1
+        snippet = snippet + f"    {f}: ${{{i}:{f}}}"
+    }
+    snippet = snippet + "\n}$0"
+    snippet
+}
+
+// Build snippet for match expression
+func build_match_snippet(variants) {
+    let snippet = "match ${1:expr} {\n"
+    let i = 1
+    for v in variants {
+        i = i + 1
+        snippet = snippet + f"    {v} => ${{{i}:todo!()}},\n"
+    }
+    snippet = snippet + "}$0"
+    snippet
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Semantic Token Modifiers (Extended) ────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const TOKEN_MOD_DECLARATION = 1
+const TOKEN_MOD_DEFINITION = 2
+const TOKEN_MOD_READONLY = 4
+const TOKEN_MOD_STATIC = 8
+const TOKEN_MOD_DEPRECATED = 16
+const TOKEN_MOD_ABSTRACT = 32
+const TOKEN_MOD_ASYNC = 64
+const TOKEN_MOD_MODIFICATION = 128
+const TOKEN_MOD_DOCUMENTATION = 256
+const TOKEN_MOD_DEFAULT_LIBRARY = 512
+
+// Compute token modifiers for a symbol
+func compute_token_modifiers(symbol_info) {
+    let mods = 0
+    if symbol_info == null { return mods }
+
+    if symbol_info.has("is_declaration") && symbol_info["is_declaration"] {
+        mods = mods + TOKEN_MOD_DECLARATION
+    }
+    if symbol_info.has("is_definition") && symbol_info["is_definition"] {
+        mods = mods + TOKEN_MOD_DEFINITION
+    }
+    if symbol_info.has("mutable") && !symbol_info["mutable"] {
+        mods = mods + TOKEN_MOD_READONLY
+    }
+    if symbol_info.has("is_static") && symbol_info["is_static"] {
+        mods = mods + TOKEN_MOD_STATIC
+    }
+    if symbol_info.has("deprecated") && symbol_info["deprecated"] {
+        mods = mods + TOKEN_MOD_DEPRECATED
+    }
+    if symbol_info.has("is_async") && symbol_info["is_async"] {
+        mods = mods + TOKEN_MOD_ASYNC
+    }
+    if symbol_info.has("is_builtin") && symbol_info["is_builtin"] {
+        mods = mods + TOKEN_MOD_DEFAULT_LIBRARY
+    }
+
+    mods
+}
+
+// Map semantic token type index to LSP token type name
+func semantic_token_type_name(idx) {
+    const types = [
+        "namespace", "type", "class", "enum", "interface",
+        "struct", "typeParameter", "parameter", "variable", "property",
+        "enumMember", "event", "function", "method", "macro",
+        "keyword", "modifier", "comment", "string", "number",
+        "regexp", "operator", "decorator",
+    ]
+    if idx >= 0 && idx < len(types) { types[idx] } else { "unknown" }
+}
+
+// Map semantic token modifier index to LSP modifier name
+func semantic_token_modifier_name(idx) {
+    const mods = [
+        "declaration", "definition", "readonly", "static",
+        "deprecated", "abstract", "async", "modification",
+        "documentation", "defaultLibrary",
+    ]
+    if idx >= 0 && idx < len(mods) { mods[idx] } else { "unknown" }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Call Hierarchy Details ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Build a detailed call hierarchy item
+func build_call_hierarchy_item(name, kind, uri, range, selection_range, detail) {
+    const item = {
+        "name": name,
+        "kind": kind,
+        "uri": uri,
+        "range": range,
+        "selectionRange": selection_range,
+    }
+    if detail != null { item["detail"] = detail }
+    item
+}
+
+// Find all callers of a function (incoming calls)
+func find_incoming_calls(uri, func_name) {
+    let callers = []
+    const docs = get_all_documents()
+
+    for doc_uri in docs.keys() {
+        const doc = docs[doc_uri]
+        const source = doc["text"]
+        const lines = source.split("\n")
+
+        let current_func = null
+        let current_func_line = 0
+
+        let li = 0
+        for line in lines {
+            const trimmed = line.trim()
+            // Track current function scope
+            if trimmed.starts_with("func ") {
+                current_func = extract_method_name(trimmed)
+                current_func_line = li
+            }
+
+            // Look for calls to our function
+            if line.contains(func_name + "(") && current_func != null && current_func != func_name {
+                let col = line.index_of(func_name + "(")
+                if col != null && col >= 0 {
+                    // Verify it's a whole word
+                    const before_ok = col == 0 || !is_ident_char(line[col - 1])
+                    if before_ok {
+                        callers.push({
+                            "from": build_call_hierarchy_item(
+                                current_func, SK_FUNCTION, doc_uri,
+                                lsp_range(current_func_line, 0, current_func_line, len(lines[current_func_line])),
+                                lsp_range(current_func_line, 5, current_func_line, 5 + len(current_func)),
+                                null
+                            ),
+                            "fromRanges": [lsp_range(li, col, li, col + len(func_name))],
+                        })
+                    }
+                }
+            }
+
+            li = li + 1
+        }
+    }
+
+    callers
+}
+
+// Find all functions called by a function (outgoing calls)
+func find_outgoing_calls(uri, func_name) {
+    let callees = []
+    const doc = get_document(uri)
+    if doc == null { return callees }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+
+    let in_func = false
+    let brace_depth = 0
+    let func_start_line = -1
+
+    let li = 0
+    for line in lines {
+        const trimmed = line.trim()
+
+        if trimmed.starts_with(f"func {func_name}(") || trimmed.starts_with(f"func {func_name} (") {
+            in_func = true
+            func_start_line = li
+            brace_depth = 0
+        }
+
+        if in_func {
+            for c in line.chars() {
+                if c == "{" { brace_depth = brace_depth + 1 }
+                if c == "}" { brace_depth = brace_depth - 1 }
+            }
+
+            // Look for function calls in this line
+            let col = 0
+            while col < len(line) {
+                if is_ident_start(line[col]) {
+                    let end = col
+                    while end < len(line) && is_ident_char(line[end]) { end = end + 1 }
+                    const word = line.slice(col, end)
+                    if end < len(line) && line[end] == "(" && word != func_name && !is_keyword(word) {
+                        callees.push({
+                            "to": build_call_hierarchy_item(
+                                word, SK_FUNCTION, uri,
+                                lsp_range(li, col, li, end),
+                                lsp_range(li, col, li, end),
+                                null
+                            ),
+                            "fromRanges": [lsp_range(li, col, li, end)],
+                        })
+                    }
+                    col = end
+                } else {
+                    col = col + 1
+                }
+            }
+
+            if brace_depth <= 0 && li > func_start_line { in_func = false }
+        }
+
+        li = li + 1
+    }
+
+    callees
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Folding Range Kinds ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Folding range kind constants
+const FOLD_COMMENT = "comment"
+const FOLD_IMPORTS = "imports"
+const FOLD_REGION = "region"
+
+// Compute folding ranges with kind annotations
+func compute_folding_ranges_full(uri) {
+    const doc = get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    let ranges = []
+
+    // Track brace-delimited blocks
+    let brace_stack = []
+    // Track comment blocks
+    let comment_start = -1
+    // Track import groups
+    let import_start = -1
+    let import_end = -1
+
+    let li = 0
+    for line in lines {
+        const trimmed = line.trim()
+
+        // Comment folding
+        if trimmed.starts_with("//") {
+            if comment_start < 0 { comment_start = li }
+        } else {
+            if comment_start >= 0 && li - comment_start > 1 {
+                ranges.push({
+                    "startLine": comment_start,
+                    "endLine": li - 1,
+                    "kind": FOLD_COMMENT,
+                })
+            }
+            comment_start = -1
+        }
+
+        // Import group folding
+        if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
+            if import_start < 0 { import_start = li }
+            import_end = li
+        } else if import_start >= 0 && import_end > import_start {
+            ranges.push({
+                "startLine": import_start,
+                "endLine": import_end,
+                "kind": FOLD_IMPORTS,
+            })
+            import_start = -1
+            import_end = -1
+        }
+
+        // Brace folding
+        for c in line.chars() {
+            if c == "{" {
+                brace_stack.push(li)
+            }
+            if c == "}" {
+                if len(brace_stack) > 0 {
+                    const start = brace_stack.pop()
+                    if li > start {
+                        ranges.push({
+                            "startLine": start,
+                            "endLine": li,
+                        })
+                    }
+                }
+            }
+        }
+
+        // Region markers
+        if trimmed.starts_with("// #region") || trimmed.starts_with("// region") {
+            brace_stack.push(li)
+        }
+        if trimmed.starts_with("// #endregion") || trimmed.starts_with("// endregion") {
+            if len(brace_stack) > 0 {
+                const start = brace_stack.pop()
+                ranges.push({
+                    "startLine": start,
+                    "endLine": li,
+                    "kind": FOLD_REGION,
+                })
+            }
+        }
+
+        li = li + 1
+    }
+
+    // Close any remaining comment block
+    if comment_start >= 0 && len(lines) - 1 - comment_start > 1 {
+        ranges.push({
+            "startLine": comment_start,
+            "endLine": len(lines) - 1,
+            "kind": FOLD_COMMENT,
+        })
+    }
+
+    ranges
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── SECTION: Document Link Resolve ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Resolve a document link with full target URI
+func resolve_document_link(link) {
+    if link == null { return null }
+    if link.has("target") && link["target"] != null { return link }
+
+    if link.has("data") {
+        const data = link["data"]
+        if typeof(data) == "map" && data.has("module_path") {
+            const module_path = data["module_path"]
+            const resolved = resolve_module_to_uri(module_path)
+            if resolved != null {
+                link["target"] = resolved
+            }
+        }
+    }
+
+    link
+}
+
+// Resolve a module import path to a file URI
+func resolve_module_to_uri(module_path) {
+    // Convert dotted module path to file path
+    let file_path = module_path.replace(".", "/") + ".magi"
+
+    // Search in known source roots
+    const roots = [".", "src", "lib", "self"]
+    for root in roots {
+        const candidate = root + "/" + file_path
+        // In a real implementation, check if file exists
+        return "file://" + candidate
+    }
+
+    null
+}
+
+// Compute document links from import statements
+func compute_document_links_full(uri) {
+    const doc = get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["text"]
+    const lines = source.split("\n")
+    let links = []
+
+    let li = 0
+    for line in lines {
+        const trimmed = line.trim()
+
+        // import module.path
+        if trimmed.starts_with("import ") {
+            const path = trimmed.slice(7).trim()
+            const col = line.index_of(path)
+            if col != null && col >= 0 {
+                links.push({
+                    "range": lsp_range(li, col, li, col + len(path)),
+                    "data": {"module_path": path},
+                })
+            }
+        }
+
+        // from module import name
+        if trimmed.starts_with("from ") {
+            const rest = trimmed.slice(5)
+            const import_idx = rest.index_of(" import ")
+            if import_idx != null && import_idx > 0 {
+                const path = rest.slice(0, import_idx).trim()
+                const col = line.index_of(path)
+                if col != null && col >= 0 {
+                    links.push({
+                        "range": lsp_range(li, col, li, col + len(path)),
+                        "data": {"module_path": path},
+                    })
+                }
+            }
+        }
+
+        // String paths that look like file references
+        let si = 0
+        while si < len(line) {
+            if line[si] == "\"" {
+                let end = si + 1
+                while end < len(line) && line[end] != "\"" { end = end + 1 }
+                if end < len(line) {
+                    const str_content = line.slice(si + 1, end)
+                    if str_content.ends_with(".magi") || str_content.ends_with(".json") ||
+                       str_content.ends_with(".toml") {
+                        links.push({
+                            "range": lsp_range(li, si + 1, li, end),
+                            "target": "file://" + str_content,
+                        })
+                    }
+                    si = end + 1
+                    continue
+                }
+            }
+            si = si + 1
+        }
+
+        li = li + 1
+    }
+
+    links
+}
