@@ -496,3 +496,1119 @@ func dbg_should_break(line) {
     }
     true
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Breakpoint Hit Counts ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_hit_counts = {"__s": true}         // line -> count of times hit
+let dbg_hit_conditions = {"__s": true}     // line -> required hit count before breaking
+
+func dbg_increment_hit_count(line) {
+    const key = to_string(line)
+    if dbg_hit_counts.has(key) {
+        dbg_hit_counts[key] = dbg_hit_counts[key] + 1
+    } else {
+        dbg_hit_counts[key] = 1
+    }
+    dbg_hit_counts[key]
+}
+
+func dbg_set_hit_condition(line, count) {
+    dbg_hit_conditions[to_string(line)] = count
+    println(f"Breakpoint at line {line} will trigger after {count} hits")
+}
+
+func dbg_get_hit_count(line) {
+    const key = to_string(line)
+    if dbg_hit_counts.has(key) { dbg_hit_counts[key] } else { 0 }
+}
+
+func dbg_should_break_hit(line) {
+    const key = to_string(line)
+    if !dbg_hit_conditions.has(key) { return true }
+    const required = dbg_hit_conditions[key]
+    const current = dbg_get_hit_count(line)
+    current >= required
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Function Breakpoints ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_func_breakpoints = {"__s": true}  // func_name -> true
+
+func dbg_set_func_breakpoint(name) {
+    dbg_func_breakpoints[name] = true
+    println(f"Breakpoint set on function: {name}")
+}
+
+func dbg_remove_func_breakpoint(name) {
+    if dbg_func_breakpoints.has(name) {
+        dbg_func_breakpoints[name] = false
+        println(f"Function breakpoint removed: {name}")
+    } else {
+        println(f"No breakpoint on function: {name}")
+    }
+}
+
+func dbg_has_func_breakpoint(name) {
+    dbg_func_breakpoints.has(name) && dbg_func_breakpoints[name] == true
+}
+
+func dbg_list_func_breakpoints() {
+    let bps = []
+    for key in keys(dbg_func_breakpoints) {
+        if key == "__s" { continue }
+        if dbg_func_breakpoints[key] == true {
+            bps.push(key)
+        }
+    }
+    if len(bps) == 0 {
+        println("No function breakpoints set.")
+    } else {
+        println("Function breakpoints: " + bps.join(", "))
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Step Into / Step Over / Step Out ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_step_into = false     // step into function calls
+let dbg_step_over = false     // step over function calls (same depth)
+let dbg_step_out = false      // step out of current function
+let dbg_step_depth = 0        // call stack depth at step command
+let dbg_current_depth = 0     // current call stack depth
+
+func dbg_enter_call(name, line) {
+    dbg_push_frame(name, line)
+    dbg_current_depth = dbg_current_depth + 1
+    // Check function breakpoints
+    if dbg_has_func_breakpoint(name) {
+        dbg_step_mode = true
+    }
+}
+
+func dbg_exit_call() {
+    dbg_pop_frame()
+    if dbg_current_depth > 0 {
+        dbg_current_depth = dbg_current_depth - 1
+    }
+    // Step out: break when we return to the previous depth
+    if dbg_step_out && dbg_current_depth <= dbg_step_depth {
+        dbg_step_out = false
+        dbg_step_mode = true
+    }
+}
+
+func dbg_should_stop_at(line) {
+    // Always stop in step mode
+    if dbg_step_mode { return true }
+
+    // Check line breakpoint with hit count
+    if dbg_has_breakpoint(line) {
+        dbg_increment_hit_count(line)
+        if dbg_should_break_hit(line) {
+            if dbg_should_break(line) {
+                return true
+            }
+        }
+    }
+
+    // Step over: stop at same or shallower depth
+    if dbg_step_over && dbg_current_depth <= dbg_step_depth {
+        dbg_step_over = false
+        return true
+    }
+
+    false
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Call Stack Navigation ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_selected_frame = -1  // -1 means top (current), 0..N for specific frame
+
+func dbg_frame_up() {
+    if len(dbg_call_stack) == 0 {
+        println("Already at top-level.")
+        return
+    }
+    if dbg_selected_frame == -1 {
+        dbg_selected_frame = len(dbg_call_stack) - 2
+    } else if dbg_selected_frame > 0 {
+        dbg_selected_frame = dbg_selected_frame - 1
+    } else {
+        println("Already at the outermost frame.")
+        return
+    }
+    dbg_show_selected_frame()
+}
+
+func dbg_frame_down() {
+    if dbg_selected_frame == -1 {
+        println("Already at the innermost frame.")
+        return
+    }
+    if dbg_selected_frame < len(dbg_call_stack) - 1 {
+        dbg_selected_frame = dbg_selected_frame + 1
+    } else {
+        dbg_selected_frame = -1
+    }
+    dbg_show_selected_frame()
+}
+
+func dbg_show_selected_frame() {
+    const idx = if dbg_selected_frame == -1 {
+        len(dbg_call_stack) - 1
+    } else {
+        dbg_selected_frame
+    }
+    if idx < 0 || idx >= len(dbg_call_stack) {
+        println("  <top-level>")
+        return
+    }
+    const frame = dbg_call_stack[idx]
+    const frame_num = len(dbg_call_stack) - idx
+    println(f"Frame #{frame_num}: {frame[\"name\"]} at line {frame[\"line\"]}")
+    if frame["line"] > 0 {
+        dbg_show_context(frame["line"], 2)
+    }
+}
+
+func dbg_frame_select(n) {
+    if n < 0 || n >= len(dbg_call_stack) {
+        println(f"Invalid frame number: {n}")
+        return
+    }
+    dbg_selected_frame = n
+    dbg_show_selected_frame()
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Variable Inspection at Selected Frame ──────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_show_frame_locals(frame_idx) {
+    if frame_idx < 0 || frame_idx >= len(i_scopes) {
+        println("Invalid frame index.")
+        return
+    }
+    const scope = i_scopes[frame_idx]
+    let count = 0
+    for name in keys(scope) {
+        if name == "__s" { continue }
+        const val = scope[name]
+        println(f"  {name} = {val}")
+        count = count + 1
+    }
+    if count == 0 {
+        println("  (no local variables)")
+    }
+}
+
+func dbg_inspect_at_frame(name, frame_idx) {
+    if frame_idx < 0 || frame_idx >= len(i_scopes) {
+        println("Invalid frame index.")
+        return
+    }
+    const scope = i_scopes[frame_idx]
+    if scope.has(name) {
+        const val = scope[name]
+        const t = typeof(val)
+        println(f"  {name}: {t} = {val}")
+    } else {
+        println(f"  Variable {name} not found in frame {frame_idx}.")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Expression Evaluation in Current Scope ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_eval_expr(expr_str) {
+    // First try simple variable lookup
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        if i_scopes[scope_idx].has(expr_str) {
+            const val = i_scopes[scope_idx][expr_str]
+            println(f"  = {val}")
+            return val
+        }
+        scope_idx = scope_idx - 1
+    }
+
+    // Try parsing as an expression and evaluating
+    const wrapped = "const __dbg_result = " + expr_str
+    const prog = parse(wrapped)
+    if prog == null {
+        println(f"  Cannot parse expression: {expr_str}")
+        return null
+    }
+
+    const result = eval_program(prog)
+    if result != null {
+        println(f"  = {result}")
+    } else {
+        // Look up __dbg_result from scope
+        let si = len(i_scopes) - 1
+        while si >= 0 {
+            if i_scopes[si].has("__dbg_result") {
+                const val = i_scopes[si]["__dbg_result"]
+                println(f"  = {val}")
+                return val
+            }
+            si = si - 1
+        }
+        println(f"  = null")
+    }
+    result
+}
+
+func dbg_eval_watch_expr(expr_str) {
+    // Evaluate without printing, return value as string
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        if i_scopes[scope_idx].has(expr_str) {
+            return to_string(i_scopes[scope_idx][expr_str])
+        }
+        scope_idx = scope_idx - 1
+    }
+
+    // Try to parse and evaluate
+    const wrapped = "const __dbg_w = " + expr_str
+    const prog = parse(wrapped)
+    if prog == null { return "<error>" }
+    eval_program(prog)
+    let si = len(i_scopes) - 1
+    while si >= 0 {
+        if i_scopes[si].has("__dbg_w") {
+            return to_string(i_scopes[si]["__dbg_w"])
+        }
+        si = si - 1
+    }
+    "<cannot evaluate>"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Watch Display ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_show_watches_enhanced() {
+    if len(dbg_watch_exprs) == 0 { return }
+    println("Watches:")
+    let i = 0
+    for expr in dbg_watch_exprs {
+        const val = dbg_eval_watch_expr(expr)
+        println(f"  [{i}] {expr} = {val}")
+        i = i + 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Stack Trace with Full Frame Info ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_show_full_stack_trace() {
+    if len(dbg_call_stack) == 0 {
+        println("Stack trace:")
+        println("  #0 <top-level> at line " + to_string(dbg_current_line))
+        return
+    }
+    println("Stack trace (most recent first):")
+    let i = len(dbg_call_stack) - 1
+    while i >= 0 {
+        const frame = dbg_call_stack[i]
+        const frame_num = len(dbg_call_stack) - i
+        const marker = if i == dbg_selected_frame || (dbg_selected_frame == -1 && i == len(dbg_call_stack) - 1) { ">" } else { " " }
+        let vars_str = ""
+        // Show local variables in this frame if we have scope info
+        if i < len(i_scopes) {
+            let var_names = []
+            for name in keys(i_scopes[i]) {
+                if name == "__s" { continue }
+                var_names.push(name)
+            }
+            if len(var_names) > 0 {
+                vars_str = " [" + var_names.join(", ") + "]"
+            }
+        }
+        println(f"{marker} #{frame_num} {frame[\"name\"]} at line {frame[\"line\"]}{vars_str}")
+        i = i - 1
+    }
+    println(f"  #0 <top-level> at line {dbg_current_line}")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Source Display with Highlighting ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_list_source(start_line, end_line) {
+    const total = len(dbg_source_lines)
+    let i = max(0, start_line - 1)
+    const end_idx = min(total, end_line)
+    while i < end_idx {
+        const marker = if i + 1 == dbg_current_line { ">>>" } else { "   " }
+        const bp_marker = if dbg_has_breakpoint(i + 1) { "*" } else { " " }
+        const line_text = if i < total { dbg_source_lines[i] } else { "" }
+        const line_num = to_string(i + 1)
+        const padded = pad_left(line_num, 4)
+        println(marker + bp_marker + padded + " | " + line_text)
+        i = i + 1
+    }
+}
+
+func dbg_list_around(n) {
+    const start = max(1, dbg_current_line - n)
+    const end_line = min(len(dbg_source_lines), dbg_current_line + n)
+    dbg_list_source(start, end_line)
+}
+
+func dbg_list_function(name) {
+    // Search for function definition in source
+    let found = false
+    let i = 0
+    while i < len(dbg_source_lines) {
+        const line_text = dbg_source_lines[i]
+        if line_text.contains("func " + name) {
+            // Show 20 lines starting from the function
+            dbg_list_source(i + 1, min(len(dbg_source_lines), i + 21))
+            found = true
+            break
+        }
+        i = i + 1
+    }
+    if !found {
+        println(f"Function '{name}' not found in source.")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Program State Serialization (Checkpoint/Restore) ───────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_checkpoints = []  // list of serialized states
+
+func dbg_checkpoint() {
+    // Serialize current debugger and interpreter state
+    let scope_snapshot = []
+    for scope in i_scopes {
+        let snapshot = {"__s": true}
+        for name in keys(scope) {
+            if name == "__s" { continue }
+            snapshot[name] = scope[name]
+        }
+        scope_snapshot.push(snapshot)
+    }
+
+    let stack_snapshot = []
+    for frame in dbg_call_stack {
+        stack_snapshot.push({
+            "name": frame["name"],
+            "line": frame["line"]
+        })
+    }
+
+    let bp_snapshot = {"__s": true}
+    for key in keys(dbg_breakpoints) {
+        bp_snapshot[key] = dbg_breakpoints[key]
+    }
+
+    let watch_snapshot = []
+    for expr in dbg_watch_exprs {
+        watch_snapshot.push(expr)
+    }
+
+    const state = {
+        "scopes": scope_snapshot,
+        "call_stack": stack_snapshot,
+        "breakpoints": bp_snapshot,
+        "watches": watch_snapshot,
+        "current_line": dbg_current_line,
+        "step_mode": dbg_step_mode,
+        "current_depth": dbg_current_depth,
+        "hit_counts": dbg_hit_counts
+    }
+    dbg_checkpoints.push(state)
+    println(f"Checkpoint #{len(dbg_checkpoints)} saved at line {dbg_current_line}")
+}
+
+func dbg_restore(index) {
+    if index < 0 || index >= len(dbg_checkpoints) {
+        println(f"Invalid checkpoint index: {index}. Have {len(dbg_checkpoints)} checkpoints.")
+        return false
+    }
+    const state = dbg_checkpoints[index]
+
+    // Restore scopes
+    i_scopes = []
+    for snapshot in state["scopes"] {
+        let scope = i_new_scope()
+        for name in keys(snapshot) {
+            if name == "__s" { continue }
+            scope[name] = snapshot[name]
+        }
+        i_scopes.push(scope)
+    }
+
+    // Restore call stack
+    dbg_call_stack = []
+    for frame in state["call_stack"] {
+        dbg_call_stack.push({"name": frame["name"], "line": frame["line"]})
+    }
+
+    // Restore breakpoints
+    dbg_breakpoints = {"__s": true}
+    for key in keys(state["breakpoints"]) {
+        dbg_breakpoints[key] = state["breakpoints"][key]
+    }
+
+    // Restore watches
+    dbg_watch_exprs = []
+    for expr in state["watches"] {
+        dbg_watch_exprs.push(expr)
+    }
+
+    dbg_current_line = state["current_line"]
+    dbg_step_mode = state["step_mode"]
+    dbg_current_depth = state["current_depth"]
+    dbg_hit_counts = state["hit_counts"]
+
+    println(f"Restored checkpoint #{index + 1} at line {dbg_current_line}")
+    true
+}
+
+func dbg_list_checkpoints() {
+    if len(dbg_checkpoints) == 0 {
+        println("No checkpoints saved.")
+        return
+    }
+    println("Checkpoints:")
+    let i = 0
+    for state in dbg_checkpoints {
+        const line = state["current_line"]
+        const depth = len(state["call_stack"])
+        println(f"  [{i}] line {line}, call depth {depth}")
+        i = i + 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Info Command (GDB-style) ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_info(what) {
+    match what {
+        "breakpoints" => {
+            dbg_list_breakpoints()
+            dbg_list_func_breakpoints()
+        },
+        "locals" => dbg_show_locals(),
+        "args" => {
+            // Show arguments of current function
+            if len(dbg_call_stack) > 0 {
+                const frame = dbg_call_stack[len(dbg_call_stack) - 1]
+                println(f"In function: {frame[\"name\"]}")
+                dbg_show_locals()
+            } else {
+                println("Not in a function.")
+            }
+        },
+        "stack" => dbg_show_full_stack_trace(),
+        "watches" => dbg_show_watches_enhanced(),
+        "checkpoints" => dbg_list_checkpoints(),
+        "line" => println(f"Current line: {dbg_current_line}"),
+        "frame" => dbg_show_selected_frame(),
+        "depth" => println(f"Call depth: {dbg_current_depth}"),
+        _ => {
+            println("info <what>: breakpoints, locals, args, stack, watches, checkpoints, line, frame, depth")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Command Parser ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_process_command_v2(cmd) {
+    const trimmed = cmd.trim()
+    if trimmed == "" || trimmed == "s" || trimmed == "step" {
+        dbg_step_mode = true
+        dbg_step_into = true
+        dbg_step_over = false
+        dbg_step_out = false
+        return "step"
+    }
+    if trimmed == "n" || trimmed == "next" {
+        // Step over: execute next line, skipping into function calls
+        dbg_step_mode = false
+        dbg_step_over = true
+        dbg_step_out = false
+        dbg_step_depth = dbg_current_depth
+        return "step"
+    }
+    if trimmed == "si" || trimmed == "stepin" {
+        dbg_step_mode = true
+        dbg_step_into = true
+        return "step"
+    }
+    if trimmed == "finish" || trimmed == "fin" || trimmed == "so" || trimmed == "stepout" {
+        // Step out: continue until current function returns
+        dbg_step_mode = false
+        dbg_step_out = true
+        dbg_step_depth = dbg_current_depth - 1
+        return "continue"
+    }
+    if trimmed == "c" || trimmed == "continue" {
+        dbg_step_mode = false
+        dbg_step_over = false
+        dbg_step_out = false
+        return "continue"
+    }
+    if trimmed == "q" || trimmed == "quit" {
+        dbg_running = false
+        return "quit"
+    }
+    if trimmed == "h" || trimmed == "help" {
+        dbg_print_help_v2()
+        return "help"
+    }
+    if trimmed == "w" || trimmed == "where" {
+        dbg_show_current()
+        return "where"
+    }
+    if trimmed == "l" || trimmed == "locals" {
+        dbg_show_locals()
+        return "locals"
+    }
+    if trimmed == "a" || trimmed == "all" {
+        dbg_show_all_vars()
+        return "all"
+    }
+    if trimmed == "bt" || trimmed == "backtrace" {
+        dbg_show_full_stack_trace()
+        return "backtrace"
+    }
+    if trimmed == "bl" || trimmed == "breakpoints" {
+        dbg_list_breakpoints()
+        return "breakpoints"
+    }
+    if trimmed == "up" {
+        dbg_frame_up()
+        return "up"
+    }
+    if trimmed == "down" {
+        dbg_frame_down()
+        return "down"
+    }
+    if trimmed == "checkpoint" || trimmed == "cp" {
+        dbg_checkpoint()
+        return "checkpoint"
+    }
+    if trimmed == "watches" {
+        dbg_show_watches_enhanced()
+        return "watches"
+    }
+
+    // b <N> — set breakpoint at line
+    if trimmed.starts_with("b ") {
+        const rest = trimmed[2..len(trimmed)].trim()
+        const line_num = to_int(rest)
+        if line_num > 0 {
+            dbg_set_breakpoint(line_num)
+        } else {
+            // Try as function name
+            dbg_set_func_breakpoint(rest)
+        }
+        return "breakpoint"
+    }
+    // break <N> or break <func_name>
+    if trimmed.starts_with("break ") {
+        const rest = trimmed[6..len(trimmed)].trim()
+        const line_num = to_int(rest)
+        if line_num > 0 {
+            dbg_set_breakpoint(line_num)
+        } else {
+            dbg_set_func_breakpoint(rest)
+        }
+        return "breakpoint"
+    }
+    // cond <N> <expr> — set conditional breakpoint
+    if trimmed.starts_with("cond ") {
+        const rest = trimmed[5..len(trimmed)].trim()
+        const space_idx = rest.indexOf(" ")
+        if space_idx > 0 {
+            const line_str = rest[0..space_idx].trim()
+            const condition = rest[space_idx + 1..len(rest)].trim()
+            const line_num = to_int(line_str)
+            if line_num > 0 {
+                dbg_set_conditional_breakpoint(line_num, condition)
+            }
+        }
+        return "cond"
+    }
+    // hit <N> <count> — set hit count condition
+    if trimmed.starts_with("hit ") {
+        const rest = trimmed[4..len(trimmed)].trim()
+        const space_idx = rest.indexOf(" ")
+        if space_idx > 0 {
+            const line_str = rest[0..space_idx].trim()
+            const count_str = rest[space_idx + 1..len(rest)].trim()
+            const line_num = to_int(line_str)
+            const count = to_int(count_str)
+            if line_num > 0 && count > 0 {
+                dbg_set_hit_condition(line_num, count)
+            }
+        }
+        return "hit"
+    }
+    // d <N> — delete breakpoint
+    if trimmed.starts_with("d ") {
+        const num_str = trimmed[2..len(trimmed)].trim()
+        const line_num = to_int(num_str)
+        if line_num > 0 {
+            dbg_remove_breakpoint(line_num)
+        } else {
+            dbg_remove_func_breakpoint(num_str)
+        }
+        return "delete"
+    }
+    // delete <N> or delete <func_name>
+    if trimmed.starts_with("delete ") {
+        const rest = trimmed[7..len(trimmed)].trim()
+        const line_num = to_int(rest)
+        if line_num > 0 {
+            dbg_remove_breakpoint(line_num)
+        } else {
+            dbg_remove_func_breakpoint(rest)
+        }
+        return "delete"
+    }
+    // p <expr> — print/evaluate expression
+    if trimmed.starts_with("p ") {
+        const expr = trimmed[2..len(trimmed)].trim()
+        dbg_eval_expr(expr)
+        return "print"
+    }
+    // print <expr>
+    if trimmed.starts_with("print ") {
+        const expr = trimmed[6..len(trimmed)].trim()
+        dbg_eval_expr(expr)
+        return "print"
+    }
+    // eval <expr>
+    if trimmed.starts_with("eval ") {
+        const expr = trimmed[5..len(trimmed)].trim()
+        dbg_eval_expr(expr)
+        return "eval"
+    }
+    // watch <expr>
+    if trimmed.starts_with("watch ") {
+        const expr = trimmed[6..len(trimmed)].trim()
+        dbg_add_watch(expr)
+        return "watch"
+    }
+    // unwatch <N>
+    if trimmed.starts_with("unwatch ") {
+        const idx_str = trimmed[8..len(trimmed)].trim()
+        dbg_remove_watch(to_int(idx_str))
+        return "unwatch"
+    }
+    // list <start> <end> — show source range
+    if trimmed.starts_with("list ") {
+        const rest = trimmed[5..len(trimmed)].trim()
+        const space_idx = rest.indexOf(" ")
+        if space_idx > 0 {
+            const start_str = rest[0..space_idx].trim()
+            const end_str = rest[space_idx + 1..len(rest)].trim()
+            dbg_list_source(to_int(start_str), to_int(end_str))
+        } else {
+            const n = to_int(rest)
+            if n > 0 { dbg_list_around(n) }
+            else { dbg_list_function(rest) }
+        }
+        return "list"
+    }
+    if trimmed == "list" {
+        dbg_list_around(5)
+        return "list"
+    }
+    // ctx <N> — show context with N lines
+    if trimmed.starts_with("ctx ") {
+        const n_str = trimmed[4..len(trimmed)].trim()
+        const n = to_int(n_str)
+        if n > 0 {
+            dbg_show_context(dbg_current_line, n)
+        }
+        return "ctx"
+    }
+    // info <what>
+    if trimmed.starts_with("info ") {
+        const what = trimmed[5..len(trimmed)].trim()
+        dbg_info(what)
+        return "info"
+    }
+    if trimmed == "info" {
+        dbg_info("")
+        return "info"
+    }
+    // frame <N> — select frame
+    if trimmed.starts_with("frame ") {
+        const n_str = trimmed[6..len(trimmed)].trim()
+        dbg_frame_select(to_int(n_str))
+        return "frame"
+    }
+    // restore <N> — restore checkpoint
+    if trimmed.starts_with("restore ") {
+        const idx_str = trimmed[8..len(trimmed)].trim()
+        dbg_restore(to_int(idx_str))
+        return "restore"
+    }
+
+    println("Unknown command: " + trimmed + ". Type h for help.")
+    "unknown"
+}
+
+func dbg_print_help_v2() {
+    println("MAGI Debugger Commands:")
+    println("")
+    println("  Execution:")
+    println("    s/step            Step into (one statement, entering calls)")
+    println("    n/next            Step over (one statement, skipping calls)")
+    println("    si/stepin         Step into function call")
+    println("    finish/stepout    Step out of current function")
+    println("    c/continue        Continue to next breakpoint")
+    println("    q/quit            Quit debugger")
+    println("")
+    println("  Breakpoints:")
+    println("    b <N>             Set breakpoint at line N")
+    println("    b <func>          Set breakpoint on function name")
+    println("    break <N|func>    Set breakpoint (alias)")
+    println("    cond <N> <expr>   Set conditional breakpoint")
+    println("    hit <N> <count>   Break after N-th hit at line")
+    println("    d <N>             Delete breakpoint at line N")
+    println("    d <func>          Delete function breakpoint")
+    println("    bl/breakpoints    List all breakpoints")
+    println("")
+    println("  Inspection:")
+    println("    p <expr>          Print expression value")
+    println("    print <expr>      Print expression value (alias)")
+    println("    eval <expr>       Evaluate expression in current scope")
+    println("    l/locals          Show local variables")
+    println("    a/all             Show all variables (all scopes)")
+    println("    info <what>       Show info (breakpoints, locals, args, stack, watches, checkpoints)")
+    println("")
+    println("  Navigation:")
+    println("    w/where           Show current location")
+    println("    bt/backtrace      Show full stack trace")
+    println("    up                Move up one stack frame")
+    println("    down              Move down one stack frame")
+    println("    frame <N>         Select stack frame N")
+    println("    list [N|func]     Show source (N lines around current, or function)")
+    println("    list <M> <N>      Show source lines M through N")
+    println("    ctx <N>           Show N lines of context")
+    println("")
+    println("  Watches:")
+    println("    watch <expr>      Add watch expression")
+    println("    unwatch <N>       Remove watch by index")
+    println("    watches           Show all watch expressions")
+    println("")
+    println("  State:")
+    println("    checkpoint/cp     Save program state")
+    println("    restore <N>       Restore checkpoint N")
+    println("    h/help            Show this help")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Debug Prompt Loop ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_prompt_v2() {
+    dbg_show_current()
+    dbg_show_watches_enhanced()
+
+    while true {
+        const frame_info = if len(dbg_call_stack) > 0 {
+            const top = dbg_call_stack[len(dbg_call_stack) - 1]
+            top["name"] + ":" + to_string(dbg_current_line)
+        } else {
+            "<main>:" + to_string(dbg_current_line)
+        }
+        print(f"(dbg {frame_info}) ")
+        const line = input()
+        if line == null {
+            dbg_running = false
+            return "quit"
+        }
+        const action = dbg_process_command_v2(line)
+        if action == "step" || action == "continue" || action == "quit" {
+            return action
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Debug Entry Point ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func debug_run_v2(source) {
+    // Reset all state
+    dbg_breakpoints = {"__s": true}
+    dbg_conditional_breakpoints = {"__s": true}
+    dbg_hit_counts = {"__s": true}
+    dbg_hit_conditions = {"__s": true}
+    dbg_func_breakpoints = {"__s": true}
+    dbg_step_mode = true
+    dbg_step_into = false
+    dbg_step_over = false
+    dbg_step_out = false
+    dbg_step_depth = 0
+    dbg_current_depth = 0
+    dbg_running = true
+    dbg_call_stack = []
+    dbg_watch_exprs = []
+    dbg_selected_frame = -1
+    dbg_checkpoints = []
+
+    // Parse source
+    const program = parse(source)
+    if program == null {
+        println("Parse error — cannot debug.")
+        return null
+    }
+
+    dbg_source_lines = source.split("\n")
+
+    println("MAGI Debugger v2")
+    println("Type 'h' for help. Stepping through program.")
+    println(f"Source: {len(dbg_source_lines)} lines")
+    println("")
+
+    // Reset interpreter state
+    i_scopes = [i_new_scope()]
+
+    // Pass 1: register definitions
+    for stmt in program.statements {
+        if dbg_is_definition(stmt) {
+            eval_stmt(stmt)
+        }
+    }
+
+    // Pass 2: execute with debug control
+    for stmt in program.statements {
+        if !dbg_running { break }
+        if dbg_is_definition(stmt) { continue }
+
+        const line = stmt.span.start_line
+        dbg_current_line = line
+
+        if dbg_should_stop_at(line) {
+            const action = dbg_prompt_v2()
+            if action == "quit" { break }
+        }
+
+        // Execute the statement
+        const result = eval_stmt(stmt)
+
+        // Check for signals
+        if is_signal(result) {
+            if is_return(result) {
+                println(f"Return value: {signal_value(result)}")
+            }
+        }
+    }
+
+    println("Program finished.")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── REPL Mode ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_repl() {
+    println("MAGI Debug REPL")
+    println("Type expressions to evaluate, or debugger commands.")
+    println("Type 'quit' to exit.")
+    println("")
+
+    i_scopes = [i_new_scope()]
+
+    while true {
+        print("(dbg-repl) ")
+        const line = input()
+        if line == null { break }
+        const trimmed = line.trim()
+        if trimmed == "" { continue }
+        if trimmed == "quit" || trimmed == "q" { break }
+        if trimmed == "help" || trimmed == "h" {
+            dbg_print_help_v2()
+            continue
+        }
+
+        // Try to evaluate as expression
+        const prog = parse(trimmed)
+        if prog != null {
+            const result = eval_program(prog)
+            if result != null {
+                println(f"  => {result}")
+            }
+        } else {
+            println("  Parse error.")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Breakpoint Persistence ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_export_breakpoints() {
+    let lines = []
+    for key in keys(dbg_breakpoints) {
+        if key == "__s" { continue }
+        if dbg_breakpoints[key] == true {
+            let entry = "b " + key
+            if dbg_conditional_breakpoints.has(key) {
+                entry = "cond " + key + " " + dbg_conditional_breakpoints[key]
+            }
+            if dbg_hit_conditions.has(key) {
+                entry = entry + "\nhit " + key + " " + to_string(dbg_hit_conditions[key])
+            }
+            lines.push(entry)
+        }
+    }
+    for key in keys(dbg_func_breakpoints) {
+        if key == "__s" { continue }
+        if dbg_func_breakpoints[key] == true {
+            lines.push("b " + key)
+        }
+    }
+    lines.join("\n")
+}
+
+func dbg_import_breakpoints(text) {
+    const lines = text.split("\n")
+    let count = 0
+    for line in lines {
+        const trimmed = line.trim()
+        if trimmed == "" { continue }
+        if trimmed[0] == "#" { continue }
+        dbg_process_command_v2(trimmed)
+        count = count + 1
+    }
+    println(f"Imported {count} breakpoint commands.")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Variable Type Inspection ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_type_of(name) {
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        const scope = i_scopes[scope_idx]
+        if scope.has(name) {
+            const val = scope[name]
+            const t = typeof(val)
+            println(f"  {name}: {t}")
+            return t
+        }
+        scope_idx = scope_idx - 1
+    }
+    println(f"  Variable {name} not found.")
+    null
+}
+
+func dbg_show_locals_with_types() {
+    if len(i_scopes) == 0 {
+        println("No active scope.")
+        return
+    }
+    const current_scope = i_scopes[len(i_scopes) - 1]
+    let count = 0
+    for name in keys(current_scope) {
+        if name == "__s" { continue }
+        const val = current_scope[name]
+        const t = typeof(val)
+        const val_str = to_string(val)
+        const display = if len(val_str) > 60 { val_str[0..57] + "..." } else { val_str }
+        println(f"  {name}: {t} = {display}")
+        count = count + 1
+    }
+    if count == 0 {
+        println("  (no local variables)")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Memory/Object Inspection ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dbg_inspect_deep(name, max_depth) {
+    let scope_idx = len(i_scopes) - 1
+    while scope_idx >= 0 {
+        if i_scopes[scope_idx].has(name) {
+            const val = i_scopes[scope_idx][name]
+            dbg_print_value(name, val, 0, max_depth)
+            return
+        }
+        scope_idx = scope_idx - 1
+    }
+    println(f"  Variable {name} not found.")
+}
+
+func dbg_print_value(name, val, depth, max_depth) {
+    const indent = "  ".repeat(depth + 1)
+    const t = typeof(val)
+    if depth >= max_depth {
+        println(f"{indent}{name}: {t} = ...")
+        return
+    }
+    if t == "map" {
+        println(f"{indent}{name}: map")
+        for key in keys(val) {
+            if key == "__s" { continue }
+            dbg_print_value(key, val[key], depth + 1, max_depth)
+        }
+    } else if t == "array" {
+        println(f"{indent}{name}: array[{len(val)}]")
+        let i = 0
+        while i < len(val) && i < 10 {
+            dbg_print_value(f"[{i}]", val[i], depth + 1, max_depth)
+            i = i + 1
+        }
+        if len(val) > 10 {
+            println(f"{indent}  ... ({len(val) - 10} more)")
+        }
+    } else {
+        println(f"{indent}{name}: {t} = {val}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Execution Timing ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let dbg_stmt_count = 0
+let dbg_start_time = 0
+
+func dbg_reset_stats() {
+    dbg_stmt_count = 0
+    dbg_start_time = time_now()
+}
+
+func dbg_record_stmt() {
+    dbg_stmt_count = dbg_stmt_count + 1
+}
+
+func dbg_show_stats() {
+    const elapsed = time_now() - dbg_start_time
+    println(f"Statements executed: {dbg_stmt_count}")
+    println(f"Elapsed time: {elapsed}ms")
+    if dbg_stmt_count > 0 && elapsed > 0 {
+        const rate = dbg_stmt_count * 1000 / elapsed
+        println(f"Rate: ~{rate} stmts/sec")
+    }
+}

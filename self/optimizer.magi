@@ -276,3 +276,1003 @@ func optimize(program) {
     const ostmts = program.statements.map(s => opt_stmt(s))
     Program { statements: ostmts, span: program.span }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Float Constant Folding ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_fold_float_binop(op, lv, rv) {
+    match op {
+        BinOp::Add => lv + rv,
+        BinOp::Sub => lv - rv,
+        BinOp::Mul => lv * rv,
+        BinOp::Div => if rv != 0.0 { lv / rv } else { null },
+        _ => null,
+    }
+}
+
+func opt_fold_float_cmp(op, lv, rv) {
+    match op {
+        BinOp::Eq    => lv == rv,
+        BinOp::NotEq => lv != rv,
+        BinOp::Lt    => lv < rv,
+        BinOp::Gt    => lv > rv,
+        BinOp::LtEq  => lv <= rv,
+        BinOp::GtEq  => lv >= rv,
+        _ => null,
+    }
+}
+
+func opt_try_fold_float_lits(op, lv, rv, span) {
+    const arith = opt_fold_float_binop(op, lv, rv)
+    if arith != null { return make_float_lit(arith, span) }
+    const cmp = opt_fold_float_cmp(op, lv, rv)
+    if cmp != null { return make_bool_lit(cmp, span) }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── String Constant Folding ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_fold_str_comparison(op, ls, rs, span) {
+    match op {
+        BinOp::Eq    => make_bool_lit(ls == rs, span),
+        BinOp::NotEq => make_bool_lit(ls != rs, span),
+        BinOp::Lt    => make_bool_lit(ls < rs, span),
+        BinOp::Gt    => make_bool_lit(ls > rs, span),
+        BinOp::LtEq  => make_bool_lit(ls <= rs, span),
+        BinOp::GtEq  => make_bool_lit(ls >= rs, span),
+        BinOp::Add   => make_str_lit(ls + rs, span),
+        _ => null,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Boolean Constant Folding ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_fold_bool_comparison(op, lv, rv, span) {
+    match op {
+        BinOp::Eq    => make_bool_lit(lv == rv, span),
+        BinOp::NotEq => make_bool_lit(lv != rv, span),
+        BinOp::And   => make_bool_lit(lv && rv, span),
+        BinOp::Or    => make_bool_lit(lv || rv, span),
+        _ => null,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Literal Folding (ALL types) ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_try_fold_lits_full(op, ll, rl, span) {
+    match ll {
+        Literal::IntLit(lv) => {
+            match rl {
+                Literal::IntLit(rv) => opt_try_fold_int_lits(op, lv, rv, span),
+                Literal::FloatLit(rv) => opt_try_fold_float_lits(op, to_float(lv), rv, span),
+                _ => null,
+            }
+        },
+        Literal::FloatLit(lv) => {
+            match rl {
+                Literal::FloatLit(rv) => opt_try_fold_float_lits(op, lv, rv, span),
+                Literal::IntLit(rv) => opt_try_fold_float_lits(op, lv, to_float(rv), span),
+                _ => null,
+            }
+        },
+        Literal::StringLit(ls) => {
+            match rl {
+                Literal::StringLit(rs) => opt_fold_str_comparison(op, ls, rs, span),
+                _ => null,
+            }
+        },
+        Literal::BoolLit(lv) => {
+            match rl {
+                Literal::BoolLit(rv) => opt_fold_bool_comparison(op, lv, rv, span),
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Strength Reduction ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_strength_reduce(op, left, right, span) {
+    // Check for x * 0 => 0, x * 1 => x, x + 0 => x, x * 2 => x + x
+    const lk = left.kind
+    const rk = right.kind
+
+    // Right operand is a literal
+    match rk {
+        ExprKind::ELiteral(rl) => {
+            match rl {
+                Literal::IntLit(rv) => {
+                    match op {
+                        BinOp::Mul => {
+                            if rv == 0 { return make_int_lit(0, span) }
+                            if rv == 1 { return left }
+                            if rv == 2 { return expr_new(ExprKind::EBinaryOp(BinOp::Add, left, left), span) }
+                            null
+                        },
+                        BinOp::Add => {
+                            if rv == 0 { return left }
+                            null
+                        },
+                        BinOp::Sub => {
+                            if rv == 0 { return left }
+                            null
+                        },
+                        BinOp::Div => {
+                            if rv == 1 { return left }
+                            null
+                        },
+                        _ => null,
+                    }
+                },
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+
+    // Left operand is a literal
+    match lk {
+        ExprKind::ELiteral(ll) => {
+            match ll {
+                Literal::IntLit(lv) => {
+                    match op {
+                        BinOp::Mul => {
+                            if lv == 0 { return make_int_lit(0, span) }
+                            if lv == 1 { return right }
+                            if lv == 2 { return expr_new(ExprKind::EBinaryOp(BinOp::Add, right, right), span) }
+                            null
+                        },
+                        BinOp::Add => {
+                            if lv == 0 { return right }
+                            null
+                        },
+                        _ => null,
+                    }
+                },
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Unused Variable Elimination ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func collect_used_names(expr) {
+    if expr == null { return [] }
+    let names = []
+    const k = expr.kind
+    match k {
+        ExprKind::EIdentifier(name) => { names.push(name) },
+        ExprKind::EBinaryOp(_, left, right) => {
+            names = names.concat(collect_used_names(left))
+            names = names.concat(collect_used_names(right))
+        },
+        ExprKind::EUnaryOp(_, operand) => {
+            names = names.concat(collect_used_names(operand))
+        },
+        ExprKind::ECall(name, args, _) => {
+            names.push(name)
+            for a in args { names = names.concat(collect_used_names(a)) }
+        },
+        ExprKind::EMethodCall(obj, _, args, _) => {
+            names = names.concat(collect_used_names(obj))
+            for a in args { names = names.concat(collect_used_names(a)) }
+        },
+        ExprKind::EFieldAccess(obj, _) => {
+            names = names.concat(collect_used_names(obj))
+        },
+        ExprKind::EIndex(obj, idx) => {
+            names = names.concat(collect_used_names(obj))
+            names = names.concat(collect_used_names(idx))
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            names = names.concat(collect_used_names(cond))
+            names = names.concat(collect_used_names_block(then_b))
+            names = names.concat(collect_used_names_block(else_b))
+        },
+        ExprKind::EBlock(blk) => {
+            names = names.concat(collect_used_names_block(blk))
+        },
+        ExprKind::EPipe(left, right) => {
+            names = names.concat(collect_used_names(left))
+            names = names.concat(collect_used_names(right))
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            names = names.concat(collect_used_names(left))
+            names = names.concat(collect_used_names(right))
+        },
+        _ => {},
+    }
+    names
+}
+
+func collect_used_names_block(blk) {
+    if blk == null { return [] }
+    let names = []
+    for s in blk.stmts {
+        names = names.concat(collect_used_names_stmt(s))
+    }
+    if blk.tail_expr != null {
+        names = names.concat(collect_used_names(blk.tail_expr))
+    }
+    names
+}
+
+func collect_used_names_stmt(s) {
+    let names = []
+    const k = s.kind
+    match k {
+        StmtKind::SLet(_, expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SLetMut(_, expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SConst(_, expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SAssignment(_, expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SReturn(expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SOutput(expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SExprStmt(expr) => { names = names.concat(collect_used_names(expr)) },
+        StmtKind::SIf(cond, then_b, else_b) => {
+            names = names.concat(collect_used_names(cond))
+            names = names.concat(collect_used_names_block(then_b))
+            names = names.concat(collect_used_names_block(else_b))
+        },
+        StmtKind::SWhileLoop(_, cond, body) => {
+            names = names.concat(collect_used_names(cond))
+            names = names.concat(collect_used_names_block(body))
+        },
+        StmtKind::SForLoop(_, _, iter, body) => {
+            names = names.concat(collect_used_names(iter))
+            names = names.concat(collect_used_names_block(body))
+        },
+        StmtKind::SThrow(expr) => { names = names.concat(collect_used_names(expr)) },
+        _ => {},
+    }
+    names
+}
+
+func eliminate_unused_vars(stmts) {
+    // Collect all names used in the program
+    let all_used = []
+    for s in stmts {
+        all_used = all_used.concat(collect_used_names_stmt(s))
+    }
+
+    let used_set = {"__s": true}
+    for name in all_used {
+        used_set[name] = true
+    }
+
+    // Filter out unused let bindings (keep assignments, returns, etc.)
+    let result = []
+    for s in stmts {
+        const k = s.kind
+        let keep = true
+        match k {
+            StmtKind::SLet(name, _) => {
+                if !used_set.has(name) { keep = false }
+            },
+            StmtKind::SConst(name, _) => {
+                if !used_set.has(name) { keep = false }
+            },
+            _ => {},
+        }
+        if keep { result.push(s) }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Tail Call Optimization Marking ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_mark_tail_calls(funcdef) {
+    const name = funcdef.name
+    const body = funcdef.body
+    if body == null { return funcdef }
+
+    // Check if the last statement is a return with a recursive call
+    const stmts = body.stmts
+    if len(stmts) == 0 { return funcdef }
+
+    const last = stmts[len(stmts) - 1]
+    const marked_last = opt_mark_tail_in_stmt(last, name)
+    let new_stmts = stmts[0..len(stmts) - 1]
+    new_stmts.push(marked_last)
+
+    FuncDef {
+        name: funcdef.name, type_params: funcdef.type_params, params: funcdef.params,
+        return_type: funcdef.return_type,
+        body: Block { stmts: new_stmts, tail_expr: body.tail_expr, span: body.span },
+        span: funcdef.span,
+        is_getter: funcdef.is_getter, is_setter: funcdef.is_setter,
+    }
+}
+
+func opt_mark_tail_in_stmt(stmt, func_name) {
+    const k = stmt.kind
+    const span = stmt.span
+    match k {
+        StmtKind::SReturn(expr) => {
+            if expr != null {
+                const ek = expr.kind
+                match ek {
+                    ExprKind::ECall(name, _, _) => {
+                        if name == func_name {
+                            // Mark as tail call by wrapping
+                            return stmt_new(StmtKind::SReturn(
+                                expr_new(ExprKind::ETailCall(name, expr), span)
+                            ), span)
+                        }
+                    },
+                    _ => {},
+                }
+            }
+            stmt
+        },
+        StmtKind::SIf(cond, then_b, else_b) => {
+            const new_then = opt_mark_tail_in_block(then_b, func_name)
+            const new_else = opt_mark_tail_in_block(else_b, func_name)
+            stmt_new(StmtKind::SIf(cond, new_then, new_else), span)
+        },
+        _ => stmt,
+    }
+}
+
+func opt_mark_tail_in_block(blk, func_name) {
+    if blk == null { return null }
+    if len(blk.stmts) == 0 { return blk }
+    const last = blk.stmts[len(blk.stmts) - 1]
+    const marked = opt_mark_tail_in_stmt(last, func_name)
+    let new_stmts = blk.stmts[0..len(blk.stmts) - 1]
+    new_stmts.push(marked)
+    Block { stmts: new_stmts, tail_expr: blk.tail_expr, span: blk.span }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Function Inlining ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_is_pure_expr(expr) {
+    if expr == null { return true }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(_) => true,
+        ExprKind::EIdentifier(_) => true,
+        ExprKind::EBinaryOp(_, left, right) => opt_is_pure_expr(left) && opt_is_pure_expr(right),
+        ExprKind::EUnaryOp(_, operand) => opt_is_pure_expr(operand),
+        ExprKind::EFieldAccess(obj, _) => opt_is_pure_expr(obj),
+        ExprKind::EIndex(obj, idx) => opt_is_pure_expr(obj) && opt_is_pure_expr(idx),
+        _ => false,
+    }
+}
+
+func opt_is_small_function(funcdef) {
+    const body = funcdef.body
+    if body == null { return false }
+    // Small: 1-2 statements, all pure expressions
+    if len(body.stmts) > 2 { return false }
+    if len(funcdef.params) > 3 { return false }
+    // Check no self-recursion
+    for s in body.stmts {
+        if opt_stmt_contains_call(s, funcdef.name) { return false }
+    }
+    true
+}
+
+func opt_stmt_contains_call(stmt, name) {
+    const k = stmt.kind
+    match k {
+        StmtKind::SReturn(expr) => opt_expr_contains_call(expr, name),
+        StmtKind::SExprStmt(expr) => opt_expr_contains_call(expr, name),
+        StmtKind::SLet(_, expr) => opt_expr_contains_call(expr, name),
+        StmtKind::SConst(_, expr) => opt_expr_contains_call(expr, name),
+        _ => false,
+    }
+}
+
+func opt_expr_contains_call(expr, name) {
+    if expr == null { return false }
+    const k = expr.kind
+    match k {
+        ExprKind::ECall(n, args, _) => {
+            if n == name { return true }
+            for a in args {
+                if opt_expr_contains_call(a, name) { return true }
+            }
+            false
+        },
+        ExprKind::EBinaryOp(_, left, right) =>
+            opt_expr_contains_call(left, name) || opt_expr_contains_call(right, name),
+        ExprKind::EUnaryOp(_, operand) => opt_expr_contains_call(operand, name),
+        _ => false,
+    }
+}
+
+// Collect small function definitions for potential inlining
+func opt_collect_inlinable(stmts) {
+    let funcs = {"__s": true}
+    for s in stmts {
+        const k = s.kind
+        match k {
+            StmtKind::SFuncDef(fd) => {
+                if opt_is_small_function(fd) {
+                    funcs[fd.name] = fd
+                }
+            },
+            _ => {},
+        }
+    }
+    funcs
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Constant Propagation ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_propagate_constants(stmts) {
+    // Build a map of const name -> literal value
+    let constants = {"__s": true}
+    for s in stmts {
+        const k = s.kind
+        match k {
+            StmtKind::SConst(name, expr) => {
+                if expr != null {
+                    const ek = expr.kind
+                    match ek {
+                        ExprKind::ELiteral(lit) => {
+                            constants[name] = lit
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+
+    if len(keys(constants)) <= 1 { return stmts }  // only __s
+
+    // Replace references to constants with their literal values
+    stmts.map(s => opt_propagate_stmt(s, constants))
+}
+
+func opt_propagate_stmt(s, constants) {
+    const k = s.kind
+    const span = s.span
+    match k {
+        StmtKind::SLet(name, expr) =>
+            stmt_new(StmtKind::SLet(name, opt_propagate_expr(expr, constants)), span),
+        StmtKind::SLetMut(name, expr) =>
+            stmt_new(StmtKind::SLetMut(name, opt_propagate_expr(expr, constants)), span),
+        StmtKind::SAssignment(name, expr) =>
+            stmt_new(StmtKind::SAssignment(name, opt_propagate_expr(expr, constants)), span),
+        StmtKind::SReturn(expr) =>
+            stmt_new(StmtKind::SReturn(opt_propagate_expr(expr, constants)), span),
+        StmtKind::SOutput(expr) =>
+            stmt_new(StmtKind::SOutput(opt_propagate_expr(expr, constants)), span),
+        StmtKind::SExprStmt(expr) =>
+            stmt_new(StmtKind::SExprStmt(opt_propagate_expr(expr, constants)), span),
+        StmtKind::SIf(cond, then_b, else_b) =>
+            stmt_new(StmtKind::SIf(
+                opt_propagate_expr(cond, constants),
+                opt_propagate_block(then_b, constants),
+                opt_propagate_block(else_b, constants)
+            ), span),
+        StmtKind::SWhileLoop(label, cond, body) =>
+            stmt_new(StmtKind::SWhileLoop(label, opt_propagate_expr(cond, constants), opt_propagate_block(body, constants)), span),
+        _ => s,
+    }
+}
+
+func opt_propagate_expr(expr, constants) {
+    if expr == null { return null }
+    const k = expr.kind
+    const span = expr.span
+    match k {
+        ExprKind::EIdentifier(name) => {
+            if constants.has(name) {
+                return expr_new(ExprKind::ELiteral(constants[name]), span)
+            }
+            expr
+        },
+        ExprKind::EBinaryOp(op, left, right) =>
+            expr_new(ExprKind::EBinaryOp(op,
+                opt_propagate_expr(left, constants),
+                opt_propagate_expr(right, constants)), span),
+        ExprKind::EUnaryOp(op, operand) =>
+            expr_new(ExprKind::EUnaryOp(op, opt_propagate_expr(operand, constants)), span),
+        ExprKind::ECall(name, args, targs) => {
+            const pargs = args.map(a => opt_propagate_expr(a, constants))
+            expr_new(ExprKind::ECall(name, pargs, targs), span)
+        },
+        ExprKind::EMethodCall(obj, method, args, targs) => {
+            const pobj = opt_propagate_expr(obj, constants)
+            const pargs = args.map(a => opt_propagate_expr(a, constants))
+            expr_new(ExprKind::EMethodCall(pobj, method, pargs, targs), span)
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) =>
+            expr_new(ExprKind::EIfElse(
+                opt_propagate_expr(cond, constants),
+                opt_propagate_block(then_b, constants),
+                opt_propagate_block(else_b, constants)), span),
+        _ => expr,
+    }
+}
+
+func opt_propagate_block(blk, constants) {
+    if blk == null { return null }
+    const pstmts = blk.stmts.map(s => opt_propagate_stmt(s, constants))
+    const ptail = opt_propagate_expr(blk.tail_expr, constants)
+    Block { stmts: pstmts, tail_expr: ptail, span: blk.span }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Loop Invariant Detection ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_find_loop_invariants(loop_body, modified_vars) {
+    // Find expressions in the loop body that don't depend on modified variables
+    let invariants = []
+    for s in loop_body.stmts {
+        const k = s.kind
+        match k {
+            StmtKind::SLet(name, expr) => {
+                if expr != null && !opt_expr_uses_any(expr, modified_vars) {
+                    invariants.push({"name": name, "expr": expr, "stmt": s})
+                }
+            },
+            StmtKind::SConst(name, expr) => {
+                if expr != null && !opt_expr_uses_any(expr, modified_vars) {
+                    invariants.push({"name": name, "expr": expr, "stmt": s})
+                }
+            },
+            _ => {},
+        }
+    }
+    invariants
+}
+
+func opt_collect_modified_vars(stmts) {
+    let modified = {"__s": true}
+    for s in stmts {
+        const k = s.kind
+        match k {
+            StmtKind::SAssignment(name, _) => { modified[name] = true },
+            StmtKind::SLetMut(name, _) => { modified[name] = true },
+            _ => {},
+        }
+    }
+    modified
+}
+
+func opt_expr_uses_any(expr, vars) {
+    if expr == null { return false }
+    const k = expr.kind
+    match k {
+        ExprKind::EIdentifier(name) => vars.has(name),
+        ExprKind::EBinaryOp(_, left, right) =>
+            opt_expr_uses_any(left, vars) || opt_expr_uses_any(right, vars),
+        ExprKind::EUnaryOp(_, operand) => opt_expr_uses_any(operand, vars),
+        ExprKind::ECall(_, args, _) => {
+            // Calls may have side effects, consider as using modified vars
+            true
+        },
+        ExprKind::EMethodCall(_, _, _, _) => true,
+        ExprKind::EFieldAccess(obj, _) => opt_expr_uses_any(obj, vars),
+        ExprKind::EIndex(obj, idx) =>
+            opt_expr_uses_any(obj, vars) || opt_expr_uses_any(idx, vars),
+        _ => false,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Common Subexpression Elimination ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_expr_key(expr) {
+    // Generate a string key for an expression for CSE comparison
+    if expr == null { return "null" }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(n) => "int:" + to_string(n),
+                Literal::FloatLit(f) => "float:" + to_string(f),
+                Literal::StringLit(s) => "str:" + s,
+                Literal::BoolLit(b) => "bool:" + to_string(b),
+                _ => "lit:?",
+            }
+        },
+        ExprKind::EIdentifier(name) => "id:" + name,
+        ExprKind::EBinaryOp(op, left, right) =>
+            "bin:" + to_string(op) + "(" + opt_expr_key(left) + "," + opt_expr_key(right) + ")",
+        ExprKind::EUnaryOp(op, operand) =>
+            "un:" + to_string(op) + "(" + opt_expr_key(operand) + ")",
+        ExprKind::EFieldAccess(obj, field) =>
+            "field:" + opt_expr_key(obj) + "." + field,
+        ExprKind::EIndex(obj, idx) =>
+            "index:" + opt_expr_key(obj) + "[" + opt_expr_key(idx) + "]",
+        _ => "complex:" + to_string(expr),
+    }
+}
+
+func opt_find_common_subexprs(stmts) {
+    let expr_counts = {"__s": true}
+    let expr_map = {"__s": true}
+
+    for s in stmts {
+        opt_count_subexprs_stmt(s, expr_counts, expr_map)
+    }
+
+    // Return expressions that appear more than once
+    let common = []
+    for key in keys(expr_counts) {
+        if key == "__s" { continue }
+        if expr_counts[key] > 1 && expr_map.has(key) {
+            common.push({"key": key, "count": expr_counts[key], "expr": expr_map[key]})
+        }
+    }
+    common
+}
+
+func opt_count_subexprs_stmt(s, counts, exprs) {
+    const k = s.kind
+    match k {
+        StmtKind::SLet(_, expr) => opt_count_subexprs(expr, counts, exprs),
+        StmtKind::SConst(_, expr) => opt_count_subexprs(expr, counts, exprs),
+        StmtKind::SAssignment(_, expr) => opt_count_subexprs(expr, counts, exprs),
+        StmtKind::SReturn(expr) => opt_count_subexprs(expr, counts, exprs),
+        StmtKind::SOutput(expr) => opt_count_subexprs(expr, counts, exprs),
+        StmtKind::SExprStmt(expr) => opt_count_subexprs(expr, counts, exprs),
+        _ => {},
+    }
+}
+
+func opt_count_subexprs(expr, counts, exprs) {
+    if expr == null { return }
+    const key = opt_expr_key(expr)
+    // Only track non-trivial expressions
+    if key.starts_with("int:") || key.starts_with("str:") || key.starts_with("bool:") || key.starts_with("id:") {
+        return
+    }
+    if counts.has(key) {
+        counts[key] = counts[key] + 1
+    } else {
+        counts[key] = 1
+        exprs[key] = expr
+    }
+
+    // Recurse
+    const k = expr.kind
+    match k {
+        ExprKind::EBinaryOp(_, left, right) => {
+            opt_count_subexprs(left, counts, exprs)
+            opt_count_subexprs(right, counts, exprs)
+        },
+        ExprKind::EUnaryOp(_, operand) => opt_count_subexprs(operand, counts, exprs),
+        ExprKind::ECall(_, args, _) => {
+            for a in args { opt_count_subexprs(a, counts, exprs) }
+        },
+        _ => {},
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Branch Simplification ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_simplify_if(cond, then_b, else_b, span) {
+    const ck = cond.kind
+    match ck {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => {
+                    if b { return stmt_new(StmtKind::SBlock(then_b), span) }
+                    if else_b != null { return stmt_new(StmtKind::SBlock(else_b), span) }
+                    // if false without else -> no-op
+                    return stmt_new(StmtKind::SExprStmt(make_null_lit(span)), span)
+                },
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Match Simplification ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_simplify_match(expr, arms, span) {
+    // Single-arm match with wildcard => just the body
+    if len(arms) == 1 {
+        const arm = arms[0]
+        if arm.has("pattern") {
+            const p = arm["pattern"]
+            if p == "_" || p == "else" {
+                return arm["body"]
+            }
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Expression Flattening ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_flatten_block(blk, span) {
+    // Block with a single expression statement -> that expression
+    if blk == null { return null }
+    if len(blk.stmts) == 0 && blk.tail_expr != null {
+        return blk.tail_expr
+    }
+    if len(blk.stmts) == 1 && blk.tail_expr == null {
+        const s = blk.stmts[0]
+        const k = s.kind
+        match k {
+            StmtKind::SExprStmt(expr) => return expr,
+            _ => {},
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Unreachable Branch Elimination ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_is_always_true(expr) {
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => b == true,
+                Literal::IntLit(n) => n != 0,
+                Literal::StringLit(s) => s != "",
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+func opt_is_always_false(expr) {
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => b == false,
+                Literal::IntLit(n) => n == 0,
+                Literal::StringLit(s) => s == "",
+                Literal::NullLit => true,
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+func opt_eliminate_unreachable_branches(stmts) {
+    let result = []
+    for s in stmts {
+        const k = s.kind
+        match k {
+            StmtKind::SWhileLoop(label, cond, body) => {
+                // while false { ... } -> remove entirely
+                if opt_is_always_false(cond) { continue }
+                result.push(s)
+            },
+            StmtKind::SIf(cond, then_b, else_b) => {
+                if opt_is_always_true(cond) {
+                    // Inline the then block
+                    for ts in then_b.stmts {
+                        result.push(ts)
+                    }
+                } else if opt_is_always_false(cond) {
+                    // Inline the else block if present
+                    if else_b != null {
+                        for es in else_b.stmts {
+                            result.push(es)
+                        }
+                    }
+                } else {
+                    result.push(s)
+                }
+            },
+            _ => result.push(s),
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Optimizer Expression Pass ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_expr_full(e) {
+    if e == null { return null }
+    const k = e.kind
+    const span = e.span
+    match k {
+        ExprKind::EBinaryOp(op, left, right) => {
+            const ol = opt_expr_full(left)
+            const or_ = opt_expr_full(right)
+
+            // Try full constant folding (all types)
+            const lk = ol.kind
+            const rk = or_.kind
+            match lk {
+                ExprKind::ELiteral(ll) => {
+                    match rk {
+                        ExprKind::ELiteral(rl) => {
+                            const folded = opt_try_fold_lits_full(op, ll, rl, span)
+                            if folded != null { return folded }
+                        },
+                        _ => null,
+                    }
+                },
+                _ => null,
+            }
+
+            // Try strength reduction
+            const reduced = opt_strength_reduce(op, ol, or_, span)
+            if reduced != null { return reduced }
+
+            expr_new(ExprKind::EBinaryOp(op, ol, or_), span)
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const oo = opt_expr_full(operand)
+            const ok = oo.kind
+            match ok {
+                ExprKind::ELiteral(lit) => {
+                    const folded = opt_try_fold_unary(op, lit, span)
+                    if folded != null { return folded }
+                },
+                _ => null,
+            }
+            expr_new(ExprKind::EUnaryOp(op, oo), span)
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            const oc = opt_expr_full(cond)
+            const ot = opt_block_full(then_b)
+            const oe = opt_block_full(else_b)
+            const ck = oc.kind
+            match ck {
+                ExprKind::ELiteral(lit) => {
+                    match lit {
+                        Literal::BoolLit(b) => {
+                            const chosen = if b { ot } else { oe }
+                            if chosen != null {
+                                return expr_new(ExprKind::EBlock(chosen), span)
+                            }
+                        },
+                        _ => null,
+                    }
+                },
+                _ => null,
+            }
+            expr_new(ExprKind::EIfElse(oc, ot, oe), span)
+        },
+        ExprKind::EBlock(blk) => {
+            const ob = opt_block_full(blk)
+            // Try to flatten single-expression blocks
+            const flat = opt_flatten_block(ob, span)
+            if flat != null { return flat }
+            expr_new(ExprKind::EBlock(ob), span)
+        },
+        ExprKind::ECall(name, args, targs) => {
+            const oargs = args.map(a => opt_expr_full(a))
+            expr_new(ExprKind::ECall(name, oargs, targs), span)
+        },
+        ExprKind::EMethodCall(obj, method, args, targs) => {
+            const oo = opt_expr_full(obj)
+            const oargs = args.map(a => opt_expr_full(a))
+            expr_new(ExprKind::EMethodCall(oo, method, oargs, targs), span)
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            expr_new(ExprKind::EFieldAccess(opt_expr_full(obj), field), span)
+        },
+        ExprKind::EIndex(obj, idx) => {
+            expr_new(ExprKind::EIndex(opt_expr_full(obj), opt_expr_full(idx)), span)
+        },
+        ExprKind::EPipe(left, right) => {
+            expr_new(ExprKind::EPipe(opt_expr_full(left), opt_expr_full(right)), span)
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            expr_new(ExprKind::ENullCoalesce(opt_expr_full(left), opt_expr_full(right)), span)
+        },
+        _ => e,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Enhanced Block Optimization ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_block_full(blk) {
+    if blk == null { return null }
+    let ostmts = blk.stmts.map(s => opt_stmt_full(s))
+    ostmts = eliminate_dead_stmts(ostmts)
+    ostmts = opt_eliminate_unreachable_branches(ostmts)
+    const otail = opt_expr_full(blk.tail_expr)
+    Block { stmts: ostmts, tail_expr: otail, span: blk.span }
+}
+
+func opt_stmt_full(s) {
+    const k = s.kind
+    const span = s.span
+    match k {
+        StmtKind::SLet(name, expr) =>
+            stmt_new(StmtKind::SLet(name, opt_expr_full(expr)), span),
+        StmtKind::SLetMut(name, expr) =>
+            stmt_new(StmtKind::SLetMut(name, opt_expr_full(expr)), span),
+        StmtKind::SConst(name, expr) =>
+            stmt_new(StmtKind::SConst(name, opt_expr_full(expr)), span),
+        StmtKind::SAssignment(name, expr) =>
+            stmt_new(StmtKind::SAssignment(name, opt_expr_full(expr)), span),
+        StmtKind::SReturn(expr) =>
+            stmt_new(StmtKind::SReturn(opt_expr_full(expr)), span),
+        StmtKind::SOutput(expr) =>
+            stmt_new(StmtKind::SOutput(opt_expr_full(expr)), span),
+        StmtKind::SExprStmt(expr) =>
+            stmt_new(StmtKind::SExprStmt(opt_expr_full(expr)), span),
+        StmtKind::SFuncDef(fd) => {
+            const ofd = opt_funcdef_full(fd)
+            stmt_new(StmtKind::SFuncDef(ofd), span)
+        },
+        StmtKind::SIf(cond, then_b, else_b) =>
+            stmt_new(StmtKind::SIf(opt_expr_full(cond), opt_block_full(then_b), opt_block_full(else_b)), span),
+        StmtKind::SWhileLoop(label, cond, body) =>
+            stmt_new(StmtKind::SWhileLoop(label, opt_expr_full(cond), opt_block_full(body)), span),
+        StmtKind::SForLoop(label, pat, iter, body) =>
+            stmt_new(StmtKind::SForLoop(label, pat, opt_expr_full(iter), opt_block_full(body)), span),
+        StmtKind::SThrow(expr) =>
+            stmt_new(StmtKind::SThrow(opt_expr_full(expr)), span),
+        _ => s,
+    }
+}
+
+func opt_funcdef_full(fd) {
+    const ob = opt_block_full(fd.body)
+    const marked = opt_mark_tail_calls(FuncDef {
+        name: fd.name, type_params: fd.type_params, params: fd.params,
+        return_type: fd.return_type, body: ob, span: fd.span,
+        is_getter: fd.is_getter, is_setter: fd.is_setter,
+    })
+    marked
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Optimization Pipeline ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func optimize_full(program) {
+    // Pass 1: Constant propagation
+    let stmts = opt_propagate_constants(program.statements)
+
+    // Pass 2: Full optimization (constant folding, strength reduction, DCE, branch simplification)
+    stmts = stmts.map(s => opt_stmt_full(s))
+
+    // Pass 3: Unused variable elimination
+    stmts = eliminate_unused_vars(stmts)
+
+    // Pass 4: Eliminate unreachable branches at top level
+    stmts = opt_eliminate_unreachable_branches(stmts)
+
+    // Pass 5: Dead code elimination
+    stmts = eliminate_dead_stmts(stmts)
+
+    Program { statements: stmts, span: program.span }
+}

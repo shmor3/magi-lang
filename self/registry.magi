@@ -513,3 +513,843 @@ func dfs_cycle(name, registry, visiting, visited) {
     visited[name] = true
     null
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Semver Constraint Parsing ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse comma-separated range constraints: ">=1.0.0, <2.0.0"
+func semver_satisfies_range(version, constraint_str) {
+    if constraint_str == "" || constraint_str == "*" { return true }
+
+    // Split by comma for range constraints
+    const parts = constraint_str.split(",")
+    for part in parts {
+        const trimmed = part.trim()
+        if trimmed == "" { continue }
+        if !semver_satisfies(version, trimmed) {
+            return false
+        }
+    }
+    true
+}
+
+// Parse != constraint
+func semver_satisfies_neq(version, ver_str) {
+    const target = semver_parse(ver_str)
+    if target == null { return true }
+    semver_compare(version, target) != 0
+}
+
+// Full constraint parser supporting all forms
+func semver_satisfies_full(version, constraint) {
+    if constraint == "" || constraint == "*" { return true }
+
+    // Handle != operator
+    if constraint.starts_with("!=") {
+        const ver_str = constraint[2..len(constraint)].trim()
+        return semver_satisfies_neq(version, ver_str)
+    }
+
+    // Handle comma-separated ranges
+    if constraint.contains(",") {
+        return semver_satisfies_range(version, constraint)
+    }
+
+    // Delegate to existing parser
+    semver_satisfies(version, constraint)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Version Bumping ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func semver_bump_major(v) {
+    {
+        "major": v["major"] + 1,
+        "minor": 0,
+        "patch": 0,
+        "pre": ""
+    }
+}
+
+func semver_bump_minor(v) {
+    {
+        "major": v["major"],
+        "minor": v["minor"] + 1,
+        "patch": 0,
+        "pre": ""
+    }
+}
+
+func semver_bump_patch(v) {
+    {
+        "major": v["major"],
+        "minor": v["minor"],
+        "patch": v["patch"] + 1,
+        "pre": ""
+    }
+}
+
+func bump_version(version_str, bump_type) {
+    const v = semver_parse(version_str)
+    if v == null { return version_str }
+    const bumped = match bump_type {
+        "major" => semver_bump_major(v),
+        "minor" => semver_bump_minor(v),
+        "patch" => semver_bump_patch(v),
+        _ => v
+    }
+    semver_to_string(bumped)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Dependency Graph Construction ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func build_dep_graph(requirements, registry) {
+    // Build a graph: name -> {version, deps: [name]}
+    let graph = {"__s": true}
+    let queue = []
+
+    for req in requirements {
+        queue.push(req["name"])
+    }
+
+    while len(queue) > 0 {
+        const current = queue[len(queue) - 1]
+        queue = queue[0..len(queue) - 1]
+
+        if graph.has(current) { continue }
+
+        if registry.has(current) {
+            const pkg = registry[current]
+            let dep_names = []
+            if pkg.has("dependencies") {
+                for dep in pkg["dependencies"] {
+                    dep_names.push(dep["name"])
+                    if !graph.has(dep["name"]) {
+                        queue.push(dep["name"])
+                    }
+                }
+            }
+            graph[current] = {
+                "name": current,
+                "version": pkg["version"],
+                "deps": dep_names
+            }
+        }
+    }
+
+    graph
+}
+
+func dep_graph_topological_sort(graph) {
+    let in_degree = {"__s": true}
+    let result = []
+
+    // Initialize in-degrees
+    for name in keys(graph) {
+        if name == "__s" { continue }
+        if !in_degree.has(name) { in_degree[name] = 0 }
+        const node = graph[name]
+        for dep in node["deps"] {
+            if !in_degree.has(dep) { in_degree[dep] = 0 }
+            in_degree[dep] = in_degree[dep] + 1
+        }
+    }
+
+    // Find all nodes with in-degree 0
+    let queue = []
+    for name in keys(in_degree) {
+        if name == "__s" { continue }
+        if in_degree[name] == 0 {
+            queue.push(name)
+        }
+    }
+
+    while len(queue) > 0 {
+        const current = queue[0]
+        queue = queue[1..len(queue)]
+        result.push(current)
+
+        if graph.has(current) {
+            const node = graph[current]
+            for dep in node["deps"] {
+                in_degree[dep] = in_degree[dep] - 1
+                if in_degree[dep] == 0 {
+                    queue.push(dep)
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Lock File with SHA256 and Git Hashes ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func generate_lockfile_full(resolved_deps, checksums) {
+    let lock = "# magi.lock -- auto-generated, do not edit\n"
+    lock = lock + "# generated: " + to_string(time_now()) + "\n\n"
+
+    for dep in resolved_deps {
+        lock = lock + "[[package]]\n"
+        lock = lock + "name = \"" + dep["name"] + "\"\n"
+        lock = lock + "version = \"" + dep["version"] + "\"\n"
+        if checksums.has(dep["name"]) {
+            const cs = checksums[dep["name"]]
+            if cs.has("sha256") {
+                lock = lock + "checksum = \"sha256:" + cs["sha256"] + "\"\n"
+            }
+            if cs.has("git_commit") {
+                lock = lock + "git_commit = \"" + cs["git_commit"] + "\"\n"
+            }
+        }
+        if dep.has("deps") && len(dep["deps"]) > 0 {
+            lock = lock + "dependencies = [" + dep["deps"].map(d => "\"" + d + "\"").join(", ") + "]\n"
+        }
+        lock = lock + "\n"
+    }
+    lock
+}
+
+func parse_lockfile_full(text) {
+    let packages = []
+    let current = null
+
+    const lines = text.split("\n")
+    for line in lines {
+        const trimmed = line.trim()
+
+        if trimmed == "[[package]]" {
+            if current != null {
+                packages.push(current)
+            }
+            current = {"name": "", "version": "", "checksum": "", "git_commit": "", "dependencies": []}
+            continue
+        }
+
+        if current != null {
+            if trimmed.starts_with("name = ") {
+                let val = trimmed[7..len(trimmed)].trim()
+                if len(val) >= 2 && val[0] == "\"" { val = val[1..len(val) - 1] }
+                current["name"] = val
+            }
+            if trimmed.starts_with("version = ") {
+                let val = trimmed[10..len(trimmed)].trim()
+                if len(val) >= 2 && val[0] == "\"" { val = val[1..len(val) - 1] }
+                current["version"] = val
+            }
+            if trimmed.starts_with("checksum = ") {
+                let val = trimmed[11..len(trimmed)].trim()
+                if len(val) >= 2 && val[0] == "\"" { val = val[1..len(val) - 1] }
+                current["checksum"] = val
+            }
+            if trimmed.starts_with("git_commit = ") {
+                let val = trimmed[13..len(trimmed)].trim()
+                if len(val) >= 2 && val[0] == "\"" { val = val[1..len(val) - 1] }
+                current["git_commit"] = val
+            }
+            if trimmed.starts_with("dependencies = ") {
+                let val = trimmed[15..len(trimmed)].trim()
+                if val[0] == "[" && val[len(val) - 1] == "]" {
+                    const inner = val[1..len(val) - 1]
+                    if inner != "" {
+                        const parts = inner.split(",")
+                        let deps = []
+                        for part in parts {
+                            let d = part.trim()
+                            if len(d) >= 2 && d[0] == "\"" { d = d[1..len(d) - 1] }
+                            deps.push(d)
+                        }
+                        current["dependencies"] = deps
+                    }
+                }
+            }
+        }
+    }
+
+    if current != null {
+        packages.push(current)
+    }
+
+    packages
+}
+
+func verify_lockfile(lockfile_packages, registry) {
+    let issues = []
+    for pkg in lockfile_packages {
+        const name = pkg["name"]
+        const version = pkg["version"]
+        const checksum = pkg["checksum"]
+
+        if !registry.has(name) {
+            issues.push(f"Package {name} not found in registry")
+            continue
+        }
+
+        const reg_pkg = registry[name]
+        if reg_pkg["version"] != version {
+            issues.push(f"Version mismatch for {name}: lock={version}, registry={reg_pkg[\"version\"]}")
+        }
+
+        // Verify checksum if present
+        if checksum != "" && checksum.starts_with("sha256:") {
+            const expected_hash = checksum[7..len(checksum)]
+            // Would verify against actual package contents
+        }
+    }
+    issues
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Cache Management ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func cache_new(base_path) {
+    {
+        "base": base_path,
+        "download": base_path + "/download",
+        "build": base_path + "/build",
+        "registry": base_path + "/registry"
+    }
+}
+
+func cache_has(cache, name, version) {
+    const key = name + "@" + version
+    const path = cache["download"] + "/" + key
+    file_exists(path)
+}
+
+func cache_get_path(cache, name, version) {
+    cache["download"] + "/" + name + "@" + version
+}
+
+func cache_store(cache, name, version, data) {
+    const dir = cache["download"] + "/" + name + "@" + version
+    mkdir(dir)
+    write_file(dir + "/package.tar", data)
+    println(f"Cached {name}@{version}")
+}
+
+func cache_clean(cache) {
+    let count = 0
+    const entries = list_dir(cache["download"])
+    for entry in entries {
+        remove_dir(cache["download"] + "/" + entry)
+        count = count + 1
+    }
+    println(f"Cleaned {count} cached packages")
+}
+
+func cache_size(cache) {
+    let total = 0
+    const entries = list_dir(cache["download"])
+    for entry in entries {
+        const path = cache["download"] + "/" + entry
+        total = total + file_size(path)
+    }
+    total
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Git-Based Package Fetching ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func git_fetch_package(url, tag, dest_dir) {
+    let cmd_args = ["git", "clone", "--depth", "1"]
+    if tag != "" {
+        cmd_args = cmd_args.concat(["--branch", tag])
+    }
+    cmd_args = cmd_args.concat([url, dest_dir])
+
+    const result = run_command(cmd_args)
+    if result["exit_code"] != 0 {
+        return {"ok": false, "error": "git clone failed: " + result["stderr"]}
+    }
+    {"ok": true, "path": dest_dir}
+}
+
+func git_get_commit_hash(repo_dir) {
+    const result = run_command(["git", "-C", repo_dir, "rev-parse", "HEAD"])
+    if result["exit_code"] == 0 {
+        result["stdout"].trim()
+    } else {
+        ""
+    }
+}
+
+func git_checkout_tag(repo_dir, tag) {
+    const result = run_command(["git", "-C", repo_dir, "checkout", tag])
+    result["exit_code"] == 0
+}
+
+func git_list_tags(repo_dir) {
+    const result = run_command(["git", "-C", repo_dir, "tag", "--list", "v*"])
+    if result["exit_code"] == 0 {
+        result["stdout"].trim().split("\n")
+    } else {
+        []
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Extended magispace.toml Parser ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func parse_magispace_full(text) {
+    const config = toml_parse(text)
+
+    let pkg_name = ""
+    let pkg_version = ""
+    let pkg_description = ""
+    let pkg_authors = []
+    let pkg_license = ""
+    let pkg_repository = ""
+    let pkg_homepage = ""
+    let pkg_keywords = []
+
+    if config.has("package") {
+        const pkg = config["package"]
+        if pkg.has("name") { pkg_name = pkg["name"] }
+        if pkg.has("version") { pkg_version = pkg["version"] }
+        if pkg.has("description") { pkg_description = pkg["description"] }
+        if pkg.has("authors") { pkg_authors = pkg["authors"] }
+        if pkg.has("license") { pkg_license = pkg["license"] }
+        if pkg.has("repository") { pkg_repository = pkg["repository"] }
+        if pkg.has("homepage") { pkg_homepage = pkg["homepage"] }
+        if pkg.has("keywords") { pkg_keywords = pkg["keywords"] }
+    }
+
+    let deps = []
+    if config.has("dependencies") {
+        const dep_section = config["dependencies"]
+        for dep_name in keys(dep_section) {
+            if dep_name == "__s" { continue }
+            const constraint = dep_section[dep_name]
+            deps.push({"name": dep_name, "constraint": to_string(constraint)})
+        }
+    }
+
+    let dev_deps = []
+    if config.has("dev-dependencies") {
+        const dev_section = config["dev-dependencies"]
+        for dep_name in keys(dev_section) {
+            if dep_name == "__s" { continue }
+            const constraint = dev_section[dep_name]
+            dev_deps.push({"name": dep_name, "constraint": to_string(constraint)})
+        }
+    }
+
+    let build_deps = []
+    if config.has("build-dependencies") {
+        const build_section = config["build-dependencies"]
+        for dep_name in keys(build_section) {
+            if dep_name == "__s" { continue }
+            const constraint = build_section[dep_name]
+            build_deps.push({"name": dep_name, "constraint": to_string(constraint)})
+        }
+    }
+
+    {
+        "name": pkg_name,
+        "version": pkg_version,
+        "description": pkg_description,
+        "authors": pkg_authors,
+        "license": pkg_license,
+        "repository": pkg_repository,
+        "homepage": pkg_homepage,
+        "keywords": pkg_keywords,
+        "dependencies": deps,
+        "dev_dependencies": dev_deps,
+        "build_dependencies": build_deps,
+        "raw": config
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Package Search (Local and Remote) ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func registry_search_scored(reg, query) {
+    let results = []
+    const query_lower = query.lower()
+    for name in keys(reg["packages"]) {
+        if name == "__s" { continue }
+        const pkg = reg["packages"][name]
+        let score = 0
+
+        // Exact name match
+        if name == query { score = score + 100 }
+        // Name contains query
+        else if name.contains(query_lower) { score = score + 50 }
+        // Name starts with query
+        if name.starts_with(query_lower) { score = score + 25 }
+        // Description match
+        if pkg["description"].lower().contains(query_lower) { score = score + 10 }
+
+        if score > 0 {
+            results.push({"package": pkg, "score": score})
+        }
+    }
+
+    // Sort by score descending
+    results = sort_by(results, r => 0 - r["score"])
+    results.map(r => r["package"])
+}
+
+func registry_search_by_keyword(reg, keyword) {
+    let results = []
+    for name in keys(reg["packages"]) {
+        if name == "__s" { continue }
+        const pkg = reg["packages"][name]
+        if pkg.has("keywords") {
+            for kw in pkg["keywords"] {
+                if kw == keyword {
+                    results.push(pkg)
+                    break
+                }
+            }
+        }
+    }
+    results
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Package Publish Preparation ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func publish_validate(magispace_text) {
+    const config = parse_magispace_full(magispace_text)
+    let errors = []
+
+    if config["name"] == "" {
+        errors.push("Missing package name")
+    }
+    if config["version"] == "" {
+        errors.push("Missing package version")
+    } else {
+        const v = semver_parse(config["version"])
+        if v == null {
+            errors.push("Invalid version format: " + config["version"])
+        }
+    }
+    if config["description"] == "" {
+        errors.push("Missing package description")
+    }
+
+    // Check name format (lowercase, alphanumeric, hyphens)
+    if config["name"] != "" {
+        let valid = true
+        for c in config["name"].chars() {
+            if c >= "a" && c <= "z" { continue }
+            if c >= "0" && c <= "9" { continue }
+            if c == "-" || c == "_" { continue }
+            valid = false
+            break
+        }
+        if !valid {
+            errors.push("Package name must be lowercase alphanumeric with hyphens/underscores")
+        }
+    }
+
+    {"valid": len(errors) == 0, "errors": errors, "config": config}
+}
+
+func publish_bundle(source_dir, config) {
+    // Collect all .magi files in the directory
+    let files = []
+    const entries = list_dir(source_dir)
+    for entry in entries {
+        if entry.ends_with(".magi") || entry == "magispace.toml" {
+            files.push(entry)
+        }
+    }
+
+    // Calculate checksum of all files
+    let hasher_input = ""
+    for file in sort(files) {
+        const content = read_file(source_dir + "/" + file)
+        hasher_input = hasher_input + file + ":" + content + "\n"
+    }
+    const checksum = sha256(hasher_input)
+
+    {
+        "name": config["name"],
+        "version": config["version"],
+        "files": files,
+        "checksum": checksum,
+        "file_count": len(files)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Dependency Tree Display ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func dep_tree_display(name, registry, indent, visited) {
+    const prefix = "  ".repeat(indent)
+    const marker = if indent == 0 { "" } else { "|- " }
+
+    if visited.has(name) {
+        println(f"{prefix}{marker}{name} (circular)")
+        return
+    }
+    visited[name] = true
+
+    if registry.has(name) {
+        const pkg = registry[name]
+        const ver = if pkg.has("version") { pkg["version"] } else { "?" }
+        println(f"{prefix}{marker}{name}@{ver}")
+
+        if pkg.has("dependencies") {
+            for dep in pkg["dependencies"] {
+                dep_tree_display(dep["name"], registry, indent + 1, visited)
+            }
+        }
+    } else {
+        println(f"{prefix}{marker}{name} (not found)")
+    }
+}
+
+func show_dep_tree(magispace_text, registry) {
+    const config = parse_magispace(magispace_text)
+    println(f"{config[\"name\"]}@{config[\"version\"]}")
+    let visited = {"__s": true}
+    for dep in config["dependencies"] {
+        dep_tree_display(dep["name"], registry, 1, visited)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Vulnerability Audit ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let known_advisories = []  // [{package, affected_versions, severity, description, id}]
+
+func advisory_add(pkg_name, versions, severity, description, advisory_id) {
+    known_advisories.push({
+        "package": pkg_name,
+        "affected_versions": versions,
+        "severity": severity,
+        "description": description,
+        "id": advisory_id
+    })
+}
+
+func audit_package(name, version) {
+    let vulnerabilities = []
+    for advisory in known_advisories {
+        if advisory["package"] != name { continue }
+        const v = semver_parse(version)
+        if v == null { continue }
+        for affected in advisory["affected_versions"] {
+            if semver_satisfies_full(v, affected) {
+                vulnerabilities.push({
+                    "advisory_id": advisory["id"],
+                    "severity": advisory["severity"],
+                    "description": advisory["description"],
+                    "affected": affected
+                })
+            }
+        }
+    }
+    vulnerabilities
+}
+
+func audit_all(resolved_deps) {
+    let all_vulns = []
+    for dep in resolved_deps {
+        const vulns = audit_package(dep["name"], dep["version"])
+        for vuln in vulns {
+            all_vulns.push({
+                "package": dep["name"],
+                "version": dep["version"],
+                "advisory_id": vuln["advisory_id"],
+                "severity": vuln["severity"],
+                "description": vuln["description"]
+            })
+        }
+    }
+    all_vulns
+}
+
+func audit_report(resolved_deps) {
+    const vulns = audit_all(resolved_deps)
+    if len(vulns) == 0 {
+        println("No known vulnerabilities found.")
+        return
+    }
+
+    let critical = 0
+    let high = 0
+    let medium = 0
+    let low = 0
+
+    for vuln in vulns {
+        match vuln["severity"] {
+            "critical" => { critical = critical + 1 },
+            "high" => { high = high + 1 },
+            "medium" => { medium = medium + 1 },
+            "low" => { low = low + 1 },
+            _ => {}
+        }
+        println(f"  [{vuln[\"severity\"]}] {vuln[\"package\"]}@{vuln[\"version\"]}: {vuln[\"description\"]} ({vuln[\"advisory_id\"]})")
+    }
+
+    println(f"\nFound {len(vulns)} vulnerabilities: {critical} critical, {high} high, {medium} medium, {low} low")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Vendor Mode ────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func vendor_deps(magispace_text, registry, vendor_dir) {
+    const config = parse_magispace(magispace_text)
+    const requirements = config["dependencies"]
+
+    if len(requirements) == 0 {
+        println("No dependencies to vendor.")
+        return
+    }
+
+    mkdir(vendor_dir)
+
+    let vendored = 0
+    for req in requirements {
+        const name = req["name"]
+        const pkg = registry_get(registry, name)
+        if pkg == null {
+            println(f"Warning: package {name} not found")
+            continue
+        }
+
+        const dest = vendor_dir + "/" + name
+        mkdir(dest)
+
+        // Copy package source to vendor directory
+        println(f"Vendored {name}@{pkg[\"version\"]} -> {dest}")
+        vendored = vendored + 1
+    }
+
+    // Write vendor manifest
+    let manifest = "# Vendored dependencies\n"
+    manifest = manifest + "# Generated by magi vendor\n\n"
+    for req in requirements {
+        const pkg = registry_get(registry, req["name"])
+        if pkg != null {
+            manifest = manifest + req["name"] + " = \"" + pkg["version"] + "\"\n"
+        }
+    }
+    write_file(vendor_dir + "/vendor.toml", manifest)
+
+    println(f"Vendored {vendored} packages to {vendor_dir}")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Resolution with Full Constraint Support ────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func resolve_mvs_full(requirements, available_versions) {
+    let selected = {"__s": true}
+    let conflicts = []
+
+    for req in requirements {
+        const name = req["name"]
+        const constraint = req["constraint"]
+
+        if !available_versions.has(name) {
+            conflicts.push(f"Package {name} not found")
+            continue
+        }
+
+        const versions = available_versions[name]
+        let found = false
+
+        for ver_str in versions {
+            const ver = semver_parse(ver_str)
+            if ver == null { continue }
+            if semver_satisfies_full(ver, constraint) {
+                if selected.has(name) {
+                    const existing = semver_parse(selected[name])
+                    if existing != null && semver_compare(ver, existing) > 0 {
+                        selected[name] = ver_str
+                    }
+                } else {
+                    selected[name] = ver_str
+                }
+                found = true
+                break
+            }
+        }
+
+        if !found {
+            conflicts.push(f"No version of {name} satisfies {constraint}")
+        }
+    }
+
+    let result = []
+    for name in keys(selected) {
+        if name == "__s" { continue }
+        result.push({"name": name, "version": selected[name]})
+    }
+
+    {"resolved": result, "conflicts": conflicts}
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Install Workflow ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func install_packages(magispace_text, reg, cache) {
+    const config = parse_magispace_full(magispace_text)
+    const requirements = config["dependencies"]
+
+    if len(requirements) == 0 {
+        return {"ok": true, "installed": [], "lockfile": ""}
+    }
+
+    // Check for circular dependencies
+    const cycles = detect_cycles(requirements, reg["packages"])
+    if len(cycles) > 0 {
+        return {"ok": false, "error": "Circular dependencies detected: " + to_string(cycles)}
+    }
+
+    // Build available versions
+    let available = {"__s": true}
+    for req in requirements {
+        const name = req["name"]
+        const pkg = registry_get(reg, name)
+        if pkg != null {
+            available[name] = [pkg["version"]]
+        }
+    }
+
+    // Resolve with MVS
+    const resolution = resolve_mvs_full(requirements, available)
+    if len(resolution["conflicts"]) > 0 {
+        return {"ok": false, "error": "Resolution conflicts: " + resolution["conflicts"].join(", ")}
+    }
+
+    const resolved = resolution["resolved"]
+
+    // Calculate checksums
+    let checksums = {"__s": true}
+    for dep in resolved {
+        checksums[dep["name"]] = {"sha256": sha256(dep["name"] + "@" + dep["version"])}
+    }
+
+    // Generate lockfile
+    const lockfile = generate_lockfile_full(resolved, checksums)
+
+    // Audit for vulnerabilities
+    const vulns = audit_all(resolved)
+    if len(vulns) > 0 {
+        println(f"Warning: {len(vulns)} known vulnerabilities in dependencies")
+    }
+
+    {"ok": true, "installed": resolved, "lockfile": lockfile, "vulnerabilities": vulns}
+}

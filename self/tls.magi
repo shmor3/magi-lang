@@ -393,3 +393,909 @@ func tls_verify_password(password, stored_hash) {
     const actual = tls_bytes_to_hex(tls_pbkdf2(password, salt, iterations, 32))
     tls_constant_time_eq(actual, expected_hash)
 }
+
+// ══════════════════════════════════════════════════════════════════
+// ── Full TLS Client Configuration ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_client_config_full(options) {
+    const config = tls_client_config(
+        if options.has("ca_cert_path") { options["ca_cert_path"] } else { "" }
+    )
+
+    if options.has("min_version") {
+        config["min_protocol"] = options["min_version"]
+    }
+    if options.has("max_version") {
+        config["max_protocol"] = options["max_version"]
+    }
+    if options.has("verify_hostname") {
+        config["verify_hostname"] = options["verify_hostname"]
+    }
+    if options.has("verify_cert") {
+        config["verify_cert"] = options["verify_cert"]
+    }
+    if options.has("cipher_suites") {
+        config["cipher_suites"] = options["cipher_suites"]
+    }
+    if options.has("alpn_protocols") {
+        config["alpn_protocols"] = options["alpn_protocols"]
+    }
+    if options.has("client_cert") {
+        config["client_cert"] = options["client_cert"]
+    }
+    if options.has("client_key") {
+        config["client_key"] = options["client_key"]
+    }
+    if options.has("sni_hostname") {
+        config["sni_hostname"] = options["sni_hostname"]
+    }
+
+    config
+}
+
+// Cipher suite presets
+func tls_cipher_suites_modern() {
+    [
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_CHACHA20_POLY1305_SHA256"
+    ]
+}
+
+func tls_cipher_suites_compatible() {
+    [
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    ]
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── X.509 Certificate Parsing ────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_parse_cert_full(pem_data) {
+    const parsed = cert_parse(pem_data)
+    if parsed == null { return null }
+
+    {
+        "subject": if parsed.has("subject") { parsed["subject"] } else { "" },
+        "issuer": if parsed.has("issuer") { parsed["issuer"] } else { "" },
+        "serial": if parsed.has("serial") { parsed["serial"] } else { "" },
+        "not_before": if parsed.has("not_before") { parsed["not_before"] } else { "" },
+        "not_after": if parsed.has("not_after") { parsed["not_after"] } else { "" },
+        "fingerprint_sha256": if parsed.has("fingerprint_sha256") { parsed["fingerprint_sha256"] } else { "" },
+        "fingerprint_sha1": if parsed.has("fingerprint_sha1") { parsed["fingerprint_sha1"] } else { "" },
+        "public_key_algorithm": if parsed.has("public_key_algorithm") { parsed["public_key_algorithm"] } else { "" },
+        "signature_algorithm": if parsed.has("signature_algorithm") { parsed["signature_algorithm"] } else { "" },
+        "key_size": if parsed.has("key_size") { parsed["key_size"] } else { 0 },
+        "is_ca": if parsed.has("is_ca") { parsed["is_ca"] } else { false },
+        "subject_alt_names": if parsed.has("subject_alt_names") { parsed["subject_alt_names"] } else { [] },
+        "key_usage": if parsed.has("key_usage") { parsed["key_usage"] } else { [] },
+        "extended_key_usage": if parsed.has("extended_key_usage") { parsed["extended_key_usage"] } else { [] },
+        "version": if parsed.has("version") { parsed["version"] } else { 3 }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Certificate Generation ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_generate_cert(options) {
+    const common_name = if options.has("common_name") { options["common_name"] } else { "localhost" }
+    const days = if options.has("days") { options["days"] } else { 365 }
+    const org = if options.has("organization") { options["organization"] } else { "" }
+    const country = if options.has("country") { options["country"] } else { "" }
+    const state = if options.has("state") { options["state"] } else { "" }
+    const locality = if options.has("locality") { options["locality"] } else { "" }
+    const alt_names = if options.has("alt_names") { options["alt_names"] } else { [] }
+    const is_ca = if options.has("is_ca") { options["is_ca"] } else { false }
+    const key_type = if options.has("key_type") { options["key_type"] } else { "rsa" }
+    const key_size = if options.has("key_size") { options["key_size"] } else { 2048 }
+
+    cert_generate_full({
+        "common_name": common_name,
+        "days": days,
+        "organization": org,
+        "country": country,
+        "state": state,
+        "locality": locality,
+        "alt_names": alt_names,
+        "is_ca": is_ca,
+        "key_type": key_type,
+        "key_size": key_size
+    })
+}
+
+func tls_generate_ca_cert(common_name, days) {
+    tls_generate_cert({
+        "common_name": common_name,
+        "days": days,
+        "is_ca": true,
+        "key_type": "rsa",
+        "key_size": 4096
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Key Generation ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_generate_rsa_key(bits) {
+    // Delegate to stage 0 builtin
+    const result = rsa_keygen(bits)
+    {
+        "algorithm": "RSA",
+        "key_size": bits,
+        "private_key": result["private"],
+        "public_key": result["public"],
+        "format": "DER"
+    }
+}
+
+func tls_generate_ecdsa_key() {
+    const result = ecdsa_keygen()
+    {
+        "algorithm": "ECDSA",
+        "curve": "P-256",
+        "private_key": result["private"],
+        "public_key": result["public"],
+        "format": "DER"
+    }
+}
+
+func tls_generate_ed25519_key() {
+    const result = ed25519_keygen()
+    {
+        "algorithm": "Ed25519",
+        "private_key": result["private"],
+        "public_key": result["public"],
+        "format": "DER"
+    }
+}
+
+func tls_generate_key(algorithm, options) {
+    match algorithm {
+        "rsa" => {
+            const bits = if options.has("bits") { options["bits"] } else { 2048 }
+            tls_generate_rsa_key(bits)
+        },
+        "rsa-2048" => tls_generate_rsa_key(2048),
+        "rsa-4096" => tls_generate_rsa_key(4096),
+        "ecdsa" => tls_generate_ecdsa_key(),
+        "ecdsa-p256" => tls_generate_ecdsa_key(),
+        "ed25519" => tls_generate_ed25519_key(),
+        _ => panic(f"Unknown key algorithm: {algorithm}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── All Hash Algorithms ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_sha1(data) { sha1(data) }
+
+func tls_hash_full(data, algorithm) {
+    match algorithm {
+        "sha1" => sha1(data),
+        "sha-1" => sha1(data),
+        "sha256" => sha256(data),
+        "sha-256" => sha256(data),
+        "sha384" => sha384(data),
+        "sha-384" => sha384(data),
+        "sha512" => sha512(data),
+        "sha-512" => sha512(data),
+        "md5" => md5(data),
+        "blake3" => blake3(data),
+        _ => panic(f"Unknown hash algorithm: {algorithm}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── HMAC for All Algorithms ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_hmac_sha384(key, data) { hmac(key, data, "sha384") }
+
+func tls_hmac_full(key, data, algorithm) {
+    match algorithm {
+        "sha1" => hmac(key, data, "sha1"),
+        "sha256" => hmac(key, data, "sha256"),
+        "sha384" => hmac(key, data, "sha384"),
+        "sha512" => hmac(key, data, "sha512"),
+        _ => panic(f"Unsupported HMAC algorithm: {algorithm}")
+    }
+}
+
+func tls_hmac_verify_full(key, data, expected_mac, algorithm) {
+    const actual = tls_hmac_full(key, data, algorithm)
+    tls_constant_time_eq(actual, expected_mac)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── AES-256-CBC Encrypt/Decrypt ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_aes_cbc_encrypt(key, plaintext, iv) {
+    if iv == null {
+        // Auto-generate IV
+        const auto_iv = random_bytes(16)
+        const ciphertext = aes_cbc_encrypt(key, plaintext, auto_iv)
+        {"ciphertext": ciphertext, "iv": auto_iv}
+    } else {
+        const ciphertext = aes_cbc_encrypt(key, plaintext, iv)
+        {"ciphertext": ciphertext, "iv": iv}
+    }
+}
+
+func tls_aes_cbc_decrypt(key, ciphertext, iv) {
+    aes_cbc_decrypt(key, ciphertext, iv)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── AES-256-GCM Encrypt/Decrypt (enhanced) ───────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_aes_gcm_encrypt_full(key, plaintext, aad, nonce) {
+    let actual_nonce = nonce
+    if actual_nonce == null {
+        actual_nonce = random_bytes(12)
+    }
+    const result = aes_gcm_encrypt(key, plaintext, aad)
+    {
+        "ciphertext": result,
+        "nonce": actual_nonce,
+        "aad": aad
+    }
+}
+
+func tls_aes_gcm_decrypt_full(key, ciphertext, aad, nonce) {
+    aes_gcm_decrypt(key, ciphertext, aad)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── ChaCha20-Poly1305 Encrypt/Decrypt ────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_chacha20_encrypt(key, plaintext, nonce, aad) {
+    let actual_nonce = nonce
+    if actual_nonce == null {
+        actual_nonce = random_bytes(12)
+    }
+    const ciphertext = chacha20_poly1305_encrypt(key, plaintext, actual_nonce, aad)
+    {
+        "ciphertext": ciphertext,
+        "nonce": actual_nonce,
+        "aad": aad
+    }
+}
+
+func tls_chacha20_decrypt(key, ciphertext, nonce, aad) {
+    chacha20_poly1305_decrypt(key, ciphertext, nonce, aad)
+}
+
+// Generate a ChaCha20 key (256-bit)
+func tls_generate_chacha20_key() {
+    random_bytes(32)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── RSA Sign/Verify ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_rsa_sign(data, private_key) {
+    rsa_sign(data, private_key)
+}
+
+func tls_rsa_verify(data, signature, public_key) {
+    rsa_verify(data, signature, public_key)
+}
+
+func tls_rsa_sign_with_hash(data, private_key, hash_algo) {
+    const digest = tls_hash_full(data, hash_algo)
+    rsa_sign(digest, private_key)
+}
+
+func tls_rsa_verify_with_hash(data, signature, public_key, hash_algo) {
+    const digest = tls_hash_full(data, hash_algo)
+    rsa_verify(digest, signature, public_key)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── ECDSA Sign/Verify ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_ecdsa_sign(data, private_key) {
+    ecdsa_sign(data, private_key)
+}
+
+func tls_ecdsa_verify(data, signature, public_key) {
+    ecdsa_verify(data, signature, public_key)
+}
+
+func tls_ecdsa_sign_with_hash(data, private_key, hash_algo) {
+    const digest = tls_hash_full(data, hash_algo)
+    ecdsa_sign(digest, private_key)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Ed25519 Sign/Verify ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_ed25519_sign(data, private_key) {
+    ed25519_sign(data, private_key)
+}
+
+func tls_ed25519_verify(data, signature, public_key) {
+    ed25519_verify(data, signature, public_key)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Key Derivation: bcrypt, argon2, scrypt ───────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_bcrypt_hash(password, rounds) {
+    const actual_rounds = if rounds == null { 12 } else { rounds }
+    bcrypt_hash(password, actual_rounds)
+}
+
+func tls_bcrypt_verify(password, hash) {
+    bcrypt_verify(password, hash)
+}
+
+func tls_argon2_hash(password, salt, options) {
+    const time_cost = if options.has("time_cost") { options["time_cost"] } else { 3 }
+    const memory_cost = if options.has("memory_cost") { options["memory_cost"] } else { 65536 }
+    const parallelism = if options.has("parallelism") { options["parallelism"] } else { 4 }
+    const output_len = if options.has("output_length") { options["output_length"] } else { 32 }
+
+    argon2_hash(password, salt, time_cost, memory_cost, parallelism, output_len)
+}
+
+func tls_argon2_verify(password, hash) {
+    argon2_verify(password, hash)
+}
+
+func tls_scrypt_hash(password, salt, options) {
+    const n = if options.has("n") { options["n"] } else { 16384 }
+    const r = if options.has("r") { options["r"] } else { 8 }
+    const p = if options.has("p") { options["p"] } else { 1 }
+    const output_len = if options.has("output_length") { options["output_length"] } else { 32 }
+
+    scrypt_hash(password, salt, n, r, p, output_len)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── HKDF Key Expansion ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_hkdf_extract(salt, input_key_material) {
+    // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
+    tls_hmac_sha256(salt, input_key_material)
+}
+
+func tls_hkdf_expand(prk, info, length) {
+    // HKDF-Expand using HMAC-SHA256
+    hkdf_expand(prk, info, length)
+}
+
+func tls_hkdf_full(input_key, salt, info, length, hash_algo) {
+    match hash_algo {
+        "sha256" => hkdf(input_key, salt, info, length),
+        "sha384" => hkdf(input_key, salt, info, length),
+        "sha512" => hkdf(input_key, salt, info, length),
+        _ => hkdf(input_key, salt, info, length),
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── CSPRNG (Random Bytes) ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_secure_random(n) { random_bytes(n) }
+func tls_random_hex(byte_count) { tls_bytes_to_hex(random_bytes(byte_count)) }
+
+func tls_random_base64(byte_count) {
+    tls_base64_encode(random_bytes(byte_count))
+}
+
+func tls_random_base64url(byte_count) {
+    tls_base64url_encode(random_bytes(byte_count))
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── X.509 Certificate Chain Verification ─────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_verify_chain(cert_chain, root_certs) {
+    // cert_chain: array of PEM strings (leaf first, root last)
+    // root_certs: array of trusted root PEM strings
+    if len(cert_chain) == 0 {
+        return {"valid": false, "error": "Empty certificate chain"}
+    }
+
+    // Verify each cert is signed by the next
+    let i = 0
+    while i < len(cert_chain) - 1 {
+        const cert = cert_chain[i]
+        const issuer = cert_chain[i + 1]
+        const result = cert_verify(cert, issuer)
+        if result != true {
+            return {"valid": false, "error": f"Chain verification failed at position {i}", "position": i}
+        }
+        i = i + 1
+    }
+
+    // Verify the last cert against root certs
+    const last_cert = cert_chain[len(cert_chain) - 1]
+    let root_verified = false
+    for root in root_certs {
+        if cert_verify(last_cert, root) == true {
+            root_verified = true
+            break
+        }
+    }
+
+    if !root_verified {
+        // Check if the last cert is self-signed (root)
+        if cert_verify(last_cert, last_cert) == true {
+            // Self-signed, check if it's in the root store
+            let found = false
+            for root in root_certs {
+                if root == last_cert {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                return {"valid": false, "error": "Self-signed certificate not in trust store"}
+            }
+        } else {
+            return {"valid": false, "error": "Root certificate not trusted"}
+        }
+    }
+
+    {"valid": true}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── PEM Encoding/Decoding ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_pem_encode(der_data, label) {
+    const b64 = tls_base64_encode(der_data)
+    // Wrap at 64 characters
+    let lines = []
+    let i = 0
+    while i < len(b64) {
+        const end = min(i + 64, len(b64))
+        lines.push(b64[i..end])
+        i = i + 64
+    }
+    "-----BEGIN " + label + "-----\n" + lines.join("\n") + "\n-----END " + label + "-----\n"
+}
+
+func tls_pem_decode(pem_data) {
+    const lines = pem_data.split("\n")
+    let label = ""
+    let b64_data = ""
+    let inside = false
+
+    for line in lines {
+        const trimmed = line.trim()
+        if trimmed.starts_with("-----BEGIN ") {
+            label = trimmed[11..len(trimmed) - 5]
+            inside = true
+            continue
+        }
+        if trimmed.starts_with("-----END ") {
+            inside = false
+            continue
+        }
+        if inside {
+            b64_data = b64_data + trimmed
+        }
+    }
+
+    {"label": label, "data": tls_base64_decode(b64_data)}
+}
+
+func tls_pem_encode_cert(der_data) {
+    tls_pem_encode(der_data, "CERTIFICATE")
+}
+
+func tls_pem_encode_private_key(der_data) {
+    tls_pem_encode(der_data, "PRIVATE KEY")
+}
+
+func tls_pem_encode_public_key(der_data) {
+    tls_pem_encode(der_data, "PUBLIC KEY")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── DER Encoding/Decoding ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_der_encode_length(length) {
+    if length < 128 {
+        return [length]
+    }
+    // Long form
+    let bytes = []
+    let remaining = length
+    while remaining > 0 {
+        bytes = [remaining % 256] + bytes
+        remaining = remaining / 256
+    }
+    [128 + len(bytes)] + bytes
+}
+
+func tls_der_decode_length(data, offset) {
+    if offset >= len(data) { return {"length": 0, "consumed": 0} }
+    const first = data[offset]
+    if first < 128 {
+        return {"length": first, "consumed": 1}
+    }
+    const num_bytes = first - 128
+    let length = 0
+    let i = 0
+    while i < num_bytes {
+        length = length * 256 + data[offset + 1 + i]
+        i = i + 1
+    }
+    {"length": length, "consumed": 1 + num_bytes}
+}
+
+func tls_der_encode_integer(value) {
+    // Tag 0x02 for INTEGER
+    let bytes = []
+    let v = if value < 0 { 0 - value } else { value }
+    if v == 0 {
+        bytes = [0]
+    } else {
+        while v > 0 {
+            bytes = [v % 256] + bytes
+            v = v / 256
+        }
+        // Add leading zero if high bit set (positive number)
+        if value >= 0 && bytes[0] >= 128 {
+            bytes = [0] + bytes
+        }
+    }
+    [2] + tls_der_encode_length(len(bytes)) + bytes
+}
+
+func tls_der_encode_sequence(contents) {
+    [48] + tls_der_encode_length(len(contents)) + contents
+}
+
+func tls_der_encode_octet_string(data) {
+    [4] + tls_der_encode_length(len(data)) + data
+}
+
+func tls_der_encode_utf8_string(text) {
+    let bytes = []
+    for c in text.chars() {
+        bytes.push(char_code(c))
+    }
+    [12] + tls_der_encode_length(len(bytes)) + bytes
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── JWT Token Creation and Verification (enhanced) ───────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_jwt_create_full(payload, key, options) {
+    const algorithm = if options.has("algorithm") { options["algorithm"] } else { "HS256" }
+    const header = {"alg": algorithm, "typ": "JWT"}
+
+    // Add optional header fields
+    if options.has("kid") { header["kid"] = options["kid"] }
+    if options.has("jku") { header["jku"] = options["jku"] }
+
+    // Add standard claims
+    let full_payload = {}
+    for k in keys(payload) {
+        full_payload[k] = payload[k]
+    }
+    if options.has("issuer") { full_payload["iss"] = options["issuer"] }
+    if options.has("subject") { full_payload["sub"] = options["subject"] }
+    if options.has("audience") { full_payload["aud"] = options["audience"] }
+    if options.has("expiration") { full_payload["exp"] = options["expiration"] }
+    if options.has("not_before") { full_payload["nbf"] = options["not_before"] }
+    if options.has("issued_at") { full_payload["iat"] = options["issued_at"] }
+    if options.has("jti") { full_payload["jti"] = options["jti"] }
+
+    const header_b64 = tls_base64url_encode(to_json(header))
+    const payload_b64 = tls_base64url_encode(to_json(full_payload))
+    const signing_input = header_b64 + "." + payload_b64
+
+    let signature = ""
+    match algorithm {
+        "HS256" => { signature = tls_base64url_encode(hmac(key, signing_input, "sha256")) },
+        "HS384" => { signature = tls_base64url_encode(hmac(key, signing_input, "sha384")) },
+        "HS512" => { signature = tls_base64url_encode(hmac(key, signing_input, "sha512")) },
+        "RS256" => { signature = tls_base64url_encode(tls_rsa_sign_with_hash(signing_input, key, "sha256")) },
+        "RS384" => { signature = tls_base64url_encode(tls_rsa_sign_with_hash(signing_input, key, "sha384")) },
+        "RS512" => { signature = tls_base64url_encode(tls_rsa_sign_with_hash(signing_input, key, "sha512")) },
+        "ES256" => { signature = tls_base64url_encode(tls_ecdsa_sign(signing_input, key)) },
+        "EdDSA" => { signature = tls_base64url_encode(tls_ed25519_sign(signing_input, key)) },
+        _ => panic(f"Unsupported JWT algorithm: {algorithm}")
+    }
+
+    signing_input + "." + signature
+}
+
+func tls_jwt_verify_full(token, key, options) {
+    const parts = token.split(".")
+    if len(parts) != 3 {
+        return {"valid": false, "error": "Invalid token format"}
+    }
+
+    const header_b64 = parts[0]
+    const payload_b64 = parts[1]
+    const signature_b64 = parts[2]
+
+    // Decode header to get algorithm
+    const header = parse_json(tls_base64url_decode(header_b64))
+    if header == null {
+        return {"valid": false, "error": "Invalid header"}
+    }
+    const algorithm = if header.has("alg") { header["alg"] } else { "" }
+
+    // Validate algorithm matches expected
+    if options.has("algorithm") && options["algorithm"] != algorithm {
+        return {"valid": false, "error": f"Algorithm mismatch: expected {options[\"algorithm\"]}, got {algorithm}"}
+    }
+
+    const signing_input = header_b64 + "." + payload_b64
+
+    // Verify signature
+    let sig_valid = false
+    match algorithm {
+        "HS256" => {
+            const expected = tls_base64url_encode(hmac(key, signing_input, "sha256"))
+            sig_valid = tls_constant_time_eq(signature_b64, expected)
+        },
+        "HS384" => {
+            const expected = tls_base64url_encode(hmac(key, signing_input, "sha384"))
+            sig_valid = tls_constant_time_eq(signature_b64, expected)
+        },
+        "HS512" => {
+            const expected = tls_base64url_encode(hmac(key, signing_input, "sha512"))
+            sig_valid = tls_constant_time_eq(signature_b64, expected)
+        },
+        "RS256" => {
+            const sig = tls_base64url_decode(signature_b64)
+            sig_valid = tls_rsa_verify_with_hash(signing_input, sig, key, "sha256")
+        },
+        "ES256" => {
+            const sig = tls_base64url_decode(signature_b64)
+            sig_valid = tls_ecdsa_verify(signing_input, sig, key)
+        },
+        "EdDSA" => {
+            const sig = tls_base64url_decode(signature_b64)
+            sig_valid = tls_ed25519_verify(signing_input, sig, key)
+        },
+        _ => {
+            return {"valid": false, "error": f"Unsupported algorithm: {algorithm}"}
+        }
+    }
+
+    if !sig_valid {
+        return {"valid": false, "error": "Signature verification failed"}
+    }
+
+    // Decode payload
+    const payload = parse_json(tls_base64url_decode(payload_b64))
+    if payload == null {
+        return {"valid": false, "error": "Invalid payload"}
+    }
+
+    // Validate claims
+    const now = time_now() / 1000  // seconds
+
+    // Check expiration
+    if payload.has("exp") {
+        if now > payload["exp"] {
+            return {"valid": false, "error": "Token expired", "payload": payload}
+        }
+    }
+
+    // Check not-before
+    if payload.has("nbf") {
+        if now < payload["nbf"] {
+            return {"valid": false, "error": "Token not yet valid", "payload": payload}
+        }
+    }
+
+    // Check issuer
+    if options.has("issuer") && payload.has("iss") {
+        if payload["iss"] != options["issuer"] {
+            return {"valid": false, "error": "Issuer mismatch", "payload": payload}
+        }
+    }
+
+    // Check audience
+    if options.has("audience") && payload.has("aud") {
+        if payload["aud"] != options["audience"] {
+            return {"valid": false, "error": "Audience mismatch", "payload": payload}
+        }
+    }
+
+    {"valid": true, "header": header, "payload": payload}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── OAuth2 Helper Functions ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_oauth2_authorization_url(base_url, client_id, redirect_uri, scope, state) {
+    let url = base_url + "?"
+    url = url + "response_type=code"
+    url = url + "&client_id=" + url_encode(client_id)
+    url = url + "&redirect_uri=" + url_encode(redirect_uri)
+    if scope != "" { url = url + "&scope=" + url_encode(scope) }
+    if state != "" { url = url + "&state=" + url_encode(state) }
+    url
+}
+
+func tls_oauth2_token_request(token_url, client_id, client_secret, code, redirect_uri) {
+    {
+        "url": token_url,
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": "Basic " + tls_base64_encode(client_id + ":" + client_secret)
+        },
+        "body": "grant_type=authorization_code"
+            + "&code=" + url_encode(code)
+            + "&redirect_uri=" + url_encode(redirect_uri)
+    }
+}
+
+func tls_oauth2_refresh_request(token_url, client_id, client_secret, refresh_token) {
+    {
+        "url": token_url,
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": "Basic " + tls_base64_encode(client_id + ":" + client_secret)
+        },
+        "body": "grant_type=refresh_token&refresh_token=" + url_encode(refresh_token)
+    }
+}
+
+func tls_oauth2_pkce_challenge() {
+    // Generate PKCE code verifier and challenge
+    const verifier = tls_random_base64url(32)
+    const challenge = tls_base64url_encode(sha256(verifier))
+    {"verifier": verifier, "challenge": challenge, "method": "S256"}
+}
+
+func tls_oauth2_client_credentials(token_url, client_id, client_secret, scope) {
+    {
+        "url": token_url,
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": "Basic " + tls_base64_encode(client_id + ":" + client_secret)
+        },
+        "body": "grant_type=client_credentials" + if scope != "" { "&scope=" + url_encode(scope) } else { "" }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Base64url Encoding (for JWT) ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Already defined above as tls_base64url_encode and tls_base64url_decode
+
+// ══════════════════════════════════════════════════════════════════
+// ── URL Encoding Helper ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func url_encode(s) {
+    const hex_chars = "0123456789ABCDEF"
+    let result = ""
+    for c in s.chars() {
+        const code = char_code(c)
+        if (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "-" || c == "_" || c == "." || c == "~" {
+            result = result + c
+        } else {
+            result = result + "%" + hex_chars[code / 16] + hex_chars[code % 16]
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Symmetric Encryption Convenience ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_encrypt(algorithm, key, plaintext, options) {
+    const aad = if options.has("aad") { options["aad"] } else { "" }
+    const nonce = if options.has("nonce") { options["nonce"] } else { null }
+    const iv = if options.has("iv") { options["iv"] } else { null }
+
+    match algorithm {
+        "aes-256-gcm" => tls_aes_gcm_encrypt_full(key, plaintext, aad, nonce),
+        "aes-256-cbc" => tls_aes_cbc_encrypt(key, plaintext, iv),
+        "chacha20-poly1305" => tls_chacha20_encrypt(key, plaintext, nonce, aad),
+        _ => panic(f"Unknown encryption algorithm: {algorithm}")
+    }
+}
+
+func tls_decrypt(algorithm, key, ciphertext, options) {
+    const aad = if options.has("aad") { options["aad"] } else { "" }
+    const nonce = if options.has("nonce") { options["nonce"] } else { null }
+    const iv = if options.has("iv") { options["iv"] } else { null }
+
+    match algorithm {
+        "aes-256-gcm" => tls_aes_gcm_decrypt_full(key, ciphertext, aad, nonce),
+        "aes-256-cbc" => tls_aes_cbc_decrypt(key, ciphertext, iv),
+        "chacha20-poly1305" => tls_chacha20_decrypt(key, ciphertext, nonce, aad),
+        _ => panic(f"Unknown decryption algorithm: {algorithm}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Digital Signature Convenience ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_sign(algorithm, data, private_key) {
+    match algorithm {
+        "rsa" => tls_rsa_sign(data, private_key),
+        "rsa-sha256" => tls_rsa_sign_with_hash(data, private_key, "sha256"),
+        "rsa-sha384" => tls_rsa_sign_with_hash(data, private_key, "sha384"),
+        "rsa-sha512" => tls_rsa_sign_with_hash(data, private_key, "sha512"),
+        "ecdsa" => tls_ecdsa_sign(data, private_key),
+        "ecdsa-p256" => tls_ecdsa_sign(data, private_key),
+        "ed25519" => tls_ed25519_sign(data, private_key),
+        _ => panic(f"Unknown signing algorithm: {algorithm}")
+    }
+}
+
+func tls_verify(algorithm, data, signature, public_key) {
+    match algorithm {
+        "rsa" => tls_rsa_verify(data, signature, public_key),
+        "rsa-sha256" => tls_rsa_verify_with_hash(data, signature, public_key, "sha256"),
+        "rsa-sha384" => tls_rsa_verify_with_hash(data, signature, public_key, "sha384"),
+        "rsa-sha512" => tls_rsa_verify_with_hash(data, signature, public_key, "sha512"),
+        "ecdsa" => tls_ecdsa_verify(data, signature, public_key),
+        "ecdsa-p256" => tls_ecdsa_verify(data, signature, public_key),
+        "ed25519" => tls_ed25519_verify(data, signature, public_key),
+        _ => panic(f"Unknown verification algorithm: {algorithm}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Key Derivation Convenience ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_derive_key(algorithm, password, salt, options) {
+    const output_length = if options.has("output_length") { options["output_length"] } else { 32 }
+
+    match algorithm {
+        "pbkdf2" => {
+            const iterations = if options.has("iterations") { options["iterations"] } else { 100000 }
+            tls_pbkdf2(password, salt, iterations, output_length)
+        },
+        "bcrypt" => {
+            const rounds = if options.has("rounds") { options["rounds"] } else { 12 }
+            tls_bcrypt_hash(password, rounds)
+        },
+        "argon2" => tls_argon2_hash(password, salt, options),
+        "scrypt" => tls_scrypt_hash(password, salt, options),
+        "hkdf" => {
+            const info = if options.has("info") { options["info"] } else { "" }
+            tls_hkdf(password, salt, info, output_length)
+        },
+        _ => panic(f"Unknown key derivation algorithm: {algorithm}")
+    }
+}
