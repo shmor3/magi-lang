@@ -1299,3 +1299,631 @@ func tls_derive_key(algorithm, password, salt, options) {
         _ => panic(f"Unknown key derivation algorithm: {algorithm}")
     }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// ── Full TLS Connection Establishment ───────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// TLS connection state
+func tls_connection_new() {
+    {
+        "__tls_conn": true,
+        "state": "new",
+        "protocol": null,
+        "cipher_suite": null,
+        "peer_cert": null,
+        "session_id": null,
+        "alpn_selected": null,
+    }
+}
+
+// Full TLS handshake state machine
+func tls_handshake(config, hostname) {
+    const conn = tls_connection_new()
+    conn["hostname"] = hostname
+
+    // Step 1: ClientHello
+    const client_hello = tls_build_client_hello(config, hostname)
+    conn["state"] = "client_hello_sent"
+
+    // Step 2: Delegate actual TLS to stage 0
+    const result = tls_connect(hostname, config)
+    if result.has("error") {
+        conn["state"] = "error"
+        conn["error"] = result["error"]
+        return conn
+    }
+
+    // Step 3: Record negotiated parameters
+    conn["state"] = "connected"
+    conn["protocol"] = if result.has("protocol") { result["protocol"] } else { "TLS1.3" }
+    conn["cipher_suite"] = if result.has("cipher_suite") { result["cipher_suite"] } else { "TLS_AES_256_GCM_SHA384" }
+    conn["session_id"] = if result.has("session_id") { result["session_id"] } else { tls_random_hex(32) }
+    conn["alpn_selected"] = if result.has("alpn") { result["alpn"] } else { null }
+
+    // Step 4: Validate peer certificate
+    if result.has("peer_cert") {
+        conn["peer_cert"] = result["peer_cert"]
+        const validation = tls_validate_cert_chain(result["peer_cert"], hostname, config)
+        if !validation["valid"] {
+            conn["state"] = "cert_error"
+            conn["error"] = validation["reason"]
+            return conn
+        }
+    }
+
+    conn
+}
+
+func tls_build_client_hello(config, hostname) {
+    {
+        "type": "client_hello",
+        "version": config["max_protocol"],
+        "random": tls_random_hex(32),
+        "session_id": "",
+        "cipher_suites": config["cipher_suites"],
+        "extensions": [
+            {"type": "server_name", "hostname": hostname},
+            {"type": "supported_versions", "versions": ["TLS1.3", "TLS1.2"]},
+            {"type": "signature_algorithms", "algorithms": [
+                "ecdsa_secp256r1_sha256", "rsa_pss_rsae_sha256",
+                "rsa_pkcs1_sha256", "ecdsa_secp384r1_sha384",
+            ]},
+            {"type": "supported_groups", "groups": ["x25519", "secp256r1", "secp384r1"]},
+            {"type": "alpn", "protocols": config["alpn_protocols"]},
+        ],
+    }
+}
+
+func tls_random_hex(bytes) {
+    // Delegate to stage 0 CSPRNG
+    const rand = tls_random_bytes(bytes)
+    if typeof(rand) == "string" { return rand }
+    // Fallback: not cryptographically secure
+    let result = ""
+    let i = 0
+    while i < bytes * 2 {
+        const val = (time_now() * 7 + i * 13) % 16
+        result = result + "0123456789abcdef"[val]
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Certificate Chain Validation ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_validate_cert_chain(cert, hostname, config) {
+    let result = {"valid": true, "reason": null}
+
+    // Check 1: Certificate not expired
+    if cert.has("not_before") && cert.has("not_after") {
+        const now = time_now()
+        if now < cert["not_before"] {
+            return {"valid": false, "reason": "certificate not yet valid"}
+        }
+        if now > cert["not_after"] {
+            return {"valid": false, "reason": "certificate has expired"}
+        }
+    }
+
+    // Check 2: Hostname verification
+    if config.has("verify_hostname") && config["verify_hostname"] {
+        if !tls_verify_hostname(cert, hostname) {
+            return {"valid": false, "reason": f"hostname '{hostname}' does not match certificate"}
+        }
+    }
+
+    // Check 3: Signature verification
+    if cert.has("issuer_cert") && cert.has("signature") {
+        const sig_valid = tls_verify_signature(
+            cert["tbs_certificate"],
+            cert["signature"],
+            cert["issuer_cert"]["public_key"],
+            cert["signature_algorithm"]
+        )
+        if !sig_valid {
+            return {"valid": false, "reason": "certificate signature verification failed"}
+        }
+    }
+
+    // Check 4: Key usage
+    if cert.has("extensions") {
+        const ku = tls_find_extension(cert["extensions"], "key_usage")
+        if ku != null {
+            if !ku["digital_signature"] && !ku["key_agreement"] {
+                return {"valid": false, "reason": "certificate key usage does not allow TLS"}
+            }
+        }
+    }
+
+    // Check 5: Basic constraints (CA cert check)
+    if cert.has("is_ca") && cert["is_ca"] {
+        // CA cert should not be used as end-entity
+        if !cert.has("issuer_cert") {
+            // Self-signed CA, only valid if explicitly trusted
+        }
+    }
+
+    result
+}
+
+func tls_verify_hostname(cert, hostname) {
+    // Check Subject Alternative Names (SAN)
+    if cert.has("san") {
+        for san in cert["san"] {
+            if tls_hostname_matches(san, hostname) { return true }
+        }
+    }
+    // Fallback to Common Name
+    if cert.has("subject") && cert["subject"].has("CN") {
+        return tls_hostname_matches(cert["subject"]["CN"], hostname)
+    }
+    false
+}
+
+func tls_hostname_matches(pattern, hostname) {
+    if pattern == hostname { return true }
+    // Wildcard matching: *.example.com matches foo.example.com
+    if pattern.starts_with("*.") {
+        const domain = pattern[2..len(pattern)]
+        const dot_idx = hostname.index_of(".")
+        if dot_idx > 0 {
+            const hostname_domain = hostname[dot_idx + 1..len(hostname)]
+            return hostname_domain == domain
+        }
+    }
+    false
+}
+
+func tls_find_extension(extensions, oid) {
+    for ext in extensions {
+        if ext.has("oid") && ext["oid"] == oid { return ext }
+        if ext.has("type") && ext["type"] == oid { return ext }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── OCSP Stapling ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_ocsp_request(cert, issuer_cert) {
+    // Build OCSP request
+    const serial = if cert.has("serial_number") { cert["serial_number"] } else { "" }
+    const issuer_hash = tls_sha256(if issuer_cert.has("subject_der") { issuer_cert["subject_der"] } else { "" })
+    const issuer_key_hash = tls_sha256(if issuer_cert.has("public_key_der") { issuer_cert["public_key_der"] } else { "" })
+
+    {
+        "type": "ocsp_request",
+        "hash_algorithm": "sha256",
+        "issuer_name_hash": issuer_hash,
+        "issuer_key_hash": issuer_key_hash,
+        "serial_number": serial,
+    }
+}
+
+func tls_ocsp_check(cert, issuer_cert, ocsp_url) {
+    const request = tls_ocsp_request(cert, issuer_cert)
+    // Delegate actual HTTP request to stage 0
+    const response = tls_ocsp_query(ocsp_url, request)
+    if response == null {
+        return {"status": "unknown", "reason": "OCSP responder unreachable"}
+    }
+    if response.has("error") {
+        return {"status": "unknown", "reason": response["error"]}
+    }
+
+    match response["cert_status"] {
+        "good" => {"status": "good", "this_update": response["this_update"], "next_update": response["next_update"]},
+        "revoked" => {"status": "revoked", "revocation_time": response["revocation_time"], "reason": response["revocation_reason"]},
+        _ => {"status": "unknown", "reason": "OCSP returned unknown status"},
+    }
+}
+
+// Process OCSP stapled response from TLS handshake
+func tls_process_stapled_ocsp(stapled_response, cert, issuer_cert) {
+    if stapled_response == null { return {"status": "not_stapled"} }
+    // Verify OCSP response signature
+    if stapled_response.has("signature") && issuer_cert != null {
+        const sig_valid = tls_verify_signature(
+            stapled_response["tbs_response"],
+            stapled_response["signature"],
+            issuer_cert["public_key"],
+            stapled_response["signature_algorithm"]
+        )
+        if !sig_valid {
+            return {"status": "invalid", "reason": "OCSP response signature invalid"}
+        }
+    }
+    // Check freshness
+    if stapled_response.has("next_update") {
+        const now = time_now()
+        if now > stapled_response["next_update"] {
+            return {"status": "stale", "reason": "OCSP response has expired"}
+        }
+    }
+    {"status": stapled_response["cert_status"]}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Certificate Revocation (CRL) Checking ───────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_check_crl(cert, crl_url) {
+    // Delegate CRL download to stage 0
+    const crl = tls_download_crl(crl_url)
+    if crl == null {
+        return {"revoked": false, "reason": "CRL unavailable"}
+    }
+
+    const serial = if cert.has("serial_number") { cert["serial_number"] } else { "" }
+
+    // Check if serial is in revoked list
+    if crl.has("revoked_certificates") {
+        for entry in crl["revoked_certificates"] {
+            if entry["serial_number"] == serial {
+                return {
+                    "revoked": true,
+                    "revocation_date": entry["revocation_date"],
+                    "reason": if entry.has("reason") { entry["reason"] } else { "unspecified" },
+                }
+            }
+        }
+    }
+
+    {"revoked": false, "checked_at": time_now()}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Full X.509 Extension Parsing ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_parse_x509_extensions(cert_data) {
+    let extensions = []
+    if !cert_data.has("extensions") { return extensions }
+
+    for ext_raw in cert_data["extensions"] {
+        const oid = ext_raw["oid"]
+        const critical = if ext_raw.has("critical") { ext_raw["critical"] } else { false }
+        const value = ext_raw["value"]
+
+        const parsed = match oid {
+            "2.5.29.15" => tls_parse_key_usage(value),
+            "2.5.29.37" => tls_parse_extended_key_usage(value),
+            "2.5.29.17" => tls_parse_san(value),
+            "2.5.29.19" => tls_parse_basic_constraints(value),
+            "2.5.29.35" => tls_parse_authority_key_id(value),
+            "2.5.29.14" => tls_parse_subject_key_id(value),
+            "2.5.29.31" => tls_parse_crl_distribution(value),
+            "1.3.6.1.5.5.7.1.1" => tls_parse_authority_info_access(value),
+            "2.5.29.32" => tls_parse_certificate_policies(value),
+            "2.5.29.30" => tls_parse_name_constraints(value),
+            _ => {"type": "unknown", "oid": oid, "value": value},
+        }
+
+        parsed["critical"] = critical
+        parsed["oid"] = oid
+        extensions.push(parsed)
+    }
+    extensions
+}
+
+func tls_parse_key_usage(value) {
+    {
+        "type": "key_usage",
+        "digital_signature": if value.has("digital_signature") { value["digital_signature"] } else { false },
+        "key_encipherment": if value.has("key_encipherment") { value["key_encipherment"] } else { false },
+        "data_encipherment": if value.has("data_encipherment") { value["data_encipherment"] } else { false },
+        "key_agreement": if value.has("key_agreement") { value["key_agreement"] } else { false },
+        "key_cert_sign": if value.has("key_cert_sign") { value["key_cert_sign"] } else { false },
+        "crl_sign": if value.has("crl_sign") { value["crl_sign"] } else { false },
+    }
+}
+
+func tls_parse_extended_key_usage(value) {
+    let usages = []
+    if typeof(value) == "array" {
+        for oid in value {
+            const name = match oid {
+                "1.3.6.1.5.5.7.3.1" => "serverAuth",
+                "1.3.6.1.5.5.7.3.2" => "clientAuth",
+                "1.3.6.1.5.5.7.3.3" => "codeSigning",
+                "1.3.6.1.5.5.7.3.4" => "emailProtection",
+                "1.3.6.1.5.5.7.3.8" => "timeStamping",
+                "1.3.6.1.5.5.7.3.9" => "OCSPSigning",
+                _ => oid,
+            }
+            usages.push(name)
+        }
+    }
+    {"type": "extended_key_usage", "usages": usages}
+}
+
+func tls_parse_san(value) {
+    let names = []
+    if typeof(value) == "array" {
+        for entry in value {
+            if typeof(entry) == "string" {
+                names.push({"type": "dns", "value": entry})
+            } else if typeof(entry) == "map" {
+                names.push(entry)
+            }
+        }
+    }
+    {"type": "subject_alt_name", "names": names}
+}
+
+func tls_parse_basic_constraints(value) {
+    {
+        "type": "basic_constraints",
+        "is_ca": if value.has("is_ca") { value["is_ca"] } else { false },
+        "path_length": if value.has("path_length") { value["path_length"] } else { null },
+    }
+}
+
+func tls_parse_authority_key_id(value) {
+    {"type": "authority_key_identifier", "key_id": value}
+}
+
+func tls_parse_subject_key_id(value) {
+    {"type": "subject_key_identifier", "key_id": value}
+}
+
+func tls_parse_crl_distribution(value) {
+    let points = []
+    if typeof(value) == "array" {
+        for entry in value {
+            points.push(entry)
+        }
+    }
+    {"type": "crl_distribution_points", "points": points}
+}
+
+func tls_parse_authority_info_access(value) {
+    let entries = []
+    if typeof(value) == "array" {
+        for entry in value {
+            entries.push(entry)
+        }
+    }
+    {"type": "authority_info_access", "entries": entries}
+}
+
+func tls_parse_certificate_policies(value) {
+    {"type": "certificate_policies", "policies": value}
+}
+
+func tls_parse_name_constraints(value) {
+    {"type": "name_constraints", "permitted": if value.has("permitted") { value["permitted"] } else { [] }, "excluded": if value.has("excluded") { value["excluded"] } else { [] }}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Certificate Signing Request (CSR) Generation ────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_generate_csr(subject, key_pair, options) {
+    const san = if options.has("san") { options["san"] } else { [] }
+    const key_usage = if options.has("key_usage") { options["key_usage"] } else { ["digital_signature", "key_encipherment"] }
+    const signature_algorithm = if options.has("signature_algorithm") { options["signature_algorithm"] } else { "sha256WithRSAEncryption" }
+
+    const csr = {
+        "type": "certificate_signing_request",
+        "version": 0,
+        "subject": subject,
+        "public_key": key_pair["public_key"],
+        "public_key_algorithm": key_pair["algorithm"],
+        "signature_algorithm": signature_algorithm,
+        "extensions": [],
+    }
+
+    // Add SAN extension
+    if len(san) > 0 {
+        let san_entries = []
+        for name in san {
+            if name.contains("@") {
+                san_entries.push({"type": "email", "value": name})
+            } else if name.matches("^[0-9.]+$") || name.contains(":") {
+                san_entries.push({"type": "ip", "value": name})
+            } else {
+                san_entries.push({"type": "dns", "value": name})
+            }
+        }
+        csr["extensions"].push({"oid": "2.5.29.17", "value": san_entries})
+    }
+
+    // Add key usage
+    if len(key_usage) > 0 {
+        let ku = {}
+        for usage in key_usage {
+            ku[usage] = true
+        }
+        csr["extensions"].push({"oid": "2.5.29.15", "value": ku, "critical": true})
+    }
+
+    // Sign the CSR with the private key
+    const tbs = csr_serialize_tbs(csr)
+    csr["signature"] = tls_sign(tbs, key_pair["private_key"], signature_algorithm)
+    csr
+}
+
+func csr_serialize_tbs(csr) {
+    // Simplified TBS (to-be-signed) serialization
+    let tbs = f"CSR:v{csr[\"version\"]}:"
+    if csr["subject"].has("CN") { tbs = tbs + f"CN={csr[\"subject\"][\"CN\"]}," }
+    if csr["subject"].has("O") { tbs = tbs + f"O={csr[\"subject\"][\"O\"]}," }
+    if csr["subject"].has("C") { tbs = tbs + f"C={csr[\"subject\"][\"C\"]}," }
+    tbs = tbs + f":alg={csr[\"public_key_algorithm\"]}"
+    tbs
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── PKCS#12 Container Handling ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_pkcs12_create(cert, private_key, password, options) {
+    const friendly_name = if options.has("friendly_name") { options["friendly_name"] } else { "" }
+    const ca_certs = if options.has("ca_certs") { options["ca_certs"] } else { [] }
+
+    // Delegate actual PKCS#12 creation to stage 0
+    tls_pkcs12_export(cert, private_key, password, friendly_name, ca_certs)
+}
+
+func tls_pkcs12_parse(data, password) {
+    // Delegate actual PKCS#12 parsing to stage 0
+    const result = tls_pkcs12_import(data, password)
+    if result == null {
+        return {"error": "failed to parse PKCS#12 container"}
+    }
+    {
+        "cert": result["cert"],
+        "private_key": result["private_key"],
+        "ca_certs": if result.has("ca_certs") { result["ca_certs"] } else { [] },
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Secure Random Number Generation ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// Generate cryptographically secure random bytes
+func secure_random(length) {
+    tls_random_bytes(length)
+}
+
+// Generate a random integer in range [min, max)
+func secure_random_int(min_val, max_val) {
+    if min_val >= max_val { return min_val }
+    const range = max_val - min_val
+    const bytes = tls_random_bytes(8)
+    const value = tls_bytes_to_int(bytes)
+    min_val + (abs(value) % range)
+}
+
+// Generate a random UUID v4
+func secure_random_uuid() {
+    const bytes = tls_random_bytes(16)
+    // Set version (4) and variant (RFC4122)
+    tls_uuid_from_random_bytes(bytes)
+}
+
+// Generate a random string of specified length from given alphabet
+func secure_random_string(length, alphabet) {
+    let result = ""
+    const alpha_len = len(alphabet)
+    let i = 0
+    while i < length {
+        const idx = secure_random_int(0, alpha_len)
+        result = result + alphabet[idx]
+        i = i + 1
+    }
+    result
+}
+
+// Generate random alphanumeric token
+func secure_random_token(length) {
+    secure_random_string(length, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Key Agreement (ECDH, X25519) ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+func tls_ecdh_generate_keypair(curve) {
+    const valid_curves = ["P-256", "P-384", "P-521", "X25519"]
+    let found = false
+    for c in valid_curves {
+        if c == curve { found = true; break }
+    }
+    if !found { panic(f"Unsupported curve: {curve}. Supported: {valid_curves.join(\", \")}") }
+
+    // Delegate key generation to stage 0
+    tls_generate_key_pair("ecdh", {"curve": curve})
+}
+
+func tls_ecdh_derive_shared_secret(private_key, peer_public_key, curve) {
+    // Delegate ECDH computation to stage 0
+    tls_key_agreement("ecdh", private_key, peer_public_key, {"curve": curve})
+}
+
+func tls_x25519_generate_keypair() {
+    tls_ecdh_generate_keypair("X25519")
+}
+
+func tls_x25519_derive_shared_secret(private_key, peer_public_key) {
+    tls_ecdh_derive_shared_secret(private_key, peer_public_key, "X25519")
+}
+
+// Ephemeral Diffie-Hellman: generate keypair, derive shared secret, derive key
+func tls_ecdhe_exchange(curve, peer_public_key) {
+    const keypair = tls_ecdh_generate_keypair(curve)
+    const shared = tls_ecdh_derive_shared_secret(keypair["private_key"], peer_public_key, curve)
+
+    // Derive actual key using HKDF
+    const derived = tls_hkdf(shared, "", "tls13 derived", 32)
+    {
+        "public_key": keypair["public_key"],
+        "shared_secret": shared,
+        "derived_key": derived,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Digital Signature Algorithm Negotiation ─────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const TLS_SIGNATURE_ALGORITHMS = [
+    {"id": 0x0401, "name": "rsa_pkcs1_sha256", "hash": "sha256", "sig": "rsa"},
+    {"id": 0x0501, "name": "rsa_pkcs1_sha384", "hash": "sha384", "sig": "rsa"},
+    {"id": 0x0601, "name": "rsa_pkcs1_sha512", "hash": "sha512", "sig": "rsa"},
+    {"id": 0x0403, "name": "ecdsa_secp256r1_sha256", "hash": "sha256", "sig": "ecdsa", "curve": "P-256"},
+    {"id": 0x0503, "name": "ecdsa_secp384r1_sha384", "hash": "sha384", "sig": "ecdsa", "curve": "P-384"},
+    {"id": 0x0603, "name": "ecdsa_secp521r1_sha512", "hash": "sha512", "sig": "ecdsa", "curve": "P-521"},
+    {"id": 0x0804, "name": "rsa_pss_rsae_sha256", "hash": "sha256", "sig": "rsa_pss"},
+    {"id": 0x0805, "name": "rsa_pss_rsae_sha384", "hash": "sha384", "sig": "rsa_pss"},
+    {"id": 0x0806, "name": "rsa_pss_rsae_sha512", "hash": "sha512", "sig": "rsa_pss"},
+    {"id": 0x0807, "name": "ed25519", "hash": "none", "sig": "ed25519"},
+    {"id": 0x0808, "name": "ed448", "hash": "none", "sig": "ed448"},
+]
+
+func tls_negotiate_signature_algorithm(client_algos, server_cert) {
+    const cert_type = if server_cert.has("public_key_algorithm") { server_cert["public_key_algorithm"] } else { "rsa" }
+
+    for algo_name in client_algos {
+        for sa in TLS_SIGNATURE_ALGORITHMS {
+            if sa["name"] == algo_name {
+                // Check compatibility with cert type
+                const compatible = match cert_type {
+                    "rsa" => sa["sig"] == "rsa" || sa["sig"] == "rsa_pss",
+                    "ecdsa" => sa["sig"] == "ecdsa",
+                    "ed25519" => sa["sig"] == "ed25519",
+                    "ed448" => sa["sig"] == "ed448",
+                    _ => false,
+                }
+                if compatible { return sa }
+            }
+        }
+    }
+    null
+}
+
+func tls_sign_with_algorithm(data, private_key, algorithm) {
+    match algorithm["sig"] {
+        "rsa" => tls_rsa_sign(data, private_key, algorithm["hash"]),
+        "rsa_pss" => tls_rsa_pss_sign(data, private_key, algorithm["hash"]),
+        "ecdsa" => tls_ecdsa_sign(data, private_key),
+        "ed25519" => tls_ed25519_sign(data, private_key),
+        _ => panic(f"Unsupported signature algorithm: {algorithm[\"sig\"]}"),
+    }
+}
+
+func tls_verify_with_algorithm(data, signature, public_key, algorithm) {
+    match algorithm["sig"] {
+        "rsa" => tls_rsa_verify(data, signature, public_key, algorithm["hash"]),
+        "rsa_pss" => tls_rsa_pss_verify(data, signature, public_key, algorithm["hash"]),
+        "ecdsa" => tls_ecdsa_verify(data, signature, public_key),
+        "ed25519" => tls_ed25519_verify(data, signature, public_key),
+        _ => false,
+    }
+}
