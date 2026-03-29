@@ -4618,3 +4618,286 @@ func op_reduce_batched(items, fn_val, initial, batch_size) {
     }
     acc
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Interpolation Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_interpolate_linear(x, x0, y0, x1, y1) {
+    const xf = op_to_f64(x)
+    const x0f = op_to_f64(x0)
+    const y0f = op_to_f64(y0)
+    const x1f = op_to_f64(x1)
+    const y1f = op_to_f64(y1)
+    if x1f == x0f { return y0f }
+    y0f + (y1f - y0f) * (xf - x0f) / (x1f - x0f)
+}
+
+func op_interpolate_cubic(t) {
+    const tf = op_to_f64(t)
+    tf * tf * (3.0 - 2.0 * tf)
+}
+
+func op_interpolate_cosine(t) {
+    const tf = op_to_f64(t)
+    (1.0 - cos(tf * 3.14159265358979323846)) / 2.0
+}
+
+func op_bezier_point(t, p0, p1, p2, p3) {
+    const tf = op_to_f64(t)
+    const u = 1.0 - tf
+    u * u * u * op_to_f64(p0) +
+    3.0 * u * u * tf * op_to_f64(p1) +
+    3.0 * u * tf * tf * op_to_f64(p2) +
+    tf * tf * tf * op_to_f64(p3)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Geometry Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_point_distance(x1, y1, x2, y2) {
+    const dx = op_to_f64(x2) - op_to_f64(x1)
+    const dy = op_to_f64(y2) - op_to_f64(y1)
+    sqrt(dx * dx + dy * dy)
+}
+
+func op_point_midpoint(x1, y1, x2, y2) {
+    {"x": (op_to_f64(x1) + op_to_f64(x2)) / 2.0,
+     "y": (op_to_f64(y1) + op_to_f64(y2)) / 2.0}
+}
+
+func op_line_slope(x1, y1, x2, y2) {
+    const dx = op_to_f64(x2) - op_to_f64(x1)
+    if dx == 0.0 { return null } // Vertical line
+    (op_to_f64(y2) - op_to_f64(y1)) / dx
+}
+
+func op_circle_area(radius) {
+    3.14159265358979323846 * op_to_f64(radius) * op_to_f64(radius)
+}
+
+func op_circle_circumference(radius) {
+    2.0 * 3.14159265358979323846 * op_to_f64(radius)
+}
+
+func op_triangle_area(x1, y1, x2, y2, x3, y3) {
+    abs(op_to_f64(x1) * (op_to_f64(y2) - op_to_f64(y3)) +
+        op_to_f64(x2) * (op_to_f64(y3) - op_to_f64(y1)) +
+        op_to_f64(x3) * (op_to_f64(y1) - op_to_f64(y2))) / 2.0
+}
+
+func op_polygon_area(points) {
+    // Shoelace formula
+    const n = len(points)
+    if n < 3 { return 0.0 }
+    let area = 0.0
+    let i = 0
+    while i < n {
+        const j = (i + 1) % n
+        area = area + op_to_f64(points[i][0]) * op_to_f64(points[j][1])
+        area = area - op_to_f64(points[j][0]) * op_to_f64(points[i][1])
+        i = i + 1
+    }
+    abs(area) / 2.0
+}
+
+func op_point_in_rect(px, py, rx, ry, rw, rh) {
+    op_to_f64(px) >= op_to_f64(rx) &&
+    op_to_f64(px) <= op_to_f64(rx) + op_to_f64(rw) &&
+    op_to_f64(py) >= op_to_f64(ry) &&
+    op_to_f64(py) <= op_to_f64(ry) + op_to_f64(rh)
+}
+
+func op_point_in_circle(px, py, cx, cy, radius) {
+    const dx = op_to_f64(px) - op_to_f64(cx)
+    const dy = op_to_f64(py) - op_to_f64(cy)
+    dx * dx + dy * dy <= op_to_f64(radius) * op_to_f64(radius)
+}
+
+func op_rects_overlap(x1, y1, w1, h1, x2, y2, w2, h2) {
+    op_to_f64(x1) < op_to_f64(x2) + op_to_f64(w2) &&
+    op_to_f64(x1) + op_to_f64(w1) > op_to_f64(x2) &&
+    op_to_f64(y1) < op_to_f64(y2) + op_to_f64(h2) &&
+    op_to_f64(y1) + op_to_f64(h1) > op_to_f64(y2)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Vector2D/Vector3D Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_vec2(x, y) { {"x": op_to_f64(x), "y": op_to_f64(y)} }
+func op_vec2_add(a, b) { {"x": a["x"] + b["x"], "y": a["y"] + b["y"]} }
+func op_vec2_sub(a, b) { {"x": a["x"] - b["x"], "y": a["y"] - b["y"]} }
+func op_vec2_scale(v, s) { {"x": v["x"] * op_to_f64(s), "y": v["y"] * op_to_f64(s)} }
+func op_vec2_dot(a, b) { a["x"] * b["x"] + a["y"] * b["y"] }
+func op_vec2_length(v) { sqrt(v["x"] * v["x"] + v["y"] * v["y"]) }
+func op_vec2_normalize(v) {
+    const len_val = op_vec2_length(v)
+    if len_val == 0.0 { return {"x": 0.0, "y": 0.0} }
+    {"x": v["x"] / len_val, "y": v["y"] / len_val}
+}
+func op_vec2_distance(a, b) { op_vec2_length(op_vec2_sub(a, b)) }
+func op_vec2_angle(v) { atan2(v["y"], v["x"]) }
+func op_vec2_rotate(v, angle) {
+    const c = cos(op_to_f64(angle))
+    const s = sin(op_to_f64(angle))
+    {"x": v["x"] * c - v["y"] * s, "y": v["x"] * s + v["y"] * c}
+}
+func op_vec2_lerp(a, b, t) {
+    const tf = op_to_f64(t)
+    {"x": a["x"] + (b["x"] - a["x"]) * tf, "y": a["y"] + (b["y"] - a["y"]) * tf}
+}
+func op_vec2_reflect(v, normal) {
+    const d = 2.0 * op_vec2_dot(v, normal)
+    op_vec2_sub(v, op_vec2_scale(normal, d))
+}
+
+func op_vec3(x, y, z) { {"x": op_to_f64(x), "y": op_to_f64(y), "z": op_to_f64(z)} }
+func op_vec3_add(a, b) { {"x": a["x"] + b["x"], "y": a["y"] + b["y"], "z": a["z"] + b["z"]} }
+func op_vec3_sub(a, b) { {"x": a["x"] - b["x"], "y": a["y"] - b["y"], "z": a["z"] - b["z"]} }
+func op_vec3_scale(v, s) { {"x": v["x"] * op_to_f64(s), "y": v["y"] * op_to_f64(s), "z": v["z"] * op_to_f64(s)} }
+func op_vec3_dot(a, b) { a["x"] * b["x"] + a["y"] * b["y"] + a["z"] * b["z"] }
+func op_vec3_cross(a, b) {
+    {"x": a["y"] * b["z"] - a["z"] * b["y"],
+     "y": a["z"] * b["x"] - a["x"] * b["z"],
+     "z": a["x"] * b["y"] - a["y"] * b["x"]}
+}
+func op_vec3_length(v) { sqrt(v["x"] * v["x"] + v["y"] * v["y"] + v["z"] * v["z"]) }
+func op_vec3_normalize(v) {
+    const len_val = op_vec3_length(v)
+    if len_val == 0.0 { return {"x": 0.0, "y": 0.0, "z": 0.0} }
+    {"x": v["x"] / len_val, "y": v["y"] / len_val, "z": v["z"] / len_val}
+}
+func op_vec3_distance(a, b) { op_vec3_length(op_vec3_sub(a, b)) }
+func op_vec3_lerp(a, b, t) {
+    const tf = op_to_f64(t)
+    {"x": a["x"] + (b["x"] - a["x"]) * tf,
+     "y": a["y"] + (b["y"] - a["y"]) * tf,
+     "z": a["z"] + (b["z"] - a["z"]) * tf}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Noise Generation
+// ══════════════════════════════════════════════════════════════════
+
+// Simple hash-based noise (deterministic)
+func op_noise_hash(x, y) {
+    let n = op_to_i64(x) * 374761393 + op_to_i64(y) * 668265263
+    n = (n ^ (n >> 13)) * 1274126177
+    n = n ^ (n >> 16)
+    op_to_f64(abs(n) % 1000000) / 1000000.0
+}
+
+func op_noise_value_2d(x, y) {
+    const xi = floor(op_to_f64(x))
+    const yi = floor(op_to_f64(y))
+    const xf = op_to_f64(x) - xi
+    const yf = op_to_f64(y) - yi
+    const n00 = op_noise_hash(xi, yi)
+    const n10 = op_noise_hash(xi + 1, yi)
+    const n01 = op_noise_hash(xi, yi + 1)
+    const n11 = op_noise_hash(xi + 1, yi + 1)
+    const sx = xf * xf * (3.0 - 2.0 * xf)
+    const sy = yf * yf * (3.0 - 2.0 * yf)
+    const nx0 = n00 + sx * (n10 - n00)
+    const nx1 = n01 + sx * (n11 - n01)
+    nx0 + sy * (nx1 - nx0)
+}
+
+func op_noise_fbm(x, y, octaves) {
+    let total = 0.0
+    let amplitude = 1.0
+    let frequency = 1.0
+    let max_val = 0.0
+    let i = 0
+    while i < octaves {
+        total = total + op_noise_value_2d(op_to_f64(x) * frequency, op_to_f64(y) * frequency) * amplitude
+        max_val = max_val + amplitude
+        amplitude = amplitude * 0.5
+        frequency = frequency * 2.0
+        i = i + 1
+    }
+    total / max_val
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full ECS (Entity Component System) Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_ecs_world_new() {
+    {"__ecs": true, "entities": {}, "next_id": 0, "components": {}}
+}
+
+func op_ecs_spawn(world) {
+    const id = world["next_id"]
+    world["next_id"] = id + 1
+    world["entities"][to_string(id)] = {}
+    id
+}
+
+func op_ecs_add_component(world, entity_id, component_name, data) {
+    const eid = to_string(entity_id)
+    if !world["entities"].has(eid) { return world }
+    let entity = world["entities"][eid]
+    entity[component_name] = data
+    world["entities"][eid] = entity
+    // Index by component
+    if !world["components"].has(component_name) {
+        world["components"][component_name] = []
+    }
+    let comp_list = world["components"][component_name]
+    if !comp_list.contains(entity_id) { comp_list.push(entity_id) }
+    world["components"][component_name] = comp_list
+    world
+}
+
+func op_ecs_get_component(world, entity_id, component_name) {
+    const eid = to_string(entity_id)
+    if !world["entities"].has(eid) { return null }
+    const entity = world["entities"][eid]
+    if entity.has(component_name) { entity[component_name] } else { null }
+}
+
+func op_ecs_query(world, component_names) {
+    // Return all entities that have ALL specified components
+    if len(component_names) == 0 { return [] }
+    let candidates = null
+    for cname in component_names {
+        if !world["components"].has(cname) { return [] }
+        const ids = world["components"][cname]
+        if candidates == null { candidates = ids }
+        else {
+            let filtered = []
+            for id in candidates {
+                if ids.contains(id) { filtered.push(id) }
+            }
+            candidates = filtered
+        }
+    }
+    if candidates == null { [] } else { candidates }
+}
+
+func op_ecs_remove_entity(world, entity_id) {
+    const eid = to_string(entity_id)
+    if world["entities"].has(eid) {
+        world["entities"].delete(eid)
+    }
+    // Remove from component indices
+    for cname in world["components"].keys() {
+        if cname == "__s" { continue }
+        world["components"][cname] = world["components"][cname].filter(id => id != entity_id)
+    }
+    world
+}
+
+func op_ecs_system(world, component_names, system_fn) {
+    const entities = op_ecs_query(world, component_names)
+    for entity_id in entities {
+        let components = {}
+        for cname in component_names {
+            components[cname] = op_ecs_get_component(world, entity_id, cname)
+        }
+        system_fn(entity_id, components)
+    }
+}
