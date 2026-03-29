@@ -160,6 +160,12 @@ static char* magi_val_to_dyn_str(int64_t val, int for_display);
 static void magi_val_to_str(int64_t val, char* buf, int bufsize);
 int64_t __magi_string_concat(int64_t a_val, int64_t b_val);
 int64_t __magi_string_len(int64_t val);
+static inline int magi_is_byte_array(MagiArray* arr) { return arr && arr->cap == -1; }
+static inline int64_t magi_byte_array_get(MagiArray* arr, int64_t idx) {
+    if (!arr || idx < 0 || idx >= arr->len) return magi_make_null();
+    const unsigned char* bytes = (const unsigned char*)(uintptr_t)arr->data;
+    return magi_make_int(bytes[idx]);
+}
 int64_t __magi_array_len(int64_t arr_val);
 int64_t __magi_array_push(int64_t arr_val, int64_t val);
 int64_t __magi_to_string(int64_t val);
@@ -265,6 +271,7 @@ int64_t __magi_array_get(int64_t arr_val, int64_t idx_val) {
     MagiArray* arr = magi_array_ptr(arr_val);
     int64_t idx = magi_as_int(idx_val);
     if (!arr || idx < 0 || idx >= arr->len) return magi_make_null();
+    if (magi_is_byte_array(arr)) return magi_byte_array_get(arr, idx);
     return arr->data[idx];
 }
 
@@ -272,6 +279,7 @@ void __magi_array_set(int64_t arr_val, int64_t idx_val, int64_t val) {
     MagiArray* arr = magi_array_ptr(arr_val);
     int64_t idx = magi_as_int(idx_val);
     if (!arr || idx < 0 || idx >= arr->len) return;
+    if (magi_is_byte_array(arr)) return; // byte arrays are read-only
     arr->data[idx] = val;
 }
 
@@ -1369,19 +1377,35 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     return magi_make_null();
 }
 
-// embed() support — create MAGI array from raw embedded bytes
+// embed() support — wrap raw embedded bytes as a MAGI array
+// Uses a compact representation: stores the raw pointer + length,
+// and the array_get function reads bytes on demand.
+typedef struct { const unsigned char* data; int64_t len; } EmbedData;
+
+// Global embed table (up to 64 embedded files)
+static EmbedData __embed_table[64];
+static int __embed_count = 0;
+
 int64_t __magi_embed_array(const unsigned char* data, int64_t len) {
-    if (!data || len <= 0) { fprintf(stderr, "[embed] null data or len=%lld\n", (long long)len); return magi_make_null(); }
-    fprintf(stderr, "[embed] Loading %lld bytes...\n", (long long)len);
+    if (!data || len <= 0) return magi_make_null();
+    fprintf(stderr, "[embed] %lld bytes\n", (long long)len);
+    // Store in embed table — return a MagiArray backed by the raw data
+    int idx = __embed_count++;
+    __embed_table[idx].data = data;
+    __embed_table[idx].len = len;
+    // Create a MagiArray that points to a pre-built int64 array
+    // But 4M * 8 bytes = 33MB is too much. Instead, use a special array
+    // that lazily reads from the raw data.
     MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
-    if (!arr) { fprintf(stderr, "[embed] malloc MagiArray failed\n"); return magi_make_null(); }
+    if (!arr) return magi_make_null();
     arr->len = (int32_t)len;
     arr->cap = (int32_t)len;
-    arr->data = (int64_t*)malloc(sizeof(int64_t) * len);
-    if (!arr->data) { fprintf(stderr, "[embed] malloc data (%lld bytes) failed\n", (long long)(len * 8)); free(arr); return magi_make_null(); }
-    for (int64_t i = 0; i < len; i++) {
-        arr->data[i] = magi_make_int(data[i]);
-    }
-    fprintf(stderr, "[embed] Done\n");
+    // Store raw pointer in data field — __magi_array_get_byte handles it
+    arr->data = (int64_t*)(uintptr_t)data;
+    // Tag with a special marker so array_get knows it's a byte array
+    // Use negative cap as marker
+    arr->cap = -1;
     return magi_make_array_val(arr);
 }
+
+// magi_is_byte_array and magi_byte_array_get defined in forward declarations above
