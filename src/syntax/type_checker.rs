@@ -544,7 +544,7 @@ impl TypeChecker {
                     stmt.span.start_col,
                     name,
                 );
-                self.define_var(name, ct, false, stmt.span.start_line, stmt.span.start_col);
+                self.define_var(name, ct, true, stmt.span.start_line, stmt.span.start_col); // let is mutable in new syntax
             }
 
             // let mut name = expr;  /  let mut name: type = expr;
@@ -4397,7 +4397,8 @@ output r;"#,
 
     #[test]
     fn test_immutable_assignment_error() {
-        let a = check("let x = 0;\nx = 42;\noutput x;");
+        // const is immutable, let is now mutable
+        let a = check("const x = 0;\nx = 42;\noutput x;");
         let e = errors(&a);
         assert_eq!(e.len(), 1);
         assert!(e[0].message.contains("cannot assign to immutable"));
@@ -5214,7 +5215,8 @@ output r;"#,
 
     #[test]
     fn test_compound_assign_immutable_error() {
-        let a = check("let x = 10;\nx += 5;\noutput x;");
+        // const is immutable
+        let a = check("const x = 10;\nx += 5;\noutput x;");
         let e = errors(&a);
         assert!(e
             .iter()
@@ -5721,7 +5723,7 @@ output r;"#,
 
     #[test]
     fn test_diagnostic_code_for_immutable_assign() {
-        let a = check("let x = 1;\nx = 2;");
+        let a = check("const x = 1;\nx = 2;");
         let errs = errors(&a);
         let d = errs
             .iter()
