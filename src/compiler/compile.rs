@@ -1130,18 +1130,42 @@ impl Compiler {
                         arg_count: args.len() as u32,
                     });
                 } else {
-                    for arg in args {
-                        self.compile_expr(arg)?;
-                    }
-
-                    if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
-                        self.emit(Instruction::Call(fn_idx));
+                    // embed("file.bin") — compile-time file embedding (like Go's //go:embed)
+                    if name == "embed" && args.len() == 1 {
+                        if let ExpressionKind::Literal(Literal::String(path)) = &args[0].kind {
+                            let data = std::fs::read(path).map_err(|e| {
+                                CompileError::Internal(format!("embed: cannot read '{}': {}", path, e))
+                            })?;
+                            let idx = self.module.embedded_data.len() as u32;
+                            self.module.embedded_data.push(super::ir::EmbeddedFile {
+                                name: path.clone(),
+                                data,
+                                global_index: idx,
+                            });
+                            // Emit a special RuntimeCall that the LLVM backend intercepts
+                            let name_idx = self.module.intern_string("__embed");
+                            self.emit(Instruction::PushI64(idx as i64));
+                            self.emit(Instruction::RuntimeCall {
+                                name: name_idx,
+                                arg_count: 1,
+                            });
+                        } else {
+                            return Err(CompileError::Internal("embed() requires a string literal path".into()));
+                        }
                     } else {
-                        let name_idx = self.module.intern_string(name);
-                        self.emit(Instruction::RuntimeCall {
-                            name: name_idx,
-                            arg_count: args.len() as u32,
-                        });
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+
+                        if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
+                            self.emit(Instruction::Call(fn_idx));
+                        } else {
+                            let name_idx = self.module.intern_string(name);
+                            self.emit(Instruction::RuntimeCall {
+                                name: name_idx,
+                                arg_count: args.len() as u32,
+                            });
+                        }
                     }
                 }
             }

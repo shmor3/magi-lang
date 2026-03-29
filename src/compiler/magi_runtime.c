@@ -1368,3 +1368,15 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     // Unknown: return null
     return magi_make_null();
 }
+
+// embed() support — create MAGI array from raw embedded bytes
+int64_t __magi_embed_array(const unsigned char* data, int64_t len) {
+    MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+    arr->len = (int32_t)len;
+    arr->cap = (int32_t)len;
+    arr->data = (int64_t*)malloc(sizeof(int64_t) * len);
+    for (int64_t i = 0; i < len; i++) {
+        arr->data[i] = magi_make_int(data[i]);
+    }
+    return magi_make_array_val(arr);
+}

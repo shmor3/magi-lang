@@ -89,6 +89,20 @@ fn emit_native(
         globals.push(gv.as_pointer_value());
     }
 
+    // ── Embedded data (from embed("file")) ────────────────
+    let mut embedded_globals: Vec<(PointerValue, u64)> = Vec::new();
+    for (i, ef) in ir_mod.embedded_data.iter().enumerate() {
+        let bytes: Vec<inkwell::values::IntValue> = ef.data.iter()
+            .map(|b| ctx.i8_type().const_int(*b as u64, false))
+            .collect();
+        let arr_val = ctx.i8_type().const_array(&bytes);
+        let global_name = format!("__embed_data_{}", i);
+        let gv = module.add_global(ctx.i8_type().array_type(ef.data.len() as u32), None, &global_name);
+        gv.set_initializer(&arr_val);
+        gv.set_constant(true);
+        embedded_globals.push((gv.as_pointer_value(), ef.data.len() as u64));
+    }
+
     // ── Declare functions ───────────────────────────────────
     // Use Vec indexed by IR function index to handle name collisions (lambdas)
     let mut fns_by_idx: Vec<FunctionValue> = Vec::new();
@@ -106,7 +120,7 @@ fn emit_native(
 
     for (idx, func) in ir_mod.functions.iter().enumerate() {
         let lf = fns_by_idx[idx];
-        compile_fn(&ctx, &module, &b, ir_mod, &fns_by_idx, &rt, &globals, &mut str_cache, func, lf)?;
+        compile_fn(&ctx, &module, &b, ir_mod, &fns_by_idx, &rt, &globals, &mut str_cache, &embedded_globals, func, lf)?;
     }
 
     // ── Function pointer table for indirect calls ─────────
@@ -442,6 +456,7 @@ fn compile_fn<'ctx>(
     rt: &HashMap<&str, FunctionValue<'ctx>>,
     globals: &[PointerValue<'ctx>],
     str_cache: &mut HashMap<u32, PointerValue<'ctx>>,
+    embedded: &[(PointerValue<'ctx>, u64)],
     func: &IrFunction,
     lf: FunctionValue<'ctx>,
 ) -> Result<(), String> {
@@ -853,17 +868,44 @@ fn compile_fn<'ctx>(
 
             // ── RuntimeCall ────────────────────────────
             Instruction::RuntimeCall { name, arg_count } => {
-                let np = str_ptr(b, ir, str_cache, *name);
-                let ac = *arg_count;
-                let aa = b.build_array_alloca(i64_t, i32_t.const_int(std::cmp::max(ac,1) as u64, false), "ra").unwrap();
-                let mut args: Vec<IntValue> = (0..ac).map(|_| stack.pop().unwrap_or(cnull(ctx))).collect();
-                args.reverse();
-                for (i, a) in args.iter().enumerate() {
-                    let p = unsafe { b.build_gep(i64_t, aa, &[i32_t.const_int(i as u64, false)], "ap").unwrap() };
-                    b.build_store(p, *a).unwrap();
+                let fn_name = &ir.strings[*name as usize];
+
+                // embed() — compile-time file embedding
+                if fn_name == "__embed" {
+                    let idx_val = stack.pop().unwrap_or(cnull(ctx));
+                    let idx_raw = ext_i64(b, ctx, idx_val);
+                    // For constant index (compile-time known), emit direct array creation
+                    // The index was pushed as PushI64(idx) right before this call
+                    if let Some(const_val) = idx_raw.get_zero_extended_constant() {
+                        let ei = const_val as usize;
+                        if ei < embedded.len() {
+                            let (data_ptr, data_len) = embedded[ei];
+                            // Call __magi_embed_array(ptr, len) → creates a MAGI array from raw bytes
+                            let embed_fn = module.get_function("__magi_embed_array").unwrap_or_else(|| {
+                                let ft = i64_t.fn_type(&[ctx.ptr_type(AddressSpace::default()).into(), i64_t.into()], false);
+                                module.add_function("__magi_embed_array", ft, None)
+                            });
+                            let r = b.build_call(embed_fn, &[data_ptr.into(), ci64(ctx, data_len).into()], "emb").unwrap();
+                            stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
+                        } else {
+                            stack.push(cnull(ctx));
+                        }
+                    } else {
+                        stack.push(cnull(ctx));
+                    }
+                } else {
+                    let np = str_ptr(b, ir, str_cache, *name);
+                    let ac = *arg_count;
+                    let aa = b.build_array_alloca(i64_t, i32_t.const_int(std::cmp::max(ac,1) as u64, false), "ra").unwrap();
+                    let mut args: Vec<IntValue> = (0..ac).map(|_| stack.pop().unwrap_or(cnull(ctx))).collect();
+                    args.reverse();
+                    for (i, a) in args.iter().enumerate() {
+                        let p = unsafe { b.build_gep(i64_t, aa, &[i32_t.const_int(i as u64, false)], "ap").unwrap() };
+                        b.build_store(p, *a).unwrap();
+                    }
+                    let r = b.build_call(rt["__magi_runtime_call"], &[np.into(), i32_t.const_int(ac as u64, false).into(), aa.into()], "rc").unwrap();
+                    stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
                 }
-                let r = b.build_call(rt["__magi_runtime_call"], &[np.into(), i32_t.const_int(ac as u64, false).into(), aa.into()], "rc").unwrap();
-                stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
             }
         }
     }

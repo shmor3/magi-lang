@@ -16,6 +16,16 @@ pub struct IrModule {
     /// HashMap index for O(1) string deduplication during interning.
     #[doc(hidden)]
     pub string_index: std::collections::HashMap<String, u32>,
+    /// Embedded binary data (from embed_file at compile time).
+    pub embedded_data: Vec<EmbeddedFile>,
+}
+
+/// A file embedded at compile time.
+#[derive(Debug, Clone)]
+pub struct EmbeddedFile {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub global_index: u32,
 }
 
 impl Default for IrModule {
@@ -31,6 +41,7 @@ impl IrModule {
             strings: Vec::new(),
             globals: Vec::new(),
             string_index: std::collections::HashMap::new(),
+            embedded_data: Vec::new(),
         }
     }
 
