@@ -7541,16 +7541,16 @@ func diff_build_hunk(a, b, a_start, a_end, b_start, b_end) {
 }
 
 func diff_format_unified(hunks, a_name, b_name) {
-    let output = f"--- {a_name}\n+++ {b_name}\n"
+    let out_str = f"--- {a_name}\n+++ {b_name}\n"
     for hunk in hunks {
         const a_count = hunk["a_end"] - hunk["a_start"]
         const b_count = hunk["b_end"] - hunk["b_start"]
-        output = output + f"@@ -{hunk[\"a_start\"] + 1},{a_count} +{hunk[\"b_start\"] + 1},{b_count} @@\n"
+        out_str = out_str + f"@@ -{hunk[\"a_start\"] + 1},{a_count} +{hunk[\"b_start\"] + 1},{b_count} @@\n"
         for line in hunk["lines"] {
-            output = output + line["op"] + line["line"] + "\n"
+            out_str = out_str + line["op"] + line["line"] + "\n"
         }
     }
-    output
+    out_str
 }
 
 // ════════════════════════════════════════════════════════════════════

@@ -166,6 +166,31 @@ pub enum TokenKind {
     Eof,
 }
 
+impl TokenKind {
+    /// Returns true if this token kind is a keyword (can appear as field name after `.`).
+    pub fn is_keyword(&self) -> bool {
+        !matches!(self,
+            TokenKind::Ident | TokenKind::IntLiteral | TokenKind::FloatLiteral
+            | TokenKind::StringLiteral | TokenKind::FStringStart | TokenKind::Label
+            | TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash
+            | TokenKind::Percent | TokenKind::Eq | TokenKind::EqEq | TokenKind::NotEq
+            | TokenKind::Gt | TokenKind::Lt | TokenKind::GtEq | TokenKind::LtEq
+            | TokenKind::PipePipe | TokenKind::AndAnd | TokenKind::Bang
+            | TokenKind::LParen | TokenKind::RParen | TokenKind::LBrace | TokenKind::RBrace
+            | TokenKind::LBracket | TokenKind::RBracket | TokenKind::Comma | TokenKind::Semicolon
+            | TokenKind::Colon | TokenKind::Dot | TokenKind::DotDot | TokenKind::DotDotDot
+            | TokenKind::DotDotEq | TokenKind::Arrow | TokenKind::FatArrow
+            | TokenKind::Pipe | TokenKind::Bar | TokenKind::Ampersand | TokenKind::Caret
+            | TokenKind::Shl | TokenKind::Shr | TokenKind::AmpCaret
+            | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq
+            | TokenKind::PercentEq | TokenKind::BarEq | TokenKind::AmpEq | TokenKind::CaretEq
+            | TokenKind::PlusPlus | TokenKind::MinusMinus | TokenKind::ColonEq | TokenKind::ColonColon
+            | TokenKind::QuestionDot | TokenKind::Question | TokenKind::QuestionQuestion
+            | TokenKind::Hash | TokenKind::Eof
+        )
+    }
+}
+
 impl fmt::Display for TokenKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {

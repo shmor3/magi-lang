@@ -2027,8 +2027,13 @@ impl Parser {
             let peek_span = self.peek().span;
             let leading = self.take_leading_comments(peek_span.start_line, peek_span.start_col);
 
-            // If the next thing is a keyword statement, parse it as a statement
+            // If the next thing is a keyword statement, parse it as a statement.
+            // Exception: func/fn followed by ( is an anonymous function expression.
             match self.peek_kind() {
+                TokenKind::Fn | TokenKind::Func
+                    if self.peek_at_kind(1) == Some(&TokenKind::LParen) => {
+                    // Anonymous function in expression position — fall through to expression parsing
+                }
                 TokenKind::Let
                 | TokenKind::Import
                 | TokenKind::For
@@ -2670,7 +2675,12 @@ impl Parser {
                 }
             } else if self.at(&TokenKind::Dot) {
                 self.advance();
-                let field_tok = self.expect(&TokenKind::Ident)?;
+                // Accept identifiers AND keywords as field names (e.g., .output, .type, .match)
+                let field_tok = if self.at(&TokenKind::Ident) || self.peek_kind().is_keyword() {
+                    self.advance().clone()
+                } else {
+                    self.expect(&TokenKind::Ident)?
+                };
 
                 if self.at(&TokenKind::LParen) {
                     self.advance(); // consume '('
