@@ -1057,6 +1057,12 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     if (strcmp(name, "log2") == 0) return magi_make_float(log2(magi_as_float(a)));
     if (strcmp(name, "log10") == 0) return magi_make_float(log10(magi_as_float(a)));
     if (strcmp(name, "exp") == 0) return magi_make_float(exp(magi_as_float(a)));
+    if (strcmp(name, "atan") == 0) return magi_make_float(atan(magi_as_float(a)));
+    if (strcmp(name, "atan2") == 0) return magi_make_float(atan2(magi_as_float(a), magi_as_float(b)));
+    if (strcmp(name, "asin") == 0) return magi_make_float(asin(magi_as_float(a)));
+    if (strcmp(name, "acos") == 0) return magi_make_float(acos(magi_as_float(a)));
+    if (strcmp(name, "pow") == 0) return magi_make_float(pow(magi_as_float(a), magi_as_float(b)));
+    if (strcmp(name, "fmod") == 0) return magi_make_float(fmod(magi_as_float(a), magi_as_float(b)));
     if (strcmp(name, "min") == 0) {
         double da = magi_as_float(a), db = magi_as_float(b);
         return da < db ? a : b;
