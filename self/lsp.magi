@@ -5297,3 +5297,4815 @@ func ensure_final_newline(source) {
     }
     trimmed + "\n"
 }
+
+// ######################################################################
+// ######################################################################
+// ##                                                                  ##
+// ##   FULL LSP DEPTH — Phase 2                                       ##
+// ##   Completions, Hover, Semantics, Code Actions, Diagnostics       ##
+// ##                                                                  ##
+// ######################################################################
+// ######################################################################
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 1: Full Completion Engine ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Context-aware completions matching src/lsp/completion.rs:
+//   - Inside struct literal -> field names
+//   - Inside match -> variant names
+//   - After dot -> methods for that type
+//   - Import completions (all stdlib modules)
+//   - Type annotation completions
+//   - Fuzzy matching with Levenshtein distance
+
+// Levenshtein distance between two strings
+func levenshtein(a, b) {
+    const la = len(a)
+    const lb = len(b)
+    if la == 0 { return lb }
+    if lb == 0 { return la }
+
+    // Use a single-row DP approach
+    let prev_row = []
+    let i = 0
+    while i <= lb {
+        prev_row.push(i)
+        i = i + 1
+    }
+
+    let ai = 0
+    while ai < la {
+        let curr_row = [ai + 1]
+        let bi = 0
+        while bi < lb {
+            const cost = if a[ai] == b[bi] { 0 } else { 1 }
+            const insert_cost = curr_row[bi] + 1
+            const delete_cost = prev_row[bi + 1] + 1
+            const replace_cost = prev_row[bi] + cost
+            let min_cost = insert_cost
+            if delete_cost < min_cost { min_cost = delete_cost }
+            if replace_cost < min_cost { min_cost = replace_cost }
+            curr_row.push(min_cost)
+            bi = bi + 1
+        }
+        prev_row = curr_row
+        ai = ai + 1
+    }
+
+    prev_row[lb]
+}
+
+// Detect if cursor is inside a struct literal: `StructName { field: ... , |`
+func find_struct_literal_context(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+    const ln = lines[line]
+
+    // Walk backwards from cursor to find opening brace
+    let pos = character - 1
+    let depth = 0
+    while pos >= 0 {
+        const c = ln[pos]
+        if c == "}" { depth = depth + 1 }
+        if c == "{" {
+            if depth == 0 {
+                // Found opening brace — look for struct name before it
+                let name_end = pos - 1
+                while name_end >= 0 && ln[name_end] == " " { name_end = name_end - 1 }
+                if name_end < 0 { return null }
+                let name_start = name_end
+                while name_start > 0 && is_ident_char(ln[name_start - 1]) {
+                    name_start = name_start - 1
+                }
+                if name_start > name_end { return null }
+                const name = ln[name_start..name_end + 1]
+                // Must start with uppercase to be a struct name
+                if len(name) > 0 && name[0] >= "A" && name[0] <= "Z" {
+                    return name
+                }
+                return null
+            }
+            depth = depth - 1
+        }
+        pos = pos - 1
+    }
+    null
+}
+
+// Detect if cursor is inside a match expression and return the matched type name
+func find_match_context(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+
+    // Scan upward from current line looking for `match <expr> {`
+    let scan_line = line
+    while scan_line >= 0 {
+        const ln = lines[scan_line].trim()
+        if ln.starts_with("match ") {
+            // Extract the expression being matched
+            const after_match = ln[6..len(ln)].trim()
+            // Strip trailing {
+            let expr_str = after_match
+            if expr_str.ends_with("{") {
+                expr_str = expr_str[0..len(expr_str) - 1].trim()
+            }
+            return expr_str
+        }
+        // If we hit a line with unmatched {, stop searching
+        if ln.ends_with("{") && !ln.starts_with("match") && !ln.starts_with("//") {
+            return null
+        }
+        scan_line = scan_line - 1
+    }
+    null
+}
+
+// Detect dot-access context: returns the receiver name before the dot
+func find_dot_receiver(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+    const ln = lines[line]
+
+    // Walk backward from cursor position
+    let pos = character - 1
+    // Skip any partial identifier the user is typing after the dot
+    while pos >= 0 && is_ident_char(ln[pos]) {
+        pos = pos - 1
+    }
+    // Check for the dot
+    if pos < 0 || ln[pos] != "." { return null }
+    pos = pos - 1
+
+    // Handle method chain: skip closing parens and brackets
+    if pos >= 0 && (ln[pos] == ")" || ln[pos] == "]") {
+        // For now, return generic methods for chained calls
+        return "__chained__"
+    }
+
+    // Collect the receiver name
+    let end = pos + 1
+    while pos >= 0 && is_ident_char(ln[pos]) {
+        pos = pos - 1
+    }
+    if pos + 1 >= end { return null }
+    ln[pos + 1..end]
+}
+
+// Full context-aware completion handler
+func handle_completion_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return {"isIncomplete": false, "items": []} }
+
+    const source = doc["source"]
+    const program = doc["program"]
+    let items = []
+
+    // Get the current word prefix for filtering
+    const word_info = word_at_position(source, line, character)
+    const prefix = if word_info != null { word_info["word"] } else { "" }
+    const prefix_lower = if prefix != "" { prefix.to_lower() } else { "" }
+
+    // 1. Check for double-colon context: `EnumName::` -> suggest variants
+    const enum_context = find_double_colon_context(source, line, character)
+    if enum_context != null {
+        const variants = get_enum_variant_completions(program, enum_context)
+        if len(variants) > 0 {
+            return {"isIncomplete": false, "items": variants}
+        }
+    }
+
+    // 2. Check for dot-access context: `expr.` -> suggest fields/methods
+    const receiver = find_dot_receiver(source, line, character)
+    if receiver != null {
+        return handle_dot_completion(doc, receiver, prefix, prefix_lower, line)
+    }
+
+    // 3. Check for struct literal context
+    const struct_context = find_struct_literal_context(source, line, character)
+    if struct_context != null {
+        const field_items = get_struct_field_completions(program, struct_context)
+        if len(field_items) > 0 {
+            return {"isIncomplete": false, "items": field_items}
+        }
+    }
+
+    // 4. Check for match context: suggest enum variants
+    const match_expr = find_match_context(source, line, character)
+    if match_expr != null {
+        // Try to find enum for the matched expression
+        const match_items = get_match_completions(program, match_expr, prefix)
+        if len(match_items) > 0 {
+            for mi in match_items { items.push(mi) }
+        }
+    }
+
+    // 5. Check for import context
+    const line_text = source.split("\n")
+    if line < len(line_text) {
+        const current_line = line_text[line].trim()
+        if current_line.starts_with("import ") || current_line.starts_with("use ") {
+            const import_items = get_import_completions(prefix)
+            return {"isIncomplete": false, "items": import_items}
+        }
+    }
+
+    // 6. Check for type annotation context (after : in parameter or let)
+    if is_type_annotation_context(source, line, character) {
+        const type_items = get_type_annotation_completions(prefix)
+        for ti in type_items { items.push(ti) }
+    }
+
+    // 7. Keywords with details
+    for kw in MAGI_KEYWORDS {
+        if prefix == "" || kw.starts_with(prefix_lower) {
+            let detail = "keyword"
+            if KEYWORD_DETAILS.has(kw) {
+                detail = KEYWORD_DETAILS[kw]
+            }
+            items.push({
+                "label": kw,
+                "kind": CIK_KEYWORD,
+                "detail": detail,
+                "sortText": "3" + kw
+            })
+        }
+    }
+
+    // 8. Builtin functions with signatures
+    for b in MAGI_BUILTINS {
+        if prefix == "" || b.starts_with(prefix_lower) {
+            let detail = "builtin"
+            if BUILTIN_SIGNATURES.has(b) {
+                detail = BUILTIN_SIGNATURES[b]
+            }
+            items.push({
+                "label": b,
+                "kind": CIK_FUNCTION,
+                "detail": detail,
+                "sortText": "2" + b
+            })
+        }
+    }
+
+    // 9. Snippet completions
+    const snippets = get_snippet_completions(prefix)
+    for s in snippets { items.push(s) }
+
+    // 10. Document symbols (functions, variables, structs, enums)
+    const func_items = get_function_completions(program, prefix)
+    for fi in func_items { items.push(fi) }
+
+    const var_items = get_variable_completions(program, prefix, line)
+    for vi in var_items { items.push(vi) }
+
+    // Struct and enum names
+    if program != null {
+        for stmt in program.statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SStructDef(name, fields, _) => {
+                    if prefix == "" || name.starts_with(prefix) {
+                        items.push({
+                            "label": name,
+                            "kind": CIK_STRUCT,
+                            "detail": f"struct {name} ({len(fields)} fields)",
+                            "sortText": "1" + name
+                        })
+                    }
+                },
+                StmtKind::SEnumDef(name, variants, _) => {
+                    if prefix == "" || name.starts_with(prefix) {
+                        items.push({
+                            "label": name,
+                            "kind": CIK_CLASS,
+                            "detail": f"enum {name} ({len(variants)} variants)",
+                            "sortText": "1" + name
+                        })
+                    }
+                },
+                StmtKind::SInterfaceDef(name, _, _) => {
+                    if prefix == "" || name.starts_with(prefix) {
+                        items.push({
+                            "label": name,
+                            "kind": CIK_INTERFACE,
+                            "detail": f"interface {name}",
+                            "sortText": "1" + name
+                        })
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    // 11. Cross-file symbol completions from workspace
+    for ws_uri in lsp_documents.keys() {
+        if ws_uri == "__s" || ws_uri == uri { continue }
+        const ws_doc = lsp_documents[ws_uri]
+        if ws_doc == null { continue }
+        const ws_symbols = collect_symbols(ws_doc["program"])
+        for sym in ws_symbols {
+            if prefix == "" || sym["name"].starts_with(prefix) {
+                items.push({
+                    "label": sym["name"],
+                    "kind": match sym["kind"] {
+                        SK_FUNCTION => CIK_FUNCTION,
+                        SK_VARIABLE => CIK_VARIABLE,
+                        SK_CONSTANT => CIK_CONSTANT,
+                        SK_ENUM => CIK_CLASS,
+                        SK_STRUCT => CIK_STRUCT,
+                        _ => CIK_TEXT
+                    },
+                    "detail": sym["detail"] + " (from " + ws_uri + ")",
+                    "sortText": "5" + sym["name"]
+                })
+            }
+        }
+    }
+
+    // 12. Fuzzy matching fallback when no exact prefix matches
+    if prefix != "" && len(items) == 0 {
+        items = fuzzy_complete(source, program, prefix, prefix_lower, line)
+    }
+
+    {"isIncomplete": len(items) > 100, "items": items}
+}
+
+// Dot-access completion: type-specific method/field suggestions
+func handle_dot_completion(doc, receiver, prefix, prefix_lower, line) {
+    let items = []
+    const program = doc["program"]
+
+    // Determine receiver type
+    let receiver_type = null
+    if receiver == "__chained__" {
+        receiver_type = "any"
+    } else if program != null {
+        // Look up variable type
+        for stmt in program.statements {
+            const sl = stmt.span.start_line - 1
+            if sl > line { break }
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SLet(name, expr) => {
+                    if name == receiver {
+                        receiver_type = infer_simple_type(expr)
+                    }
+                },
+                StmtKind::SLetMut(name, expr) => {
+                    if name == receiver {
+                        receiver_type = infer_simple_type(expr)
+                    }
+                },
+                StmtKind::SConst(name, expr) => {
+                    if name == receiver {
+                        receiver_type = infer_simple_type(expr)
+                    }
+                },
+                _ => {}
+            }
+        }
+
+        // Check if receiver is a struct instance
+        if receiver_type == null || receiver_type == "unknown" {
+            const struct_fields = find_struct_for_variable(program, receiver)
+            if struct_fields != null {
+                for f in struct_fields { items.push(f) }
+            }
+        }
+    }
+
+    // Add type-specific methods
+    if receiver_type != null {
+        const type_methods = get_method_completions_for_type(receiver_type)
+        for m in type_methods {
+            if prefix_lower == "" || m["label"].to_lower().starts_with(prefix_lower) {
+                items.push(m)
+            }
+        }
+    }
+
+    // Always add generic methods
+    const generic_methods = [
+        {"label": "to_string", "kind": CIK_METHOD, "detail": "func to_string() -> string", "documentation": "Converts to string"},
+        {"label": "to_json", "kind": CIK_METHOD, "detail": "func to_json() -> string", "documentation": "Converts to JSON string"},
+        {"label": "to_int", "kind": CIK_METHOD, "detail": "func to_int() -> int", "documentation": "Converts to integer"},
+        {"label": "to_float", "kind": CIK_METHOD, "detail": "func to_float() -> float", "documentation": "Converts to float"},
+        {"label": "to_bool", "kind": CIK_METHOD, "detail": "func to_bool() -> bool", "documentation": "Converts to boolean"},
+        {"label": "typeof", "kind": CIK_METHOD, "detail": "func typeof() -> string", "documentation": "Returns type name"}
+    ]
+    for gm in generic_methods {
+        if prefix_lower == "" || gm["label"].to_lower().starts_with(prefix_lower) {
+            // Avoid duplicates
+            let found = false
+            for existing in items {
+                if existing["label"] == gm["label"] { found = true; break }
+            }
+            if !found { items.push(gm) }
+        }
+    }
+
+    // If prefix given but nothing matches exactly, try fuzzy
+    if prefix != "" && len(items) == 0 {
+        let all_methods = get_method_completions_for_type(if receiver_type != null { receiver_type } else { "any" })
+        for gm in generic_methods { all_methods.push(gm) }
+        const max_dist = if len(prefix) <= 2 { 1 } else if len(prefix) <= 5 { 2 } else { 3 }
+        for m in all_methods {
+            const dist = levenshtein(prefix_lower, m["label"].to_lower())
+            if dist > 0 && dist <= max_dist {
+                m["sortText"] = "zz" + to_string(dist) + m["label"]
+                items.push(m)
+            }
+        }
+    }
+
+    {"isIncomplete": false, "items": items}
+}
+
+// Find struct fields for a variable that was constructed from a struct literal
+func find_struct_for_variable(program, var_name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLet(name, expr) => {
+                if name == var_name && expr != null {
+                    const struct_name = detect_struct_construction(expr)
+                    if struct_name != null {
+                        return get_struct_field_completions(program, struct_name)
+                    }
+                }
+            },
+            StmtKind::SConst(name, expr) => {
+                if name == var_name && expr != null {
+                    const struct_name = detect_struct_construction(expr)
+                    if struct_name != null {
+                        return get_struct_field_completions(program, struct_name)
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Detect struct construction in an expression (e.g., `StructName { ... }`)
+func detect_struct_construction(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ECall(name, _, _) => {
+            // Struct construction looks like a call: StructName { ... }
+            if len(name) > 0 && name[0] >= "A" && name[0] <= "Z" {
+                return name
+            }
+            null
+        },
+        ExprKind::EStructLiteral(name, _) => name,
+        _ => null
+    }
+}
+
+// Match completions: suggest enum variants for matched expression
+func get_match_completions(program, match_expr, prefix) {
+    let items = []
+    if program == null { return items }
+
+    // Try to identify the enum type from the expression
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SEnumDef(name, variants, _) => {
+                // Check if the match expression references this enum type
+                if match_expr == name || match_expr.contains(name) {
+                    for v in variants {
+                        const vname = if typeof(v) == "string" { v } else { v[0] }
+                        const full = name + "::" + vname
+                        if prefix == "" || vname.starts_with(prefix) || full.starts_with(prefix) {
+                            items.push({
+                                "label": full,
+                                "kind": CIK_ENUM_MEMBER,
+                                "detail": f"Variant of {name}",
+                                "insertText": full + " => ",
+                                "sortText": "0" + vname
+                            })
+                        }
+                    }
+                    // Also suggest wildcard pattern
+                    items.push({
+                        "label": "_",
+                        "kind": CIK_KEYWORD,
+                        "detail": "Wildcard pattern (matches anything)",
+                        "insertText": "_ => ",
+                        "sortText": "9_"
+                    })
+                }
+            },
+            _ => {}
+        }
+    }
+
+    // If no enum matched, suggest common match patterns
+    if len(items) == 0 {
+        items.push({"label": "true", "kind": CIK_KEYWORD, "detail": "Match true", "insertText": "true => "})
+        items.push({"label": "false", "kind": CIK_KEYWORD, "detail": "Match false", "insertText": "false => "})
+        items.push({"label": "null", "kind": CIK_KEYWORD, "detail": "Match null", "insertText": "null => "})
+        items.push({"label": "_", "kind": CIK_KEYWORD, "detail": "Wildcard pattern", "insertText": "_ => "})
+    }
+
+    items
+}
+
+// Type annotation completions (after `:` in declarations)
+func is_type_annotation_context(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return false }
+    const ln = lines[line]
+    // Walk backward from cursor to find `:`
+    let pos = character - 1
+    // Skip current word
+    while pos >= 0 && is_ident_char(ln[pos]) { pos = pos - 1 }
+    // Skip whitespace
+    while pos >= 0 && (ln[pos] == " " || ln[pos] == "\t") { pos = pos - 1 }
+    // Check for colon
+    if pos >= 0 && ln[pos] == ":" {
+        // Make sure it's not :: (double colon for enum variants)
+        if pos > 0 && ln[pos - 1] == ":" { return false }
+        return true
+    }
+    false
+}
+
+func get_type_annotation_completions(prefix) {
+    let items = []
+    const types = [
+        ["int", "32-bit integer type"],
+        ["int32", "32-bit signed integer"],
+        ["int64", "64-bit signed integer"],
+        ["uint32", "32-bit unsigned integer"],
+        ["uint64", "64-bit unsigned integer"],
+        ["float", "64-bit floating point type"],
+        ["float32", "32-bit floating point"],
+        ["float64", "64-bit floating point"],
+        ["string", "String type"],
+        ["bool", "Boolean type (true/false)"],
+        ["null", "Null type"],
+        ["any", "Any type (no type constraint)"],
+        ["Array", "Dynamic array type"],
+        ["Map", "Ordered map type"],
+        ["Bytes", "Byte array type"],
+        ["Function", "Function type"],
+        ["void", "Void (no return value)"],
+        ["never", "Never type (function does not return)"]
+    ]
+    for t in types {
+        const name = t[0]
+        const desc = t[1]
+        if prefix == "" || name.to_lower().starts_with(prefix.to_lower()) {
+            items.push({
+                "label": name,
+                "kind": CIK_CLASS,
+                "detail": desc,
+                "sortText": "0" + name
+            })
+        }
+    }
+    items
+}
+
+// Fuzzy completion fallback using Levenshtein distance
+func fuzzy_complete(source, program, prefix, prefix_lower, line) {
+    let candidates = []
+
+    // Collect all potential completion labels
+    for kw in MAGI_KEYWORDS {
+        candidates.push({"label": kw, "kind": CIK_KEYWORD, "detail": "keyword"})
+    }
+    for b in MAGI_BUILTINS {
+        let detail = "builtin"
+        if BUILTIN_SIGNATURES.has(b) { detail = BUILTIN_SIGNATURES[b] }
+        candidates.push({"label": b, "kind": CIK_FUNCTION, "detail": detail})
+    }
+    if program != null {
+        const symbols = collect_symbols(program)
+        for sym in symbols {
+            candidates.push({
+                "label": sym["name"],
+                "kind": match sym["kind"] {
+                    SK_FUNCTION => CIK_FUNCTION,
+                    SK_VARIABLE => CIK_VARIABLE,
+                    SK_CONSTANT => CIK_CONSTANT,
+                    _ => CIK_TEXT
+                },
+                "detail": sym["detail"]
+            })
+        }
+    }
+
+    // Score by Levenshtein distance
+    const max_dist = if len(prefix) <= 2 { 1 } else if len(prefix) <= 5 { 2 } else { 3 }
+    let scored = []
+    for c in candidates {
+        const dist = levenshtein(prefix_lower, c["label"].to_lower())
+        if dist > 0 && dist <= max_dist {
+            c["sortText"] = "zz" + to_string(dist) + c["label"]
+            scored.push(c)
+        }
+    }
+
+    scored
+}
+
+// Find double-colon context: `EnumName::` returns the enum name
+func find_double_colon_context(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+    const ln = lines[line]
+
+    // Walk backward: skip any partial identifier
+    let pos = character
+    while pos > 0 && is_ident_char(ln[pos - 1]) {
+        pos = pos - 1
+    }
+
+    // Check for `::`
+    if pos < 2 || ln[pos - 1] != ":" || ln[pos - 2] != ":" {
+        return null
+    }
+    pos = pos - 2
+
+    // Scan backward for the enum name
+    let name_end = pos
+    let name_start = name_end
+    while name_start > 0 && is_ident_char(ln[name_start - 1]) {
+        name_start = name_start - 1
+    }
+    if name_start >= name_end { return null }
+    ln[name_start..name_end]
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 2: Full Hover Engine ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Full hover matching src/lsp/hover.rs:
+//   - Full function signatures with parameter types and return type
+//   - Doc comments (/// above declarations)
+//   - Type info for complex expressions
+//   - Enum variant data types
+//   - Builtin descriptions with examples
+//   - Method descriptions
+//   - Stdlib operation hover with module info
+//   - Keyword documentation
+
+// Method documentation map (mirrors hover.rs method_description)
+const METHOD_DOCS = {
+    "__s": true,
+    "length": "Returns the length (alias for `len`).",
+    "size": "Returns the number of entries in a map (alias for `len`).",
+    "push": "Appends an element to the array and returns the new array.",
+    "pop": "Removes and returns the last element of the array.",
+    "shift": "Removes and returns the first element of the array.",
+    "insert": "Inserts an element at the given index.",
+    "remove": "Removes the element at the given index and returns the array.",
+    "get": "Returns the element at an index (array) or the value for a key (map).",
+    "set": "Sets the element at an index (array) or a key-value pair (map).",
+    "map": "Transforms each element using a function. Returns a new array.",
+    "filter": "Filters elements by a predicate function. Returns a new array.",
+    "reduce": "Reduces the array to a single value using an accumulator function.",
+    "find": "Returns the first element matching the predicate, or null.",
+    "find_index": "Returns the index of the first matching element, or null.",
+    "any": "Returns true if any element matches the predicate.",
+    "all": "Returns true if all elements match the predicate.",
+    "each": "Iterates over each element (for side effects). Returns null.",
+    "sort": "Returns a sorted copy of the array.",
+    "sort_by": "Sorts by a comparator function (a, b) -> number.",
+    "reverse": "Returns a reversed copy.",
+    "contains": "Checks if the collection contains a value.",
+    "join": "Joins array elements into a string with a separator.",
+    "slice": "Returns a sub-array or substring by index range.",
+    "concat": "Concatenates two arrays or byte sequences.",
+    "flatten": "Flattens nested arrays one level deep.",
+    "unique": "Returns the array with duplicate elements removed.",
+    "first": "Returns the first element, or null if empty.",
+    "last": "Returns the last element, or null if empty.",
+    "is_empty": "Returns true if the collection is empty.",
+    "sum": "Returns the sum of all numeric elements.",
+    "product": "Returns the product of all numeric elements.",
+    "flat_map": "Maps each element and flattens the results.",
+    "enumerate": "Returns [index, value] pairs.",
+    "chunk": "Splits the array into chunks of n elements.",
+    "zip": "Zips two arrays into pairs.",
+    "group_by": "Groups elements by a key function. Returns a map.",
+    "min_by": "Finds the minimum element using a comparator.",
+    "max_by": "Finds the maximum element using a comparator.",
+    "take_while": "Takes elements while the predicate is true.",
+    "skip_while": "Skips elements while the predicate is true.",
+    "partition": "Splits into [matches, non-matches].",
+    "scan": "Like reduce, but returns all intermediate accumulator values.",
+    "filter_nulls": "Removes null elements from the array.",
+    "split": "Splits the string by a delimiter. Returns an array.",
+    "replace": "Replaces all occurrences of a substring.",
+    "trim": "Removes leading and trailing whitespace.",
+    "trim_start": "Removes leading whitespace.",
+    "trim_end": "Removes trailing whitespace.",
+    "to_uppercase": "Converts the string to uppercase.",
+    "to_upper": "Converts the string to uppercase (alias).",
+    "to_lowercase": "Converts the string to lowercase.",
+    "to_lower": "Converts the string to lowercase (alias).",
+    "starts_with": "Returns true if the string starts with the given prefix.",
+    "ends_with": "Returns true if the string ends with the given suffix.",
+    "index_of": "Returns the character index of the first occurrence, or -1.",
+    "chars": "Returns an array of individual characters.",
+    "lines": "Splits the string into lines. Returns an array.",
+    "words": "Splits the string into words. Returns an array.",
+    "repeat": "Repeats the string n times.",
+    "count": "Counts occurrences of a substring.",
+    "pad_start": "Pads the start of the string to a given width.",
+    "pad_end": "Pads the end of the string to a given width.",
+    "char_at": "Returns the character at the given index, or null.",
+    "substring": "Returns a substring by start and end index.",
+    "is_numeric": "Returns true if the string is a valid number.",
+    "is_alphabetic": "Returns true if all characters are alphabetic.",
+    "to_int": "Parses the string as an integer. Returns null on failure.",
+    "to_float": "Parses the string as a float. Returns null on failure.",
+    "has": "Returns true if the map contains the given key.",
+    "delete": "Removes a key from the map. Returns the updated map.",
+    "keys": "Returns an array of all keys in the map.",
+    "values": "Returns an array of all values in the map.",
+    "entries": "Returns an array of [key, value] pairs.",
+    "merge": "Merges another map into this one. Returns the merged map.",
+    "filter_entries": "Filters map entries by a predicate (key, value) -> bool.",
+    "map_values": "Transforms map values with a function. Returns a new map.",
+    "map_keys": "Transforms map keys with a function. Returns a new map.",
+    "base64_encode": "Encodes bytes as a base64 string.",
+    "base64_decode": "Decodes a base64 string to bytes.",
+    "sign": "Returns the sign of the number (-1, 0, or 1).",
+    "is_nan": "Returns true if the value is NaN.",
+    "is_infinite": "Returns true if the value is infinite.",
+    "is_finite": "Returns true if the value is finite (not NaN or Infinity).",
+    "dedup": "Removes consecutive duplicate elements.",
+    "binary_search": "Searches a sorted array for a value. Returns index or null.",
+    "frequencies": "Counts occurrences of each element. Returns a map.",
+    "window": "Returns sliding windows of n elements.",
+    "take": "Takes the first n elements.",
+    "skip": "Skips the first n elements.",
+    "invert": "Swaps keys and values in a map.",
+    "select": "Selects only the specified keys from a map.",
+    "reject": "Removes the specified keys from a map.",
+    "deep_merge": "Recursively merges two maps."
+}
+
+// Stdlib operation descriptions (mirrors hover.rs stdlib_op_description)
+const STDLIB_OPS = {
+    "__s": true,
+    "add": ["math", "Adds two numbers."],
+    "subtract": ["math", "Subtracts two numbers."],
+    "multiply": ["math", "Multiplies two numbers."],
+    "divide": ["math", "Divides two numbers."],
+    "modulo": ["math", "Returns the remainder of division."],
+    "power": ["math", "Raises a number to a power."],
+    "negate": ["math", "Negates a number."],
+    "lerp": ["math", "Linear interpolation between two values."],
+    "remap": ["math", "Remaps a value from one range to another."],
+    "gcd": ["math", "Returns the greatest common divisor of two integers."],
+    "lcm": ["math", "Returns the least common multiple of two integers."],
+    "approx_eq": ["math", "Checks approximate equality within an epsilon."],
+    "to_radians": ["math", "Converts degrees to radians."],
+    "to_degrees": ["math", "Converts radians to degrees."],
+    "equal": ["cmp", "Checks if two values are equal."],
+    "not_equal": ["cmp", "Checks if two values are not equal."],
+    "greater": ["cmp", "Checks if the first value is greater."],
+    "less": ["cmp", "Checks if the first value is less."],
+    "and": ["logic", "Logical AND of two values."],
+    "or": ["logic", "Logical OR of two values."],
+    "not": ["logic", "Logical NOT of a value."],
+    "xor": ["logic", "Logical XOR of two values."],
+    "bit_and": ["bits", "Bitwise AND."],
+    "bit_or": ["bits", "Bitwise OR."],
+    "bit_xor": ["bits", "Bitwise XOR."],
+    "bit_not": ["bits", "Bitwise NOT."],
+    "bit_shift_left": ["bits", "Bitwise left shift."],
+    "bit_shift_right": ["bits", "Bitwise right shift."],
+    "string_repeat": ["str", "Repeats a string n times."],
+    "string_reverse": ["str", "Reverses a string."],
+    "string_lines": ["str", "Splits a string into lines."],
+    "string_words": ["str", "Splits a string into words."],
+    "regex_match": ["str", "Tests if a string matches a regex pattern."],
+    "regex_replace": ["str", "Replaces matches of a regex pattern."],
+    "regex_extract": ["str", "Extracts regex match groups."],
+    "parse_json": ["convert", "Parses a JSON string into a value."],
+    "default": ["convert", "Returns the default value for a type."],
+    "from_bytes": ["convert", "Converts bytes to a value."],
+    "to_bytes": ["convert", "Converts a value to bytes."],
+    "array_get": ["array", "Returns the element at an index."],
+    "array_set": ["array", "Sets the element at an index."],
+    "array_push": ["array", "Appends an element to the array."],
+    "array_pop": ["array", "Removes and returns the last element."],
+    "array_shift": ["array", "Removes and returns the first element."],
+    "array_length": ["array", "Returns the length of the array."],
+    "array_slice": ["array", "Returns a sub-array."],
+    "array_concat": ["array", "Concatenates two arrays."],
+    "array_contains": ["array", "Checks if array contains a value."],
+    "array_sort": ["array", "Returns a sorted copy of the array."],
+    "array_reverse": ["array", "Returns a reversed copy of the array."],
+    "array_flatten": ["array", "Flattens nested arrays one level."],
+    "array_unique": ["array", "Returns array with duplicates removed."],
+    "map_get": ["map", "Returns the value for a key."],
+    "map_set": ["map", "Sets a key-value pair."],
+    "map_delete": ["map", "Removes a key from the map."],
+    "map_has": ["map", "Checks if a key exists."],
+    "map_keys": ["map", "Returns an array of keys."],
+    "map_values": ["map", "Returns an array of values."],
+    "map_entries": ["map", "Returns an array of [key, value] pairs."],
+    "map_merge": ["map", "Merges another map."],
+    "map_size": ["map", "Returns the number of entries."],
+    "json_get": ["json", "Gets a value from a JSON structure by path."],
+    "json_set": ["json", "Sets a value in a JSON structure by path."],
+    "json_delete": ["json", "Deletes a value from a JSON structure by path."],
+    "json_flatten": ["json", "Flattens a nested JSON structure."],
+    "json_merge": ["json", "Deep-merges two JSON structures."],
+    "json_type": ["json", "Returns the JSON type of a value."],
+    "json_validate": ["json", "Validates a JSON string."],
+    "json_pretty_print": ["json", "Pretty-prints a JSON value."],
+    "json_compact": ["json", "Compacts a JSON value (removes whitespace)."],
+    "now_timestamp": ["time", "Returns the current timestamp."],
+    "format_timestamp": ["time", "Formats a timestamp as a string."],
+    "parse_timestamp": ["time", "Parses a string into a timestamp."],
+    "sleep": ["time", "Pauses execution for a duration."],
+    "elapsed": ["time", "Returns elapsed time since a timestamp."]
+}
+
+// Enhanced hover handler with full feature set
+func handle_hover_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const program = doc["program"]
+
+    // Check for enum variant pattern: EnumName::Variant
+    const enum_variant = find_enum_variant_at(source, line, character)
+    if enum_variant != null {
+        const ename = enum_variant["enum"]
+        const vname = enum_variant["variant"]
+        const hover_md = get_enum_variant_hover(program, ename, vname)
+        if hover_md != null {
+            return {
+                "contents": lsp_markup_content("markdown", hover_md),
+                "range": lsp_range(line, enum_variant["start"], line, enum_variant["end"])
+            }
+        }
+    }
+
+    const word_info = word_at_position(source, line, character)
+    if word_info == null { return null }
+    const word = word_info["word"]
+    const word_range = lsp_range(line, word_info["start"], line, word_info["end"])
+
+    // 1. Check user-defined functions (with doc comments and full signatures)
+    const func_hover = get_function_hover(program, word)
+    if func_hover != null {
+        return {"contents": lsp_markup_content("markdown", func_hover), "range": word_range}
+    }
+
+    // 2. Check user-defined structs
+    const struct_hover = get_struct_hover(program, word)
+    if struct_hover != null {
+        return {"contents": lsp_markup_content("markdown", struct_hover), "range": word_range}
+    }
+
+    // 3. Check user-defined enums
+    const enum_hover = get_enum_hover(program, word)
+    if enum_hover != null {
+        return {"contents": lsp_markup_content("markdown", enum_hover), "range": word_range}
+    }
+
+    // 4. Check user-defined variables with type inference
+    const var_hover = get_variable_hover(program, word)
+    if var_hover != null {
+        return {"contents": lsp_markup_content("markdown", var_hover), "range": word_range}
+    }
+
+    // 5. Check user-defined interfaces/traits
+    const iface_hover = get_interface_hover(program, word)
+    if iface_hover != null {
+        return {"contents": lsp_markup_content("markdown", iface_hover), "range": word_range}
+    }
+
+    // 6. Check builtin functions with full documentation
+    if BUILTIN_DOCS.has(word) {
+        return {
+            "contents": lsp_markup_content("markdown", BUILTIN_DOCS[word]),
+            "range": word_range
+        }
+    }
+
+    // 7. Check method names
+    if METHOD_DOCS.has(word) {
+        const desc = METHOD_DOCS[word]
+        const md = f"```magi\n.{word}(...)\n```\n\n{desc}"
+        return {"contents": lsp_markup_content("markdown", md), "range": word_range}
+    }
+
+    // 8. Check keyword documentation
+    if KEYWORD_DOCS.has(word) {
+        return {
+            "contents": lsp_markup_content("markdown", KEYWORD_DOCS[word]),
+            "range": word_range
+        }
+    }
+
+    // 9. Check stdlib operations
+    if STDLIB_OPS.has(word) {
+        const op_info = STDLIB_OPS[word]
+        const mod_name = op_info[0]
+        const desc = op_info[1]
+        const md = f"```magi\nfunc {word}(...)\n```\n\n{desc}\n\n*From `std::{mod_name}`*"
+        return {"contents": lsp_markup_content("markdown", md), "range": word_range}
+    }
+
+    // 10. Check cross-file definitions
+    const cross_def = find_definition_across_files(word)
+    if cross_def != null {
+        const def = cross_def["def"]
+        const def_uri = cross_def["uri"]
+        const md = f"```magi\n({def['kind']}) {word}\n```\n\nDefined in `{def_uri}` at line {def['line'] + 1}."
+        return {"contents": lsp_markup_content("markdown", md), "range": word_range}
+    }
+
+    // 11. Type names
+    const type_names = ["int", "int32", "int64", "uint32", "uint64", "float", "float32", "float64",
+                        "string", "bool", "null", "any", "Array", "Map", "Bytes", "String",
+                        "Bool", "Int32", "Int64", "Uint32", "Uint64", "Float32", "Float64"]
+    if type_names.contains(word) {
+        const md = f"`{word}` -- MAGI built-in type"
+        return {"contents": lsp_markup_content("markdown", md), "range": word_range}
+    }
+
+    null
+}
+
+// Detect enum variant at position: returns {enum, variant, start, end} or null
+func find_enum_variant_at(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+    const ln = lines[line]
+
+    // Expand to find the word at cursor
+    let start = character
+    while start > 0 && is_ident_char(ln[start - 1]) { start = start - 1 }
+    let end_pos = character
+    while end_pos < len(ln) && is_ident_char(ln[end_pos]) { end_pos = end_pos + 1 }
+    if start >= end_pos { return null }
+    const word = ln[start..end_pos]
+
+    // Check if preceded by ::
+    if start >= 2 && ln[start - 1] == ":" && ln[start - 2] == ":" {
+        // Get enum name before ::
+        let enum_end = start - 2
+        let enum_start = enum_end
+        while enum_start > 0 && is_ident_char(ln[enum_start - 1]) { enum_start = enum_start - 1 }
+        if enum_start < enum_end {
+            const enum_name = ln[enum_start..enum_end]
+            return {"enum": enum_name, "variant": word, "start": enum_start, "end": end_pos}
+        }
+    }
+
+    // Check if followed by :: (cursor is on enum name)
+    if end_pos + 1 < len(ln) && ln[end_pos] == ":" && ln[end_pos + 1] == ":" {
+        let var_start = end_pos + 2
+        let var_end = var_start
+        while var_end < len(ln) && is_ident_char(ln[var_end]) { var_end = var_end + 1 }
+        if var_start < var_end {
+            const variant = ln[var_start..var_end]
+            return {"enum": word, "variant": variant, "start": start, "end": var_end}
+        }
+    }
+
+    null
+}
+
+// Get hover info for an enum variant
+func get_enum_variant_hover(program, enum_name, variant_name) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SEnumDef(name, variants, _) => {
+                if name == enum_name {
+                    let all_variants = []
+                    let found = false
+                    let variant_data = null
+                    for v in variants {
+                        const vname = if typeof(v) == "string" { v } else { v[0] }
+                        all_variants.push(vname)
+                        if vname == variant_name {
+                            found = true
+                            if typeof(v) != "string" && len(v) > 1 {
+                                variant_data = v[1]
+                            }
+                        }
+                    }
+                    if found {
+                        let md = f"```magi\n{enum_name}::{variant_name}\n```\n\nVariant of `enum {enum_name} {{ {all_variants.join(', ')} }}`"
+                        if variant_data != null {
+                            md = md + f"\n\nData type: `{variant_data}`"
+                        }
+                        return md
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Extract doc comments (///) preceding a statement
+func extract_doc_comments(source, target_line) {
+    const lines = source.split("\n")
+    let doc_lines = []
+    let check_line = target_line - 2  // 0-based, line before the definition
+    while check_line >= 0 {
+        const ln = lines[check_line].trim()
+        if ln.starts_with("///") {
+            const comment_text = ln[3..len(ln)].trim()
+            doc_lines.push(comment_text)
+        } else if ln.starts_with("//") {
+            // Regular comment, stop
+            break
+        } else if ln == "" {
+            // Blank line, stop
+            break
+        } else {
+            break
+        }
+        check_line = check_line - 1
+    }
+    if len(doc_lines) == 0 { return "" }
+    // Reverse since we collected bottom-up
+    doc_lines.reverse().join("\n")
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 3: Full Semantic Tokens ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Walk entire AST and emit token for EVERY node:
+//   - Keywords, string literals, number literals, comments
+//   - Function names, variable names, type names, field names
+//   - Operator tokens, enum members, struct names
+//   - Modifiers: definition, readonly, deprecated
+
+// Full semantic tokens handler using AST-aware classification
+func handle_semantic_tokens_full_v2(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return {"data": []} }
+
+    const source = doc["source"]
+    const program = doc["program"]
+
+    // Build symbol lookup tables for fast classification
+    let known_functions = {"__s": true}
+    let known_structs = {"__s": true}
+    let known_enums = {"__s": true}
+    let known_constants = {"__s": true}
+    let known_variables = {"__s": true}
+    let known_params = {"__s": true}
+    let known_type_aliases = {"__s": true}
+
+    if program != null {
+        for stmt in program.statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    known_functions[fdef.name] = true
+                    for p in fdef.params {
+                        known_params[p.name] = true
+                    }
+                },
+                StmtKind::SAsyncFuncDef(fdef) => {
+                    known_functions[fdef.name] = true
+                    for p in fdef.params {
+                        known_params[p.name] = true
+                    }
+                },
+                StmtKind::SStructDef(name, _, _) => { known_structs[name] = true },
+                StmtKind::SEnumDef(name, _, _) => { known_enums[name] = true },
+                StmtKind::SConst(name, _) => { known_constants[name] = true },
+                StmtKind::SLet(name, _) => { known_variables[name] = true },
+                StmtKind::SLetMut(name, _) => { known_variables[name] = true },
+                _ => {}
+            }
+        }
+    }
+
+    // Tokenize source using the self-hosted lexer
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+    p_tokens = tokenize(source)
+    const tokens = p_tokens
+    p_tokens = save_tokens
+    p_pos = save_pos
+
+    // Classify each token with rich semantic information
+    let raw = []  // Array of [line, col, len, type, modifiers]
+
+    for tok in tokens {
+        const tl = tok.line - 1
+        const tc = tok.col - 1
+        const tlen = len(tok.text)
+        if tlen == 0 { continue }
+
+        let token_type = null
+        let token_mods = 0
+        const tk = tok.kind
+
+        match tk {
+            // String literals
+            TokenKind::StringLit => {
+                token_type = SEM_STRING
+            },
+            // Number literals
+            TokenKind::IntLit => {
+                token_type = SEM_NUMBER
+            },
+            TokenKind::FloatLit => {
+                token_type = SEM_NUMBER
+            },
+            // Keywords
+            TokenKind::Func => { token_type = SEM_KEYWORD },
+            TokenKind::Let => { token_type = SEM_KEYWORD },
+            TokenKind::Const => { token_type = SEM_KEYWORD },
+            TokenKind::If => { token_type = SEM_KEYWORD },
+            TokenKind::Else => { token_type = SEM_KEYWORD },
+            TokenKind::While => { token_type = SEM_KEYWORD },
+            TokenKind::For => { token_type = SEM_KEYWORD },
+            TokenKind::Return => { token_type = SEM_KEYWORD },
+            TokenKind::Match => { token_type = SEM_KEYWORD },
+            TokenKind::Enum => { token_type = SEM_KEYWORD },
+            TokenKind::Struct => { token_type = SEM_KEYWORD },
+            TokenKind::Trait => { token_type = SEM_KEYWORD },
+            TokenKind::Impl => { token_type = SEM_KEYWORD },
+            TokenKind::Import => { token_type = SEM_KEYWORD },
+            TokenKind::True => { token_type = SEM_KEYWORD },
+            TokenKind::False => { token_type = SEM_KEYWORD },
+            TokenKind::Null => { token_type = SEM_KEYWORD },
+            TokenKind::In => { token_type = SEM_KEYWORD },
+            TokenKind::As => { token_type = SEM_KEYWORD },
+            TokenKind::Break => { token_type = SEM_KEYWORD },
+            TokenKind::Continue => { token_type = SEM_KEYWORD },
+            TokenKind::Async => { token_type = SEM_KEYWORD },
+            TokenKind::Await => { token_type = SEM_KEYWORD },
+            TokenKind::Try => { token_type = SEM_KEYWORD },
+            TokenKind::Catch => { token_type = SEM_KEYWORD },
+            TokenKind::Throw => { token_type = SEM_KEYWORD },
+            TokenKind::Spawn => { token_type = SEM_KEYWORD },
+            TokenKind::Yield => { token_type = SEM_KEYWORD },
+            TokenKind::Pub => { token_type = SEM_KEYWORD },
+            TokenKind::Test => { token_type = SEM_KEYWORD },
+            // Operators
+            TokenKind::Plus => { token_type = SEM_OPERATOR },
+            TokenKind::Minus => { token_type = SEM_OPERATOR },
+            TokenKind::Star => { token_type = SEM_OPERATOR },
+            TokenKind::Slash => { token_type = SEM_OPERATOR },
+            TokenKind::Percent => { token_type = SEM_OPERATOR },
+            TokenKind::EqEq => { token_type = SEM_OPERATOR },
+            TokenKind::NotEq => { token_type = SEM_OPERATOR },
+            TokenKind::Lt => { token_type = SEM_OPERATOR },
+            TokenKind::Gt => { token_type = SEM_OPERATOR },
+            TokenKind::LtEq => { token_type = SEM_OPERATOR },
+            TokenKind::GtEq => { token_type = SEM_OPERATOR },
+            TokenKind::And => { token_type = SEM_OPERATOR },
+            TokenKind::Or => { token_type = SEM_OPERATOR },
+            TokenKind::Not => { token_type = SEM_OPERATOR },
+            TokenKind::Eq => { token_type = SEM_OPERATOR },
+            TokenKind::Arrow => { token_type = SEM_OPERATOR },
+            TokenKind::FatArrow => { token_type = SEM_OPERATOR },
+            TokenKind::Pipe => { token_type = SEM_OPERATOR },
+            TokenKind::Ampersand => { token_type = SEM_OPERATOR },
+            TokenKind::DotDot => { token_type = SEM_OPERATOR },
+            TokenKind::ColonColon => { token_type = SEM_OPERATOR },
+            // Identifiers — classify using symbol tables
+            TokenKind::Ident => {
+                const txt = tok.text
+                if MAGI_KEYWORDS.contains(txt) {
+                    token_type = SEM_KEYWORD
+                } else if known_functions.has(txt) && txt != "__s" {
+                    token_type = SEM_FUNCTION
+                    token_mods = MOD_DECLARATION
+                } else if known_structs.has(txt) && txt != "__s" {
+                    token_type = SEM_STRUCT
+                    token_mods = MOD_DECLARATION
+                } else if known_enums.has(txt) && txt != "__s" {
+                    token_type = SEM_ENUM
+                    token_mods = MOD_DECLARATION
+                } else if known_constants.has(txt) && txt != "__s" {
+                    token_type = SEM_VARIABLE
+                    token_mods = MOD_READONLY
+                } else if known_params.has(txt) && txt != "__s" {
+                    token_type = SEM_PARAMETER
+                } else if known_variables.has(txt) && txt != "__s" {
+                    token_type = SEM_VARIABLE
+                } else if MAGI_BUILTINS.contains(txt) {
+                    token_type = SEM_FUNCTION
+                    token_mods = MOD_DEFAULT_LIBRARY
+                } else if is_type_name_str(txt) {
+                    token_type = SEM_TYPE
+                } else {
+                    // Check context: preceded by dot -> property/method
+                    const src_lines = source.split("\n")
+                    if tl < len(src_lines) {
+                        const line_text = src_lines[tl]
+                        if tc > 0 && line_text[tc - 1] == "." {
+                            // Check if followed by ( -> method call
+                            let next_pos = tc + tlen
+                            while next_pos < len(line_text) && line_text[next_pos] == " " { next_pos = next_pos + 1 }
+                            if next_pos < len(line_text) && line_text[next_pos] == "(" {
+                                token_type = SEM_METHOD
+                            } else {
+                                token_type = SEM_PROPERTY
+                            }
+                        } else if tc >= 2 && line_text[tc - 1] == ":" && line_text[tc - 2] == ":" {
+                            token_type = SEM_ENUM_MEMBER
+                        } else {
+                            // Check if followed by ( -> function call
+                            let next_pos = tc + tlen
+                            while next_pos < len(line_text) && line_text[next_pos] == " " { next_pos = next_pos + 1 }
+                            if next_pos < len(line_text) && line_text[next_pos] == "(" {
+                                token_type = SEM_FUNCTION
+                            } else {
+                                token_type = SEM_VARIABLE
+                            }
+                        }
+                    } else {
+                        token_type = SEM_VARIABLE
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        if token_type != null {
+            raw.push([tl, tc, tlen, token_type, token_mods])
+        }
+    }
+
+    // Also emit comment tokens by scanning source lines
+    const src_lines = source.split("\n")
+    let li = 0
+    while li < len(src_lines) {
+        const ln = src_lines[li]
+        let ci = 0
+        // Skip whitespace
+        while ci < len(ln) && (ln[ci] == " " || ln[ci] == "\t") { ci = ci + 1 }
+        if ci < len(ln) - 1 && ln[ci] == "/" && ln[ci + 1] == "/" {
+            const comment_len = len(ln) - ci
+            let is_doc = ci < len(ln) - 2 && ln[ci + 2] == "/"
+            let mods = 0
+            if is_doc { mods = MOD_DOCUMENTATION }
+            raw.push([li, ci, comment_len, SEM_COMMENT, mods])
+        }
+        li = li + 1
+    }
+
+    // Sort by line then column
+    raw = raw.sort_by((a, b) => {
+        if a[0] != b[0] { return a[0] - b[0] }
+        a[1] - b[1]
+    })
+
+    // Encode as delta format
+    let data = []
+    let prev_line = 0
+    let prev_char = 0
+
+    for entry in raw {
+        const rl = entry[0]
+        const rc = entry[1]
+        const rlen = entry[2]
+        const rtype = entry[3]
+        const rmods = entry[4]
+
+        const delta_line = rl - prev_line
+        const delta_char = if delta_line == 0 { rc - prev_char } else { rc }
+        data.push(delta_line)
+        data.push(delta_char)
+        data.push(rlen)
+        data.push(rtype)
+        data.push(rmods)
+
+        prev_line = rl
+        prev_char = rc
+    }
+
+    {"data": data}
+}
+
+// Check if a string is a type name
+func is_type_name_str(name) {
+    const types = ["int", "int32", "int64", "uint32", "uint64", "float", "float32", "float64",
+                   "string", "bool", "null", "any", "Array", "Map", "Bytes", "String",
+                   "Bool", "Int32", "Int64", "Uint32", "Uint64", "Float32", "Float64",
+                   "Function", "void", "never"]
+    types.contains(name)
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 4: Full Code Actions ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Matching src/lsp/code_actions.rs:
+//   - Fix misspelled identifier (suggest closest match)
+//   - Add missing import (E201)
+//   - Remove unused import
+//   - Convert let to const (if never reassigned)
+//   - Add type annotation
+//   - Rename to snake_case (W200)
+//   - Organize imports
+//   - Extract function
+//   - Inline variable
+
+// Full code actions handler
+func handle_code_action_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const range = params["range"]
+    const context = params["context"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return [] }
+
+    let actions = []
+    const source = doc["source"]
+    const program = doc["program"]
+
+    // Process diagnostics for quick fixes
+    if context != null && context.has("diagnostics") {
+        const diags = context["diagnostics"]
+        for diag in diags {
+            const msg = diag["message"]
+            const code = if diag.has("code") { diag["code"] } else { null }
+
+            // E201: Undefined function — suggest import
+            if code == "E201" || msg.contains("Undefined function") {
+                const func_name = extract_name_from_diagnostic(msg)
+                if func_name != null {
+                    const import_action = make_import_action(uri, source, func_name, diag)
+                    if import_action != null {
+                        actions.push(import_action)
+                    }
+                }
+            }
+
+            // W200: Naming convention — suggest snake_case rename
+            if code == "W200" || msg.contains("should be snake_case") {
+                const ident = extract_name_from_diagnostic(msg)
+                if ident != null {
+                    const snake_action = make_snake_case_action(uri, source, ident, diag)
+                    if snake_action != null {
+                        actions.push(snake_action)
+                    }
+                }
+            }
+
+            // Unused variable: prefix with underscore
+            if msg.contains("unused") {
+                const var_name = extract_name_from_diagnostic(msg)
+                if var_name != null && !var_name.starts_with("_") {
+                    actions.push({
+                        "title": f"Prefix '{var_name}' with underscore",
+                        "kind": "quickfix",
+                        "diagnostics": [diag],
+                        "edit": {
+                            "changes": make_rename_edits(uri, source, var_name, "_" + var_name)
+                        },
+                        "isPreferred": true
+                    })
+                }
+            }
+
+            // Misspelled identifier: suggest closest match
+            if msg.contains("Undefined") || msg.contains("undefined") {
+                const unknown = extract_name_from_diagnostic(msg)
+                if unknown != null {
+                    const suggestion = find_closest_symbol(program, unknown)
+                    if suggestion != null {
+                        actions.push({
+                            "title": f"Did you mean '{suggestion}'?",
+                            "kind": "quickfix",
+                            "diagnostics": [diag],
+                            "edit": {
+                                "changes": make_rename_edits(uri, source, unknown, suggestion)
+                            }
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    // Source actions (always available)
+
+    // Organize imports
+    const organize_action = make_organize_imports_action(uri, source)
+    if organize_action != null {
+        actions.push(organize_action)
+    }
+
+    // Convert let to const (if variable is never reassigned)
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+    const let_to_const = make_let_to_const_action(uri, source, program, start_line, end_line)
+    if let_to_const != null {
+        actions.push(let_to_const)
+    }
+
+    // Add type annotation for untyped declarations in range
+    const add_type_action = make_add_type_annotation_action(uri, source, program, start_line, end_line)
+    if add_type_action != null {
+        actions.push(add_type_action)
+    }
+
+    // Format document
+    actions.push({
+        "title": "Format document",
+        "kind": "source.fixAll",
+        "command": {
+            "title": "Format",
+            "command": "magi.format",
+            "arguments": [uri]
+        }
+    })
+
+    actions
+}
+
+// Extract a quoted name from diagnostic message: "blah 'name' blah"
+func extract_name_from_diagnostic(message) {
+    let start = -1
+    let i = 0
+    while i < len(message) {
+        if message[i] == "'" {
+            if start == -1 {
+                start = i + 1
+            } else {
+                return message[start..i]
+            }
+        }
+        i = i + 1
+    }
+    null
+}
+
+// Find the closest matching symbol for a misspelled identifier
+func find_closest_symbol(program, unknown) {
+    if program == null { return null }
+    let best_name = null
+    let best_dist = 999
+
+    const symbols = collect_symbols(program)
+    for sym in symbols {
+        const dist = levenshtein(unknown.to_lower(), sym["name"].to_lower())
+        if dist > 0 && dist < best_dist && dist <= 3 {
+            best_dist = dist
+            best_name = sym["name"]
+        }
+    }
+
+    // Also check builtins and keywords
+    for b in MAGI_BUILTINS {
+        const dist = levenshtein(unknown.to_lower(), b.to_lower())
+        if dist > 0 && dist < best_dist && dist <= 3 {
+            best_dist = dist
+            best_name = b
+        }
+    }
+
+    best_name
+}
+
+// Make an import suggestion code action
+func make_import_action(uri, source, func_name, diag) {
+    // Check if the function exists in any stdlib module
+    const module = find_stdlib_module_for_function(func_name)
+    if module == null { return null }
+
+    const insert_line = find_import_insert_line(source)
+    const import_text = f"import std.{module}\n"
+
+    let changes = {"__s": true}
+    changes[uri] = [{
+        "range": lsp_range(insert_line, 0, insert_line, 0),
+        "newText": import_text
+    }]
+
+    {
+        "title": f"Import '{func_name}' from std.{module}",
+        "kind": "quickfix",
+        "diagnostics": [diag],
+        "edit": {"changes": changes},
+        "isPreferred": true
+    }
+}
+
+// Find which stdlib module exports a function
+func find_stdlib_module_for_function(func_name) {
+    for key in STDLIB_OPS.keys() {
+        if key == "__s" { continue }
+        if key == func_name {
+            return STDLIB_OPS[key][0]
+        }
+    }
+    // Check common mappings
+    if func_name.starts_with("array_") { return "array" }
+    if func_name.starts_with("map_") { return "map" }
+    if func_name.starts_with("string_") { return "str" }
+    if func_name.starts_with("json_") { return "json" }
+    if func_name.starts_with("regex_") { return "str" }
+    if func_name.starts_with("bit_") { return "bits" }
+    null
+}
+
+// Find the line to insert a new import statement
+func find_import_insert_line(source) {
+    const lines = source.split("\n")
+    let last_import_line = -1
+    let i = 0
+    while i < len(lines) {
+        const trimmed = lines[i].trim()
+        if trimmed.starts_with("import ") || trimmed.starts_with("use ") {
+            last_import_line = i
+        } else if trimmed != "" && last_import_line >= 0 {
+            break
+        } else if trimmed != "" && last_import_line == -1 {
+            break
+        }
+        i = i + 1
+    }
+    if last_import_line >= 0 { last_import_line + 1 } else { 0 }
+}
+
+// Convert string to snake_case
+func to_snake_case(name) {
+    let result = ""
+    let i = 0
+    while i < len(name) {
+        const c = name[i]
+        if c >= "A" && c <= "Z" {
+            if i > 0 && result[len(result) - 1] != "_" {
+                result = result + "_"
+            }
+            result = result + c.to_lower()
+        } else {
+            result = result + c
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Make a snake_case rename action
+func make_snake_case_action(uri, source, ident, diag) {
+    const snake = to_snake_case(ident)
+    if snake == ident || len(snake) == 0 { return null }
+
+    let changes = make_rename_edits(uri, source, ident, snake)
+
+    {
+        "title": f"Rename '{ident}' to '{snake}'",
+        "kind": "quickfix",
+        "diagnostics": [diag],
+        "edit": {"changes": changes},
+        "isPreferred": true
+    }
+}
+
+// Make text edits to rename all occurrences of a name in a document
+func make_rename_edits(uri, source, old_name, new_name) {
+    let edits = []
+    const lines = source.split("\n")
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i]
+        let search_start = 0
+        while search_start < len(ln) {
+            const idx = ln[search_start..len(ln)].index_of(old_name)
+            if idx == -1 { break }
+            const abs_idx = search_start + idx
+            const after_idx = abs_idx + len(old_name)
+            // Check word boundary
+            const before_ok = abs_idx == 0 || !is_ident_char(ln[abs_idx - 1])
+            const after_ok = after_idx >= len(ln) || !is_ident_char(ln[after_idx])
+            if before_ok && after_ok {
+                edits.push(lsp_text_edit(
+                    lsp_range(i, abs_idx, i, after_idx),
+                    new_name
+                ))
+            }
+            search_start = abs_idx + len(old_name)
+            if search_start >= len(ln) { break }
+        }
+        i = i + 1
+    }
+    let changes = {"__s": true}
+    changes[uri] = edits
+    changes
+}
+
+// Make organize imports action
+func make_organize_imports_action(uri, source) {
+    const lines = source.split("\n")
+    let import_lines = []
+    let i = 0
+    while i < len(lines) {
+        const trimmed = lines[i].trim()
+        if trimmed.starts_with("import ") || trimmed.starts_with("use ") {
+            import_lines.push({"line": i, "text": trimmed})
+        }
+        i = i + 1
+    }
+
+    if len(import_lines) < 2 { return null }
+
+    // Check if already sorted
+    let sorted_texts = []
+    for il in import_lines { sorted_texts.push(il["text"]) }
+    sorted_texts = sorted_texts.sort()
+
+    let already_sorted = true
+    i = 0
+    while i < len(import_lines) {
+        if import_lines[i]["text"] != sorted_texts[i] {
+            already_sorted = false
+            break
+        }
+        i = i + 1
+    }
+    if already_sorted { return null }
+
+    // Build edits to replace each import line
+    let edits = []
+    i = 0
+    while i < len(import_lines) {
+        const il = import_lines[i]
+        const original = lines[il["line"]]
+        edits.push(lsp_text_edit(
+            lsp_range(il["line"], 0, il["line"], len(original)),
+            sorted_texts[i]
+        ))
+        i = i + 1
+    }
+
+    let changes = {"__s": true}
+    changes[uri] = edits
+
+    {
+        "title": "Organize imports",
+        "kind": "source.organizeImports",
+        "edit": {"changes": changes}
+    }
+}
+
+// Make let-to-const action for variables that are never reassigned
+func make_let_to_const_action(uri, source, program, start_line, end_line) {
+    if program == null { return null }
+    const lines = source.split("\n")
+
+    let i = start_line
+    while i <= end_line && i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.starts_with("let ") && !ln.starts_with("let mut ") {
+            // Extract variable name
+            const after_let = ln[4..len(ln)].trim()
+            let name_end = 0
+            while name_end < len(after_let) && is_ident_char(after_let[name_end]) {
+                name_end = name_end + 1
+            }
+            if name_end > 0 {
+                const var_name = after_let[0..name_end]
+                // Check if the variable is ever reassigned
+                const is_reassigned = check_reassignment(program, var_name)
+                if !is_reassigned {
+                    // Find the "let " in the original line
+                    const original = lines[i]
+                    const let_idx = original.index_of("let ")
+                    if let_idx >= 0 {
+                        let changes = {"__s": true}
+                        changes[uri] = [lsp_text_edit(
+                            lsp_range(i, let_idx, i, let_idx + 3),
+                            "const"
+                        )]
+                        return {
+                            "title": f"Convert 'let {var_name}' to 'const {var_name}'",
+                            "kind": "refactor.rewrite",
+                            "edit": {"changes": changes}
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    null
+}
+
+// Check if a variable is reassigned in the program
+func check_reassignment(program, var_name) {
+    if program == null { return false }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SAssignment(name, _) => {
+                if name == var_name { return true }
+            },
+            StmtKind::SCompoundAssign(name, _, _) => {
+                if name == var_name { return true }
+            },
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.body != null {
+                    for s in fdef.body.statements {
+                        if check_reassignment_in_stmt(s, var_name) { return true }
+                    }
+                }
+            },
+            StmtKind::SIf(_, then_body, else_body) => {
+                if then_body != null {
+                    for s in then_body.statements {
+                        if check_reassignment_in_stmt(s, var_name) { return true }
+                    }
+                }
+                if else_body != null {
+                    for s in else_body.statements {
+                        if check_reassignment_in_stmt(s, var_name) { return true }
+                    }
+                }
+            },
+            StmtKind::SWhileLoop(_, _, body) => {
+                if body != null {
+                    for s in body.statements {
+                        if check_reassignment_in_stmt(s, var_name) { return true }
+                    }
+                }
+            },
+            StmtKind::SForLoop(_, _, body, _) => {
+                if body != null {
+                    for s in body.statements {
+                        if check_reassignment_in_stmt(s, var_name) { return true }
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+func check_reassignment_in_stmt(stmt, var_name) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SAssignment(name, _) => name == var_name,
+        StmtKind::SCompoundAssign(name, _, _) => name == var_name,
+        _ => false
+    }
+}
+
+// Make add type annotation action
+func make_add_type_annotation_action(uri, source, program, start_line, end_line) {
+    if program == null { return null }
+    const lines = source.split("\n")
+
+    let i = start_line
+    while i <= end_line && i < len(lines) {
+        for stmt in program.statements {
+            const sl = stmt.span.start_line - 1
+            if sl != i { continue }
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SLet(name, expr) => {
+                    if expr != null {
+                        const inferred = infer_simple_type(expr)
+                        if inferred != "unknown" && inferred != null {
+                            const original = lines[i]
+                            // Find the variable name position
+                            const name_idx = original.index_of(name)
+                            if name_idx >= 0 {
+                                const insert_pos = name_idx + len(name)
+                                let changes = {"__s": true}
+                                changes[uri] = [lsp_text_edit(
+                                    lsp_range(i, insert_pos, i, insert_pos),
+                                    f": {inferred}"
+                                )]
+                                return {
+                                    "title": f"Add type annotation ': {inferred}' to '{name}'",
+                                    "kind": "refactor.rewrite",
+                                    "edit": {"changes": changes}
+                                }
+                            }
+                        }
+                    }
+                },
+                StmtKind::SConst(name, expr) => {
+                    if expr != null {
+                        const inferred = infer_simple_type(expr)
+                        if inferred != "unknown" && inferred != null {
+                            const original = lines[i]
+                            const name_idx = original.index_of(name)
+                            if name_idx >= 0 {
+                                const insert_pos = name_idx + len(name)
+                                let changes = {"__s": true}
+                                changes[uri] = [lsp_text_edit(
+                                    lsp_range(i, insert_pos, i, insert_pos),
+                                    f": {inferred}"
+                                )]
+                                return {
+                                    "title": f"Add type annotation ': {inferred}' to '{name}'",
+                                    "kind": "refactor.rewrite",
+                                    "edit": {"changes": changes}
+                                }
+                            }
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+        i = i + 1
+    }
+    null
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 5: Full Document Formatting ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Uses the self-hosted formatter for full document and range formatting
+// with additional cleanup passes
+
+// Full formatting handler with cleanup passes
+func handle_formatting_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const options = if params.has("options") { params["options"] } else { null }
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const program = doc["program"]
+
+    // If we have a parsed program, use the AST formatter
+    let formatted = source
+    if program != null {
+        formatted = format_program(program)
+    }
+
+    // Apply cleanup passes
+    formatted = sort_imports(formatted)
+    formatted = remove_trailing_whitespace(formatted)
+    formatted = normalize_blank_lines(formatted)
+    formatted = ensure_final_newline(formatted)
+
+    // Apply tab/space preference from options
+    if options != null {
+        const use_tabs = if options.has("insertSpaces") { !options["insertSpaces"] } else { false }
+        const tab_size = if options.has("tabSize") { options["tabSize"] } else { 4 }
+        if use_tabs {
+            formatted = convert_spaces_to_tabs(formatted, tab_size)
+        }
+    }
+
+    // If no changes, return empty edits
+    if formatted == source { return [] }
+
+    const lines = source_lines(source)
+    const last_line = len(lines) - 1
+    const last_char = if last_line >= 0 { len(lines[last_line]) } else { 0 }
+
+    [lsp_text_edit(lsp_range(0, 0, last_line, last_char), formatted)]
+}
+
+// Full range formatting handler
+func handle_range_formatting_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const range = params["range"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const program = doc["program"]
+
+    let formatted = source
+    if program != null {
+        formatted = format_program(program)
+    }
+    formatted = remove_trailing_whitespace(formatted)
+
+    const fmt_lines = formatted.split("\n")
+    const src_lines = source_lines(source)
+
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+
+    // Extract formatted lines for the range
+    let range_text = ""
+    let i = start_line
+    while i <= end_line && i < len(fmt_lines) {
+        if i > start_line { range_text = range_text + "\n" }
+        range_text = range_text + fmt_lines[i]
+        i = i + 1
+    }
+
+    const end_char = if end_line < len(src_lines) { len(src_lines[end_line]) } else { 0 }
+
+    [lsp_text_edit(lsp_range(start_line, 0, end_line, end_char), range_text)]
+}
+
+// Normalize consecutive blank lines (max 2)
+func normalize_blank_lines(source) {
+    const lines = source.split("\n")
+    let result = []
+    let blank_count = 0
+
+    for ln in lines {
+        if ln.trim() == "" {
+            blank_count = blank_count + 1
+            if blank_count <= 2 {
+                result.push(ln)
+            }
+        } else {
+            blank_count = 0
+            result.push(ln)
+        }
+    }
+
+    result.join("\n")
+}
+
+// Convert spaces to tabs
+func convert_spaces_to_tabs(source, tab_size) {
+    const lines = source.split("\n")
+    let result = []
+    const spaces = " ".repeat(tab_size)
+
+    for ln in lines {
+        let new_line = ln
+        // Only convert leading spaces
+        let indent_end = 0
+        while indent_end < len(ln) && ln[indent_end] == " " {
+            indent_end = indent_end + 1
+        }
+        if indent_end > 0 {
+            const indent = ln[0..indent_end]
+            const rest = ln[indent_end..len(ln)]
+            const tab_count = indent_end / tab_size
+            const remainder = indent_end % tab_size
+            new_line = "\t".repeat(tab_count) + " ".repeat(remainder) + rest
+        }
+        result.push(new_line)
+    }
+
+    result.join("\n")
+}
+
+// On-type formatting: auto-indent after { and dedent after }
+func handle_on_type_formatting_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const ch = if params.has("ch") { params["ch"] } else { "" }
+    const doc = lsp_get_document(uri)
+    if doc == null { return [] }
+
+    const source = doc["source"]
+    const lines = source_lines(source)
+    const line = pos["line"]
+
+    if ch == "}" && line > 0 {
+        // Find the matching { and use its indentation
+        const current_line = if line < len(lines) { lines[line] } else { "" }
+        let current_indent = 0
+        while current_indent < len(current_line) && current_line[current_indent] == " " {
+            current_indent = current_indent + 1
+        }
+
+        // Look for the matching opening brace
+        let depth = 0
+        let target_indent = 0
+        let scan = line
+        while scan >= 0 {
+            const ln = lines[scan]
+            let ci = len(ln) - 1
+            while ci >= 0 {
+                if ln[ci] == "}" { depth = depth + 1 }
+                if ln[ci] == "{" {
+                    depth = depth - 1
+                    if depth == 0 {
+                        // Found matching brace — compute its indent
+                        let bi = 0
+                        while bi < len(ln) && ln[bi] == " " { bi = bi + 1 }
+                        target_indent = bi
+                        break
+                    }
+                }
+                ci = ci - 1
+            }
+            if depth == 0 { break }
+            scan = scan - 1
+        }
+
+        if target_indent != current_indent {
+            const new_indent = " ".repeat(target_indent)
+            const rest = current_line.trim()
+            return [lsp_text_edit(
+                lsp_range(line, 0, line, len(current_line)),
+                new_indent + rest
+            )]
+        }
+    }
+
+    []
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 6: Diagnostics Integration ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// After each document change, run type checker and linter,
+// report errors and warnings as LSP diagnostics with proper ranges.
+
+// Enhanced diagnostics with source position tracking
+func compute_diagnostics_full(uri, text) {
+    let diagnostics = []
+
+    // Save parser state
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+
+    // Tokenize
+    const tokens = tokenize(text)
+    p_tokens = tokens
+    p_pos = 0
+    let program = null
+    let parse_errors = []
+
+    // Parse
+    if len(tokens) > 0 {
+        p_pos = 0
+        program = parse_program()
+    }
+
+    // Restore parser state
+    p_tokens = save_tokens
+    p_pos = save_pos
+
+    // Type check with position tracking
+    if program != null {
+        const save_errors = tc_errors
+        const save_warnings = tc_warnings
+        tc_errors = []
+        tc_warnings = []
+
+        check(program)
+
+        for err in tc_errors {
+            const pos_info = extract_position_from_error(err, text)
+            diagnostics.push(lsp_diagnostic(
+                lsp_range(pos_info["line"], pos_info["col"], pos_info["line"], pos_info["end_col"]),
+                DIAG_ERROR,
+                pos_info["message"],
+                "magi",
+                pos_info["code"]
+            ))
+        }
+        for w in tc_warnings {
+            const pos_info = extract_position_from_error(w, text)
+            diagnostics.push(lsp_diagnostic(
+                lsp_range(pos_info["line"], pos_info["col"], pos_info["line"], pos_info["end_col"]),
+                DIAG_WARNING,
+                pos_info["message"],
+                "magi",
+                pos_info["code"]
+            ))
+        }
+
+        tc_errors = save_errors
+        tc_warnings = save_warnings
+    }
+
+    // Lint
+    if program != null {
+        const lint_warnings = lint(program)
+        for w in lint_warnings {
+            const pos_info = extract_position_from_error(w, text)
+            diagnostics.push(lsp_diagnostic(
+                lsp_range(pos_info["line"], pos_info["col"], pos_info["line"], pos_info["end_col"]),
+                DIAG_INFO,
+                pos_info["message"],
+                "magi-lint",
+                null
+            ))
+        }
+    }
+
+    // Check for common issues not caught by type checker
+
+    // 1. Duplicate function definitions
+    if program != null {
+        let func_names = {"__s": true}
+        for stmt in program.statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if func_names.has(fdef.name) && fdef.name != "__s" {
+                        const sl = stmt.span.start_line - 1
+                        const sc = stmt.span.start_col - 1
+                        diagnostics.push(lsp_diagnostic(
+                            lsp_range(sl, sc, sl, sc + len(fdef.name) + 5),
+                            DIAG_ERROR,
+                            f"Duplicate function definition '{fdef.name}'",
+                            "magi",
+                            "E100"
+                        ))
+                    }
+                    func_names[fdef.name] = true
+                },
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Unused imports
+    if program != null {
+        const lines = text.split("\n")
+        for stmt in program.statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SImport(module_path, _) => {
+                    const sl = stmt.span.start_line - 1
+                    const parts = module_path.split(".")
+                    const mod_name = if len(parts) > 0 { parts[len(parts) - 1] } else { module_path }
+                    // Simple check: does the module name appear elsewhere in the source?
+                    let used = false
+                    let li = 0
+                    while li < len(lines) {
+                        if li != sl && lines[li].contains(mod_name) {
+                            used = true
+                            break
+                        }
+                        li = li + 1
+                    }
+                    if !used {
+                        const sc = stmt.span.start_col - 1
+                        diagnostics.push(lsp_diagnostic(
+                            lsp_range(sl, sc, sl, sc + len(module_path) + 7),
+                            DIAG_HINT,
+                            f"Unused import '{module_path}'",
+                            "magi-lint",
+                            "W100"
+                        ))
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    // 3. Empty blocks
+    if program != null {
+        for stmt in program.statements {
+            const sl = stmt.span.start_line - 1
+            const sc = stmt.span.start_col - 1
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if fdef.body != null && len(fdef.body.statements) == 0 {
+                        diagnostics.push(lsp_diagnostic(
+                            lsp_range(sl, sc, sl, sc + len(fdef.name) + 5),
+                            DIAG_INFO,
+                            f"Function '{fdef.name}' has an empty body",
+                            "magi-lint",
+                            "W101"
+                        ))
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    diagnostics
+}
+
+// Extract position information from error messages
+// Error format might be: "line N col M: message" or just "message"
+func extract_position_from_error(error_msg, source) {
+    let line = 0
+    let col = 0
+    let end_col = 1
+    let message = error_msg
+    let code = null
+
+    // Try to extract "line N" pattern
+    if error_msg.contains("line ") {
+        const line_idx = error_msg.index_of("line ")
+        if line_idx >= 0 {
+            const after = error_msg[line_idx + 5..len(error_msg)]
+            let num_end = 0
+            while num_end < len(after) && after[num_end] >= "0" && after[num_end] <= "9" {
+                num_end = num_end + 1
+            }
+            if num_end > 0 {
+                line = to_int(after[0..num_end]) - 1
+                if line < 0 { line = 0 }
+            }
+        }
+    }
+
+    // Try to extract "col N" pattern
+    if error_msg.contains("col ") {
+        const col_idx = error_msg.index_of("col ")
+        if col_idx >= 0 {
+            const after = error_msg[col_idx + 4..len(error_msg)]
+            let num_end = 0
+            while num_end < len(after) && after[num_end] >= "0" && after[num_end] <= "9" {
+                num_end = num_end + 1
+            }
+            if num_end > 0 {
+                col = to_int(after[0..num_end]) - 1
+                if col < 0 { col = 0 }
+                end_col = col + 10
+            }
+        }
+    }
+
+    // Try to extract error code: E200, W100, etc.
+    if len(error_msg) >= 4 {
+        const first = error_msg[0]
+        if (first == "E" || first == "W") && error_msg[1] >= "0" && error_msg[1] <= "9" {
+            let code_end = 1
+            while code_end < len(error_msg) && error_msg[code_end] >= "0" && error_msg[code_end] <= "9" {
+                code_end = code_end + 1
+            }
+            code = error_msg[0..code_end]
+            if code_end < len(error_msg) && error_msg[code_end] == ":" {
+                message = error_msg[code_end + 1..len(error_msg)].trim()
+            }
+        }
+    }
+
+    // Clamp end_col to line length
+    const lines = source.split("\n")
+    if line < len(lines) {
+        const line_len = len(lines[line])
+        if end_col > line_len { end_col = line_len }
+    }
+
+    {"line": line, "col": col, "end_col": end_col, "message": message, "code": code}
+}
+
+// Enhanced document caching with full diagnostics
+func lsp_cache_document_full(uri, text) {
+    let program = null
+    let diagnostics = []
+
+    // Parse
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+    p_tokens = tokenize(text)
+    p_pos = 0
+    if len(p_tokens) > 0 {
+        p_pos = 0
+        program = parse_program()
+    }
+    p_tokens = save_tokens
+    p_pos = save_pos
+
+    // Compute full diagnostics
+    diagnostics = compute_diagnostics_full(uri, text)
+
+    lsp_documents[uri] = {
+        "source": text,
+        "program": program,
+        "diagnostics": diagnostics,
+        "version": 0
+    }
+    diagnostics
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 7: Full Workspace Support ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Track all open documents, parse on change, cross-file symbol resolution.
+// This section adds workspace-level operations.
+
+// Workspace document version tracking
+let lsp_document_versions = {"__s": true}
+
+// Update document version
+func update_document_version(uri, version) {
+    lsp_document_versions[uri] = version
+}
+
+// Get document version
+func get_document_version(uri) {
+    if lsp_document_versions.has(uri) { lsp_document_versions[uri] } else { 0 }
+}
+
+// Workspace symbol index: name -> [{uri, line, col, kind}]
+let lsp_symbol_index = {"__s": true}
+
+// Rebuild symbol index for a document
+func rebuild_symbol_index(uri) {
+    const doc = lsp_get_document(uri)
+    if doc == null { return }
+
+    const symbols = collect_symbols(doc["program"])
+    for sym in symbols {
+        const name = sym["name"]
+        if !lsp_symbol_index.has(name) || name == "__s" {
+            lsp_symbol_index[name] = []
+        }
+        // Remove old entries for this URI
+        let filtered = []
+        for entry in lsp_symbol_index[name] {
+            if entry["uri"] != uri {
+                filtered.push(entry)
+            }
+        }
+        filtered.push({
+            "uri": uri,
+            "line": sym["line"],
+            "col": sym["col"],
+            "kind": sym["kind"],
+            "detail": sym["detail"]
+        })
+        lsp_symbol_index[name] = filtered
+    }
+}
+
+// Cross-file go-to-definition using symbol index
+func goto_definition_cross_file(uri, name) {
+    // First check current document
+    const doc = lsp_get_document(uri)
+    if doc != null {
+        const def = find_definition(doc["program"], name)
+        if def != null {
+            return lsp_location(uri, lsp_range(def["line"], def["col"], def["line"], def["col"] + len(name)))
+        }
+    }
+
+    // Then check symbol index
+    if lsp_symbol_index.has(name) && name != "__s" {
+        const entries = lsp_symbol_index[name]
+        if len(entries) > 0 {
+            const entry = entries[0]  // First match
+            return lsp_location(entry["uri"], lsp_range(entry["line"], entry["col"], entry["line"], entry["col"] + len(name)))
+        }
+    }
+
+    null
+}
+
+// Cross-file find-all-references using symbol index
+func find_all_references_cross_file(name) {
+    let locations = []
+
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+        const refs = find_references(doc["program"], name)
+        for r in refs {
+            locations.push(lsp_location(uri, lsp_range(r["line"], r["col"], r["line"], r["col"] + len(name))))
+        }
+    }
+
+    locations
+}
+
+// Workspace symbol search with scoring
+func search_workspace_symbols(query) {
+    let results = []
+    const query_lower = query.to_lower()
+
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+
+        const symbols = collect_symbols(doc["program"])
+        for sym in symbols {
+            const name = sym["name"]
+            const name_lower = name.to_lower()
+
+            // Score: exact match > prefix > contains > fuzzy
+            let score = 0
+            if query == "" {
+                score = 1
+            } else if name_lower == query_lower {
+                score = 100
+            } else if name_lower.starts_with(query_lower) {
+                score = 80
+            } else if name_lower.contains(query_lower) {
+                score = 50
+            } else {
+                const dist = levenshtein(query_lower, name_lower)
+                if dist <= 3 {
+                    score = 30 - dist * 5
+                }
+            }
+
+            if score > 0 {
+                results.push({
+                    "name": name,
+                    "kind": sym["kind"],
+                    "location": lsp_location(uri, lsp_range(sym["line"], sym["col"], sym["end_line"], 0)),
+                    "containerName": uri,
+                    "score": score
+                })
+            }
+        }
+    }
+
+    // Sort by score descending
+    results = results.sort_by((a, b) => b["score"] - a["score"])
+
+    // Remove score field from results
+    let clean = []
+    for r in results {
+        clean.push({
+            "name": r["name"],
+            "kind": r["kind"],
+            "location": r["location"],
+            "containerName": r["containerName"]
+        })
+    }
+    clean
+}
+
+// Enhanced workspace symbol handler
+func handle_workspace_symbol_full(params) {
+    const query = if params.has("query") { params["query"] } else { "" }
+    const results = search_workspace_symbols(query)
+    if len(results) == 0 { return null }
+    results
+}
+
+// Handle workspace/didChangeWatchedFiles notification
+func handle_did_change_watched_files(params) {
+    if params == null || !params.has("changes") { return null }
+
+    for change in params["changes"] {
+        const uri = change["uri"]
+        const change_type = change["type"]
+        match change_type {
+            1 => {
+                // Created: could index new file
+                send_log_message(MSG_INFO, f"File created: {uri}")
+            },
+            2 => {
+                // Changed: re-index if it's a .magi file
+                if uri.ends_with(".magi") {
+                    send_log_message(MSG_INFO, f"File changed: {uri}")
+                }
+            },
+            3 => {
+                // Deleted: remove from index
+                if lsp_documents.has(uri) {
+                    lsp_documents[uri] = null
+                }
+                send_log_message(MSG_INFO, f"File deleted: {uri}")
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Handle workspace/configuration request
+func handle_workspace_configuration(params) {
+    if params == null || !params.has("items") { return [] }
+
+    let results = []
+    for item in params["items"] {
+        const section = if item.has("section") { item["section"] } else { "" }
+        if section == "magi" || section == "" {
+            results.push(lsp_config)
+        } else {
+            results.push(null)
+        }
+    }
+    results
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 8: JSON-RPC Infrastructure ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Full Content-Length header parsing, request ID tracking,
+// notification handling, error responses, batching support.
+
+// JSON-RPC error codes
+const JSONRPC_PARSE_ERROR = -32700
+const JSONRPC_INVALID_REQUEST = -32600
+const JSONRPC_METHOD_NOT_FOUND = -32601
+const JSONRPC_INVALID_PARAMS = -32602
+const JSONRPC_INTERNAL_ERROR = -32603
+const JSONRPC_SERVER_NOT_INITIALIZED = -32002
+const JSONRPC_REQUEST_CANCELLED = -32800
+
+// Server state
+let lsp_initialized = false
+let lsp_shutdown_requested = false
+let lsp_request_counter = 0
+
+// Track pending requests (for cancellation)
+let lsp_pending_requests = {"__s": true}
+
+// Read a full JSON-RPC message with proper Content-Length handling
+func read_jsonrpc_message() {
+    let content_length = -1
+    let content_type = "application/vscode-jsonrpc; charset=utf-8"
+
+    // Read headers until empty line
+    while true {
+        const line = input()
+        if line == null { return null }  // EOF
+        const trimmed = line.trim()
+        if trimmed == "" { break }  // End of headers
+
+        // Parse Content-Length
+        if trimmed.starts_with("Content-Length:") {
+            const value = trimmed[15..len(trimmed)].trim()
+            content_length = to_int(value)
+        }
+        // Parse Content-Type (optional)
+        if trimmed.starts_with("Content-Type:") {
+            content_type = trimmed[13..len(trimmed)].trim()
+        }
+    }
+
+    if content_length < 0 { return null }
+    if content_length == 0 { return null }
+
+    // Read the body (content_length bytes)
+    const body = input()
+    if body == null { return null }
+
+    // Parse JSON
+    const message = json_parse(body)
+    if message == null {
+        return {"error": "parse_error"}
+    }
+
+    message
+}
+
+// Write a JSON-RPC message with Content-Length header
+func write_jsonrpc_message(message) {
+    const body = json_encode(message)
+    const header = "Content-Length: " + to_string(len(body)) + "\r\n\r\n"
+    print(header + body)
+}
+
+// Send a JSON-RPC error response
+func send_error_response(id, code, message) {
+    write_jsonrpc_message(jsonrpc_error(id, code, message))
+}
+
+// Send a JSON-RPC success response
+func send_success_response(id, result) {
+    write_jsonrpc_message(jsonrpc_result(id, result))
+}
+
+// Send a notification (no id, no response expected)
+func send_notification(method, params) {
+    write_jsonrpc_message(jsonrpc_notification(method, params))
+}
+
+// Handle request cancellation
+func handle_cancel_request(params) {
+    if params != null && params.has("id") {
+        const cancel_id = params["id"]
+        if lsp_pending_requests.has(to_string(cancel_id)) {
+            lsp_pending_requests[to_string(cancel_id)] = "cancelled"
+        }
+    }
+    null
+}
+
+// Check if a request has been cancelled
+func is_request_cancelled(id) {
+    const key = to_string(id)
+    if lsp_pending_requests.has(key) {
+        return lsp_pending_requests[key] == "cancelled"
+    }
+    false
+}
+
+// Enhanced dispatch with full protocol support
+func lsp_dispatch_full(method, params, id) {
+    // Track request
+    if id != null {
+        lsp_pending_requests[to_string(id)] = "pending"
+    }
+
+    // Pre-initialization: only allow initialize
+    if !lsp_initialized && method != "initialize" && method != "exit" {
+        if id != null {
+            return jsonrpc_error(id, JSONRPC_SERVER_NOT_INITIALIZED, "Server not initialized")
+        }
+        return null
+    }
+
+    // After shutdown: only allow exit
+    if lsp_shutdown_requested && method != "exit" {
+        if id != null {
+            return jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Server is shutting down")
+        }
+        return null
+    }
+
+    const result = match method {
+        // Lifecycle
+        "initialize" => {
+            const init_result = handle_initialize(params)
+            lsp_initialized = true
+            init_result
+        },
+        "initialized" => {
+            handle_initialized(params)
+            null
+        },
+        "shutdown" => {
+            lsp_shutdown_requested = true
+            null
+        },
+        "exit" => null,
+
+        // Request cancellation
+        "$/cancelRequest" => { handle_cancel_request(params); null },
+
+        // Document sync
+        "textDocument/didOpen" => {
+            const td = params["textDocument"]
+            const open_uri = td["uri"]
+            const open_text = td["text"]
+            const open_version = if td.has("version") { td["version"] } else { 0 }
+            update_document_version(open_uri, open_version)
+            const diags = lsp_cache_document_full(open_uri, open_text)
+            rebuild_symbol_index(open_uri)
+            send_notification("textDocument/publishDiagnostics", {
+                "uri": open_uri, "diagnostics": diags
+            })
+            null
+        },
+        "textDocument/didChange" => {
+            const change_uri = params["textDocument"]["uri"]
+            const change_version = if params["textDocument"].has("version") { params["textDocument"]["version"] } else { 0 }
+            const changes = params["contentChanges"]
+            if len(changes) > 0 {
+                const change_text = changes[len(changes) - 1]["text"]
+                update_document_version(change_uri, change_version)
+                const diags = lsp_cache_document_full(change_uri, change_text)
+                rebuild_symbol_index(change_uri)
+                send_notification("textDocument/publishDiagnostics", {
+                    "uri": change_uri, "diagnostics": diags
+                })
+            }
+            null
+        },
+        "textDocument/didClose" => {
+            handle_did_close(params)
+            null
+        },
+        "textDocument/didSave" => {
+            handle_did_save(params)
+            null
+        },
+        "textDocument/willSave" => { handle_will_save(params); null },
+
+        // Language features — use full implementations
+        "textDocument/completion" => handle_completion_full(params),
+        "textDocument/hover" => handle_hover_full(params),
+        "textDocument/definition" => {
+            const def_uri = params["textDocument"]["uri"]
+            const def_pos = params["position"]
+            const def_doc = lsp_get_document(def_uri)
+            if def_doc != null {
+                const wi = word_at_position(def_doc["source"], def_pos["line"], def_pos["character"])
+                if wi != null {
+                    goto_definition_cross_file(def_uri, wi["word"])
+                } else { null }
+            } else { null }
+        },
+        "textDocument/typeDefinition" => handle_type_definition(params),
+        "textDocument/references" => {
+            const ref_uri = params["textDocument"]["uri"]
+            const ref_pos = params["position"]
+            const ref_doc = lsp_get_document(ref_uri)
+            if ref_doc != null {
+                const wi = word_at_position(ref_doc["source"], ref_pos["line"], ref_pos["character"])
+                if wi != null {
+                    find_all_references_cross_file(wi["word"])
+                } else { null }
+            } else { null }
+        },
+        "textDocument/rename" => handle_rename(params),
+        "textDocument/prepareRename" => handle_prepare_rename(params),
+        "textDocument/formatting" => handle_formatting_full(params),
+        "textDocument/rangeFormatting" => handle_range_formatting_full(params),
+        "textDocument/onTypeFormatting" => handle_on_type_formatting_full(params),
+        "textDocument/codeAction" => handle_code_action_full(params),
+        "textDocument/signatureHelp" => handle_signature_help(params),
+        "textDocument/documentSymbol" => handle_document_symbol(params),
+        "textDocument/semanticTokens/full" => handle_semantic_tokens_full_v2(params),
+        "textDocument/foldingRange" => handle_folding_range(params),
+        "textDocument/selectionRange" => handle_selection_range(params),
+        "textDocument/codeLens" => handle_code_lens(params),
+        "textDocument/inlayHint" => handle_inlay_hint(params),
+        "textDocument/documentLink" => handle_document_link(params),
+        "textDocument/linkedEditingRange" => handle_linked_editing_range(params),
+        "textDocument/documentHighlight" => handle_document_highlight(params),
+        "textDocument/documentColor" => handle_document_color(params),
+        "textDocument/prepareCallHierarchy" => handle_prepare_call_hierarchy(params),
+        "textDocument/prepareTypeHierarchy" => handle_prepare_type_hierarchy(params),
+
+        // Call hierarchy
+        "callHierarchy/incomingCalls" => handle_incoming_calls(params),
+        "callHierarchy/outgoingCalls" => handle_outgoing_calls(params),
+
+        // Type hierarchy
+        "typeHierarchy/supertypes" => handle_type_hierarchy_supertypes(params),
+        "typeHierarchy/subtypes" => handle_type_hierarchy_subtypes(params),
+
+        // Workspace
+        "workspace/symbol" => handle_workspace_symbol_full(params),
+        "workspace/executeCommand" => handle_execute_command(params),
+        "workspace/didChangeConfiguration" => { handle_configuration_changed(params); null },
+        "workspace/didChangeWatchedFiles" => { handle_did_change_watched_files(params); null },
+        "workspace/didChangeWorkspaceFolders" => { handle_workspace_folders_change(params); null },
+        "workspace/configuration" => handle_workspace_configuration(params),
+
+        // Resolve handlers
+        "completionItem/resolve" => resolve_completion_item(params),
+        "inlayHint/resolve" => resolve_inlay_hint(params),
+        "codeLens/resolve" => resolve_code_lens(params),
+
+        // Unrecognized
+        _ => {
+            if id != null {
+                return jsonrpc_error(id, JSONRPC_METHOD_NOT_FOUND, f"Method not found: {method}")
+            }
+            null
+        }
+    }
+
+    // Clean up pending request
+    if id != null {
+        const key = to_string(id)
+        if lsp_pending_requests.has(key) {
+            lsp_pending_requests[key] = "done"
+        }
+    }
+
+    result
+}
+
+// Full server main loop with proper protocol handling
+func run_lsp_server_full() {
+    let running = true
+    lsp_initialized = false
+    lsp_shutdown_requested = false
+
+    send_log_message(MSG_INFO, "MAGI LSP server starting (self-hosted)")
+
+    while running {
+        const message = read_jsonrpc_message()
+        if message == null { break }
+
+        // Handle parse error
+        if typeof(message) == "map" && message.has("error") {
+            send_error_response(null, JSONRPC_PARSE_ERROR, "Parse error")
+            continue
+        }
+
+        const method = if message.has("method") { message["method"] } else { null }
+        const id = if message.has("id") { message["id"] } else { null }
+        const msg_params = if message.has("params") { message["params"] } else { null }
+
+        // Validate JSON-RPC version
+        if message.has("jsonrpc") && message["jsonrpc"] != "2.0" {
+            if id != null {
+                send_error_response(id, JSONRPC_INVALID_REQUEST, "Invalid JSON-RPC version")
+            }
+            continue
+        }
+
+        // Exit notification
+        if method == "exit" {
+            running = false
+            continue
+        }
+
+        // Dispatch
+        if method != null {
+            const result = lsp_dispatch_full(method, msg_params, id)
+
+            // Only send response for requests (has id), not notifications
+            if id != null {
+                if result != null && typeof(result) == "map" && result.has("error") {
+                    // Error response already formed
+                    write_jsonrpc_message(result)
+                } else {
+                    send_success_response(id, result)
+                }
+            }
+        } else if id != null {
+            // Request without method
+            send_error_response(id, JSONRPC_INVALID_REQUEST, "Missing method")
+        }
+
+        lsp_request_counter = lsp_request_counter + 1
+    }
+
+    send_log_message(MSG_INFO, "MAGI LSP server shutting down")
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Signature Help: Builtin Signatures ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Full builtin signature database matching src/lsp/signature_help.rs
+
+const BUILTIN_SIGS = {
+    "__s": true,
+    "len": {"label": "func len(value) -> int", "params": ["value"]},
+    "range": {"label": "func range(start: int, end: int, step?: int) -> array", "params": ["start", "end", "step"]},
+    "assert": {"label": "func assert(condition: bool, message?: string)", "params": ["condition", "message"]},
+    "assert_eq": {"label": "func assert_eq(left, right, message?: string)", "params": ["left", "right", "message"]},
+    "assert_ne": {"label": "func assert_ne(left, right, message?: string)", "params": ["left", "right", "message"]},
+    "assert_throws": {"label": "func assert_throws(fn_to_call)", "params": ["fn_to_call"]},
+    "print": {"label": "func print(...values)", "params": ["values"]},
+    "println": {"label": "func println(...values)", "params": ["values"]},
+    "debug_log": {"label": "func debug_log(value)", "params": ["value"]},
+    "typeof": {"label": "func typeof(value) -> string", "params": ["value"]},
+    "to_string": {"label": "func to_string(value) -> string", "params": ["value"]},
+    "to_int": {"label": "func to_int(value) -> int", "params": ["value"]},
+    "to_int64": {"label": "func to_int64(value) -> int64", "params": ["value"]},
+    "to_float": {"label": "func to_float(value) -> float", "params": ["value"]},
+    "to_float64": {"label": "func to_float64(value) -> float64", "params": ["value"]},
+    "to_bool": {"label": "func to_bool(value) -> bool", "params": ["value"]},
+    "to_json": {"label": "func to_json(value) -> string", "params": ["value"]},
+    "parse_int": {"label": "func parse_int(s: string) -> int", "params": ["s"]},
+    "parse_float": {"label": "func parse_float(s: string) -> float", "params": ["s"]},
+    "abs": {"label": "func abs(n: number) -> number", "params": ["n"]},
+    "round": {"label": "func round(n: float) -> float", "params": ["n"]},
+    "floor": {"label": "func floor(n: float) -> int", "params": ["n"]},
+    "ceil": {"label": "func ceil(n: float) -> int", "params": ["n"]},
+    "sqrt": {"label": "func sqrt(n: number) -> float", "params": ["n"]},
+    "pow": {"label": "func pow(base: number, exp: number) -> number", "params": ["base", "exp"]},
+    "min": {"label": "func min(a, b) -> value", "params": ["a", "b"]},
+    "max": {"label": "func max(a, b) -> value", "params": ["a", "b"]},
+    "clamp": {"label": "func clamp(value, min, max) -> value", "params": ["value", "min", "max"]},
+    "sin": {"label": "func sin(radians: float) -> float", "params": ["radians"]},
+    "cos": {"label": "func cos(radians: float) -> float", "params": ["radians"]},
+    "tan": {"label": "func tan(radians: float) -> float", "params": ["radians"]},
+    "asin": {"label": "func asin(n: float) -> float", "params": ["n"]},
+    "acos": {"label": "func acos(n: float) -> float", "params": ["n"]},
+    "atan": {"label": "func atan(n: float) -> float", "params": ["n"]},
+    "atan2": {"label": "func atan2(y: float, x: float) -> float", "params": ["y", "x"]},
+    "ln": {"label": "func ln(n: float) -> float", "params": ["n"]},
+    "log2": {"label": "func log2(n: float) -> float", "params": ["n"]},
+    "log10": {"label": "func log10(n: float) -> float", "params": ["n"]},
+    "exp": {"label": "func exp(n: float) -> float", "params": ["n"]},
+    "is_null": {"label": "func is_null(value) -> bool", "params": ["value"]},
+    "is_string": {"label": "func is_string(value) -> bool", "params": ["value"]},
+    "is_number": {"label": "func is_number(value) -> bool", "params": ["value"]},
+    "is_array": {"label": "func is_array(value) -> bool", "params": ["value"]},
+    "is_map": {"label": "func is_map(value) -> bool", "params": ["value"]},
+    "is_bool": {"label": "func is_bool(value) -> bool", "params": ["value"]},
+    "is_bytes": {"label": "func is_bytes(value) -> bool", "params": ["value"]},
+    "is_finite": {"label": "func is_finite(value) -> bool", "params": ["value"]}
+}
+
+// Enhanced signature help handler
+func handle_signature_help_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const src_lines = source_lines(source)
+    if line >= len(src_lines) { return null }
+    const ln = src_lines[line]
+
+    // Find the opening paren before cursor position
+    let paren_pos = character - 1
+    let depth = 0
+    while paren_pos >= 0 {
+        const c = ln[paren_pos]
+        if c == ")" { depth = depth + 1 }
+        if c == "(" {
+            if depth == 0 { break }
+            depth = depth - 1
+        }
+        paren_pos = paren_pos - 1
+    }
+    if paren_pos < 0 { return null }
+
+    // Get function name before paren
+    const func_word = word_at_position(source, line, paren_pos)
+    if func_word == null { return null }
+    const func_name = func_word["word"]
+
+    // Count commas to determine active parameter
+    let active_param = 0
+    let ci = paren_pos + 1
+    let comma_depth = 0
+    while ci < character {
+        if ln[ci] == "(" { comma_depth = comma_depth + 1 }
+        if ln[ci] == ")" { comma_depth = comma_depth - 1 }
+        if ln[ci] == "," && comma_depth == 0 {
+            active_param = active_param + 1
+        }
+        ci = ci + 1
+    }
+
+    // Check user-defined functions first
+    const program = doc["program"]
+    if program != null {
+        for stmt in program.statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if fdef.name == func_name {
+                        let param_strs = []
+                        let param_labels = []
+                        for p in fdef.params {
+                            let pstr = p.name
+                            if p.type_ann != "" { pstr = pstr + ": " + p.type_ann }
+                            if p.rest { pstr = "..." + pstr }
+                            param_strs.push(pstr)
+                            param_labels.push({"label": pstr})
+                        }
+                        let ret = ""
+                        if fdef.return_type != "" { ret = " -> " + fdef.return_type }
+                        const label = f"func {func_name}({param_strs.join(', ')}){ret}"
+                        return {
+                            "signatures": [{
+                                "label": label,
+                                "parameters": param_labels,
+                                "activeParameter": active_param
+                            }],
+                            "activeSignature": 0,
+                            "activeParameter": active_param
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    // Check builtin signatures
+    if BUILTIN_SIGS.has(func_name) {
+        const sig = BUILTIN_SIGS[func_name]
+        let param_labels = []
+        for p in sig["params"] {
+            param_labels.push({"label": p})
+        }
+        return {
+            "signatures": [{
+                "label": sig["label"],
+                "parameters": param_labels,
+                "activeParameter": active_param
+            }],
+            "activeSignature": 0,
+            "activeParameter": active_param
+        }
+    }
+
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Collect test names helper ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func collect_test_names(program) {
+    let names = []
+    if program == null { return names }
+    for stmt in program.statements {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::STestDef(name, _) => {
+                names.push(name)
+            },
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.name.starts_with("test_") {
+                    names.push(fdef.name)
+                }
+            },
+            _ => {}
+        }
+    }
+    names
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Self-test: verify handler count ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const LSP_FULL_HANDLER_COUNT = 53
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 9: Extended Type Inference Engine ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Deep type inference across expressions for better completions,
+// hover info, and diagnostics.
+
+// Infer the type of an expression by walking the AST
+func infer_expr_type_deep(expr, program) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::IntLit(_) => "int64",
+                Literal::FloatLit(_) => "float64",
+                Literal::StringLit(_) => "string",
+                Literal::BoolLit(_) => "bool",
+                Literal::NullLit => "null",
+                Literal::ArrayLit(elements) => {
+                    if len(elements) > 0 {
+                        const elem_type = infer_expr_type_deep(elements[0], program)
+                        if elem_type != null { f"[{elem_type}]" } else { "Array" }
+                    } else { "Array" }
+                },
+                Literal::MapLit(_) => "Map",
+                _ => null
+            }
+        },
+        ExprKind::EVariable(name) => {
+            // Look up variable type in program definitions
+            if program != null {
+                for stmt in program.statements {
+                    const sk = stmt.kind
+                    match sk {
+                        StmtKind::SLet(vname, value) => {
+                            if vname == name && value != null {
+                                return infer_expr_type_deep(value, program)
+                            }
+                        },
+                        StmtKind::SConst(vname, value) => {
+                            if vname == name && value != null {
+                                return infer_expr_type_deep(value, program)
+                            }
+                        },
+                        StmtKind::SLetMut(vname, value) => {
+                            if vname == name && value != null {
+                                return infer_expr_type_deep(value, program)
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            null
+        },
+        ExprKind::ECall(name, args, _) => {
+            // Infer return type from known function signatures
+            if BUILTIN_RETURN_TYPES.has(name) {
+                return BUILTIN_RETURN_TYPES[name]
+            }
+            // Check user-defined functions
+            if program != null {
+                for stmt in program.statements {
+                    const sk = stmt.kind
+                    match sk {
+                        StmtKind::SFuncDef(fdef) => {
+                            if fdef.name == name && fdef.return_type != "" {
+                                return fdef.return_type
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            null
+        },
+        ExprKind::EBinaryOp(op, left, right) => {
+            match op {
+                BinOp::Eq => "bool", BinOp::NotEq => "bool",
+                BinOp::Lt => "bool", BinOp::Gt => "bool",
+                BinOp::LtEq => "bool", BinOp::GtEq => "bool",
+                BinOp::And => "bool", BinOp::Or => "bool",
+                BinOp::Add => {
+                    const lt = infer_expr_type_deep(left, program)
+                    if lt == "string" { return "string" }
+                    if lt == "int64" || lt == "int" { return "int64" }
+                    if lt == "float64" || lt == "float" { return "float64" }
+                    lt
+                },
+                BinOp::Sub => infer_expr_type_deep(left, program),
+                BinOp::Mul => infer_expr_type_deep(left, program),
+                BinOp::Div => "float64",
+                BinOp::Mod => "int64",
+                _ => infer_expr_type_deep(left, program)
+            }
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            match op {
+                UnOp::Not => "bool",
+                UnOp::Neg => infer_expr_type_deep(operand, program)
+            }
+        },
+        ExprKind::EMethodCall(object, method_name, _, _) => {
+            // Infer return type based on method
+            if METHOD_RETURN_TYPES.has(method_name) {
+                return METHOD_RETURN_TYPES[method_name]
+            }
+            null
+        },
+        ExprKind::EFieldAccess(object, field) => {
+            // Try to resolve struct field type
+            const obj_type = infer_expr_type_deep(object, program)
+            if obj_type != null && program != null {
+                for stmt in program.statements {
+                    const sk = stmt.kind
+                    match sk {
+                        StmtKind::SStructDef(name, fields, _) => {
+                            if name == obj_type {
+                                for f in fields {
+                                    if f[0] == field && len(f) > 1 {
+                                        return f[1]
+                                    }
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            null
+        },
+        ExprKind::EIndex(object, _) => {
+            const obj_type = infer_expr_type_deep(object, program)
+            if obj_type != null && obj_type.starts_with("[") {
+                // Array element type
+                return obj_type[1..len(obj_type) - 1]
+            }
+            if obj_type == "string" { return "string" }
+            null
+        },
+        ExprKind::EIfExpr(_, then_expr, else_expr) => {
+            infer_expr_type_deep(then_expr, program)
+        },
+        ExprKind::ELambda(_, _) => "Function",
+        ExprKind::EStructLiteral(name, _) => name,
+        ExprKind::ERange(_, _, _) => "[int64]",
+        ExprKind::ETuple(elements) => {
+            let types = []
+            for e in elements {
+                const t = infer_expr_type_deep(e, program)
+                types.push(if t != null { t } else { "any" })
+            }
+            "(" + types.join(", ") + ")"
+        },
+        _ => null
+    }
+}
+
+// Return types for builtin functions
+const BUILTIN_RETURN_TYPES = {
+    "__s": true,
+    "len": "int64",
+    "range": "[int64]",
+    "typeof": "string",
+    "to_string": "string",
+    "to_int": "int64",
+    "to_int64": "int64",
+    "to_float": "float64",
+    "to_float64": "float64",
+    "to_bool": "bool",
+    "to_json": "string",
+    "parse_int": "int64",
+    "parse_float": "float64",
+    "abs": "number",
+    "round": "float64",
+    "floor": "int64",
+    "ceil": "int64",
+    "sqrt": "float64",
+    "pow": "number",
+    "min": "number",
+    "max": "number",
+    "clamp": "number",
+    "sin": "float64",
+    "cos": "float64",
+    "tan": "float64",
+    "asin": "float64",
+    "acos": "float64",
+    "atan": "float64",
+    "atan2": "float64",
+    "sinh": "float64",
+    "cosh": "float64",
+    "tanh": "float64",
+    "ln": "float64",
+    "log2": "float64",
+    "log10": "float64",
+    "exp": "float64",
+    "is_null": "bool",
+    "is_string": "bool",
+    "is_number": "bool",
+    "is_array": "bool",
+    "is_map": "bool",
+    "is_bool": "bool",
+    "is_bytes": "bool",
+    "is_finite": "bool",
+    "assert": "null",
+    "assert_eq": "null",
+    "assert_ne": "null",
+    "print": "null",
+    "println": "null",
+    "panic": "never",
+    "input": "string",
+    "keys": "[string]",
+    "values": "Array",
+    "contains": "bool",
+    "map": "Array",
+    "filter": "Array",
+    "reduce": "any",
+    "sort": "Array",
+    "reverse": "Array",
+    "join": "string",
+    "split": "[string]",
+    "trim": "string",
+    "replace": "string"
+}
+
+// Return types for method calls
+const METHOD_RETURN_TYPES = {
+    "__s": true,
+    "len": "int64",
+    "length": "int64",
+    "is_empty": "bool",
+    "push": "Array",
+    "pop": "any",
+    "shift": "any",
+    "first": "any",
+    "last": "any",
+    "contains": "bool",
+    "starts_with": "bool",
+    "ends_with": "bool",
+    "index_of": "int64",
+    "map": "Array",
+    "filter": "Array",
+    "reduce": "any",
+    "find": "any",
+    "find_index": "int64",
+    "any": "bool",
+    "all": "bool",
+    "sort": "Array",
+    "sort_by": "Array",
+    "reverse": "Array",
+    "join": "string",
+    "split": "[string]",
+    "trim": "string",
+    "trim_start": "string",
+    "trim_end": "string",
+    "to_upper": "string",
+    "to_lower": "string",
+    "to_uppercase": "string",
+    "to_lowercase": "string",
+    "replace": "string",
+    "substring": "string",
+    "slice": "Array",
+    "concat": "Array",
+    "flatten": "Array",
+    "flat_map": "Array",
+    "unique": "Array",
+    "chunk": "Array",
+    "zip": "Array",
+    "enumerate": "Array",
+    "group_by": "Map",
+    "partition": "Array",
+    "scan": "Array",
+    "keys": "[string]",
+    "values": "Array",
+    "entries": "Array",
+    "has": "bool",
+    "get": "any",
+    "set": "Map",
+    "delete": "Map",
+    "merge": "Map",
+    "sum": "number",
+    "product": "number",
+    "min": "any",
+    "max": "any",
+    "min_by": "any",
+    "max_by": "any",
+    "to_string": "string",
+    "to_json": "string",
+    "to_int": "int64",
+    "to_float": "float64",
+    "typeof": "string",
+    "chars": "[string]",
+    "lines": "[string]",
+    "words": "[string]",
+    "repeat": "string",
+    "count": "int64",
+    "char_at": "string",
+    "pad_start": "string",
+    "pad_end": "string",
+    "dedup": "Array",
+    "take": "Array",
+    "skip": "Array",
+    "take_while": "Array",
+    "skip_while": "Array",
+    "window": "Array",
+    "frequencies": "Map",
+    "binary_search": "int64",
+    "filter_nulls": "Array",
+    "filter_entries": "Map",
+    "map_values": "Map",
+    "map_keys": "Map",
+    "invert": "Map",
+    "select": "Map",
+    "reject": "Map",
+    "deep_merge": "Map"
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 10: Enhanced Inlay Hints ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Better inlay hints using the deep type inference engine
+
+func handle_inlay_hint_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const range = params["range"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    // Check if inlay hints are enabled
+    if lsp_config.has("inlayHints.enabled") && !lsp_config["inlayHints.enabled"] {
+        return null
+    }
+
+    let hints = []
+    const program = doc["program"]
+    const source = doc["source"]
+    if program == null { return null }
+
+    const start_line = range["start"]["line"]
+    const end_line = range["end"]["line"]
+    const src_lines = source_lines(source)
+
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        if sl < start_line || sl > end_line { continue }
+        const sk = stmt.kind
+
+        match sk {
+            // Type hints for let/const bindings without explicit type annotations
+            StmtKind::SLet(var_name, value) => {
+                if value != null && lsp_config.has("inlayHints.typeHints") && lsp_config["inlayHints.typeHints"] {
+                    const inferred = infer_expr_type_deep(value, program)
+                    if inferred != null && inferred != "unknown" {
+                        // Find the position after the variable name
+                        const line_text = if sl < len(src_lines) { src_lines[sl] } else { "" }
+                        const name_idx = line_text.index_of(var_name)
+                        if name_idx >= 0 {
+                            const hint_pos = name_idx + len(var_name)
+                            // Only add if there's no explicit type annotation
+                            const after_name = line_text[hint_pos..len(line_text)].trim()
+                            if !after_name.starts_with(":") {
+                                hints.push({
+                                    "position": lsp_position(sl, hint_pos),
+                                    "label": f": {inferred}",
+                                    "kind": 1,
+                                    "paddingLeft": false,
+                                    "paddingRight": true,
+                                    "tooltip": {
+                                        "kind": "markdown",
+                                        "value": f"Inferred type: `{inferred}`"
+                                    }
+                                })
+                            }
+                        }
+                    }
+                }
+            },
+            StmtKind::SLetMut(var_name, value) => {
+                if value != null && lsp_config.has("inlayHints.typeHints") && lsp_config["inlayHints.typeHints"] {
+                    const inferred = infer_expr_type_deep(value, program)
+                    if inferred != null && inferred != "unknown" {
+                        const line_text = if sl < len(src_lines) { src_lines[sl] } else { "" }
+                        const name_idx = line_text.index_of(var_name)
+                        if name_idx >= 0 {
+                            const hint_pos = name_idx + len(var_name)
+                            const after_name = line_text[hint_pos..len(line_text)].trim()
+                            if !after_name.starts_with(":") {
+                                hints.push({
+                                    "position": lsp_position(sl, hint_pos),
+                                    "label": f": {inferred}",
+                                    "kind": 1,
+                                    "paddingLeft": false,
+                                    "paddingRight": true,
+                                    "tooltip": {
+                                        "kind": "markdown",
+                                        "value": f"Inferred type: `{inferred}` (mutable)"
+                                    }
+                                })
+                            }
+                        }
+                    }
+                }
+            },
+            StmtKind::SConst(var_name, value) => {
+                if value != null && lsp_config.has("inlayHints.typeHints") && lsp_config["inlayHints.typeHints"] {
+                    const inferred = infer_expr_type_deep(value, program)
+                    if inferred != null && inferred != "unknown" {
+                        const line_text = if sl < len(src_lines) { src_lines[sl] } else { "" }
+                        const name_idx = line_text.index_of(var_name)
+                        if name_idx >= 0 {
+                            const hint_pos = name_idx + len(var_name)
+                            const after_name = line_text[hint_pos..len(line_text)].trim()
+                            if !after_name.starts_with(":") {
+                                hints.push({
+                                    "position": lsp_position(sl, hint_pos),
+                                    "label": f": {inferred}",
+                                    "kind": 1,
+                                    "paddingLeft": false,
+                                    "paddingRight": true,
+                                    "tooltip": {
+                                        "kind": "markdown",
+                                        "value": f"Inferred type: `{inferred}` (constant)"
+                                    }
+                                })
+                            }
+                        }
+                    }
+                }
+            },
+
+            // Return type hints for functions without explicit return type
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.return_type == "" && lsp_config.has("inlayHints.returnTypeHints") && lsp_config["inlayHints.returnTypeHints"] {
+                    // Try to infer return type from body
+                    const ret_type = infer_function_return_type(fdef, program)
+                    if ret_type != null {
+                        const line_text = if sl < len(src_lines) { src_lines[sl] } else { "" }
+                        const brace_idx = line_text.index_of("{")
+                        if brace_idx >= 0 {
+                            hints.push({
+                                "position": lsp_position(sl, brace_idx),
+                                "label": f"-> {ret_type} ",
+                                "kind": 1,
+                                "paddingLeft": true,
+                                "paddingRight": false,
+                                "tooltip": {
+                                    "kind": "markdown",
+                                    "value": f"Inferred return type: `{ret_type}`"
+                                }
+                            })
+                        }
+                    }
+                }
+
+                // Parameter name hints at call sites
+                if lsp_config.has("inlayHints.parameterHints") && lsp_config["inlayHints.parameterHints"] {
+                    // Find calls to this function in the visible range
+                    for other_stmt in program.statements {
+                        const osl = other_stmt.span.start_line - 1
+                        if osl < start_line || osl > end_line { continue }
+                        add_parameter_hints(hints, other_stmt, fdef, osl)
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    if len(hints) == 0 { return null }
+    hints
+}
+
+// Infer function return type from its body
+func infer_function_return_type(fdef, program) {
+    if fdef.body == null { return null }
+    const stmts = fdef.body.statements
+    if len(stmts) == 0 { return null }
+
+    // Check last statement for implicit return
+    const last = stmts[len(stmts) - 1]
+    const sk = last.kind
+    match sk {
+        StmtKind::SReturn(value) => {
+            if value != null { return infer_expr_type_deep(value, program) }
+            "null"
+        },
+        StmtKind::SExprStmt(expr) => {
+            infer_expr_type_deep(expr, program)
+        },
+        _ => null
+    }
+}
+
+// Add parameter name hints for function calls
+func add_parameter_hints(hints, stmt, fdef, line) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => {
+            add_param_hints_expr(hints, expr, fdef, line)
+        },
+        StmtKind::SLet(_, expr) => {
+            if expr != null { add_param_hints_expr(hints, expr, fdef, line) }
+        },
+        StmtKind::SConst(_, expr) => {
+            if expr != null { add_param_hints_expr(hints, expr, fdef, line) }
+        },
+        StmtKind::SReturn(expr) => {
+            if expr != null { add_param_hints_expr(hints, expr, fdef, line) }
+        },
+        _ => {}
+    }
+}
+
+func add_param_hints_expr(hints, expr, fdef, line) {
+    if expr == null { return }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ECall(name, args, _) => {
+            if name == fdef.name && args != null {
+                let pi = 0
+                while pi < len(args) && pi < len(fdef.params) {
+                    const param = fdef.params[pi]
+                    const arg = args[pi]
+                    // Only add hint if the argument is not just a variable with the same name
+                    let arg_name = null
+                    const arg_kind = arg.kind
+                    match arg_kind {
+                        ExprKind::EVariable(vn) => { arg_name = vn },
+                        _ => {}
+                    }
+                    if arg_name != param.name {
+                        hints.push({
+                            "position": lsp_position(arg.span.start_line - 1, arg.span.start_col - 1),
+                            "label": param.name + ": ",
+                            "kind": 2,
+                            "paddingLeft": false,
+                            "paddingRight": false
+                        })
+                    }
+                    pi = pi + 1
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 11: Enhanced Document Highlights ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// More precise document highlights using word-boundary matching
+// instead of just AST references.
+
+func handle_document_highlight_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    const word = word_info["word"]
+    const source = doc["source"]
+    const program = doc["program"]
+
+    // Use AST references for precise highlighting
+    const refs = find_references(program, word)
+
+    // Also find text-based occurrences for things the AST might miss
+    let text_refs = find_text_occurrences(source, word)
+
+    // Merge: prefer AST refs (which have write/read info)
+    let highlights = []
+    let ast_positions = {"__s": true}
+
+    for r in refs {
+        const key = to_string(r["line"]) + ":" + to_string(r["col"])
+        ast_positions[key] = true
+        const highlight_kind = if r["kind"] == "definition" { 3 } else { 2 }
+        highlights.push({
+            "range": lsp_range(r["line"], r["col"], r["line"], r["col"] + len(word)),
+            "kind": highlight_kind
+        })
+    }
+
+    // Add text-based refs not covered by AST
+    for tr in text_refs {
+        const key = to_string(tr["line"]) + ":" + to_string(tr["col"])
+        if !ast_positions.has(key) || key == "__s" {
+            highlights.push({
+                "range": lsp_range(tr["line"], tr["col"], tr["line"], tr["col"] + len(word)),
+                "kind": 1  // Text highlight
+            })
+        }
+    }
+
+    if len(highlights) == 0 { return null }
+    highlights
+}
+
+// Find all text occurrences of a word (word-boundary aware)
+func find_text_occurrences(source, word) {
+    let occurrences = []
+    const lines = source.split("\n")
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i]
+        let search_start = 0
+        while search_start < len(ln) {
+            const idx = ln[search_start..len(ln)].index_of(word)
+            if idx == -1 { break }
+            const abs_idx = search_start + idx
+            const after_idx = abs_idx + len(word)
+            const before_ok = abs_idx == 0 || !is_ident_char(ln[abs_idx - 1])
+            const after_ok = after_idx >= len(ln) || !is_ident_char(ln[after_idx])
+            if before_ok && after_ok {
+                occurrences.push({"line": i, "col": abs_idx})
+            }
+            search_start = abs_idx + len(word)
+            if search_start >= len(ln) { break }
+        }
+        i = i + 1
+    }
+    occurrences
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 12: Enhanced Call Hierarchy ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Cross-file call hierarchy support
+
+func handle_prepare_call_hierarchy_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const word_info = word_at_position(doc["source"], line, character)
+    if word_info == null { return null }
+
+    // Check current file
+    const def = find_definition(doc["program"], word_info["word"])
+    if def != null && def["kind"] == "function" {
+        return [{
+            "name": def["name"],
+            "kind": SK_FUNCTION,
+            "uri": uri,
+            "range": lsp_range(def["line"], def["col"], def["line"] + 1, 0),
+            "selectionRange": lsp_range(def["line"], def["col"], def["line"], def["col"] + len(def["name"]))
+        }]
+    }
+
+    // Check cross-file
+    const cross = find_definition_across_files(word_info["word"])
+    if cross != null {
+        const cd = cross["def"]
+        if cd["kind"] == "function" {
+            return [{
+                "name": cd["name"],
+                "kind": SK_FUNCTION,
+                "uri": cross["uri"],
+                "range": lsp_range(cd["line"], cd["col"], cd["line"] + 1, 0),
+                "selectionRange": lsp_range(cd["line"], cd["col"], cd["line"], cd["col"] + len(cd["name"]))
+            }]
+        }
+    }
+
+    null
+}
+
+// Cross-file incoming calls
+func handle_incoming_calls_full(params) {
+    const item = params["item"]
+    const target_name = item["name"]
+
+    let callers = []
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const doc = lsp_documents[uri]
+        if doc == null { continue }
+
+        const symbols = collect_symbols(doc["program"])
+        for sym in symbols {
+            if sym["kind"] == SK_FUNCTION && sym["name"] != target_name {
+                const refs = find_refs_in_function(doc["program"], sym["name"], target_name)
+                if len(refs) > 0 {
+                    let from_ranges = []
+                    for r in refs {
+                        from_ranges.push(lsp_range(r["line"], r["col"], r["line"], r["col"] + len(target_name)))
+                    }
+                    callers.push({
+                        "from": {
+                            "name": sym["name"],
+                            "kind": SK_FUNCTION,
+                            "uri": uri,
+                            "range": lsp_range(sym["line"], sym["col"], sym["end_line"], 0),
+                            "selectionRange": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(sym["name"]))
+                        },
+                        "fromRanges": from_ranges
+                    })
+                }
+            }
+        }
+    }
+
+    if len(callers) == 0 { return null }
+    callers
+}
+
+// Cross-file outgoing calls
+func handle_outgoing_calls_full(params) {
+    const item = params["item"]
+    const func_name = item["name"]
+    const target_uri = item["uri"]
+
+    const doc = lsp_get_document(target_uri)
+    if doc == null { return null }
+
+    let callees = {"__s": true}
+    let all_functions = {"__s": true}
+
+    // Collect all known functions across workspace
+    for uri in lsp_documents.keys() {
+        if uri == "__s" { continue }
+        const ws_doc = lsp_documents[uri]
+        if ws_doc == null { continue }
+        const symbols = collect_symbols(ws_doc["program"])
+        for sym in symbols {
+            if sym["kind"] == SK_FUNCTION {
+                all_functions[sym["name"]] = {"uri": uri, "sym": sym}
+            }
+        }
+    }
+
+    // Find calls from func_name
+    if doc["program"] != null {
+        for stmt in doc["program"].statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if fdef.name == func_name && fdef.body != null {
+                        for s in fdef.body.statements {
+                            collect_calls_in_stmt(callees, s, all_functions)
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    let result = []
+    for callee_name in callees.keys() {
+        if callee_name == "__s" { continue }
+        if all_functions.has(callee_name) && callee_name != "__s" {
+            const info = all_functions[callee_name]
+            const sym = info["sym"]
+            const callee_uri = info["uri"]
+            const ranges = callees[callee_name]
+            result.push({
+                "to": {
+                    "name": callee_name,
+                    "kind": SK_FUNCTION,
+                    "uri": callee_uri,
+                    "range": lsp_range(sym["line"], sym["col"], sym["end_line"], 0),
+                    "selectionRange": lsp_range(sym["line"], sym["col"], sym["line"], sym["col"] + len(callee_name))
+                },
+                "fromRanges": ranges
+            })
+        }
+    }
+
+    if len(result) == 0 { return null }
+    result
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 13: Enhanced Signature Help with Overload Resolution ─────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Display full parameter information, support overloaded functions,
+// active parameter highlighting
+
+// Find call context at position: returns [func_name, active_param]
+func find_call_context(source, line, character) {
+    const lines = source.split("\n")
+    if line >= len(lines) { return null }
+    const ln = lines[line]
+
+    // Walk backward to find function call context
+    let paren_pos = character - 1
+    let depth = 0
+
+    while paren_pos >= 0 {
+        const c = ln[paren_pos]
+        if c == ")" || c == "]" { depth = depth + 1 }
+        if c == "(" || c == "[" {
+            if depth == 0 {
+                if c == "(" {
+                    // Found opening paren — get function name
+                    const func_word = word_at_position(source, line, paren_pos)
+                    if func_word != null {
+                        // Count commas for active parameter
+                        let active = 0
+                        let ci = paren_pos + 1
+                        let d = 0
+                        while ci < character {
+                            if ln[ci] == "(" || ln[ci] == "[" { d = d + 1 }
+                            if ln[ci] == ")" || ln[ci] == "]" { d = d - 1 }
+                            if ln[ci] == "," && d == 0 { active = active + 1 }
+                            ci = ci + 1
+                        }
+                        return {"name": func_word["word"], "active_param": active}
+                    }
+                }
+                return null
+            }
+            depth = depth - 1
+        }
+        paren_pos = paren_pos - 1
+    }
+    null
+}
+
+// Enhanced signature help with method signatures
+func handle_signature_help_v2(params) {
+    const uri = params["textDocument"]["uri"]
+    const pos = params["position"]
+    const line = pos["line"]
+    const character = pos["character"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const ctx = find_call_context(doc["source"], line, character)
+    if ctx == null { return null }
+
+    const func_name = ctx["name"]
+    const active_param = ctx["active_param"]
+    const program = doc["program"]
+
+    // 1. User-defined function signatures
+    if program != null {
+        for stmt in program.statements {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if fdef.name == func_name {
+                        let param_strs = []
+                        let param_labels = []
+                        for p in fdef.params {
+                            let pstr = p.name
+                            if p.type_ann != "" { pstr = pstr + ": " + p.type_ann }
+                            if p.rest { pstr = "..." + pstr }
+                            if p.default_value != null { pstr = pstr + " = ..." }
+                            param_strs.push(pstr)
+                            param_labels.push({"label": pstr})
+                        }
+                        let ret = ""
+                        if fdef.return_type != "" { ret = " -> " + fdef.return_type }
+                        const label = f"func {func_name}({param_strs.join(', ')}){ret}"
+
+                        // Extract doc comment for documentation
+                        const doc_comment = extract_doc_comments(doc["source"], stmt.span.start_line)
+                        let sig_doc = null
+                        if doc_comment != "" {
+                            sig_doc = {"kind": "markdown", "value": doc_comment}
+                        }
+
+                        return {
+                            "signatures": [{
+                                "label": label,
+                                "documentation": sig_doc,
+                                "parameters": param_labels,
+                                "activeParameter": active_param
+                            }],
+                            "activeSignature": 0,
+                            "activeParameter": active_param
+                        }
+                    }
+                },
+                StmtKind::SAsyncFuncDef(fdef) => {
+                    if fdef.name == func_name {
+                        let param_strs = []
+                        let param_labels = []
+                        for p in fdef.params {
+                            param_strs.push(p.name)
+                            param_labels.push({"label": p.name})
+                        }
+                        const label = f"async func {func_name}({param_strs.join(', ')})"
+                        return {
+                            "signatures": [{
+                                "label": label,
+                                "parameters": param_labels,
+                                "activeParameter": active_param
+                            }],
+                            "activeSignature": 0,
+                            "activeParameter": active_param
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Builtin signatures
+    if BUILTIN_SIGS.has(func_name) {
+        const sig = BUILTIN_SIGS[func_name]
+        let param_labels = []
+        for p in sig["params"] {
+            param_labels.push({"label": p})
+        }
+        let sig_doc = null
+        if BUILTIN_DOCS.has(func_name) {
+            sig_doc = {"kind": "markdown", "value": BUILTIN_DOCS[func_name]}
+        }
+        return {
+            "signatures": [{
+                "label": sig["label"],
+                "documentation": sig_doc,
+                "parameters": param_labels,
+                "activeParameter": active_param
+            }],
+            "activeSignature": 0,
+            "activeParameter": active_param
+        }
+    }
+
+    null
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 14: Enhanced Folding Ranges ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// More precise folding using AST and multi-line string detection
+
+func handle_folding_range_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const lines = source_lines(source)
+    const program = doc["program"]
+    let ranges = []
+
+    // 1. AST-based folding for function bodies, struct/enum definitions
+    if program != null {
+        for stmt in program.statements {
+            const sl = stmt.span.start_line - 1
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SFuncDef(fdef) => {
+                    if fdef.body != null {
+                        const body_stmts = fdef.body.statements
+                        if len(body_stmts) > 0 {
+                            const last_stmt = body_stmts[len(body_stmts) - 1]
+                            const end_line = last_stmt.span.start_line
+                            if end_line > sl + 1 {
+                                ranges.push({
+                                    "startLine": sl,
+                                    "endLine": end_line,
+                                    "kind": "region"
+                                })
+                            }
+                        }
+                    }
+                },
+                StmtKind::SAsyncFuncDef(fdef) => {
+                    if fdef.body != null && len(fdef.body.statements) > 0 {
+                        const last_stmt = fdef.body.statements[len(fdef.body.statements) - 1]
+                        const end_line = last_stmt.span.start_line
+                        if end_line > sl + 1 {
+                            ranges.push({"startLine": sl, "endLine": end_line, "kind": "region"})
+                        }
+                    }
+                },
+                StmtKind::SEnumDef(_, variants, _) => {
+                    if len(variants) > 1 {
+                        ranges.push({"startLine": sl, "endLine": sl + len(variants), "kind": "region"})
+                    }
+                },
+                StmtKind::SStructDef(_, fields, _) => {
+                    if len(fields) > 1 {
+                        ranges.push({"startLine": sl, "endLine": sl + len(fields), "kind": "region"})
+                    }
+                },
+                StmtKind::STestDef(_, body) => {
+                    if body != null && len(body.statements) > 0 {
+                        const last_stmt = body.statements[len(body.statements) - 1]
+                        const end_line = last_stmt.span.start_line
+                        if end_line > sl + 1 {
+                            ranges.push({"startLine": sl, "endLine": end_line, "kind": "region"})
+                        }
+                    }
+                },
+                StmtKind::SImplBlock(_, methods) => {
+                    if methods != null && len(methods) > 0 {
+                        const last_method = methods[len(methods) - 1]
+                        const end_line = last_method.span.start_line
+                        if end_line > sl + 1 {
+                            ranges.push({"startLine": sl, "endLine": end_line, "kind": "region"})
+                        }
+                    }
+                },
+                StmtKind::SModuleDef(_, body) => {
+                    if body != null && len(body.statements) > 0 {
+                        const last_stmt = body.statements[len(body.statements) - 1]
+                        const end_line = last_stmt.span.start_line
+                        if end_line > sl + 1 {
+                            ranges.push({"startLine": sl, "endLine": end_line, "kind": "region"})
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Comment block folding
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.starts_with("//") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) && lines[j].trim().starts_with("//") {
+                j = j + 1
+            }
+            if j > start + 1 {
+                ranges.push({"startLine": start, "endLine": j - 1, "kind": FOLD_COMMENT})
+                i = j
+                continue
+            }
+        }
+        i = i + 1
+    }
+
+    // 3. Import block folding
+    i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.starts_with("import ") || ln.starts_with("use ") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) {
+                const next = lines[j].trim()
+                if next.starts_with("import ") || next.starts_with("use ") {
+                    j = j + 1
+                } else {
+                    break
+                }
+            }
+            if j > start + 1 {
+                ranges.push({"startLine": start, "endLine": j - 1, "kind": FOLD_IMPORTS})
+            }
+            i = j
+            continue
+        }
+        i = i + 1
+    }
+
+    // 4. Multi-line string folding
+    i = 0
+    while i < len(lines) {
+        const ln = lines[i]
+        if ln.contains("\"\"\"") {
+            const start = i
+            let j = i + 1
+            while j < len(lines) && !lines[j].contains("\"\"\"") {
+                j = j + 1
+            }
+            if j > start && j < len(lines) {
+                ranges.push({"startLine": start, "endLine": j, "kind": "region"})
+            }
+            i = j + 1
+            continue
+        }
+        i = i + 1
+    }
+
+    // 5. Brace-based folding as fallback for constructs not in AST
+    i = 0
+    while i < len(lines) {
+        const ln = lines[i].trim()
+        if ln.ends_with("{") && !ranges.any(r => r["startLine"] == i) {
+            let depth = 1
+            let j = i + 1
+            while j < len(lines) && depth > 0 {
+                const jln = lines[j]
+                let k = 0
+                while k < len(jln) {
+                    if jln[k] == "{" { depth = depth + 1 }
+                    if jln[k] == "}" { depth = depth - 1 }
+                    k = k + 1
+                }
+                if depth == 0 && j > i + 1 {
+                    ranges.push({"startLine": i, "endLine": j, "kind": "region"})
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    if len(ranges) == 0 { return null }
+    ranges
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 15: Enhanced Document Links ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Resolve import paths to file URIs, detect URL strings
+
+func handle_document_link_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    let links = []
+    const source = doc["source"]
+    const lines = source_lines(source)
+
+    let i = 0
+    while i < len(lines) {
+        const ln = lines[i]
+        const trimmed = ln.trim()
+
+        // Import/use statements
+        if trimmed.starts_with("import ") {
+            const path_start = 7
+            const path_part = trimmed[path_start..len(trimmed)]
+            if len(path_part) > 0 {
+                // Convert module path to potential file path
+                const file_path = path_part.replace(".", "/") + ".magi"
+                const indent = len(ln) - len(trimmed)
+                links.push({
+                    "range": lsp_range(i, indent + path_start, i, indent + path_start + len(path_part)),
+                    "tooltip": f"Module: {path_part}\nFile: {file_path}",
+                    "data": {"type": "import", "module": path_part}
+                })
+            }
+        }
+        if trimmed.starts_with("use ") {
+            const path_start = 4
+            let path_end = len(trimmed)
+            if trimmed.ends_with(";") { path_end = path_end - 1 }
+            const path_part = trimmed[path_start..path_end].trim()
+            if len(path_part) > 0 {
+                const indent = len(ln) - len(trimmed)
+                links.push({
+                    "range": lsp_range(i, indent + path_start, i, indent + path_start + len(path_part)),
+                    "tooltip": f"Use: {path_part}"
+                })
+            }
+        }
+
+        // Detect URLs in strings and comments
+        let search_start = 0
+        while search_start < len(ln) {
+            const http_idx = ln[search_start..len(ln)].index_of("http")
+            if http_idx == -1 { break }
+            const abs_idx = search_start + http_idx
+            // Check for http:// or https://
+            if abs_idx + 7 < len(ln) && (ln[abs_idx..abs_idx + 7] == "http://" || ln[abs_idx..abs_idx + 8] == "https://") {
+                // Find end of URL
+                let url_end = abs_idx
+                while url_end < len(ln) && ln[url_end] != " " && ln[url_end] != "\"" && ln[url_end] != "'" && ln[url_end] != ")" && ln[url_end] != ">" {
+                    url_end = url_end + 1
+                }
+                if url_end > abs_idx + 8 {
+                    const url = ln[abs_idx..url_end]
+                    links.push({
+                        "range": lsp_range(i, abs_idx, i, url_end),
+                        "target": url,
+                        "tooltip": f"Open: {url}"
+                    })
+                }
+                search_start = url_end
+            } else {
+                search_start = abs_idx + 4
+            }
+        }
+
+        i = i + 1
+    }
+
+    if len(links) == 0 { return null }
+    links
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 16: Enhanced Selection Ranges ────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// AST-aware selection ranges for better expand/shrink selection
+
+func handle_selection_range_full(params) {
+    const uri = params["textDocument"]["uri"]
+    const positions = params["positions"]
+
+    const doc = lsp_get_document(uri)
+    if doc == null { return null }
+
+    const source = doc["source"]
+    const program = doc["program"]
+    const lines = source_lines(source)
+
+    let result = []
+    for pos in positions {
+        const line = pos["line"]
+        const character = pos["character"]
+
+        let ranges = []
+
+        // Level 1: Word
+        const word_info = word_at_position(source, line, character)
+        if word_info != null {
+            ranges.push(lsp_range(line, word_info["start"], line, word_info["end"]))
+        }
+
+        // Level 2: Expression (find containing expression in AST)
+        if program != null {
+            const expr_range = find_containing_expression_range(program, line, character)
+            if expr_range != null {
+                ranges.push(expr_range)
+            }
+        }
+
+        // Level 3: Statement
+        if program != null {
+            const stmt_range = find_containing_statement_range(program, line)
+            if stmt_range != null {
+                ranges.push(stmt_range)
+            }
+        }
+
+        // Level 4: Block
+        if program != null {
+            const block_range = find_containing_block_range(program, line)
+            if block_range != null {
+                ranges.push(block_range)
+            }
+        }
+
+        // Level 5: Line
+        if line < len(lines) {
+            ranges.push(lsp_range(line, 0, line, len(lines[line])))
+        }
+
+        // Level 6: Document
+        const last_line = len(lines) - 1
+        const last_char = if last_line >= 0 { len(lines[last_line]) } else { 0 }
+        ranges.push(lsp_range(0, 0, last_line, last_char))
+
+        // Deduplicate ranges
+        let unique_ranges = []
+        for r in ranges {
+            let dup = false
+            for ur in unique_ranges {
+                if ur["start"]["line"] == r["start"]["line"] &&
+                   ur["start"]["character"] == r["start"]["character"] &&
+                   ur["end"]["line"] == r["end"]["line"] &&
+                   ur["end"]["character"] == r["end"]["character"] {
+                    dup = true
+                    break
+                }
+            }
+            if !dup { unique_ranges.push(r) }
+        }
+
+        // Build nested selection range (innermost to outermost)
+        let sel = null
+        let ri = len(unique_ranges) - 1
+        while ri >= 0 {
+            sel = {"range": unique_ranges[ri], "parent": sel}
+            ri = ri - 1
+        }
+        result.push(sel)
+    }
+
+    if len(result) == 0 { return null }
+    result
+}
+
+// Find the containing expression range at a position
+func find_containing_expression_range(program, line, character) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        if sl == line {
+            // Simple: return the statement's expression range
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SExprStmt(expr) => {
+                    if expr != null {
+                        const el = expr.span.start_line - 1
+                        const ec = expr.span.start_col - 1
+                        return lsp_range(el, ec, el, ec + 20)
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+    null
+}
+
+// Find the containing statement range at a line
+func find_containing_statement_range(program, line) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        if sl == line {
+            return lsp_range(sl, 0, sl + 1, 0)
+        }
+        // Check nested statements in function bodies
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.body != null {
+                    for s in fdef.body.statements {
+                        const ssl = s.span.start_line - 1
+                        if ssl == line {
+                            return lsp_range(ssl, 0, ssl + 1, 0)
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// Find the containing block range at a line
+func find_containing_block_range(program, line) {
+    if program == null { return null }
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fdef) => {
+                if fdef.body != null && len(fdef.body.statements) > 0 {
+                    const first_sl = fdef.body.statements[0].span.start_line - 1
+                    const last_sl = fdef.body.statements[len(fdef.body.statements) - 1].span.start_line - 1
+                    if line >= first_sl && line <= last_sl {
+                        return lsp_range(sl, 0, last_sl + 1, 0)
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Final: Version constant ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const LSP_VERSION = "2.0.0"
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 17: Diagnostics Severity Mapping ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Map error codes to severity levels and provide related information
+
+// Error code to severity mapping
+func diagnostic_severity_for_code(code) {
+    if code == null { return DIAG_ERROR }
+    const first = code[0]
+    if first == "E" { return DIAG_ERROR }
+    if first == "W" { return DIAG_WARNING }
+    if first == "I" { return DIAG_INFO }
+    if first == "H" { return DIAG_HINT }
+    DIAG_ERROR
+}
+
+// Error code to diagnostic tag mapping
+// Tags: 1 = Unnecessary, 2 = Deprecated
+func diagnostic_tags_for_code(code) {
+    if code == null { return [] }
+    if code == "W100" { return [1] }  // Unused import
+    if code == "W101" { return [1] }  // Empty block
+    if code == "W102" { return [1] }  // Unused variable
+    if code == "W103" { return [2] }  // Deprecated
+    []
+}
+
+// Build related information for a diagnostic
+func diagnostic_related_info(source, program, code, message) {
+    let related = []
+
+    // For undefined function errors, show where similar functions are defined
+    if code == "E201" {
+        const func_name = extract_name_from_diagnostic(message)
+        if func_name != null {
+            const suggestion = find_closest_symbol(program, func_name)
+            if suggestion != null {
+                const def = find_definition(program, suggestion)
+                if def != null {
+                    related.push({
+                        "message": f"Did you mean '{suggestion}'?",
+                        "location": {
+                            "range": lsp_range(def["line"], def["col"], def["line"], def["col"] + len(suggestion))
+                        }
+                    })
+                }
+            }
+        }
+    }
+
+    // For duplicate definition errors, show the original
+    if code == "E100" {
+        const dup_name = extract_name_from_diagnostic(message)
+        if dup_name != null {
+            const def = find_definition(program, dup_name)
+            if def != null {
+                related.push({
+                    "message": f"'{dup_name}' is first defined here",
+                    "location": {
+                        "range": lsp_range(def["line"], def["col"], def["line"], def["col"] + len(dup_name))
+                    }
+                })
+            }
+        }
+    }
+
+    related
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 18: Code Action — Extract Function ───────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Extract selected code into a new function
+
+func make_extract_function_action(uri, source, start_line, start_char, end_line, end_char) {
+    const lines = source.split("\n")
+
+    // Extract the selected text
+    let selected_lines = []
+    let i = start_line
+    while i <= end_line && i < len(lines) {
+        if i == start_line && i == end_line {
+            selected_lines.push(lines[i][start_char..end_char])
+        } else if i == start_line {
+            selected_lines.push(lines[i][start_char..len(lines[i])])
+        } else if i == end_line {
+            selected_lines.push(lines[i][0..end_char])
+        } else {
+            selected_lines.push(lines[i])
+        }
+        i = i + 1
+    }
+
+    const selected_text = selected_lines.join("\n")
+    if len(selected_text.trim()) == 0 { return null }
+
+    // Detect free variables in the selection (simple heuristic)
+    let free_vars = detect_free_variables(selected_text)
+
+    // Build the new function
+    const params_str = free_vars.join(", ")
+    const func_name = "extracted_function"
+    let func_body = ""
+    for sl in selected_lines {
+        func_body = func_body + "    " + sl.trim() + "\n"
+    }
+
+    const new_func = f"\nfunc {func_name}({params_str}) {{\n{func_body}}}\n"
+
+    // Build the call expression
+    const call_text = f"{func_name}({params_str})"
+
+    // Find insertion point (after the current function, or at end of file)
+    let insert_line = len(lines)
+
+    let changes = {"__s": true}
+    let edits = []
+
+    // Replace selected text with function call
+    edits.push(lsp_text_edit(
+        lsp_range(start_line, start_char, end_line, end_char),
+        call_text
+    ))
+
+    // Insert new function at end
+    edits.push(lsp_text_edit(
+        lsp_range(insert_line, 0, insert_line, 0),
+        new_func
+    ))
+
+    changes[uri] = edits
+
+    {
+        "title": "Extract function",
+        "kind": "refactor.extract",
+        "edit": {"changes": changes}
+    }
+}
+
+// Detect free variables in a code snippet (simple heuristic)
+func detect_free_variables(code) {
+    let vars = []
+    let declared = {"__s": true}
+
+    const lines = code.split("\n")
+    for ln in lines {
+        const trimmed = ln.trim()
+
+        // Track declarations
+        if trimmed.starts_with("let ") || trimmed.starts_with("const ") {
+            const prefix_len = if trimmed.starts_with("let ") { 4 } else { 6 }
+            const rest = trimmed[prefix_len..len(trimmed)].trim()
+            let name_end = 0
+            while name_end < len(rest) && is_ident_char(rest[name_end]) {
+                name_end = name_end + 1
+            }
+            if name_end > 0 {
+                declared[rest[0..name_end]] = true
+            }
+        }
+
+        // Find identifiers that aren't declared locally
+        let ci = 0
+        while ci < len(trimmed) {
+            if is_ident_char(trimmed[ci]) && (ci == 0 || !is_ident_char(trimmed[ci - 1])) {
+                let end = ci
+                while end < len(trimmed) && is_ident_char(trimmed[end]) { end = end + 1 }
+                const word = trimmed[ci..end]
+                if !MAGI_KEYWORDS.contains(word) && !MAGI_BUILTINS.contains(word) && !declared.has(word) {
+                    if !vars.contains(word) {
+                        vars.push(word)
+                    }
+                }
+                ci = end
+            } else {
+                ci = ci + 1
+            }
+        }
+    }
+
+    vars
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 19: Code Action — Inline Variable ────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+//
+// Replace a variable with its value at all usage sites
+
+func make_inline_variable_action(uri, source, program, var_name) {
+    if program == null { return null }
+
+    // Find the variable's value
+    let var_value_text = null
+    let def_line = -1
+
+    const lines = source.split("\n")
+    for stmt in program.statements {
+        const sl = stmt.span.start_line - 1
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLet(name, _) => {
+                if name == var_name {
+                    def_line = sl
+                    // Extract the value text from source
+                    const ln = lines[sl]
+                    const eq_idx = ln.index_of("=")
+                    if eq_idx >= 0 {
+                        var_value_text = ln[eq_idx + 1..len(ln)].trim()
+                        // Remove trailing semicolons if any
+                        if var_value_text.ends_with(";") {
+                            var_value_text = var_value_text[0..len(var_value_text) - 1].trim()
+                        }
+                    }
+                }
+            },
+            StmtKind::SConst(name, _) => {
+                if name == var_name {
+                    def_line = sl
+                    const ln = lines[sl]
+                    const eq_idx = ln.index_of("=")
+                    if eq_idx >= 0 {
+                        var_value_text = ln[eq_idx + 1..len(ln)].trim()
+                        if var_value_text.ends_with(";") {
+                            var_value_text = var_value_text[0..len(var_value_text) - 1].trim()
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    if var_value_text == null || def_line == -1 { return null }
+
+    // Find all references to the variable (excluding the definition)
+    const refs = find_references(program, var_name)
+    let usage_refs = []
+    for r in refs {
+        if r["line"] != def_line || r["kind"] != "definition" {
+            usage_refs.push(r)
+        }
+    }
+
+    if len(usage_refs) == 0 { return null }
+
+    let edits = []
+
+    // Replace each usage with the value
+    // Process in reverse order to preserve positions
+    let ri = len(usage_refs) - 1
+    while ri >= 0 {
+        const r = usage_refs[ri]
+        edits.push(lsp_text_edit(
+            lsp_range(r["line"], r["col"], r["line"], r["col"] + len(var_name)),
+            var_value_text
+        ))
+        ri = ri - 1
+    }
+
+    // Remove the definition line
+    if def_line >= 0 && def_line < len(lines) {
+        edits.push(lsp_text_edit(
+            lsp_range(def_line, 0, def_line + 1, 0),
+            ""
+        ))
+    }
+
+    let changes = {"__s": true}
+    changes[uri] = edits
+
+    {
+        "title": f"Inline variable '{var_name}'",
+        "kind": "refactor.inline",
+        "edit": {"changes": changes}
+    }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Section 20: Server Capabilities Extension ────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Full initialize response with all capabilities
+func handle_initialize_full(params) {
+    if params != null && params.has("rootUri") && params["rootUri"] != null {
+        lsp_workspace_root = params["rootUri"]
+    }
+
+    // Extract client capabilities for feature negotiation
+    let client_caps = null
+    if params != null && params.has("capabilities") {
+        client_caps = params["capabilities"]
+    }
+
+    {
+        "capabilities": {
+            "textDocumentSync": {
+                "openClose": true,
+                "change": 1,
+                "save": {"includeText": true},
+                "willSave": true,
+                "willSaveWaitUntil": false
+            },
+            "completionProvider": {
+                "triggerCharacters": [".", ":", "@", "/"],
+                "resolveProvider": true
+            },
+            "hoverProvider": true,
+            "definitionProvider": true,
+            "typeDefinitionProvider": true,
+            "referencesProvider": true,
+            "renameProvider": {"prepareProvider": true},
+            "documentFormattingProvider": true,
+            "documentRangeFormattingProvider": true,
+            "documentOnTypeFormattingProvider": {
+                "firstTriggerCharacter": "}",
+                "moreTriggerCharacter": [";", "\n"]
+            },
+            "codeActionProvider": {
+                "codeActionKinds": [
+                    "quickfix",
+                    "refactor.extract",
+                    "refactor.inline",
+                    "refactor.rewrite",
+                    "source.organizeImports",
+                    "source.fixAll"
+                ]
+            },
+            "signatureHelpProvider": {
+                "triggerCharacters": ["(", ","],
+                "retriggerCharacters": [","]
+            },
+            "documentSymbolProvider": true,
+            "semanticTokensProvider": {
+                "legend": {
+                    "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                    "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS
+                },
+                "full": true,
+                "range": false
+            },
+            "foldingRangeProvider": true,
+            "selectionRangeProvider": true,
+            "codeLensProvider": {"resolveProvider": true},
+            "inlayHintProvider": {"resolveProvider": true},
+            "documentLinkProvider": {"resolveSupport": true},
+            "linkedEditingRangeProvider": true,
+            "documentHighlightProvider": true,
+            "documentColorProvider": true,
+            "callHierarchyProvider": true,
+            "typeHierarchyProvider": true,
+            "workspaceSymbolProvider": true,
+            "executeCommandProvider": {
+                "commands": ["magi.run", "magi.check", "magi.lint", "magi.format", "magi.runTest", "magi.runTests"]
+            },
+            "workspace": {
+                "workspaceFolders": {
+                    "supported": true,
+                    "changeNotifications": true
+                },
+                "fileOperations": {
+                    "didCreate": {"filters": [{"pattern": {"glob": "**/*.magi"}}]},
+                    "didDelete": {"filters": [{"pattern": {"glob": "**/*.magi"}}]}
+                }
+            },
+            "diagnosticProvider": {
+                "interFileDependencies": true,
+                "workspaceDiagnostics": false
+            }
+        },
+        "serverInfo": {
+            "name": "magi-lsp-self",
+            "version": LSP_VERSION
+        }
+    }
+}
