@@ -1743,17 +1743,15 @@ impl Compiler {
         let iter_local = self.define_local("__iter", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(iter_local));
 
-        // Counter (raw untagged i64 — internal use only).
-        let counter_local = self.define_local("__counter", ValType::I64, true)?;
+        // Counter (tagged I64).
+        let counter_local = self.define_local("__counter", ValType::Tagged, true)?;
         self.emit(Instruction::PushI64(0));
-        self.emit(Instruction::UntagI64);
         self.emit(Instruction::LocalSet(counter_local));
 
-        // Length (raw untagged i64).
+        // Length (tagged I64).
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::ArrayLen);
-        self.emit(Instruction::UntagI64); // strip tag to get raw length
-        let len_local = self.define_local("__len", ValType::I64, false)?;
+        let len_local = self.define_local("__len", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(len_local));
 
         // Loop structure.
@@ -1775,10 +1773,9 @@ impl Compiler {
         let cond_break_offset = self.block_depth.saturating_sub(break_depth);
         self.emit(Instruction::BrIf(cond_break_offset));
 
-        // Load current element. ArrayGet expects tagged index.
+        // Load current element.
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::LocalGet(counter_local));
-        self.emit(Instruction::TagI64); // tag counter for ArrayGet
         self.emit(Instruction::ArrayGet);
 
         // Bind pattern.
@@ -1841,10 +1838,9 @@ impl Compiler {
         }
         self.fb()?.pop_scope();
 
-        // Increment counter (raw untagged arithmetic).
+        // Increment counter (tagged arithmetic).
         self.emit(Instruction::LocalGet(counter_local));
         self.emit(Instruction::PushI64(1));
-        self.emit(Instruction::UntagI64); // get raw 1
         self.emit(Instruction::I64Add);
         self.emit(Instruction::LocalSet(counter_local));
 
