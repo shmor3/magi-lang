@@ -2043,3 +2043,342 @@ func fmt_count_changes(original, formatted) {
     const changes = fmt_diff(original, formatted)
     len(changes)
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Attribute Formatting ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_attribute(attr, depth) {
+    let result = fmt_indent(depth) + "#[" + attr["name"]
+    if attr.has("args") && len(attr["args"]) > 0 {
+        let parts = []
+        for arg in attr["args"] {
+            parts.push(fmt_expr(arg, depth))
+        }
+        if attr.has("kwargs") {
+            for key in attr["kwargs"].keys() {
+                if key == "__s" { continue }
+                parts.push(key + " = " + fmt_expr(attr["kwargs"][key], depth))
+            }
+        }
+        result = result + "(" + parts.join(", ") + ")"
+    }
+    result = result + "]"
+    result
+}
+
+func fmt_attributes(attrs, depth) {
+    if attrs == null || len(attrs) == 0 { return "" }
+    let result = ""
+    for attr in attrs {
+        result = result + fmt_attribute(attr, depth) + FMT_NL
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Generic Type Parameter Formatting ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_type_params(type_params) {
+    if type_params == null || len(type_params) == 0 { return "" }
+
+    let parts = []
+    for tp in type_params {
+        if typeof(tp) == "string" {
+            parts.push(tp)
+        } else if typeof(tp) == "map" {
+            let param_str = tp["name"]
+            if tp.has("bounds") && len(tp["bounds"]) > 0 {
+                const bounds = tp["bounds"].map(b => fmt_type(b))
+                param_str = param_str + ": " + bounds.join(" + ")
+            }
+            parts.push(param_str)
+        }
+    }
+    "<" + parts.join(", ") + ">"
+}
+
+func fmt_type(ty) {
+    if ty == null { return "any" }
+    if typeof(ty) == "string" { return ty }
+
+    match ty["kind"] {
+        "named" => ty["name"],
+        "array" => "[" + fmt_type(ty["element"]) + "]",
+        "map" => "{" + fmt_type(ty["key"]) + ": " + fmt_type(ty["value"]) + "}",
+        "tuple" => "(" + ty["types"].map(t => fmt_type(t)).join(", ") + ")",
+        "optional" => fmt_type(ty["inner"]) + "?",
+        "union" => fmt_type(ty["left"]) + " | " + fmt_type(ty["right"]),
+        "intersection" => fmt_type(ty["left"]) + " & " + fmt_type(ty["right"]),
+        "function" => fmt_type(ty["params"]) + " -> " + fmt_type(ty["return"]),
+        "generic" => ty["name"] + "<" + ty["args"].map(a => fmt_type(a)).join(", ") + ">",
+        "qualified" => ty["module"] + "." + ty["name"],
+        "unit" => "()",
+        _ => "any",
+    }
+}
+
+func fmt_return_type(ret_type) {
+    if ret_type == null { return "" }
+    " -> " + fmt_type(ret_type)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Where Clause Formatting ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_where_clause(constraints, depth) {
+    if constraints == null || len(constraints) == 0 { return "" }
+
+    if len(constraints) == 1 {
+        const c = constraints[0]
+        const bounds = c["bounds"].map(b => fmt_type(b))
+        return " where " + c["type"] + ": " + bounds.join(" + ")
+    }
+
+    // Multi-line where clause for readability
+    let result = FMT_NL + fmt_indent(depth) + "where" + FMT_NL
+    let first = true
+    for c in constraints {
+        const bounds = c["bounds"].map(b => fmt_type(b))
+        const prefix = if first { "    " } else { "    " }
+        const comma = if first { "" } else { "" }
+        result = result + fmt_indent(depth) + prefix + c["type"] + ": " + bounds.join(" + ")
+        if !first || len(constraints) > 1 {
+            result = result + ","
+        }
+        result = result + FMT_NL
+        first = false
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Async/Await Formatting ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_async_func(fd, depth) {
+    let result = fmt_indent(depth) + "async func " + fd.name
+    result = result + fmt_type_params(fd.type_params)
+    result = result + "(" + fmt_params(fd.params) + ")"
+    result = result + fmt_return_type(fd.return_type)
+    if fd.has("where_clause") {
+        result = result + fmt_where_clause(fd["where_clause"], depth)
+    }
+    result = result + " " + FMT_OPEN + FMT_NL
+    result = result + fmt_block_body(fd.body, depth + 1)
+    result = result + fmt_indent(depth) + FMT_CLOSE
+    result
+}
+
+func fmt_await_expr(operand, depth) {
+    "await " + fmt_expr(operand, depth)
+}
+
+func fmt_spawn_expr(body, depth) {
+    let result = "spawn " + FMT_OPEN + FMT_NL
+    result = result + fmt_block_body(body, depth + 1)
+    result = result + fmt_indent(depth) + FMT_CLOSE
+    result
+}
+
+func fmt_async_block(body, depth) {
+    let result = "async " + FMT_OPEN + FMT_NL
+    result = result + fmt_block_body(body, depth + 1)
+    result = result + fmt_indent(depth) + FMT_CLOSE
+    result
+}
+
+func fmt_params(params) {
+    if params == null || len(params) == 0 { return "" }
+
+    let parts = []
+    for p in params {
+        if typeof(p) == "string" {
+            parts.push(p)
+        } else if typeof(p) == "map" {
+            let param_str = p["name"]
+            if p.has("type") && p["type"] != null {
+                param_str = param_str + ": " + fmt_type(p["type"])
+            }
+            if p.has("default") && p["default"] != null {
+                param_str = param_str + " = " + fmt_expr(p["default"], 0)
+            }
+            parts.push(param_str)
+        }
+    }
+    parts.join(", ")
+}
+
+func fmt_block_body(block, depth) {
+    if block == null { return "" }
+    let result = ""
+    for stmt in block.statements {
+        result = result + fmt_stmt(stmt, depth) + FMT_NL
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Complex Match Arm Formatting with Alignment ─────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_match_expr_aligned(subject, arms, depth) {
+    let result = "match " + fmt_expr(subject, depth) + " " + FMT_OPEN + FMT_NL
+
+    // Calculate max pattern width for alignment
+    let max_pattern_width = 0
+    let patterns = []
+    for arm in arms {
+        const pattern_str = fmt_pattern(arm["pattern"], depth + 1)
+        patterns.push(pattern_str)
+        if len(pattern_str) > max_pattern_width {
+            max_pattern_width = len(pattern_str)
+        }
+    }
+
+    // Only align if patterns are reasonably short
+    const should_align = max_pattern_width < 30 && len(arms) > 1
+
+    let i = 0
+    for arm in arms {
+        const ind = fmt_indent(depth + 1)
+        const pattern_str = patterns[i]
+        const guard = if arm.has("guard") && arm["guard"] != null {
+            " if " + fmt_expr(arm["guard"], depth + 1)
+        } else { "" }
+
+        const body_expr = arm["body"]
+        const is_block = typeof(body_expr) == "map" && body_expr.has("kind") && body_expr["kind"] == "block"
+
+        if is_block {
+            // Multi-line arm body
+            result = result + ind + pattern_str + guard + " => " + FMT_OPEN + FMT_NL
+            result = result + fmt_block_body(body_expr, depth + 2)
+            result = result + fmt_indent(depth + 1) + FMT_CLOSE + "," + FMT_NL
+        } else {
+            // Single-line arm
+            let arrow = " => "
+            if should_align {
+                const padding = max_pattern_width - len(pattern_str)
+                let pad = ""
+                let j = 0
+                while j < padding { pad = pad + " "; j = j + 1 }
+                arrow = pad + " => "
+            }
+            const body_str = fmt_expr(body_expr, depth + 1)
+            result = result + ind + pattern_str + guard + arrow + body_str + "," + FMT_NL
+        }
+        i = i + 1
+    }
+
+    result = result + fmt_indent(depth) + FMT_CLOSE
+    result
+}
+
+func fmt_pattern(pattern, depth) {
+    if pattern == null { return "_" }
+    if typeof(pattern) == "string" { return pattern }
+    if typeof(pattern) == "map" {
+        if pattern.has("kind") {
+            match pattern["kind"] {
+                "wildcard" => "_",
+                "literal" => fmt_literal(pattern["value"]),
+                "variable" => pattern["name"],
+                "enum_variant" => {
+                    let s = pattern["enum"] + "::" + pattern["variant"]
+                    if pattern.has("bindings") && len(pattern["bindings"]) > 0 {
+                        s = s + "(" + pattern["bindings"].join(", ") + ")"
+                    }
+                    s
+                },
+                "struct" => {
+                    let s = pattern["name"] + " { "
+                    let fields = []
+                    if pattern.has("fields") {
+                        for f in pattern["fields"] {
+                            if f.has("binding") && f["binding"] != f["name"] {
+                                fields.push(f["name"] + ": " + f["binding"])
+                            } else {
+                                fields.push(f["name"])
+                            }
+                        }
+                    }
+                    s = s + fields.join(", ") + " }"
+                    s
+                },
+                "tuple" => "(" + pattern["elements"].map(e => fmt_pattern(e, depth)).join(", ") + ")",
+                "or" => pattern["patterns"].map(p => fmt_pattern(p, depth)).join(" | "),
+                "range" => fmt_expr(pattern["start"], depth) + ".." + fmt_expr(pattern["end"], depth),
+                _ => to_string(pattern),
+            }
+        } else {
+            to_string(pattern)
+        }
+    } else {
+        to_string(pattern)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Select Statement Formatting ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_select(cases, depth) {
+    let result = "select " + FMT_OPEN + FMT_NL
+    for c in cases {
+        const ind = fmt_indent(depth + 1)
+        if c["kind"] == "default" {
+            result = result + ind + "default => "
+        } else {
+            result = result + ind + fmt_expr(c["operation"], depth + 1) + " => "
+        }
+        const body = c["body"]
+        if typeof(body) == "map" && body.has("kind") && body["kind"] == "block" {
+            result = result + FMT_OPEN + FMT_NL
+            result = result + fmt_block_body(body, depth + 2)
+            result = result + fmt_indent(depth + 1) + FMT_CLOSE
+        } else {
+            result = result + fmt_expr(body, depth + 1)
+        }
+        result = result + "," + FMT_NL
+    }
+    result = result + fmt_indent(depth) + FMT_CLOSE
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Interface Formatting ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_interface(name, type_params, methods, operators, depth) {
+    let result = fmt_indent(depth) + "interface " + name
+    result = result + fmt_type_params(type_params)
+    result = result + " " + FMT_OPEN + FMT_NL
+
+    for m in methods {
+        if typeof(m) == "string" {
+            result = result + fmt_indent(depth + 1) + m + FMT_NL
+        } else if typeof(m) == "map" {
+            if m.has("kind") && m["kind"] == "operator" {
+                result = result + fmt_indent(depth + 1) + "operator " + m["op"]
+                result = result + "(" + fmt_params(m["params"]) + ")"
+                if m.has("return_type") && m["return_type"] != null {
+                    result = result + " -> " + fmt_type(m["return_type"])
+                }
+                result = result + FMT_NL
+            } else {
+                result = result + fmt_indent(depth + 1) + "func " + m["name"]
+                result = result + "(" + fmt_params(m["params"]) + ")"
+                if m.has("return_type") && m["return_type"] != null {
+                    result = result + " -> " + fmt_type(m["return_type"])
+                }
+                result = result + FMT_NL
+            }
+        }
+    }
+
+    result = result + fmt_indent(depth) + FMT_CLOSE
+    result
+}
