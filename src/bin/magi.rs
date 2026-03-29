@@ -8407,23 +8407,23 @@ fn main_inner() {
                 }
             } else {
                 // No file — show language stats
-                println!("║ OperationType    │ {:<29}║", "468 variants");
                 println!("║ Stdlib Modules   │ {:<29}║", "105 modules");
                 println!("║ Stdlib Functions │ {:<29}║", "1,355 operations");
-                println!("║ LSP Handlers     │ {:<29}║", "43 handlers");
                 println!("║ Lint Rules       │ {:<29}║", "49 rules");
-                println!("║ Error Codes      │ {:<29}║", "27 codes");
-                println!("║ CLI Commands     │ {:<29}║", "40+ commands");
                 println!("╠══════════════════════════════════════════════════╣");
-                println!("║ Execution Modes:                                 ║");
-                println!("║  • magi run          │ Interpreter (100%)        ║");
-                println!("║  • magi compilec     │ Runtime (.magc, 100%)     ║");
-                println!("║  • magi run-bc       │ IR VM                     ║");
-                println!("║  • magi compile      │ WASM binary               ║");
-                println!("║  • magi compile-native│ ELF/Mach-O binary        ║");
+                println!("║ Compile Targets:                                 ║");
+                println!("║  • Interpreted   │ magi run file.magi            ║");
+                println!("║  • WASM          │ magi compile file.magi        ║");
+                println!("║  • Native ELF    │ magi compile-native file.magi ║");
                 println!("╠══════════════════════════════════════════════════╣");
-                println!("║ Self-Hosted      │ {:<29}║", "95,454 lines (100%)");
-                println!("║ Tests            │ {:<29}║", "3,283 (1,663 lib + 1,620 int)");
+                println!("║ Tools:                                           ║");
+                println!("║  • magi check    │ Type check                    ║");
+                println!("║  • magi lint     │ 49 lint rules                 ║");
+                println!("║  • magi fmt      │ Auto-format                   ║");
+                println!("║  • magi test     │ Test runner                   ║");
+                println!("║  • magi bench    │ Benchmarks                    ║");
+                println!("║  • magi lsp      │ IDE support                   ║");
+                println!("║  • magi repl     │ Interactive                   ║");
             }
             println!("╚══════════════════════════════════════════════════╝");
         }
