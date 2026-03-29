@@ -1071,8 +1071,8 @@ func dispatch_full(command, args) {
             if len(positional) < 1 { println("Usage: magi fix <file.magi>"); return null }
             cmd_fix(positional[0])
         },
-        "version" | "--version" | "-V" => print_version(),
-        "help" | "--help" | "-h" => print_help_full(),
+        "version" | "--version" | "-V" => { print_version(); return null },
+        "help" | "--help" | "-h" => { print_help_full(); return null },
         _ => {
             if ends_with(command, ".magi") {
                 const source = fs_read(command)
@@ -5339,8 +5339,8 @@ func dispatch_v2(raw_args) {
             const shell = if len(positional) > 0 { positional[0] } else { "bash" }
             cmd_completions(shell)
         },
-        "version" | "--version" | "-V" => print_version(),
-        "help" | "--help" | "-h" => print_help_full(),
+        "version" | "--version" | "-V" => { print_version(); return null },
+        "help" | "--help" | "-h" => { print_help_full(); return null },
         _ => {
             if ends_with(command, ".magi") {
                 cmd_run_full(command, flags)
