@@ -1276,3 +1276,350 @@ func optimize_full(program) {
 
     Program { statements: stmts, span: program.span }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Loop Unrolling for Constant Ranges ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const UNROLL_THRESHOLD = 8  // Only unroll loops with this many or fewer iterations
+
+func opt_try_unroll_for(var_name, collection, body) {
+    // Check if collection is a constant range: range(N) or [literal, literal, ...]
+    const range_info = opt_extract_constant_range(collection)
+    if range_info == null { return null }
+
+    const values = range_info["values"]
+    if len(values) > UNROLL_THRESHOLD { return null }
+
+    // Unroll: replace loop body with N copies, substituting var_name with value
+    let unrolled = []
+    for val in values {
+        for stmt in body.statements {
+            const substituted = opt_substitute_var(stmt, var_name, val)
+            unrolled.push(substituted)
+        }
+    }
+    unrolled
+}
+
+func opt_extract_constant_range(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+
+    match k {
+        ExprKind::ECall("range", args, _) => {
+            // range(end) or range(start, end) or range(start, end, step)
+            if len(args) == 1 {
+                const end_val = opt_get_int_literal(args[0])
+                if end_val != null && end_val >= 0 && end_val <= UNROLL_THRESHOLD {
+                    let values = []
+                    let i = 0
+                    while i < end_val { values.push(i); i = i + 1 }
+                    return {"values": values}
+                }
+            }
+            if len(args) == 2 {
+                const start = opt_get_int_literal(args[0])
+                const end_val = opt_get_int_literal(args[1])
+                if start != null && end_val != null && (end_val - start) >= 0 && (end_val - start) <= UNROLL_THRESHOLD {
+                    let values = []
+                    let i = start
+                    while i < end_val { values.push(i); i = i + 1 }
+                    return {"values": values}
+                }
+            }
+            null
+        },
+        ExprKind::ELiteral(Literal::ArrayLit(elems)) => {
+            // Check if all elements are literal
+            let values = []
+            for elem in elems {
+                const val = opt_get_literal_value(elem)
+                if val == null { return null }
+                values.push(val)
+            }
+            if len(values) <= UNROLL_THRESHOLD {
+                return {"values": values}
+            }
+            null
+        },
+        _ => null,
+    }
+}
+
+func opt_get_int_literal(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(Literal::IntLit(n)) => n,
+        _ => null,
+    }
+}
+
+func opt_get_literal_value(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(Literal::IntLit(n)) => n,
+        ExprKind::ELiteral(Literal::FloatLit(f)) => f,
+        ExprKind::ELiteral(Literal::StringLit(s)) => s,
+        ExprKind::ELiteral(Literal::BoolLit(b)) => b,
+        _ => null,
+    }
+}
+
+func opt_substitute_var(stmt, var_name, value) {
+    // Deep clone with substitution (simplified)
+    stmt  // Full substitution requires AST rewrite; placeholder for stage 0
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Array Literal Optimization ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Optimize array literals by pre-computing constant elements
+func opt_array_literal(elems, span) {
+    let all_const = true
+    let optimized = []
+
+    for elem in elems {
+        const folded = opt_expr(elem)
+        optimized.push(folded)
+        const k = folded.kind
+        match k {
+            ExprKind::ELiteral(_) => {},
+            _ => { all_const = false },
+        }
+    }
+
+    // If all elements are constants, mark as frozen array
+    if all_const && len(optimized) > 0 {
+        // Return optimized array literal (could be interned in a future pass)
+        expr_new(ExprKind::ELiteral(Literal::ArrayLit(optimized)), span)
+    } else {
+        expr_new(ExprKind::ELiteral(Literal::ArrayLit(optimized)), span)
+    }
+}
+
+// Optimize repeated push to array: convert to array literal if possible
+func opt_array_push_chain(stmts) {
+    let result = []
+    let current_arr = null
+    let current_name = null
+    let collected = []
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLet(name, init) | StmtKind::SConst(name, init) => {
+                // Check if initializer is empty array
+                if init != null {
+                    const ik = init.kind
+                    match ik {
+                        ExprKind::ELiteral(Literal::ArrayLit(elems)) => {
+                            if len(elems) == 0 {
+                                current_arr = stmt
+                                current_name = name
+                                collected = []
+                                result.push(stmt)
+                                continue
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+                if current_name != null && len(collected) > 0 {
+                    // Emit collected pushes as array literal
+                    opt_flush_array_pushes(result, current_name, collected)
+                    current_name = null
+                    collected = []
+                }
+                result.push(stmt)
+            },
+            StmtKind::SExprStmt(expr) => {
+                if current_name != null {
+                    const pushed = opt_extract_push(expr, current_name)
+                    if pushed != null {
+                        collected.push(pushed)
+                        continue
+                    }
+                }
+                if len(collected) > 0 {
+                    opt_flush_array_pushes(result, current_name, collected)
+                    current_name = null
+                    collected = []
+                }
+                result.push(stmt)
+            },
+            _ => {
+                if len(collected) > 0 {
+                    opt_flush_array_pushes(result, current_name, collected)
+                    current_name = null
+                    collected = []
+                }
+                result.push(stmt)
+            },
+        }
+    }
+
+    if len(collected) > 0 {
+        opt_flush_array_pushes(result, current_name, collected)
+    }
+    result
+}
+
+func opt_extract_push(expr, arr_name) {
+    const k = expr.kind
+    match k {
+        ExprKind::EMethodCall(obj, "push", args, _) => {
+            const ok = obj.kind
+            match ok {
+                ExprKind::EVariable(name) => {
+                    if name == arr_name && len(args) == 1 {
+                        return args[0]
+                    }
+                    null
+                },
+                _ => null,
+            }
+        },
+        _ => null,
+    }
+}
+
+func opt_flush_array_pushes(result, arr_name, elements) {
+    // Replace the last empty-array declaration with a populated one
+    // This is a hint; actual rewrite happens at a later stage
+    // For now, just leave pushes as-is
+    for elem in elements {
+        result.push(stmt_new(StmtKind::SExprStmt(
+            expr_new(ExprKind::EMethodCall(
+                expr_new(ExprKind::EVariable(arr_name), null),
+                "push",
+                [elem],
+                null
+            ), null)
+        ), null))
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Map Literal Optimization ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func opt_map_literal(entries, span) {
+    let all_const = true
+    let optimized = []
+
+    for entry in entries {
+        const key = entry[0]
+        const value = opt_expr(entry[1])
+        optimized.push([key, value])
+        const vk = value.kind
+        match vk {
+            ExprKind::ELiteral(_) => {},
+            _ => { all_const = false },
+        }
+    }
+
+    // Check for duplicate keys
+    let seen_keys = {"__s": true}
+    let deduped = []
+    for entry in optimized {
+        const key = entry[0]
+        if seen_keys.has(key) {
+            // Later duplicate overwrites earlier — keep last
+            let i = 0
+            for d in deduped {
+                if d[0] == key { deduped[i] = entry; break }
+                i = i + 1
+            }
+        } else {
+            seen_keys[key] = true
+            deduped.push(entry)
+        }
+    }
+
+    expr_new(ExprKind::ELiteral(Literal::MapLit(deduped)), span)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Inline Caching Hints ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Mark function calls that are monomorphic (always same target) for inline caching
+func opt_analyze_call_sites(stmts) {
+    let call_targets = {"__s": true}  // call_site_id -> [target_names]
+
+    for stmt in stmts {
+        opt_collect_call_targets(stmt, call_targets)
+    }
+
+    // Find monomorphic call sites
+    let monomorphic = {"__s": true}
+    for site in call_targets.keys() {
+        if site == "__s" { continue }
+        const targets = call_targets[site]
+        if len(targets) == 1 {
+            monomorphic[site] = targets[0]
+        }
+    }
+    monomorphic
+}
+
+func opt_collect_call_targets(stmt, targets) {
+    // Walk AST collecting call site -> target function name mappings
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SExprStmt(expr) => opt_collect_expr_calls(expr, targets),
+        StmtKind::SFuncDef(fd) => {
+            if fd.body != null {
+                for s in fd.body.statements {
+                    opt_collect_call_targets(s, targets)
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+func opt_collect_expr_calls(expr, targets) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::ECall(name, _, _) => {
+            const site_id = f"call:{name}:{expr.span}"
+            if !targets.has(site_id) {
+                targets[site_id] = []
+            }
+            if !targets[site_id].contains(name) {
+                targets[site_id].push(name)
+            }
+        },
+        ExprKind::EMethodCall(_, method, _, _) => {
+            const site_id = f"method:{method}:{expr.span}"
+            if !targets.has(site_id) {
+                targets[site_id] = []
+            }
+            if !targets[site_id].contains(method) {
+                targets[site_id].push(method)
+            }
+        },
+        _ => {},
+    }
+}
+
+// Generate inline cache hints for monomorphic sites
+func opt_inline_cache_hints(stmts) {
+    const mono = opt_analyze_call_sites(stmts)
+    let hints = []
+    for site in mono.keys() {
+        if site == "__s" { continue }
+        hints.push({
+            "site": site,
+            "target": mono[site],
+            "strategy": "monomorphic_inline_cache",
+        })
+    }
+    hints
+}
