@@ -19,8 +19,6 @@ use std::collections::HashMap;
 
 /// Embedded C runtime source.
 const RUNTIME_C_SOURCE: &str = include_str!("magi_runtime.c");
-/// Embedded SDL2 wrapper source.
-const SDL_C_SOURCE: &str = include_str!("magi_sdl.c");
 
 // NaN-boxing constants
 const NANBOX_SIG: u64 = 0xFFF8_0000_0000_0000;
@@ -198,43 +196,15 @@ fn emit_native(
 
     let rt_path = format!("{}.magi_rt.c", output_path);
     std::fs::write(&rt_path, RUNTIME_C_SOURCE).map_err(|e| format!("write runtime: {}", e))?;
-    let sdl_path = format!("{}.magi_sdl.c", output_path);
-    std::fs::write(&sdl_path, SDL_C_SOURCE).map_err(|e| format!("write sdl: {}", e))?;
 
     // Find SDL2 static lib in canvas package or system
-    let mut link_args = vec![obj_path.clone(), rt_path.clone(), sdl_path.clone(), "-o".into(), output_path.into(), "-lm".into(), "-O2".into()];
-
-    // Check for bundled SDL2 in canvas package
-    let sdl2_search_paths = [
-        "packages/canvas/lib/libSDL2.a",
-        "../packages/canvas/lib/libSDL2.a",
-        "/home/dev/workspace/magi/magi-lang/packages/canvas/lib/libSDL2.a",
-    ];
-    let mut sdl2_found = false;
-    for path in &sdl2_search_paths {
-        if std::path::Path::new(path).exists() {
-            link_args.push(path.to_string());
-            link_args.push("-lpthread".into());
-            link_args.push("-ldl".into());
-            sdl2_found = true;
-            break;
-        }
-    }
-    if !sdl2_found {
-        // Try system SDL2
-        if std::process::Command::new("pkg-config").args(["--exists", "sdl2"]).status().map(|s| s.success()).unwrap_or(false) {
-            link_args.push("-lSDL2".into());
-        }
-    }
-
     let status = std::process::Command::new("cc")
-        .args(&link_args)
+        .args([&obj_path, &rt_path, "-o", output_path, "-lm", "-O2"])
         .status()
         .map_err(|e| format!("linker: {}", e))?;
 
     let _ = std::fs::remove_file(&obj_path);
     let _ = std::fs::remove_file(&rt_path);
-    let _ = std::fs::remove_file(&sdl_path);
 
     if !status.success() { return Err("linking failed".into()); }
     Ok(())

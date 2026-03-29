@@ -1349,57 +1349,6 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         return magi_make_int(getpid());
     }
 
-    // SDL2 functions
-    if (strcmp(name, "sdl_init") == 0) {
-        typedef void* (*sdl_init_fn)(const char*, int, int);
-        extern void* __magi_sdl_init(const char*, int, int);
-        const char* title = magi_as_string(a);
-        int w = (int)magi_as_int(b);
-        int h = argc > 2 ? (int)magi_as_int(args[2]) : 600;
-        void* handle = __magi_sdl_init(title, w, h);
-        if (!handle) return magi_make_null();
-        return magi_make_int((int64_t)(uintptr_t)handle);
-    }
-    if (strcmp(name, "sdl_set_color") == 0) {
-        extern void __magi_sdl_set_color(void*, int, int, int);
-        void* h = (void*)(uintptr_t)magi_as_int(a);
-        int r = (int)magi_as_int(b);
-        int g = argc > 2 ? (int)magi_as_int(args[2]) : 0;
-        int bb = argc > 3 ? (int)magi_as_int(args[3]) : 0;
-        __magi_sdl_set_color(h, r, g, bb);
-        return magi_make_null();
-    }
-    if (strcmp(name, "sdl_clear") == 0) { extern void __magi_sdl_clear(void*); __magi_sdl_clear((void*)(uintptr_t)magi_as_int(a)); return magi_make_null(); }
-    if (strcmp(name, "sdl_present") == 0) { extern void __magi_sdl_present(void*); __magi_sdl_present((void*)(uintptr_t)magi_as_int(a)); return magi_make_null(); }
-    if (strcmp(name, "sdl_fill_rect") == 0) {
-        extern void __magi_sdl_fill_rect(void*, int, int, int, int);
-        void* h = (void*)(uintptr_t)magi_as_int(a);
-        int x = (int)magi_as_int(b);
-        int y = argc > 2 ? (int)magi_as_int(args[2]) : 0;
-        int w = argc > 3 ? (int)magi_as_int(args[3]) : 1;
-        int hh = argc > 4 ? (int)magi_as_int(args[4]) : 1;
-        __magi_sdl_fill_rect(h, x, y, w, hh);
-        return magi_make_null();
-    }
-    if (strcmp(name, "sdl_draw_pixel") == 0) {
-        extern void __magi_sdl_draw_pixel(void*, int, int);
-        __magi_sdl_draw_pixel((void*)(uintptr_t)magi_as_int(a), (int)magi_as_int(b), argc > 2 ? (int)magi_as_int(args[2]) : 0);
-        return magi_make_null();
-    }
-    if (strcmp(name, "sdl_poll_event") == 0) {
-        extern int64_t __magi_sdl_poll_event(void*);
-        return __magi_sdl_poll_event((void*)(uintptr_t)magi_as_int(a));
-    }
-    if (strcmp(name, "sdl_delay") == 0) { extern void __magi_sdl_delay(int); __magi_sdl_delay((int)magi_as_int(a)); return magi_make_null(); }
-    if (strcmp(name, "sdl_ticks") == 0) { extern int __magi_sdl_ticks(void*); return magi_make_int(__magi_sdl_ticks((void*)(uintptr_t)magi_as_int(a))); }
-    if (strcmp(name, "sdl_destroy") == 0) { extern void __magi_sdl_destroy(void*); __magi_sdl_destroy((void*)(uintptr_t)magi_as_int(a)); return magi_make_null(); }
-    if (strcmp(name, "sdl_draw_line") == 0) {
-        extern void __magi_sdl_draw_line(void*, int, int, int, int);
-        void* h = (void*)(uintptr_t)magi_as_int(a);
-        __magi_sdl_draw_line(h, (int)magi_as_int(b), argc>2?(int)magi_as_int(args[2]):0, argc>3?(int)magi_as_int(args[3]):0, argc>4?(int)magi_as_int(args[4]):0);
-        return magi_make_null();
-    }
-
     // Unknown: return null
     return magi_make_null();
 }
