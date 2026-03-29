@@ -6200,9 +6200,9 @@ fn test_slice_both_negative() {
 fn test_string_concat_type_inference() {
     // String + String should not produce type checker warnings
     let src = r#"
-    let a = "hello"
-    let b = " world"
-    let c = a + b
+    const a = "hello"
+    const b = " world"
+    const c = a + b
     c
     "#;
     let warnings = typecheck_warnings(src);
