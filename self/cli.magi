@@ -10899,3 +10899,6 @@ func progress_end() {
 func json_stringify(value) {
     json_emit(value)
 }
+
+// ── Entry Point ─────────────────────────────────────────────────────
+dispatch_v2(process_args())
