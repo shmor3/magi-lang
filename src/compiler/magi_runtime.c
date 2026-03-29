@@ -1071,6 +1071,37 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         return magi_make_string(result);
     }
 
+    // Binary file read — returns array of byte values
+    if (strcmp(name, "fs_read_bytes") == 0 || strcmp(name, "read_file_bytes") == 0) {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "rb");
+        if (!f) return magi_make_null();
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = (int32_t)len;
+        arr->cap = (int32_t)len;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * len);
+        unsigned char* buf = (unsigned char*)malloc(len);
+        fread(buf, 1, len, f);
+        fclose(f);
+        for (long i = 0; i < len; i++) {
+            arr->data[i] = magi_make_int(buf[i]);
+        }
+        free(buf);
+        return magi_make_array_val(arr);
+    }
+    if (strcmp(name, "fs_size") == 0 || strcmp(name, "file_size") == 0) {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "rb");
+        if (!f) return magi_make_int(0);
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fclose(f);
+        return magi_make_int(sz);
+    }
+
     // File I/O
     if (strcmp(name, "fs_write") == 0 || strcmp(name, "file_write") == 0 || strcmp(name, "write_file") == 0) {
         const char* path = magi_as_string(a);
