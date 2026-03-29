@@ -1,0 +1,168 @@
+// MAGI Self-Hosted Compiler — Version Management
+//
+// Semantic versioning, feature tracking, and compatibility checks.
+
+const MAGI_VERSION_MAJOR = 1
+const MAGI_VERSION_MINOR = 0
+const MAGI_VERSION_PATCH = 0
+const MAGI_VERSION_PRE = "self"
+const MAGI_VERSION = "1.0.0-self"
+
+// ── Semver Parsing ──────────────────────────────────────────────────
+
+func semver_parse(s) {
+    let major = 0
+    let minor = 0
+    let patch = 0
+    let pre = ""
+    let build = ""
+
+    const plus_idx = s.index_of("+")
+    let version_str = s
+    if plus_idx >= 0 {
+        build = s.substring(plus_idx + 1, len(s))
+        version_str = s.substring(0, plus_idx)
+    }
+
+    const dash_idx = version_str.index_of("-")
+    if dash_idx >= 0 {
+        pre = version_str.substring(dash_idx + 1, len(version_str))
+        version_str = version_str.substring(0, dash_idx)
+    }
+
+    const parts = version_str.split(".")
+    if len(parts) >= 1 { major = parse_int(parts[0]) ?? 0 }
+    if len(parts) >= 2 { minor = parse_int(parts[1]) ?? 0 }
+    if len(parts) >= 3 { patch = parse_int(parts[2]) ?? 0 }
+
+    { "major": major, "minor": minor, "patch": patch, "pre": pre, "build": build }
+}
+
+func semver_format(v) {
+    let s = f"{v.major}.{v.minor}.{v.patch}"
+    if len(v.pre) > 0 { s = s + "-" + v.pre }
+    if len(v.build) > 0 { s = s + "+" + v.build }
+    s
+}
+
+func semver_compare(a, b) {
+    if a.major != b.major { return if a.major > b.major { 1 } else { -1 } }
+    if a.minor != b.minor { return if a.minor > b.minor { 1 } else { -1 } }
+    if a.patch != b.patch { return if a.patch > b.patch { 1 } else { -1 } }
+    if len(a.pre) == 0 && len(b.pre) > 0 { return 1 }
+    if len(a.pre) > 0 && len(b.pre) == 0 { return -1 }
+    if a.pre < b.pre { return -1 }
+    if a.pre > b.pre { return 1 }
+    0
+}
+
+func semver_bump_major(v) { { "major": v.major + 1, "minor": 0, "patch": 0, "pre": "", "build": "" } }
+func semver_bump_minor(v) { { "major": v.major, "minor": v.minor + 1, "patch": 0, "pre": "", "build": "" } }
+func semver_bump_patch(v) { { "major": v.major, "minor": v.minor, "patch": v.patch + 1, "pre": "", "build": "" } }
+
+// ── Constraint Checking ─────────────────────────────────────────────
+
+func semver_satisfies(version, constraint) {
+    const v = if typeof(version) == "string" { semver_parse(version) } else { version }
+    const trimmed = constraint.trim()
+
+    if trimmed == "*" { return true }
+
+    if trimmed.starts_with("^") {
+        const target = semver_parse(trimmed.substring(1, len(trimmed)))
+        if v.major != target.major { return false }
+        return semver_compare(v, target) >= 0
+    }
+
+    if trimmed.starts_with("~") {
+        const target = semver_parse(trimmed.substring(1, len(trimmed)))
+        if v.major != target.major || v.minor != target.minor { return false }
+        return v.patch >= target.patch
+    }
+
+    if trimmed.starts_with(">=") {
+        const target = semver_parse(trimmed.substring(2, len(trimmed)).trim())
+        return semver_compare(v, target) >= 0
+    }
+
+    if trimmed.starts_with("<=") {
+        const target = semver_parse(trimmed.substring(2, len(trimmed)).trim())
+        return semver_compare(v, target) <= 0
+    }
+
+    if trimmed.starts_with(">") {
+        const target = semver_parse(trimmed.substring(1, len(trimmed)).trim())
+        return semver_compare(v, target) > 0
+    }
+
+    if trimmed.starts_with("<") {
+        const target = semver_parse(trimmed.substring(1, len(trimmed)).trim())
+        return semver_compare(v, target) < 0
+    }
+
+    if trimmed.starts_with("!=") {
+        const target = semver_parse(trimmed.substring(2, len(trimmed)).trim())
+        return semver_compare(v, target) != 0
+    }
+
+    // Exact match
+    const target = semver_parse(trimmed)
+    semver_compare(v, target) == 0
+}
+
+func semver_satisfies_all(version, constraints) {
+    for c in constraints {
+        if !semver_satisfies(version, c) { return false }
+    }
+    true
+}
+
+// ── Feature Tracking ────────────────────────────────────────────────
+
+const MAGI_FEATURES = [
+    "func_keyword",
+    "interface_keyword",
+    "import_dotted",
+    "arrow_functions",
+    "dot_receivers",
+    "multi_return",
+    "const_let_bindings",
+    "optional_semicolons",
+    "clean_enum_display",
+    "named_operator_interfaces",
+    "exhaustive_match",
+    "pattern_matching",
+    "string_interpolation",
+    "pipe_operator",
+    "null_coalescing",
+    "optional_chaining",
+    "spread_operator",
+    "comprehensions",
+    "generics",
+    "async_await",
+    "spawn_select",
+    "defer",
+    "labeled_loops",
+    "destructuring",
+    "type_aliases",
+    "attributes",
+]
+
+func has_feature(name) {
+    for f in MAGI_FEATURES {
+        if f == name { return true }
+    }
+    false
+}
+
+func version_info() {
+    {
+        "version": MAGI_VERSION,
+        "major": MAGI_VERSION_MAJOR,
+        "minor": MAGI_VERSION_MINOR,
+        "patch": MAGI_VERSION_PATCH,
+        "pre": MAGI_VERSION_PRE,
+        "features": MAGI_FEATURES,
+        "self_hosted": true,
+    }
+}
