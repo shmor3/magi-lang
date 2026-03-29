@@ -11,7 +11,7 @@ use super::SyntaxError;
 /// Maximum nesting depth for expressions (prevents stack overflow on pathological input).
 /// Each parenthesized sub-expression adds ~2 depth units (binary_expr + unary_expr),
 /// so this effectively limits paren nesting to ~64 levels.
-const MAX_PARSE_DEPTH: usize = 128;
+const MAX_PARSE_DEPTH: usize = 512;
 
 /// Positional arguments and keyword arguments parsed from a call site.
 type ArgsAndKwargs = (Vec<Expression>, Vec<(String, Expression)>);
@@ -5558,14 +5558,16 @@ output result;
     fn test_parse_exceeds_max_depth() {
         // Run in a thread with a larger stack to avoid stack overflow in debug mode
         let handle = std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024) // 16MB stack
+            .stack_size(64 * 1024 * 1024) // 64MB stack
             .spawn(|| {
+                // 512 depth limit / ~2 units per paren = need >256 parens
+                let n = 260;
                 let mut code = String::new();
-                for _ in 0..70 {
+                for _ in 0..n {
                     code.push('(');
                 }
                 code.push('1');
-                for _ in 0..70 {
+                for _ in 0..n {
                     code.push(')');
                 }
                 code.push(';');
