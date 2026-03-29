@@ -10,6 +10,12 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <time.h>
+#include <unistd.h>
+
+// Command line args (set by main before calling __main)
+int __magi_argc = 0;
+char** __magi_argv = NULL;
 
 // ===== NaN-Boxing Constants =====
 #define NANBOX_SIG   ((uint64_t)0xFFF8000000000000ULL)
@@ -1235,6 +1241,70 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     if (strcmp(name, "stringify_json") == 0 || strcmp(name, "json_stringify") == 0 || strcmp(name, "to_json") == 0) {
         // Produce JSON format: {"key":"value"} with quoted keys and no spaces
         return magi_make_string(magi_to_json(a));
+    }
+
+    // Process/OS operations
+    if (strcmp(name, "process_args") == 0 || strcmp(name, "args") == 0) {
+        // Return command line args (stored by main)
+        extern int __magi_argc;
+        extern char** __magi_argv;
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = __magi_argc > 1 ? __magi_argc - 1 : 0;
+        arr->cap = arr->len > 8 ? arr->len : 8;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+        for (int i = 1; i < __magi_argc; i++) {
+            arr->data[i - 1] = magi_make_string(__magi_argv[i]);
+        }
+        return magi_make_array_val(arr);
+    }
+    if (strcmp(name, "env_get") == 0) {
+        const char* key = magi_as_string(a);
+        const char* val = getenv(key);
+        return val ? magi_make_string(val) : magi_make_null();
+    }
+    if (strcmp(name, "env_set") == 0) {
+        setenv(magi_as_string(a), magi_as_string(b), 1);
+        return magi_make_null();
+    }
+    if (strcmp(name, "env_has") == 0) {
+        return magi_make_bool(getenv(magi_as_string(a)) != NULL);
+    }
+    if (strcmp(name, "timestamp_ms") == 0 || strcmp(name, "time_ms") == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        return magi_make_int(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    }
+    if (strcmp(name, "exit") == 0) {
+        exit((int)magi_as_int(a));
+    }
+    if (strcmp(name, "panic") == 0) {
+        const char* msg = magi_as_string(a);
+        fprintf(stderr, "panic: %s\n", msg);
+        exit(1);
+    }
+    if (strcmp(name, "exec_cmd") == 0) {
+        const char* cmd = magi_as_string(a);
+        int r = system(cmd);
+        return magi_make_int(r);
+    }
+    if (strcmp(name, "cwd") == 0) {
+        char buf[4096];
+        if (getcwd(buf, sizeof(buf))) return magi_make_string(strdup(buf));
+        return magi_make_string("/");
+    }
+    if (strcmp(name, "os_name") == 0) {
+        #ifdef __linux__
+        return magi_make_string("linux");
+        #elif __APPLE__
+        return magi_make_string("macos");
+        #elif _WIN32
+        return magi_make_string("windows");
+        #else
+        return magi_make_string("unknown");
+        #endif
+    }
+    if (strcmp(name, "pid") == 0) {
+        return magi_make_int(getpid());
     }
 
     // Unknown: return null

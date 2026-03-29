@@ -154,11 +154,19 @@ fn emit_native(
     fn_count.set_initializer(&i32_t.const_int(n_fns as u64, false));
     fn_count.set_linkage(inkwell::module::Linkage::External);
 
-    // ── main() entry point ──────────────────────────────────
+    // ── main(argc, argv) entry point ──────────────────────────
     if let Some(mf) = fns.get("__main").copied() {
-        let main = module.add_function("main", i32_t.fn_type(&[], false), None);
+        let main_ft = i32_t.fn_type(&[i32_t.into(), ptr_t.into()], false);
+        let main = module.add_function("main", main_ft, None);
         let entry = ctx.append_basic_block(main, "entry");
         b.position_at_end(entry);
+        // Store argc/argv for process_args() runtime call
+        let argc_global = module.add_global(i32_t, None, "__magi_argc");
+        argc_global.set_linkage(inkwell::module::Linkage::External);
+        let argv_global = module.add_global(ptr_t, None, "__magi_argv");
+        argv_global.set_linkage(inkwell::module::Linkage::External);
+        b.build_store(argc_global.as_pointer_value(), main.get_nth_param(0).unwrap()).unwrap();
+        b.build_store(argv_global.as_pointer_value(), main.get_nth_param(1).unwrap()).unwrap();
         b.build_call(mf, &[], "r").unwrap();
         b.build_return(Some(&i32_t.const_int(0, false))).unwrap();
     }
