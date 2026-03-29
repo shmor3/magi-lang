@@ -5201,11 +5201,11 @@ func dispatch_v2(raw_args) {
     }
     if command == "version" || command == "--version" || command == "-V" {
         print_version()
-        return null
+        exit(0)
     }
     if command == "help" || command == "--help" || command == "-h" {
         print_help_full()
-        return null
+        exit(0)
     }
 
     run_hook("pre-" + command)
