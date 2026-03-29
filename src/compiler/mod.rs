@@ -1,19 +1,18 @@
-//! MAGI compiler — compiles MAGI AST to WebAssembly and bytecode.
+//! MAGI compiler — compiles MAGI AST to native code (LLVM) and WebAssembly.
 //!
 //! Architecture:
 //! 1. AST → IR (stack-based intermediate representation)
-//! 2. IR → WASM binary (via own encoder)
-//! 3. AST → Bytecode → VM (fast interpreter)
+//! 2. IR → LLVM IR → Machine Code (native compilation)
+//! 3. IR → WASM binary (via own encoder)
 
 mod compile;
 mod ir;
 mod wasm;
-pub mod bytecode;
-pub mod native;
+pub mod llvm;
+pub mod bytecode; // Kept for runtime/vm.rs ClassFile tests
 pub mod wasm_binary;
 pub mod wasm_runtime;
 pub mod webgpu;
-pub mod ir_vm;
 
 pub use compile::{Compiler, SourceMapping};
 pub use ir::*;

@@ -7,7 +7,6 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    // Simple UTC date calculation
     let days = now / 86400;
     let (year, month, day) = days_to_date(days);
     println!("cargo:rustc-env=MAGI_BUILD_DATE={year:04}-{month:02}-{day:02}");
@@ -16,17 +15,16 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=MAGI_BUILD_TARGET={target}");
 
-    // Link OpenSSL for TLS support (HTTPS, WSS)
-    println!("cargo:rustc-link-lib=ssl");
-    println!("cargo:rustc-link-lib=crypto");
+    // OpenSSL: handled by openssl crate's vendored feature (compiled from source)
+    // zlib: handled by libz-sys static feature
 
-    // SDL2 for pixel graphics (optional — runtime dlopen if not linked)
+    // SDL2 for pixel graphics (optional, dynamic)
     if probe_lib("SDL2") {
         println!("cargo:rustc-link-lib=SDL2");
         println!("cargo:rustc-cfg=has_sdl2");
     }
 
-    // PulseAudio for real-time audio streaming (optional)
+    // PulseAudio for real-time audio streaming (optional, dynamic)
     if probe_lib("pulse-simple") {
         println!("cargo:rustc-link-lib=pulse-simple");
         println!("cargo:rustc-link-lib=pulse");
@@ -34,9 +32,7 @@ fn main() {
     }
 }
 
-/// Check if a C library is available by attempting to locate it.
 fn probe_lib(name: &str) -> bool {
-    // Try pkg-config first
     if let Ok(output) = std::process::Command::new("pkg-config")
         .args(["--exists", name])
         .output()
@@ -45,7 +41,6 @@ fn probe_lib(name: &str) -> bool {
             return true;
         }
     }
-    // Fallback: check common library paths
     let lib_name = format!("lib{}.so", name);
     for dir in &["/usr/lib", "/usr/lib64", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu"] {
         if std::path::Path::new(dir).join(&lib_name).exists() {
@@ -55,9 +50,7 @@ fn probe_lib(name: &str) -> bool {
     false
 }
 
-/// Convert days since Unix epoch to (year, month, day).
 fn days_to_date(days: u64) -> (u64, u64, u64) {
-    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     let z = days + 719468;
     let era = z / 146097;
     let doe = z - era * 146097;

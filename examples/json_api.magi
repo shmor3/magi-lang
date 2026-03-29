@@ -4,7 +4,7 @@
 
 println("=== JSON Parse ===")
 
-const json_str = '{"name": "Alice", "age": 30, "skills": ["MAGI", "Go", "Rust"]}'
+const json_str = "{\"name\": \"Alice\", \"age\": 30, \"skills\": [\"MAGI\", \"Go\", \"Rust\"]}"
 const data = parse_json(json_str)
 println(f"Name: {data.name}")
 println(f"Age: {data.age}")

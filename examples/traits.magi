@@ -53,7 +53,7 @@ func Circle.display(self) { f"Circle(r={self.radius})" }
 func Square.area(self) { self.side * self.side }
 func Square.display(self) { f"Square(s={self.side})" }
 
-func print_area(shape HasArea) {
+func print_area(shape) {
     println(f"  area = {shape.area()}")
 }
 

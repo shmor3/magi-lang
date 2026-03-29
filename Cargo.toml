@@ -1,11 +1,13 @@
 [package]
 name = "magi-lang"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2021"
 description = "MAGI programming language — compiler, runtime, interpreter, LSP, and CLI"
 
 [dependencies]
-# Zero dependencies
+inkwell = { version = "0.5", features = ["llvm18-0"] }
+openssl = { version = "0.10", features = ["vendored"] }
+libz-sys = { version = "1", features = ["static"] }
 
 [[bin]]
 name = "magi"

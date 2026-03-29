@@ -20,6 +20,8 @@ type SSL = *mut std::ffi::c_void;
 #[allow(non_camel_case_types)]
 type SSL_METHOD = *const std::ffi::c_void;
 
+#[link(name = "ssl")]
+#[link(name = "crypto")]
 extern "C" {
     fn TLS_client_method() -> SSL_METHOD;
     fn SSL_CTX_new(method: SSL_METHOD) -> SSL_CTX;

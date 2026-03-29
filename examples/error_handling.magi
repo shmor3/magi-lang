@@ -31,16 +31,16 @@ func double_input(input) {
 }
 
 let val, err = double_input("21")
-println(f"double('21') = {val}")
+println(f"double(21) = {val}")
 
 let val2, err2 = double_input("abc")
-println(f"double('abc') error: {err2}")
+println(f"double(abc) error: {err2}")
 
 println("")
 println("=== Null Coalescing ===")
 
 const name = null ?? "default"
-println(f"null ?? 'default' = {name}")
+println(f"null ?? default = {name}")
 
 const config = {"host": "localhost"}
 const port = config.port ?? 8080
@@ -51,7 +51,8 @@ println("=== Optional Chaining ===")
 
 const user = {"profile": {"name": "Alice"}}
 println(f"name = {user?.profile?.name}")
-println(f"missing = {user?.settings?.theme ?? 'dark'}")
+const fallback = "dark"
+println(f"missing = {user?.settings?.theme ?? fallback}")
 
 println("")
 println("Error handling demo complete.")

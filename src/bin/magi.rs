@@ -7357,8 +7357,7 @@ fn print_usage() {
     eprintln!("  init <name>                 Create a new MAGI project");
     eprintln!("  get [file | dir]            Fetch all git dependencies");
     eprintln!("  bench [options] <file.magi>  Benchmark a .magi file");
-    eprintln!("  compile <file.magi>         Compile to WebAssembly (.wasm)");
-    eprintln!("  run-wasm <file.wasm>        Execute a compiled .wasm file");
+    eprintln!("  compile <file.magi>         Compile to native binary (default) or WASM");
     eprintln!("  doc <file.magi>             Generate Markdown documentation");
     eprintln!("  test-all                    Run tests across all workspace members");
     eprintln!("  lsp                         Start the Language Server Protocol server");
@@ -7392,7 +7391,8 @@ fn print_usage() {
     eprintln!("  magi fmt --write main.magi  Format a file in-place");
     eprintln!("  magi bench -n 500 main.magi Benchmark a file (500 iterations)");
     eprintln!("  magi init my-project        Scaffold a new project");
-    eprintln!("  magi compile main.magi      Compile to dist/main.wasm");
+    eprintln!("  magi compile main.magi      Compile to native binary");
+    eprintln!("  magi compile main.magi --target wasm  Compile to dist/main.wasm");
     eprintln!("  magi test-all               Run tests for all workspace members");
 }
 
@@ -7490,21 +7490,53 @@ fn main_inner() {
                 }
             }
         }
-        "compile" => {
+        "compile" | "build" => {
             if args.len() < 3 {
                 eprintln!("error: missing file argument");
-                eprintln!("Usage: magi compile <file.magi>");
+                eprintln!("Usage: magi compile [--target native|wasm] [-O0..3] [-o output] <file.magi>");
                 process::exit(1);
             }
-            cmd_compile(&args[2]);
-        }
-        "run-wasm" => {
-            if args.len() < 3 {
-                eprintln!("error: missing file argument");
-                eprintln!("Usage: magi run-wasm <file.wasm>");
-                process::exit(1);
+            // Parse compile flags
+            let mut target = "native";
+            let mut opt_level: u8 = 2;
+            let mut output_path: Option<String> = None;
+            let mut file_path: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--target" => {
+                        i += 1;
+                        if i < args.len() { target = if args[i] == "wasm" { "wasm" } else { "native" }; }
+                    }
+                    "-o" | "--output" => {
+                        i += 1;
+                        if i < args.len() { output_path = Some(args[i].clone()); }
+                    }
+                    "-O0" => opt_level = 0,
+                    "-O1" => opt_level = 1,
+                    "-O2" => opt_level = 2,
+                    "-O3" => opt_level = 3,
+                    "-Os" => opt_level = 2, // size = default
+                    _ => {
+                        if file_path.is_none() && !args[i].starts_with('-') {
+                            file_path = Some(args[i].clone());
+                        }
+                    }
+                }
+                i += 1;
             }
-            cmd_run_wasm(&args[2]);
+            let file_path = match file_path {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: missing file argument");
+                    process::exit(1);
+                }
+            };
+            if target == "wasm" {
+                cmd_compile(&file_path);
+            } else {
+                cmd_compile_native(&file_path, opt_level, output_path.as_deref());
+            }
         }
         "check" => {
             let mut json_output = false;
@@ -7653,31 +7685,12 @@ fn main_inner() {
             cmd_lsp();
         }
         "compile-native" | "build-native" => {
+            // Legacy alias — redirect to `magi compile --target native`
             if args.len() < 3 {
-                eprintln!("Usage: magi compile-native <file.magi>");
+                eprintln!("Usage: magi compile <file.magi> (compile-native is deprecated)");
                 process::exit(1);
             }
-            let source = read_source(&args[2]);
-            match magi_lang::compiler::native::compile_to_elf(&source) {
-                Ok(elf) => {
-                    let out_path = args[2].replace(".magi", "");
-                    fs::write(&out_path, &elf).unwrap_or_else(|e| {
-                        eprintln!("error writing {}: {}", out_path, e);
-                        process::exit(1);
-                    });
-                    // Make executable
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o755));
-                    }
-                    println!("Compiled {} -> {} ({} bytes, ELF x86-64)", args[2], out_path, elf.len());
-                }
-                Err(e) => {
-                    eprintln!("Compile error: {}", e);
-                    process::exit(1);
-                }
-            }
+            cmd_compile_native(&args[2], 2, None);
         }
         "debug" | "dbg" => {
             if args.len() < 3 {
@@ -7884,23 +7897,8 @@ fn main_inner() {
             }
         }
         "run-bc" | "run-bytecode" => {
-            // Run via IR VM (AST → IR → stack machine)
-            if args.len() < 3 {
-                eprintln!("Usage: magi run-bc <file.magi>");
-                process::exit(1);
-            }
-            let source = read_source(&args[2]);
-            match magi_lang::compiler::ir_vm::run_ir(&source) {
-                Ok(output) => {
-                    for line in &output {
-                        println!("{}", line);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("IR VM error: {}", e);
-                    process::exit(1);
-                }
-            }
+            eprintln!("run-bc has been removed. Use 'magi compile file.magi' to compile to native.");
+            process::exit(1);
         }
         "compilec" | "build-class" => {
             if args.len() < 3 {
@@ -8414,7 +8412,7 @@ fn main_inner() {
                 println!("║ Compile Targets:                                 ║");
                 println!("║  • Interpreted   │ magi run file.magi            ║");
                 println!("║  • WASM          │ magi compile file.magi        ║");
-                println!("║  • Native ELF    │ magi compile-native file.magi ║");
+                println!("║  • Native Binary  │ magi compile file.magi       ║");
                 println!("╠══════════════════════════════════════════════════╣");
                 println!("║ Tools:                                           ║");
                 println!("║  • magi check    │ Type check                    ║");
@@ -9807,6 +9805,55 @@ fn cmd_compile(path: &str) {
         }
         Err(e) => {
             eprintln!("error: cannot write '{}': {}", out_path.display(), e);
+            process::exit(1);
+        }
+    }
+}
+
+fn cmd_compile_native(path: &str, opt_level: u8, output: Option<&str>) {
+    let source = read_source(path);
+
+    // Resolve dependencies
+    let file_path = std::path::Path::new(path);
+    let mut combined_source = String::new();
+    let dep_sources = resolve_dependency_sources(file_path);
+    for dep_src in &dep_sources {
+        combined_source.push_str(dep_src);
+        combined_source.push('\n');
+    }
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("use pkg::") {
+            continue;
+        }
+        combined_source.push_str(line);
+        combined_source.push('\n');
+    }
+
+    let out_path = match output {
+        Some(p) => p.to_string(),
+        None => {
+            let stem = file_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            stem
+        }
+    };
+
+    match magi_lang::compiler::llvm::compile_native(&combined_source, None, opt_level, &out_path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o755));
+            }
+            let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+            println!("Compiled {} -> {} ({} bytes, native)", path, out_path, size);
+        }
+        Err(e) => {
+            eprintln!("Compile error: {}", e);
             process::exit(1);
         }
     }
