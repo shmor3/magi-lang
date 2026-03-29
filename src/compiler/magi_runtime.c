@@ -160,6 +160,8 @@ static char* magi_val_to_dyn_str(int64_t val, int for_display);
 static void magi_val_to_str(int64_t val, char* buf, int bufsize);
 int64_t __magi_string_concat(int64_t a_val, int64_t b_val);
 int64_t __magi_string_len(int64_t val);
+int64_t __magi_map_get(int64_t map_val, int64_t key_val);
+void __magi_map_set(int64_t map_val, int64_t key_val, int64_t val);
 static inline int magi_is_byte_array(MagiArray* arr) { return arr && arr->cap == -1; }
 static inline int64_t magi_byte_array_get(MagiArray* arr, int64_t idx) {
     if (!arr || idx < 0 || idx >= arr->len) return magi_make_null();
@@ -268,6 +270,10 @@ int64_t __magi_array_new(int32_t count, int64_t* elements) {
 }
 
 int64_t __magi_array_get(int64_t arr_val, int64_t idx_val) {
+    // If the object is a map, delegate to map_get
+    if (magi_is_tagged(arr_val) && magi_get_tag(arr_val) == TAG_MAP) {
+        return __magi_map_get(arr_val, idx_val);
+    }
     MagiArray* arr = magi_array_ptr(arr_val);
     int64_t idx = magi_as_int(idx_val);
     if (!arr || idx < 0 || idx >= arr->len) return magi_make_null();
@@ -276,10 +282,14 @@ int64_t __magi_array_get(int64_t arr_val, int64_t idx_val) {
 }
 
 void __magi_array_set(int64_t arr_val, int64_t idx_val, int64_t val) {
+    if (magi_is_tagged(arr_val) && magi_get_tag(arr_val) == TAG_MAP) {
+        __magi_map_set(arr_val, idx_val, val);
+        return;
+    }
     MagiArray* arr = magi_array_ptr(arr_val);
     int64_t idx = magi_as_int(idx_val);
     if (!arr || idx < 0 || idx >= arr->len) return;
-    if (magi_is_byte_array(arr)) return; // byte arrays are read-only
+    if (magi_is_byte_array(arr)) return;
     arr->data[idx] = val;
 }
 
@@ -308,7 +318,10 @@ int64_t __magi_map_new(int32_t count, int64_t* entries) {
     map->keys = (char**)malloc(sizeof(char*) * map->cap);
     map->values = (int64_t*)malloc(sizeof(int64_t) * map->cap);
     for (int i = 0; i < count; i++) {
-        const char* key_str = magi_as_string(entries[i * 2]);
+        int64_t key_tagged = entries[i * 2];
+        int key_tag = magi_get_tag(key_tagged);
+        const char* key_str = magi_as_string(key_tagged);
+        if (count <= 4) fprintf(stderr, "[map_new] key[%d] tag=%d str='%s' raw=%llx\n", i, key_tag, key_str, (unsigned long long)key_tagged);
         map->keys[i] = strdup(key_str);
         map->values[i] = entries[i * 2 + 1];
     }
@@ -318,8 +331,11 @@ int64_t __magi_map_new(int32_t count, int64_t* entries) {
 int64_t __magi_map_get(int64_t map_val, int64_t key_val) {
     MagiMap* map = magi_map_ptr(map_val);
     const char* key = magi_as_string(key_val);
-    if (!map || !key) return magi_make_null();
+    int key_tag = magi_get_tag(key_val);
+    if (!map || !key) { fprintf(stderr, "[map_get] null map=%p key='%s'\n", (void*)map, key ? key : "NULL"); return magi_make_null(); }
+    if (map->len <= 4) fprintf(stderr, "[map_get] looking for '%s' (tag=%d) in %d keys\n", key, key_tag, map->len);
     for (int i = 0; i < map->len; i++) {
+        if (map->len <= 4) fprintf(stderr, "[map_get]   key[%d]='%s' cmp=%d\n", i, map->keys[i], strcmp(map->keys[i], key));
         if (strcmp(map->keys[i], key) == 0) return map->values[i];
     }
     return magi_make_null();
