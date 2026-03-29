@@ -290,10 +290,10 @@ fn emit_native(
     link_args.push(output_path.into());
     link_args.push("-lm".into());
     link_args.push("-O2".into());
-    // Windows: console subsystem + 8MB stack (default 1MB too small for deep RuntimeCall chains)
+    // 64MB stack for all platforms (RuntimeCall chains with map access are stack-heavy)
     if is_windows {
         link_args.push("-mconsole".into());
-        link_args.push("-Wl,--stack,8388608".into());
+        link_args.push("-Wl,--stack,67108864".into());
     }
     if is_macos && std::env::consts::OS == "macos" {
         for fw in &["Cocoa", "IOKit", "CoreVideo", "CoreAudio", "AudioToolbox", "Carbon", "ForceFeedback"] {

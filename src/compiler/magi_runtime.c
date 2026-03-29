@@ -174,9 +174,9 @@ int64_t __magi_to_string(int64_t val);
 
 // ===== Print =====
 void __magi_print(int64_t val) {
-    // For display: strings are printed without quotes
     char* s = magi_val_to_dyn_str(val, 1);
     printf("%s\n", s);
+    fflush(stdout);
     free(s);
 }
 
@@ -318,10 +318,7 @@ int64_t __magi_map_new(int32_t count, int64_t* entries) {
     map->keys = (char**)malloc(sizeof(char*) * map->cap);
     map->values = (int64_t*)malloc(sizeof(int64_t) * map->cap);
     for (int i = 0; i < count; i++) {
-        int64_t key_tagged = entries[i * 2];
-        int key_tag = magi_get_tag(key_tagged);
-        const char* key_str = magi_as_string(key_tagged);
-        if (count <= 4) fprintf(stderr, "[map_new] key[%d] tag=%d str='%s' raw=%llx\n", i, key_tag, key_str, (unsigned long long)key_tagged);
+        const char* key_str = magi_as_string(entries[i * 2]);
         map->keys[i] = strdup(key_str);
         map->values[i] = entries[i * 2 + 1];
     }
@@ -331,11 +328,8 @@ int64_t __magi_map_new(int32_t count, int64_t* entries) {
 int64_t __magi_map_get(int64_t map_val, int64_t key_val) {
     MagiMap* map = magi_map_ptr(map_val);
     const char* key = magi_as_string(key_val);
-    int key_tag = magi_get_tag(key_val);
-    if (!map || !key) { fprintf(stderr, "[map_get] null map=%p key='%s'\n", (void*)map, key ? key : "NULL"); return magi_make_null(); }
-    if (map->len <= 4) fprintf(stderr, "[map_get] looking for '%s' (tag=%d) in %d keys\n", key, key_tag, map->len);
+    if (!map || !key) return magi_make_null();
     for (int i = 0; i < map->len; i++) {
-        if (map->len <= 4) fprintf(stderr, "[map_get]   key[%d]='%s' cmp=%d\n", i, map->keys[i], strcmp(map->keys[i], key));
         if (strcmp(map->keys[i], key) == 0) return map->values[i];
     }
     return magi_make_null();
@@ -1411,7 +1405,6 @@ static int __embed_count = 0;
 
 int64_t __magi_embed_array(const unsigned char* data, int64_t len) {
     if (!data || len <= 0) return magi_make_null();
-    fprintf(stderr, "[embed] %lld bytes\n", (long long)len);
     // Store in embed table — return a MagiArray backed by the raw data
     int idx = __embed_count++;
     __embed_table[idx].data = data;
@@ -1424,13 +1417,7 @@ int64_t __magi_embed_array(const unsigned char* data, int64_t len) {
     arr->len = (int32_t)len;
     arr->data = (int64_t*)(uintptr_t)data;
     arr->cap = -1;
-    int64_t tagged = magi_make_array_val(arr);
-    uintptr_t orig_ptr = (uintptr_t)arr;
-    uintptr_t recovered = (uintptr_t)magi_get_payload(tagged);
-    fprintf(stderr, "[embed] arr=%p orig=%llx recovered=%llx %s\n",
-        (void*)arr, (unsigned long long)orig_ptr, (unsigned long long)recovered,
-        orig_ptr == recovered ? "OK" : "POINTER TRUNCATED!");
-    return tagged;
+    return magi_make_array_val(arr);
 }
 
 // magi_is_byte_array and magi_byte_array_get defined in forward declarations above
