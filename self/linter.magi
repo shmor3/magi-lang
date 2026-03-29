@@ -2388,3 +2388,446 @@ func lint_format_json(warnings) {
     }
     "[\n" + items.join(",\n") + "\n]"
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Lint Rule Registry with Configurable Severity ──────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const LINT_RULES = [
+    {"code": "W001", "name": "unused-variable", "severity": "warning", "fixable": true,
+     "description": "Variable is declared but never used"},
+    {"code": "W002", "name": "unused-import", "severity": "warning", "fixable": true,
+     "description": "Import is declared but never referenced"},
+    {"code": "W003", "name": "dead-code", "severity": "warning", "fixable": true,
+     "description": "Code after return/break/continue is unreachable"},
+    {"code": "W004", "name": "empty-block", "severity": "warning", "fixable": false,
+     "description": "Block body is empty"},
+    {"code": "W005", "name": "non-exhaustive-match", "severity": "warning", "fixable": false,
+     "description": "Match expression may not cover all cases"},
+    {"code": "W006", "name": "unnecessary-return", "severity": "info", "fixable": true,
+     "description": "Return at end of function is unnecessary"},
+    {"code": "W007", "name": "single-element-array", "severity": "info", "fixable": false,
+     "description": "Array literal with single element could be simplified"},
+    {"code": "W008", "name": "duplicate-import", "severity": "warning", "fixable": true,
+     "description": "Module is imported more than once"},
+    {"code": "W009", "name": "unreachable-pattern", "severity": "warning", "fixable": true,
+     "description": "Match arm is unreachable due to previous catch-all"},
+    {"code": "W010", "name": "constant-condition", "severity": "warning", "fixable": true,
+     "description": "Condition is always true or always false"},
+    {"code": "W011", "name": "self-comparison", "severity": "warning", "fixable": true,
+     "description": "Comparing a value to itself"},
+    {"code": "W012", "name": "unused-result", "severity": "info", "fixable": false,
+     "description": "Function return value is discarded"},
+    {"code": "W013", "name": "mutable-const", "severity": "error", "fixable": true,
+     "description": "Constant is reassigned"},
+    {"code": "W014", "name": "empty-function", "severity": "info", "fixable": false,
+     "description": "Function body is empty"},
+    {"code": "W015", "name": "implicit-return", "severity": "info", "fixable": false,
+     "description": "Function relies on implicit return"},
+    {"code": "W016", "name": "duplicate-key", "severity": "warning", "fixable": true,
+     "description": "Map literal has duplicate keys"},
+    {"code": "W017", "name": "missing-else", "severity": "info", "fixable": false,
+     "description": "If expression used as value without else branch"},
+    {"code": "W018", "name": "nested-if", "severity": "info", "fixable": false,
+     "description": "Deeply nested if statements could be simplified"},
+    {"code": "W019", "name": "large-function", "severity": "info", "fixable": false,
+     "description": "Function body exceeds recommended line count"},
+    {"code": "W020", "name": "too-many-params", "severity": "info", "fixable": false,
+     "description": "Function has too many parameters"},
+    {"code": "W100", "name": "shadowed-variable", "severity": "warning", "fixable": true,
+     "description": "Variable shadows an outer scope variable"},
+    {"code": "W101", "name": "redundant-let", "severity": "info", "fixable": true,
+     "description": "Variable is never reassigned, could be const"},
+    {"code": "W102", "name": "unused-parameter", "severity": "info", "fixable": true,
+     "description": "Function parameter is never used"},
+    {"code": "W103", "name": "unnecessary-semicolon", "severity": "info", "fixable": true,
+     "description": "Unnecessary trailing semicolon"},
+    {"code": "W200", "name": "naming-convention", "severity": "warning", "fixable": true,
+     "description": "Identifier does not follow naming convention"},
+    {"code": "W201", "name": "constant-naming", "severity": "warning", "fixable": true,
+     "description": "Constant should use UPPER_SNAKE_CASE"},
+    {"code": "W202", "name": "type-naming", "severity": "warning", "fixable": true,
+     "description": "Type name should use PascalCase"},
+    {"code": "W203", "name": "function-naming", "severity": "warning", "fixable": true,
+     "description": "Function name should use snake_case"},
+    {"code": "W300", "name": "todo-comment", "severity": "info", "fixable": false,
+     "description": "TODO comment found"},
+    {"code": "W301", "name": "fixme-comment", "severity": "warning", "fixable": false,
+     "description": "FIXME comment found"},
+    {"code": "W302", "name": "hack-comment", "severity": "warning", "fixable": false,
+     "description": "HACK comment found"},
+    {"code": "W303", "name": "long-line", "severity": "info", "fixable": false,
+     "description": "Line exceeds maximum length"},
+    {"code": "W304", "name": "trailing-whitespace", "severity": "info", "fixable": true,
+     "description": "Line has trailing whitespace"},
+    {"code": "W305", "name": "mixed-indentation", "severity": "warning", "fixable": true,
+     "description": "File uses both tabs and spaces for indentation"},
+    {"code": "W306", "name": "no-newline-at-end", "severity": "info", "fixable": true,
+     "description": "File does not end with a newline"},
+    {"code": "W400", "name": "panic-in-library", "severity": "warning", "fixable": false,
+     "description": "Library code uses panic instead of returning errors"},
+    {"code": "W401", "name": "unwrap-without-check", "severity": "warning", "fixable": false,
+     "description": "Unwrapping result without error check"},
+    {"code": "W402", "name": "infinite-loop", "severity": "warning", "fixable": false,
+     "description": "Loop appears to be infinite (no break/return)"},
+    {"code": "W403", "name": "division-by-zero", "severity": "error", "fixable": false,
+     "description": "Potential division by zero"},
+    {"code": "W404", "name": "index-out-of-bounds", "severity": "warning", "fixable": false,
+     "description": "Potential array index out of bounds"},
+    {"code": "W500", "name": "deprecated-syntax", "severity": "warning", "fixable": true,
+     "description": "Using deprecated syntax"},
+    {"code": "W501", "name": "unnecessary-parens", "severity": "info", "fixable": true,
+     "description": "Unnecessary parentheses around expression"},
+    {"code": "W502", "name": "double-negation", "severity": "info", "fixable": true,
+     "description": "Double negation can be simplified"},
+    {"code": "W503", "name": "boolean-literal-comparison", "severity": "info", "fixable": true,
+     "description": "Comparing to boolean literal (use value directly)"},
+    {"code": "W504", "name": "null-comparison", "severity": "info", "fixable": true,
+     "description": "Use is_null() instead of == null"},
+    {"code": "W505", "name": "string-concat-in-loop", "severity": "warning", "fixable": false,
+     "description": "String concatenation in loop (use array + join)"},
+    {"code": "W506", "name": "magic-number", "severity": "info", "fixable": false,
+     "description": "Unexplained numeric literal (consider named constant)"},
+    {"code": "W507", "name": "identity-operation", "severity": "info", "fixable": true,
+     "description": "Operation has no effect (x + 0, x * 1, etc.)"},
+]
+
+// Configurable lint configuration
+let lint_config = {"__s": true}  // code -> {enabled, severity}
+
+func lint_configure(code, options) {
+    lint_config[code] = options
+}
+
+func lint_is_enabled(code) {
+    if lint_config.has(code) {
+        const cfg = lint_config[code]
+        if cfg.has("enabled") { return cfg["enabled"] }
+    }
+    true  // Enabled by default
+}
+
+func lint_get_severity(code) {
+    if lint_config.has(code) {
+        const cfg = lint_config[code]
+        if cfg.has("severity") { return cfg["severity"] }
+    }
+    // Default severity from rule definition
+    for rule in LINT_RULES {
+        if rule["code"] == code { return rule["severity"] }
+    }
+    "warning"
+}
+
+// ── Additional Lint Checks ──────────────────────────────────────────
+
+func lint_check_constant_condition(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(Literal::BoolLit(b)) => {
+            const val_str = if b { "true" } else { "false" }
+            if lint_is_enabled("W010") {
+                lint_warn(f"W010: condition is always {val_str}")
+            }
+        },
+        _ => {},
+    }
+}
+
+func lint_check_self_comparison(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::EBinaryOp(op, left, right) => {
+            if lint_expr_equals(left, right) {
+                if lint_is_enabled("W011") {
+                    lint_warn("W011: comparing a value to itself")
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+func lint_expr_equals(a, b) {
+    if a == null || b == null { return false }
+    // Simple structural equality check
+    const ka = a.kind
+    const kb = b.kind
+    match ka {
+        ExprKind::EVariable(na) => {
+            match kb {
+                ExprKind::EVariable(nb) => na == nb,
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+func lint_check_duplicate_map_keys(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(Literal::MapLit(entries)) => {
+            let seen_keys = {"__s": true}
+            for entry in entries {
+                const key = to_string(entry[0])
+                if seen_keys.has(key) {
+                    if lint_is_enabled("W016") {
+                        lint_warn(f"W016: duplicate key '{key}' in map literal")
+                    }
+                }
+                seen_keys[key] = true
+            }
+        },
+        _ => {},
+    }
+}
+
+func lint_check_too_many_params(func_def) {
+    const max_params = 7
+    if len(func_def.params) > max_params {
+        if lint_is_enabled("W020") {
+            lint_warn(f"W020: function '{func_def.name}' has {len(func_def.params)} parameters (max recommended: {max_params})")
+        }
+    }
+}
+
+func lint_check_large_function(func_def) {
+    const max_lines = 50
+    if func_def.body != null && len(func_def.body.statements) > max_lines {
+        if lint_is_enabled("W019") {
+            lint_warn(f"W019: function '{func_def.name}' has {len(func_def.body.statements)} statements (max recommended: {max_lines})")
+        }
+    }
+}
+
+func lint_check_boolean_comparison(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::EBinaryOp(op, left, right) => {
+            if op == BinOp::Eq || op == BinOp::NotEq {
+                const lr = right.kind
+                match lr {
+                    ExprKind::ELiteral(Literal::BoolLit(_)) => {
+                        if lint_is_enabled("W503") {
+                            lint_warn("W503: comparing to boolean literal (use value directly)")
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+func lint_check_identity_operation(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::EBinaryOp(op, left, right) => {
+            const rk = right.kind
+            match rk {
+                ExprKind::ELiteral(Literal::IntLit(n)) => {
+                    if (op == BinOp::Add || op == BinOp::Sub) && n == 0 {
+                        if lint_is_enabled("W507") {
+                            lint_warn("W507: adding/subtracting zero has no effect")
+                        }
+                    }
+                    if (op == BinOp::Mul || op == BinOp::Div) && n == 1 {
+                        if lint_is_enabled("W507") {
+                            lint_warn("W507: multiplying/dividing by one has no effect")
+                        }
+                    }
+                    if op == BinOp::Mul && n == 0 {
+                        if lint_is_enabled("W507") {
+                            lint_warn("W507: multiplying by zero always yields zero")
+                        }
+                    }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+}
+
+func lint_check_double_negation(expr) {
+    if expr == null { return null }
+    const k = expr.kind
+    match k {
+        ExprKind::EUnaryOp(UnaryOp::Not, inner) => {
+            const ik = inner.kind
+            match ik {
+                ExprKind::EUnaryOp(UnaryOp::Not, _) => {
+                    if lint_is_enabled("W502") {
+                        lint_warn("W502: double negation can be simplified")
+                    }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+}
+
+// ── Source-Level Lint Checks (comments, whitespace, line length) ─────
+
+func lint_source_checks(source) {
+    const lines = source.split("\n")
+    let has_tabs = false
+    let has_spaces = false
+    let line_num = 0
+
+    for line in lines {
+        line_num = line_num + 1
+        const trimmed = line.trim()
+
+        // Check line length
+        if len(line) > 120 && lint_is_enabled("W303") {
+            lint_warn(f"W303: line {line_num} exceeds 120 characters ({len(line)})")
+        }
+
+        // Check trailing whitespace
+        if len(line) > 0 && line != trimmed && (line.ends_with(" ") || line.ends_with("\t")) {
+            if lint_is_enabled("W304") {
+                lint_warn(f"W304: trailing whitespace at line {line_num}")
+            }
+        }
+
+        // Check TODO/FIXME/HACK comments
+        if trimmed.contains("TODO") && lint_is_enabled("W300") {
+            lint_warn(f"W300: TODO comment at line {line_num}")
+        }
+        if trimmed.contains("FIXME") && lint_is_enabled("W301") {
+            lint_warn(f"W301: FIXME comment at line {line_num}")
+        }
+        if trimmed.contains("HACK") && lint_is_enabled("W302") {
+            lint_warn(f"W302: HACK comment at line {line_num}")
+        }
+
+        // Track indentation style
+        if len(line) > 0 && line[0] == "\t" { has_tabs = true }
+        if len(line) > 0 && line[0] == " " { has_spaces = true }
+    }
+
+    // Mixed indentation
+    if has_tabs && has_spaces && lint_is_enabled("W305") {
+        lint_warn("W305: file uses both tabs and spaces for indentation")
+    }
+
+    // No trailing newline
+    if len(source) > 0 && !source.ends_with("\n") && lint_is_enabled("W306") {
+        lint_warn("W306: file does not end with a newline")
+    }
+}
+
+// ── Auto-Fix Suggestions for Each Rule ──────────────────────────────
+
+func lint_auto_fix(code, context) {
+    match code {
+        "W001" => {"action": "prefix_underscore", "description": "Prefix variable with underscore"},
+        "W002" => {"action": "delete_line", "description": "Remove unused import"},
+        "W003" => {"action": "delete_range", "description": "Remove unreachable code"},
+        "W006" => {"action": "remove_return", "description": "Remove unnecessary return"},
+        "W008" => {"action": "delete_line", "description": "Remove duplicate import"},
+        "W009" => {"action": "delete_arm", "description": "Remove unreachable match arm"},
+        "W010" => {"action": "simplify_condition", "description": "Simplify constant condition"},
+        "W011" => {"action": "simplify_comparison", "description": "Simplify self-comparison"},
+        "W013" => {"action": "change_to_let", "description": "Change const to let"},
+        "W100" => {"action": "rename", "description": "Rename to avoid shadowing"},
+        "W101" => {"action": "change_to_const", "description": "Change let to const"},
+        "W102" => {"action": "prefix_underscore", "description": "Prefix parameter with underscore"},
+        "W103" => {"action": "remove_semicolon", "description": "Remove trailing semicolon"},
+        "W200" => {"action": "to_snake_case", "description": "Convert to snake_case"},
+        "W201" => {"action": "to_upper_snake", "description": "Convert to UPPER_SNAKE_CASE"},
+        "W202" => {"action": "to_pascal_case", "description": "Convert to PascalCase"},
+        "W203" => {"action": "to_snake_case", "description": "Convert to snake_case"},
+        "W304" => {"action": "trim_trailing", "description": "Remove trailing whitespace"},
+        "W305" => {"action": "normalize_indent", "description": "Normalize to spaces"},
+        "W306" => {"action": "add_newline", "description": "Add trailing newline"},
+        "W500" => {"action": "update_syntax", "description": "Update to modern syntax"},
+        "W501" => {"action": "remove_parens", "description": "Remove unnecessary parentheses"},
+        "W502" => {"action": "remove_double_neg", "description": "Remove double negation"},
+        "W503" => {"action": "remove_bool_cmp", "description": "Remove boolean comparison"},
+        "W504" => {"action": "use_is_null", "description": "Use is_null()"},
+        "W507" => {"action": "remove_identity_op", "description": "Remove identity operation"},
+        _ => null,
+    }
+}
+
+// ── Full Lint Pipeline ──────────────────────────────────────────────
+
+func lint_full(source) {
+    const save_warnings = lint_warnings
+    const save_scopes = lint_scopes
+
+    lint_warnings = []
+    lint_scopes = [lint_new_scope()]
+
+    // AST-based checks
+    const program = parse(source)
+    lint_program(program)
+
+    // Source-level checks
+    lint_source_checks(source)
+
+    const warnings = lint_warnings
+    lint_warnings = save_warnings
+    lint_scopes = save_scopes
+    warnings
+}
+
+// ── JSON Output Format ──────────────────────────────────────────────
+
+func lint_format_json_full(warnings, source_path) {
+    let items = []
+    for w in warnings {
+        const colon = w.index_of(":")
+        let code = ""
+        let message = w
+        let line = 0
+        let severity = "warning"
+
+        if colon > 0 {
+            code = w[0..colon].trim()
+            message = w[colon + 1..len(w)].trim()
+            severity = lint_get_severity(code)
+        }
+
+        // Extract line number from message
+        const at_idx = message.index_of(" at line ")
+        if at_idx >= 0 {
+            const num_str = message[at_idx + 9..len(message)]
+            const space = num_str.index_of(" ")
+            const line_str = if space >= 0 { num_str[0..space] } else { num_str }
+            line = parse_int(line_str)
+            if line == null { line = 0 }
+        }
+
+        // Get auto-fix suggestion
+        const fix = lint_auto_fix(code, null)
+
+        let item = f"    {{\n"
+        item = item + f"      \"code\": \"{code}\",\n"
+        item = item + f"      \"severity\": \"{severity}\",\n"
+        item = item + f"      \"message\": \"{message.replace(\"\\\"\", \"\\\\\\\"\")}\",\n"
+        item = item + f"      \"line\": {line}"
+        if source_path != null {
+            item = item + f",\n      \"file\": \"{source_path}\""
+        }
+        if fix != null {
+            item = item + f",\n      \"fix\": {{\n"
+            item = item + f"        \"action\": \"{fix[\"action\"]}\",\n"
+            item = item + f"        \"description\": \"{fix[\"description\"]}\"\n"
+            item = item + "      }"
+        }
+        item = item + "\n    }"
+        items.push(item)
+    }
+    "{\n  \"warnings\": [\n" + items.join(",\n") + "\n  ]\n}"
+}
