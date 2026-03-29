@@ -3096,24 +3096,144 @@ impl WasmCodegen {
                         f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::ARRAY as i64) << tag::TAG_SHIFT)));
                         f.instruction(&WasmInst::I64Or);
                     }
-                    ("parse_int" | "parse_float" | "pop", _) => {
-                        // Delegate to host runtime_call for these operations.
-                        // Drop args from stack first (host cannot read WASM stack directly).
-                        for _ in 0..*arg_count {
-                            f.instruction(&WasmInst::Drop);
+                    ("__bit_and" | "__bit_or" | "__bit_xor" | "__bit_shl" | "__bit_shr" | "__bit_andnot", 2) => {
+                        // Bitwise operations: untag both operands, apply op, retag.
+                        let t0 = temp_base;
+                        let t1 = temp_base + 1;
+                        f.instruction(&WasmInst::LocalSet(t1));
+                        f.instruction(&WasmInst::LocalSet(t0));
+                        // Untag left (sign-extend from 48 bits)
+                        f.instruction(&WasmInst::LocalGet(t0));
+                        f.instruction(&WasmInst::I64Const(16));
+                        f.instruction(&WasmInst::I64Shl);
+                        f.instruction(&WasmInst::I64Const(16));
+                        f.instruction(&WasmInst::I64ShrS);
+                        // Untag right
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I64Const(16));
+                        f.instruction(&WasmInst::I64Shl);
+                        f.instruction(&WasmInst::I64Const(16));
+                        f.instruction(&WasmInst::I64ShrS);
+                        match fn_name {
+                            "__bit_and" => { f.instruction(&WasmInst::I64And); }
+                            "__bit_or" => { f.instruction(&WasmInst::I64Or); }
+                            "__bit_xor" => { f.instruction(&WasmInst::I64Xor); }
+                            "__bit_shl" => { f.instruction(&WasmInst::I64Shl); }
+                            "__bit_shr" => { f.instruction(&WasmInst::I64ShrS); }
+                            "__bit_andnot" => {
+                                // a &^ b = a & ~b => xor b with -1, then and with a
+                                // Stack: [a, b] => need [a, ~b]
+                                f.instruction(&WasmInst::I64Const(-1));
+                                f.instruction(&WasmInst::I64Xor); // ~b
+                                f.instruction(&WasmInst::I64And); // a & ~b
+                            }
+                            _ => {}
                         }
-                        // runtime_call(name_offset: i32, arg_count: i32) -> i64
-                        let name_offset = string_offsets.get(*name as usize).copied().unwrap_or(0);
-                        f.instruction(&WasmInst::I32Const(name_offset as i32));
-                        f.instruction(&WasmInst::I32Const(*arg_count as i32));
-                        f.instruction(&WasmInst::Call(1)); // runtime_call import
+                        // Retag as i64
+                        f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
+                        f.instruction(&WasmInst::I64And);
+                        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
+                        f.instruction(&WasmInst::I64Or);
+                    }
+                    ("__in", 2) => {
+                        // Containment check: element in collection (array linear scan).
+                        let t0 = temp_base;     // needle
+                        let t1 = temp_base + 1; // collection ptr (untagged)
+                        let t2 = temp_base + 2; // loop counter
+                        f.instruction(&WasmInst::LocalSet(t1)); // save collection tagged
+                        f.instruction(&WasmInst::LocalSet(t0)); // save needle
+
+                        // Check if collection is a NaN-boxed array
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+                        f.instruction(&WasmInst::I64And);
+                        f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+                        f.instruction(&WasmInst::I64Eq);
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I32)));
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
+                        f.instruction(&WasmInst::I64ShrU);
+                        f.instruction(&WasmInst::I64Const(0x07));
+                        f.instruction(&WasmInst::I64And);
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(tag::ARRAY as i32));
+                        f.instruction(&WasmInst::I32Eq);
+                        f.instruction(&WasmInst::Else);
+                        f.instruction(&WasmInst::I32Const(0));
+                        f.instruction(&WasmInst::End);
+
+                        f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
+                        // Array: untag ptr, scan elements
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
+                        f.instruction(&WasmInst::I64And);
+                        f.instruction(&WasmInst::LocalSet(t1));
+
+                        f.instruction(&WasmInst::I64Const(0));
+                        f.instruction(&WasmInst::LocalSet(t2)); // i = 0
+
+                        f.instruction(&WasmInst::Block(BlockType::Result(WasmValType::I64))); // $outer
+                        f.instruction(&WasmInst::Loop(BlockType::Empty)); // $loop
+
+                        // if i >= len, break with false
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        f.instruction(&WasmInst::I64ExtendI32U);
+                        f.instruction(&WasmInst::I64GeU);
+                        f.instruction(&WasmInst::If(BlockType::Empty));
+                        f.instruction(&WasmInst::I64Const(tag::encode(tag::BOOL, 0)));
+                        f.instruction(&WasmInst::Br(2)); // break $outer with false
+                        f.instruction(&WasmInst::End);
+
+                        // Load arr[i] and compare with needle
+                        f.instruction(&WasmInst::LocalGet(t1));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I32WrapI64);
+                        f.instruction(&WasmInst::I32Const(8));
+                        f.instruction(&WasmInst::I32Mul);
+                        f.instruction(&WasmInst::I32Add);
+                        f.instruction(&WasmInst::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        f.instruction(&WasmInst::LocalGet(t0));
+                        f.instruction(&WasmInst::I64Eq);
+                        f.instruction(&WasmInst::If(BlockType::Empty));
+                        f.instruction(&WasmInst::I64Const(tag::encode(tag::BOOL, 1)));
+                        f.instruction(&WasmInst::Br(2)); // break $outer with true
+                        f.instruction(&WasmInst::End);
+
+                        // i++
+                        f.instruction(&WasmInst::LocalGet(t2));
+                        f.instruction(&WasmInst::I64Const(1));
+                        f.instruction(&WasmInst::I64Add);
+                        f.instruction(&WasmInst::LocalSet(t2));
+                        f.instruction(&WasmInst::Br(0)); // continue $loop
+
+                        f.instruction(&WasmInst::End); // end $loop
+                        f.instruction(&WasmInst::I64Const(tag::encode(tag::BOOL, 0))); // unreachable fallback
+                        f.instruction(&WasmInst::End); // end $outer
+
+                        f.instruction(&WasmInst::Else);
+                        f.instruction(&WasmInst::I64Const(tag::encode(tag::BOOL, 0)));
+                        f.instruction(&WasmInst::End);
                     }
                     _ => {
-                        // Unknown runtime call: delegate to host runtime_call.
-                        // runtime_call(name_offset: i32, arg_count: i32) -> i64
-                        // Drop args from stack first (host cannot read WASM stack directly).
-                        for _ in 0..*arg_count {
-                            f.instruction(&WasmInst::Drop);
+                        // Delegate to host runtime_call. Store args in scratch
+                        // memory (bytes 0..argc*8) so the host can read them,
+                        // instead of dropping them.
+                        let t0 = temp_base;
+                        for i in (0..*arg_count).rev() {
+                            f.instruction(&WasmInst::LocalSet(t0));
+                            f.instruction(&WasmInst::I32Const(0));
+                            f.instruction(&WasmInst::LocalGet(t0));
+                            f.instruction(&WasmInst::I64Store(MemArg {
+                                offset: (i * 8) as u64,
+                                align: 3,
+                                memory_index: 0,
+                            }));
                         }
                         let name_offset = string_offsets.get(*name as usize).copied().unwrap_or(0);
                         f.instruction(&WasmInst::I32Const(name_offset as i32));

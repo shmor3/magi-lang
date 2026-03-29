@@ -159,8 +159,13 @@ impl IrVm {
         }
         self.locals.push(frame_locals);
 
+        // Save label stack — function calls must not corrupt the caller's labels
+        let saved_labels = std::mem::take(&mut self.label_stack);
+
         let result = self.execute_instructions(module, &func.instructions, fn_idx);
 
+        // Restore label stack
+        self.label_stack = saved_labels;
         self.locals.pop();
         result
     }
@@ -472,7 +477,6 @@ impl IrVm {
                     let val = self.stack.pop().unwrap_or(Val::null());
                     let s = self.val_to_display_string(&val);
                     self.output.push(s.clone());
-                    println!("{}", s);
                 }
                 Instruction::RuntimeCall { name, arg_count } => {
                     let fn_name = self.strings.get(*name as usize).cloned().unwrap_or_default();
@@ -578,8 +582,13 @@ impl IrVm {
             "__range" => {
                 let start = a.as_i64();
                 let end = b.as_i64();
+                let inclusive = args.get(2).map(|v| v.as_bool()).unwrap_or(false);
                 let mut elems = Vec::new();
-                for i in start..end { elems.push(Val::int(i)); }
+                if inclusive {
+                    for i in start..=end { elems.push(Val::int(i)); }
+                } else {
+                    for i in start..end { elems.push(Val::int(i)); }
+                }
                 let addr = self.next_heap;
                 self.next_heap += 1;
                 self.heap_arrays.insert(addr, elems);

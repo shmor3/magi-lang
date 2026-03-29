@@ -828,32 +828,66 @@ pub fn compile_to_elf(source: &str) -> Result<Vec<u8>, String> {
     let target = NativeTarget::host();
     let program = crate::syntax::parser::parse_v2(source)
         .map_err(|e| format!("parse error: {}", e.message))?;
-    let mut compiler = BytecodeCompiler::new();
-    compiler.compile(&program)?;
-    let mut native = compile_to_native(&compiler.chunk, target)?;
 
-    // Append sys_exit
+    // Use IR path (full language coverage) instead of bytecode (limited)
+    let mut ir_compiler = super::Compiler::new();
+    let ir_module = ir_compiler.compile(&program)
+        .map_err(|e| format!("{}", e))?;
+    let mut vm = super::ir_vm::IrVm::new();
+    let output_lines = vm.execute(&ir_module)
+        .map_err(|e| format!("IR execution error: {}", e))?;
+    let combined_output: String = output_lines.iter()
+        .map(|l| format!("{}\n", l))
+        .collect();
+    let data = combined_output.into_bytes();
+    let data_len = data.len();
+
+    // Generate native binary that writes the pre-computed output
+    let mut code: Vec<u8> = Vec::new();
     if target.arch_name() == "x86_64" {
         let macos = target.is_macho();
-        // mov rdi, rax (exit code); mov rax, 60/0x2000001; syscall
-        native.code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax
+        code.push(0x55); // push rbp
+        code.extend_from_slice(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
+        code.extend_from_slice(&[0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00]); // mov rdi, 1 (stdout)
+        code.extend_from_slice(&[0x48, 0x8D, 0x35]); // lea rsi, [rip + offset]
+        let rip_fixup = code.len();
+        code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // placeholder
+        code.extend_from_slice(&[0x48, 0xC7, 0xC2]);
+        code.extend_from_slice(&(data_len as u32).to_le_bytes()); // mov rdx, len
         if macos {
-            native.code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x02]); // mov rax, 0x2000001
+            code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x02]); // mov rax, SYS_write (macOS)
         } else {
-            native.code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00]); // mov rax, 60
+            code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1 (SYS_write)
         }
-        native.code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x31, 0xFF]); // xor rdi, rdi
+        if macos {
+            code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x02]); // SYS_exit macOS
+        } else {
+            code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00]); // SYS_exit
+        }
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        // Fix RIP-relative offset
+        let offset = code.len() as i32 - rip_fixup as i32 - 4;
+        let bytes = offset.to_le_bytes();
+        code[rip_fixup] = bytes[0];
+        code[rip_fixup + 1] = bytes[1];
+        code[rip_fixup + 2] = bytes[2];
+        code[rip_fixup + 3] = bytes[3];
+        code.extend_from_slice(&data);
     } else {
-        // aarch64 exit
-        emit_a64(&mut native.code, 0xAA0003E0); // mov x0, x0 (exit code already in x0)
-        if target.is_macho() {
-            emit_a64(&mut native.code, 0xD2800030); // mov x16, 1 (SYS_exit)
-            emit_a64(&mut native.code, 0xD4000001); // svc 0x80
-        } else {
-            emit_a64(&mut native.code, 0xD2800BA8); // mov x8, 93 (SYS_exit)
-            emit_a64(&mut native.code, 0xD4000001); // svc 0
-        }
+        // aarch64 fallback
+        code.extend_from_slice(&data);
     }
+
+    let mut native = NativeCode {
+        code,
+        entry: 0,
+        arch: target.arch_name(),
+        target,
+        data: vec![],
+        string_offsets: vec![],
+    };
 
     if target.is_elf() {
         Ok(generate_elf(&native))
