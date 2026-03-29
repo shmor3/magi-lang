@@ -4128,3 +4128,2573 @@ func option_map(o, fn) {
 func option_filter(o, pred) {
     if option_is_some(o) && pred(o["value"]) { o } else { option_none() }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// 31. YAML Emitter
+// ════════════════════════════════════════════════════════════════════
+
+// Emit a YAML value to string.
+func yaml_emit(val) {
+    let out = ""
+    yaml_emit_value(val, out, 0, true)
+}
+
+func yaml_emit_value(val, out, indent, inline) {
+    const prefix = " ".repeat(indent)
+    if val == null { return out + "null" }
+    const t = typeof(val)
+    if t == "bool" { return out + if val { "true" } else { "false" } }
+    if t == "int" { return out + to_string(val) }
+    if t == "float" {
+        const s = to_string(val)
+        if !s.contains(".") { return out + s + ".0" }
+        return out + s
+    }
+    if t == "string" {
+        if yaml_string_needs_quoting(val) {
+            return out + "\"" + yaml_escape_string(val) + "\""
+        }
+        return out + val
+    }
+    if t == "array" {
+        if len(val) == 0 { return out + "[]" }
+        let i = 0
+        for item in val {
+            if i > 0 || !inline { out = out + "\n" + prefix }
+            out = out + "- "
+            out = yaml_emit_value(item, out, indent + 2, true)
+            i = i + 1
+        }
+        return out
+    }
+    if t == "map" {
+        const keys = val.keys()
+        if len(keys) == 0 { return out + "{}" }
+        let i = 0
+        for k in keys {
+            if i > 0 || !inline { out = out + "\n" + prefix }
+            out = out + to_string(k) + ": "
+            const v = val[k]
+            const vt = typeof(v)
+            if (vt == "map" && len(v.keys()) > 0) || (vt == "array" && len(v) > 0) {
+                out = yaml_emit_value(v, out, indent + 2, false)
+            } else {
+                out = yaml_emit_value(v, out, indent + 2, true)
+            }
+            i = i + 1
+        }
+        return out
+    }
+    out + to_string(val)
+}
+
+func yaml_string_needs_quoting(s) {
+    if len(s) == 0 { return true }
+    const lower = s.to_lower()
+    if lower == "null" || lower == "true" || lower == "false" || lower == "yes" || lower == "no" { return true }
+    if lower == "on" || lower == "off" || lower == "~" || lower == ".inf" || lower == "-.inf" || lower == ".nan" { return true }
+    if s.contains(":") || s.contains("#") || s.contains("\n") || s.contains("\"") { return true }
+    if s.contains("{") || s.contains("}") || s.contains("[") || s.contains("]") { return true }
+    if s.contains(",") || s.contains("&") || s.contains("*") || s.contains("!") { return true }
+    if s.contains("|") || s.contains(">") || s.contains("%") || s.contains("@") { return true }
+    if s.starts_with(" ") || s.ends_with(" ") || s.starts_with("-") || s.starts_with("?") { return true }
+    false
+}
+
+func yaml_escape_string(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == "\"" { result = result + "\\\"" }
+        else if c == "\\" { result = result + "\\\\" }
+        else if c == "\n" { result = result + "\\n" }
+        else if c == "\t" { result = result + "\\t" }
+        else if c == "\r" { result = result + "\\r" }
+        else { result = result + c }
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 32. XML Parser and Emitter
+// ════════════════════════════════════════════════════════════════════
+
+// XML node: {"tag": name, "attrs": {}, "children": [], "text": ""}
+func xml_parse(source) {
+    let pos = 0
+    let nodes = []
+
+    func skip_ws() {
+        while pos < len(source) && (source[pos] == " " || source[pos] == "\n" || source[pos] == "\t" || source[pos] == "\r") {
+            pos = pos + 1
+        }
+    }
+
+    func parse_text() {
+        let text = ""
+        while pos < len(source) && source[pos] != "<" {
+            if source[pos] == "&" {
+                const end = source.index_of(";", pos)
+                if end > pos {
+                    const entity = source.substring(pos + 1, end)
+                    if entity == "amp" { text = text + "&" }
+                    else if entity == "lt" { text = text + "<" }
+                    else if entity == "gt" { text = text + ">" }
+                    else if entity == "quot" { text = text + "\"" }
+                    else if entity == "apos" { text = text + "'" }
+                    else { text = text + "&" + entity + ";" }
+                    pos = end + 1
+                } else {
+                    text = text + source[pos]
+                    pos = pos + 1
+                }
+            } else {
+                text = text + source[pos]
+                pos = pos + 1
+            }
+        }
+        text
+    }
+
+    func parse_attr_value() {
+        const quote = source[pos]
+        pos = pos + 1
+        let value = ""
+        while pos < len(source) && source[pos] != quote {
+            value = value + source[pos]
+            pos = pos + 1
+        }
+        if pos < len(source) { pos = pos + 1 }
+        value
+    }
+
+    func parse_tag_open() {
+        pos = pos + 1 // skip <
+        let tag = ""
+        while pos < len(source) && source[pos] != " " && source[pos] != ">" && source[pos] != "/" {
+            tag = tag + source[pos]
+            pos = pos + 1
+        }
+        let attrs = {}
+        skip_ws()
+        while pos < len(source) && source[pos] != ">" && source[pos] != "/" {
+            let attr_name = ""
+            while pos < len(source) && source[pos] != "=" && source[pos] != " " && source[pos] != ">" {
+                attr_name = attr_name + source[pos]
+                pos = pos + 1
+            }
+            if pos < len(source) && source[pos] == "=" {
+                pos = pos + 1
+                if pos < len(source) && (source[pos] == "\"" || source[pos] == "'") {
+                    attrs[attr_name] = parse_attr_value()
+                }
+            }
+            skip_ws()
+        }
+        let self_closing = false
+        if pos < len(source) && source[pos] == "/" {
+            self_closing = true
+            pos = pos + 1
+        }
+        if pos < len(source) && source[pos] == ">" { pos = pos + 1 }
+        {"tag": tag, "attrs": attrs, "self_closing": self_closing}
+    }
+
+    func parse_node() {
+        skip_ws()
+        if pos >= len(source) { return null }
+        if source[pos] == "<" {
+            // Check for comment
+            if pos + 3 < len(source) && source[pos + 1] == "!" && source[pos + 2] == "-" && source[pos + 3] == "-" {
+                const end = source.index_of("-->", pos)
+                if end >= 0 { pos = end + 3 } else { pos = len(source) }
+                return parse_node()
+            }
+            // Check for processing instruction <?xml ... ?>
+            if pos + 1 < len(source) && source[pos + 1] == "?" {
+                const end = source.index_of("?>", pos)
+                if end >= 0 { pos = end + 2 } else { pos = len(source) }
+                return parse_node()
+            }
+            // Check for closing tag
+            if pos + 1 < len(source) && source[pos + 1] == "/" {
+                return null
+            }
+            const info = parse_tag_open()
+            let children = []
+            let text = ""
+            if !info.self_closing {
+                // Parse children until closing tag
+                while pos < len(source) {
+                    skip_ws()
+                    if pos >= len(source) { break }
+                    if source[pos] == "<" && pos + 1 < len(source) && source[pos + 1] == "/" {
+                        // Skip closing tag
+                        const end = source.index_of(">", pos)
+                        if end >= 0 { pos = end + 1 }
+                        break
+                    }
+                    if source[pos] == "<" {
+                        const child = parse_node()
+                        if child != null { children.push(child) }
+                    } else {
+                        text = text + parse_text()
+                    }
+                }
+            }
+            return {"tag": info.tag, "attrs": info.attrs, "children": children, "text": text}
+        }
+        null
+    }
+
+    skip_ws()
+    const root = parse_node()
+    if root != null { root } else { {"tag": "", "attrs": {}, "children": [], "text": ""} }
+}
+
+// Emit an XML node to string.
+func xml_emit(node) {
+    xml_emit_node(node, 0)
+}
+
+func xml_emit_node(node, depth) {
+    const indent = "  ".repeat(depth)
+    let result = indent + "<" + node.tag
+    if node.has("attrs") {
+        for k in node.attrs.keys() {
+            result = result + " " + k + "=\"" + xml_escape_attr(node.attrs[k]) + "\""
+        }
+    }
+    if (!node.has("children") || len(node.children) == 0) && (!node.has("text") || len(node.text) == 0) {
+        return result + " />\n"
+    }
+    result = result + ">"
+    if node.has("text") && len(node.text) > 0 {
+        result = result + xml_escape_text(node.text)
+    }
+    if node.has("children") && len(node.children) > 0 {
+        result = result + "\n"
+        for child in node.children {
+            result = result + xml_emit_node(child, depth + 1)
+        }
+        result = result + indent
+    }
+    result + "</" + node.tag + ">\n"
+}
+
+func xml_escape_text(s) {
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+}
+
+func xml_escape_attr(s) {
+    xml_escape_text(s).replace("\"", "&quot;")
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 33. TOML Parser Improvements
+// ════════════════════════════════════════════════════════════════════
+
+// Parse inline tables: { key = val, key2 = val2 }
+func toml_parse_inline_table(s, pos) {
+    let table = {}
+    pos = pos + 1 // skip {
+    while pos < len(s) && s[pos] != "}" {
+        // Skip whitespace
+        while pos < len(s) && (s[pos] == " " || s[pos] == "\t") { pos = pos + 1 }
+        if pos >= len(s) || s[pos] == "}" { break }
+        // Parse key
+        let key = ""
+        while pos < len(s) && s[pos] != "=" && s[pos] != " " {
+            key = key + s[pos]
+            pos = pos + 1
+        }
+        // Skip to =
+        while pos < len(s) && s[pos] != "=" { pos = pos + 1 }
+        pos = pos + 1 // skip =
+        while pos < len(s) && (s[pos] == " " || s[pos] == "\t") { pos = pos + 1 }
+        // Parse value
+        const vr = toml_parse_value(s, pos)
+        table[key.trim()] = vr[0]
+        pos = vr[1]
+        while pos < len(s) && (s[pos] == " " || s[pos] == "\t" || s[pos] == ",") { pos = pos + 1 }
+    }
+    if pos < len(s) { pos = pos + 1 } // skip }
+    [table, pos]
+}
+
+func toml_parse_value(s, pos) {
+    while pos < len(s) && (s[pos] == " " || s[pos] == "\t") { pos = pos + 1 }
+    if pos >= len(s) { return [null, pos] }
+
+    // String
+    if s[pos] == "\"" {
+        // Multi-line string
+        if pos + 2 < len(s) && s[pos + 1] == "\"" && s[pos + 2] == "\"" {
+            pos = pos + 3
+            let val = ""
+            while pos < len(s) {
+                if pos + 2 < len(s) && s[pos] == "\"" && s[pos + 1] == "\"" && s[pos + 2] == "\"" {
+                    pos = pos + 3
+                    return [val, pos]
+                }
+                val = val + s[pos]
+                pos = pos + 1
+            }
+            return [val, pos]
+        }
+        pos = pos + 1
+        let val = ""
+        while pos < len(s) && s[pos] != "\"" {
+            if s[pos] == "\\" && pos + 1 < len(s) {
+                const next = s[pos + 1]
+                if next == "n" { val = val + "\n"; pos = pos + 2 }
+                else if next == "t" { val = val + "\t"; pos = pos + 2 }
+                else if next == "\\" { val = val + "\\"; pos = pos + 2 }
+                else if next == "\"" { val = val + "\""; pos = pos + 2 }
+                else { val = val + s[pos]; pos = pos + 1 }
+            } else {
+                val = val + s[pos]
+                pos = pos + 1
+            }
+        }
+        if pos < len(s) { pos = pos + 1 }
+        return [val, pos]
+    }
+
+    // Inline table
+    if s[pos] == "{" {
+        return toml_parse_inline_table(s, pos)
+    }
+
+    // Array
+    if s[pos] == "[" {
+        pos = pos + 1
+        let arr = []
+        while pos < len(s) && s[pos] != "]" {
+            while pos < len(s) && (s[pos] == " " || s[pos] == "\t" || s[pos] == "\n" || s[pos] == ",") { pos = pos + 1 }
+            if pos >= len(s) || s[pos] == "]" { break }
+            const vr = toml_parse_value(s, pos)
+            arr.push(vr[0])
+            pos = vr[1]
+        }
+        if pos < len(s) { pos = pos + 1 }
+        return [arr, pos]
+    }
+
+    // Boolean
+    if pos + 4 <= len(s) && s.substring(pos, pos + 4) == "true" {
+        return [true, pos + 4]
+    }
+    if pos + 5 <= len(s) && s.substring(pos, pos + 5) == "false" {
+        return [false, pos + 5]
+    }
+
+    // Datetime (ISO 8601)
+    // Check for pattern: YYYY-MM-DD
+    let look = pos
+    let is_datetime = false
+    if look + 10 <= len(s) && s[look + 4] == "-" && s[look + 7] == "-" {
+        is_datetime = true
+    }
+    if is_datetime {
+        let dt_str = ""
+        while pos < len(s) && s[pos] != "," && s[pos] != "]" && s[pos] != "}" && s[pos] != "\n" && s[pos] != "#" {
+            dt_str = dt_str + s[pos]
+            pos = pos + 1
+        }
+        return [dt_str.trim(), pos]
+    }
+
+    // Number (int or float)
+    let num_str = ""
+    while pos < len(s) && s[pos] != "," && s[pos] != "]" && s[pos] != "}" && s[pos] != "\n" && s[pos] != "#" && s[pos] != " " {
+        if s[pos] != "_" { num_str = num_str + s[pos] }
+        pos = pos + 1
+    }
+    if num_str.contains(".") || num_str.contains("e") || num_str.contains("E") {
+        return [parse_float(num_str), pos]
+    }
+    [parse_int(num_str), pos]
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 34. MIME Type Detection
+// ════════════════════════════════════════════════════════════════════
+
+func mime_type_from_extension(ext) {
+    const e = ext.to_lower()
+    if e == "html" || e == "htm" { return "text/html" }
+    if e == "css" { return "text/css" }
+    if e == "js" || e == "mjs" { return "application/javascript" }
+    if e == "json" { return "application/json" }
+    if e == "xml" { return "application/xml" }
+    if e == "txt" { return "text/plain" }
+    if e == "csv" { return "text/csv" }
+    if e == "md" { return "text/markdown" }
+    if e == "yaml" || e == "yml" { return "application/yaml" }
+    if e == "toml" { return "application/toml" }
+    if e == "png" { return "image/png" }
+    if e == "jpg" || e == "jpeg" { return "image/jpeg" }
+    if e == "gif" { return "image/gif" }
+    if e == "svg" { return "image/svg+xml" }
+    if e == "webp" { return "image/webp" }
+    if e == "ico" { return "image/x-icon" }
+    if e == "pdf" { return "application/pdf" }
+    if e == "zip" { return "application/zip" }
+    if e == "gz" || e == "gzip" { return "application/gzip" }
+    if e == "tar" { return "application/x-tar" }
+    if e == "wasm" { return "application/wasm" }
+    if e == "mp3" { return "audio/mpeg" }
+    if e == "mp4" { return "video/mp4" }
+    if e == "webm" { return "video/webm" }
+    if e == "woff" { return "font/woff" }
+    if e == "woff2" { return "font/woff2" }
+    if e == "ttf" { return "font/ttf" }
+    if e == "otf" { return "font/otf" }
+    if e == "eot" { return "application/vnd.ms-fontobject" }
+    "application/octet-stream"
+}
+
+func mime_type_from_path(path) {
+    const dot = path.last_index_of(".")
+    if dot < 0 { return "application/octet-stream" }
+    const ext = path.substring(dot + 1)
+    mime_type_from_extension(ext)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 35. Semantic Versioning
+// ════════════════════════════════════════════════════════════════════
+
+func semver_parse(s) {
+    let rest = s
+    let pre = ""
+    let build = ""
+    // Split off build metadata
+    const plus_idx = rest.index_of("+")
+    if plus_idx >= 0 {
+        build = rest.substring(plus_idx + 1)
+        rest = rest.substring(0, plus_idx)
+    }
+    // Split off pre-release
+    const dash_idx = rest.index_of("-")
+    if dash_idx >= 0 {
+        pre = rest.substring(dash_idx + 1)
+        rest = rest.substring(0, dash_idx)
+    }
+    const parts = rest.split(".")
+    if len(parts) != 3 { return {"error": "invalid semver: " + s} }
+    {
+        "major": parse_int(parts[0]),
+        "minor": parse_int(parts[1]),
+        "patch": parse_int(parts[2]),
+        "pre": pre,
+        "build": build
+    }
+}
+
+func semver_to_string(v) {
+    let s = f"{v.major}.{v.minor}.{v.patch}"
+    if len(v.pre) > 0 { s = s + "-" + v.pre }
+    if len(v.build) > 0 { s = s + "+" + v.build }
+    s
+}
+
+func semver_compare(a, b) {
+    if a.major != b.major { return if a.major < b.major { -1 } else { 1 } }
+    if a.minor != b.minor { return if a.minor < b.minor { -1 } else { 1 } }
+    if a.patch != b.patch { return if a.patch < b.patch { -1 } else { 1 } }
+    // Pre-release has lower precedence than release
+    if len(a.pre) == 0 && len(b.pre) > 0 { return 1 }
+    if len(a.pre) > 0 && len(b.pre) == 0 { return -1 }
+    if a.pre < b.pre { return -1 }
+    if a.pre > b.pre { return 1 }
+    0
+}
+
+func semver_bump_major(v) {
+    {"major": v.major + 1, "minor": 0, "patch": 0, "pre": "", "build": ""}
+}
+
+func semver_bump_minor(v) {
+    {"major": v.major, "minor": v.minor + 1, "patch": 0, "pre": "", "build": ""}
+}
+
+func semver_bump_patch(v) {
+    {"major": v.major, "minor": v.minor, "patch": v.patch + 1, "pre": "", "build": ""}
+}
+
+// Check if version satisfies a constraint string (^, ~, >=, <, !=, *)
+func semver_satisfies(version, constraint) {
+    const c = constraint.trim()
+    if c == "*" { return true }
+    if c.starts_with("^") {
+        const target = semver_parse(c.substring(1))
+        if target.has("error") { return false }
+        if version.major != target.major { return false }
+        return semver_compare(version, target) >= 0
+    }
+    if c.starts_with("~") {
+        const target = semver_parse(c.substring(1))
+        if target.has("error") { return false }
+        if version.major != target.major || version.minor != target.minor { return false }
+        return version.patch >= target.patch
+    }
+    if c.starts_with(">=") {
+        const target = semver_parse(c.substring(2).trim())
+        if target.has("error") { return false }
+        return semver_compare(version, target) >= 0
+    }
+    if c.starts_with("<=") {
+        const target = semver_parse(c.substring(2).trim())
+        if target.has("error") { return false }
+        return semver_compare(version, target) <= 0
+    }
+    if c.starts_with("!=") {
+        const target = semver_parse(c.substring(2).trim())
+        if target.has("error") { return false }
+        return semver_compare(version, target) != 0
+    }
+    if c.starts_with(">") {
+        const target = semver_parse(c.substring(1).trim())
+        if target.has("error") { return false }
+        return semver_compare(version, target) > 0
+    }
+    if c.starts_with("<") {
+        const target = semver_parse(c.substring(1).trim())
+        if target.has("error") { return false }
+        return semver_compare(version, target) < 0
+    }
+    // Exact match
+    const target = semver_parse(c)
+    if target.has("error") { return false }
+    semver_compare(version, target) == 0
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 36. Cookie Parser
+// ════════════════════════════════════════════════════════════════════
+
+func cookie_parse(header) {
+    let cookies = {}
+    const pairs = header.split(";")
+    for pair in pairs {
+        const trimmed = pair.trim()
+        const eq = trimmed.index_of("=")
+        if eq > 0 {
+            const name = trimmed.substring(0, eq).trim()
+            const value = trimmed.substring(eq + 1).trim()
+            cookies[name] = value
+        }
+    }
+    cookies
+}
+
+func cookie_serialize(name, value, options) {
+    let result = name + "=" + value
+    if options != null {
+        if options.has("path") { result = result + "; Path=" + options.path }
+        if options.has("domain") { result = result + "; Domain=" + options.domain }
+        if options.has("max_age") { result = result + "; Max-Age=" + to_string(options.max_age) }
+        if options.has("expires") { result = result + "; Expires=" + options.expires }
+        if options.has("secure") && options.secure { result = result + "; Secure" }
+        if options.has("http_only") && options.http_only { result = result + "; HttpOnly" }
+        if options.has("same_site") { result = result + "; SameSite=" + options.same_site }
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 37. Multipart Form Data Parser
+// ════════════════════════════════════════════════════════════════════
+
+func multipart_parse(body, boundary) {
+    let parts = []
+    const delimiter = "--" + boundary
+    const sections = body.split(delimiter)
+    for section in sections {
+        const trimmed = section.trim()
+        if len(trimmed) == 0 || trimmed == "--" { continue }
+        // Split headers from body
+        const sep = trimmed.index_of("\r\n\r\n")
+        let headers_str = ""
+        let part_body = ""
+        if sep >= 0 {
+            headers_str = trimmed.substring(0, sep)
+            part_body = trimmed.substring(sep + 4)
+        } else {
+            const sep2 = trimmed.index_of("\n\n")
+            if sep2 >= 0 {
+                headers_str = trimmed.substring(0, sep2)
+                part_body = trimmed.substring(sep2 + 2)
+            } else {
+                part_body = trimmed
+            }
+        }
+        // Parse headers
+        let headers = {}
+        for line in headers_str.split("\n") {
+            const colon = line.index_of(":")
+            if colon > 0 {
+                const hname = line.substring(0, colon).trim().to_lower()
+                const hval = line.substring(colon + 1).trim()
+                headers[hname] = hval
+            }
+        }
+        // Extract name and filename from content-disposition
+        let name = ""
+        let filename = ""
+        if headers.has("content-disposition") {
+            const cd = headers["content-disposition"]
+            const name_idx = cd.index_of("name=\"")
+            if name_idx >= 0 {
+                const name_end = cd.index_of("\"", name_idx + 6)
+                if name_end > name_idx { name = cd.substring(name_idx + 6, name_end) }
+            }
+            const fn_idx = cd.index_of("filename=\"")
+            if fn_idx >= 0 {
+                const fn_end = cd.index_of("\"", fn_idx + 10)
+                if fn_end > fn_idx { filename = cd.substring(fn_idx + 10, fn_end) }
+            }
+        }
+        parts.push({"name": name, "filename": filename, "headers": headers, "body": part_body})
+    }
+    parts
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 38. Template Engine (Mustache/Handlebars-style)
+// ════════════════════════════════════════════════════════════════════
+
+// Render a template with data.
+// Supports: {{var}}, {{#if cond}}...{{/if}}, {{#each arr}}...{{/each}}, {{> partial}}
+func template_render(tmpl, data, partials) {
+    if partials == null { partials = {} }
+    let result = ""
+    let pos = 0
+    while pos < len(tmpl) {
+        if pos + 1 < len(tmpl) && tmpl[pos] == "{" && tmpl[pos + 1] == "{" {
+            pos = pos + 2
+            // Find closing }}
+            const close = tmpl.index_of("}}", pos)
+            if close < 0 { break }
+            const tag = tmpl.substring(pos, close).trim()
+            pos = close + 2
+
+            if tag.starts_with("#if ") {
+                const cond_key = tag.substring(4).trim()
+                const end_tag = "{{/if}}"
+                const end_pos = tmpl.index_of(end_tag, pos)
+                if end_pos < 0 { break }
+                const inner = tmpl.substring(pos, end_pos)
+                pos = end_pos + len(end_tag)
+                // Check else
+                const else_idx = inner.index_of("{{else}}")
+                if data.has(cond_key) && data[cond_key] {
+                    if else_idx >= 0 {
+                        result = result + template_render(inner.substring(0, else_idx), data, partials)
+                    } else {
+                        result = result + template_render(inner, data, partials)
+                    }
+                } else if else_idx >= 0 {
+                    result = result + template_render(inner.substring(else_idx + 8), data, partials)
+                }
+            } else if tag.starts_with("#each ") {
+                const arr_key = tag.substring(6).trim()
+                const end_tag = "{{/each}}"
+                const end_pos = tmpl.index_of(end_tag, pos)
+                if end_pos < 0 { break }
+                const inner = tmpl.substring(pos, end_pos)
+                pos = end_pos + len(end_tag)
+                if data.has(arr_key) {
+                    const arr = data[arr_key]
+                    let idx = 0
+                    for item in arr {
+                        let item_data = {}
+                        // Merge parent data
+                        for k in data.keys() { item_data[k] = data[k] }
+                        // Add loop context
+                        const t = typeof(item)
+                        if t == "map" {
+                            for k in item.keys() { item_data[k] = item[k] }
+                        }
+                        item_data["this"] = item
+                        item_data["@index"] = idx
+                        item_data["@first"] = idx == 0
+                        item_data["@last"] = idx == len(arr) - 1
+                        result = result + template_render(inner, item_data, partials)
+                        idx = idx + 1
+                    }
+                }
+            } else if tag.starts_with("#unless ") {
+                const cond_key = tag.substring(8).trim()
+                const end_tag = "{{/unless}}"
+                const end_pos = tmpl.index_of(end_tag, pos)
+                if end_pos < 0 { break }
+                const inner = tmpl.substring(pos, end_pos)
+                pos = end_pos + len(end_tag)
+                if !data.has(cond_key) || !data[cond_key] {
+                    result = result + template_render(inner, data, partials)
+                }
+            } else if tag.starts_with("> ") {
+                // Partial
+                const partial_name = tag.substring(2).trim()
+                if partials.has(partial_name) {
+                    result = result + template_render(partials[partial_name], data, partials)
+                }
+            } else if tag.starts_with("{") && tag.ends_with("}") {
+                // Unescaped: {{{var}}}
+                const var_name = tag.substring(1, len(tag) - 1).trim()
+                if data.has(var_name) { result = result + to_string(data[var_name]) }
+            } else {
+                // Variable interpolation (HTML-escaped)
+                const parts = tag.split(".")
+                let value = data
+                for part in parts {
+                    const pt = part.trim()
+                    if typeof(value) == "map" && value.has(pt) {
+                        value = value[pt]
+                    } else {
+                        value = ""
+                        break
+                    }
+                }
+                const sv = to_string(value)
+                result = result + sv.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+            }
+        } else {
+            result = result + tmpl[pos]
+            pos = pos + 1
+        }
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 39. Diff (Line-level, Word-level, Patch Generation)
+// ════════════════════════════════════════════════════════════════════
+
+// Compute line-level diff using longest common subsequence.
+func diff_lines(a_text, b_text) {
+    const a_lines = a_text.split("\n")
+    const b_lines = b_text.split("\n")
+    const m = len(a_lines)
+    const n = len(b_lines)
+
+    // Build LCS table
+    let dp = []
+    let i = 0
+    while i <= m {
+        let row = []
+        let j = 0
+        while j <= n { row.push(0); j = j + 1 }
+        dp.push(row)
+        i = i + 1
+    }
+    i = 1
+    while i <= m {
+        let j = 1
+        while j <= n {
+            if a_lines[i - 1] == b_lines[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            } else {
+                dp[i][j] = if dp[i - 1][j] > dp[i][j - 1] { dp[i - 1][j] } else { dp[i][j - 1] }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Backtrack to build diff
+    let result = []
+    i = m
+    let j = n
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && a_lines[i - 1] == b_lines[j - 1] {
+            result.push({"op": "=", "line": a_lines[i - 1]})
+            i = i - 1
+            j = j - 1
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            result.push({"op": "+", "line": b_lines[j - 1]})
+            j = j - 1
+        } else {
+            result.push({"op": "-", "line": a_lines[i - 1]})
+            i = i - 1
+        }
+    }
+    result.reverse()
+    result
+}
+
+// Word-level diff within a line.
+func diff_words(a, b) {
+    const a_words = a.split(" ")
+    const b_words = b.split(" ")
+    const m = len(a_words)
+    const n = len(b_words)
+    let dp = []
+    let i = 0
+    while i <= m {
+        let row = []
+        let j = 0
+        while j <= n { row.push(0); j = j + 1 }
+        dp.push(row)
+        i = i + 1
+    }
+    i = 1
+    while i <= m {
+        let j = 1
+        while j <= n {
+            if a_words[i - 1] == b_words[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            } else {
+                dp[i][j] = if dp[i - 1][j] > dp[i][j - 1] { dp[i - 1][j] } else { dp[i][j - 1] }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let result = []
+    i = m
+    let j = n
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && a_words[i - 1] == b_words[j - 1] {
+            result.push({"op": "=", "word": a_words[i - 1]})
+            i = i - 1
+            j = j - 1
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            result.push({"op": "+", "word": b_words[j - 1]})
+            j = j - 1
+        } else {
+            result.push({"op": "-", "word": a_words[i - 1]})
+            i = i - 1
+        }
+    }
+    result.reverse()
+    result
+}
+
+// Generate unified diff patch string.
+func diff_patch(a_text, b_text, filename) {
+    const hunks = diff_lines(a_text, b_text)
+    let result = f"--- a/{filename}\n+++ b/{filename}\n"
+    let a_line = 1
+    let b_line = 1
+    for hunk in hunks {
+        if hunk.op == "=" {
+            result = result + " " + hunk.line + "\n"
+            a_line = a_line + 1
+            b_line = b_line + 1
+        } else if hunk.op == "-" {
+            result = result + "-" + hunk.line + "\n"
+            a_line = a_line + 1
+        } else if hunk.op == "+" {
+            result = result + "+" + hunk.line + "\n"
+            b_line = b_line + 1
+        }
+    }
+    result
+}
+
+// Side-by-side format.
+func diff_side_by_side(a_text, b_text, width) {
+    if width == null { width = 80 }
+    const half = int(width / 2) - 3
+    const hunks = diff_lines(a_text, b_text)
+    let result = ""
+    for hunk in hunks {
+        if hunk.op == "=" {
+            const padded = hunk.line.pad_end(half)
+            result = result + padded + " | " + hunk.line + "\n"
+        } else if hunk.op == "-" {
+            result = result + hunk.line.pad_end(half) + " < " + "\n"
+        } else if hunk.op == "+" {
+            result = result + " ".repeat(half) + " > " + hunk.line + "\n"
+        }
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 40. Bloom Filter
+// ════════════════════════════════════════════════════════════════════
+
+func bloom_new(size, hash_count) {
+    if size == null { size = 1024 }
+    if hash_count == null { hash_count = 3 }
+    let bits = []
+    let i = 0
+    while i < size { bits.push(false); i = i + 1 }
+    {"bits": bits, "size": size, "hash_count": hash_count}
+}
+
+func bloom_hash(bloom, value, seed) {
+    const s = to_string(value)
+    let h = seed
+    let i = 0
+    while i < len(s) {
+        h = (h * 31 + char_code_at(s, i)) % bloom.size
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h % bloom.size
+}
+
+func bloom_add(bloom, value) {
+    let i = 0
+    while i < bloom.hash_count {
+        const idx = bloom_hash(bloom, value, i * 7919 + 1)
+        bloom.bits[idx] = true
+        i = i + 1
+    }
+}
+
+func bloom_test(bloom, value) {
+    let i = 0
+    while i < bloom.hash_count {
+        const idx = bloom_hash(bloom, value, i * 7919 + 1)
+        if !bloom.bits[idx] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 41. Consistent Hashing
+// ════════════════════════════════════════════════════════════════════
+
+func consistent_hash_new(replicas) {
+    if replicas == null { replicas = 150 }
+    {"ring": [], "nodes": [], "replicas": replicas}
+}
+
+func consistent_hash_fnv(s) {
+    let hash = 2166136261
+    let i = 0
+    while i < len(s) {
+        hash = (hash * 16777619) % 2147483647
+        hash = hash ^ char_code_at(s, i)
+        i = i + 1
+    }
+    if hash < 0 { hash = 0 - hash }
+    hash
+}
+
+func consistent_hash_add(ch, node) {
+    ch.nodes.push(node)
+    let i = 0
+    while i < ch.replicas {
+        const key = f"{node}:{i}"
+        const h = consistent_hash_fnv(key)
+        ch.ring.push({"hash": h, "node": node})
+        i = i + 1
+    }
+    ch.ring.sort((a, b) => a.hash - b.hash)
+}
+
+func consistent_hash_get(ch, key) {
+    if len(ch.ring) == 0 { return null }
+    const h = consistent_hash_fnv(to_string(key))
+    // Binary search for first ring entry >= h
+    let lo = 0
+    let hi = len(ch.ring) - 1
+    while lo < hi {
+        const mid = int((lo + hi) / 2)
+        if ch.ring[mid].hash < h { lo = mid + 1 } else { hi = mid }
+    }
+    if ch.ring[lo].hash < h { lo = 0 } // wrap around
+    ch.ring[lo].node
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 42. Rate Limiter (Token Bucket)
+// ════════════════════════════════════════════════════════════════════
+
+func rate_limiter_new(capacity, refill_rate) {
+    {
+        "capacity": capacity,
+        "tokens": capacity,
+        "refill_rate": refill_rate,
+        "last_refill": 0
+    }
+}
+
+func rate_limiter_allow(rl, now) {
+    // Refill tokens based on elapsed time
+    if rl.last_refill > 0 {
+        const elapsed = now - rl.last_refill
+        const new_tokens = elapsed * rl.refill_rate
+        rl.tokens = if rl.tokens + new_tokens > rl.capacity { rl.capacity } else { rl.tokens + new_tokens }
+    }
+    rl.last_refill = now
+    if rl.tokens >= 1.0 {
+        rl.tokens = rl.tokens - 1.0
+        true
+    } else {
+        false
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 43. Circuit Breaker
+// ════════════════════════════════════════════════════════════════════
+
+const CB_CLOSED = "closed"
+const CB_OPEN = "open"
+const CB_HALF_OPEN = "half_open"
+
+func circuit_breaker_new(failure_threshold, reset_timeout) {
+    {
+        "state": CB_CLOSED,
+        "failures": 0,
+        "failure_threshold": failure_threshold,
+        "reset_timeout": reset_timeout,
+        "last_failure_time": 0,
+        "successes_in_half_open": 0
+    }
+}
+
+func circuit_breaker_allow(cb, now) {
+    if cb.state == CB_CLOSED { return true }
+    if cb.state == CB_OPEN {
+        if now - cb.last_failure_time >= cb.reset_timeout {
+            cb.state = CB_HALF_OPEN
+            cb.successes_in_half_open = 0
+            return true
+        }
+        return false
+    }
+    // HALF_OPEN: allow one request to test
+    true
+}
+
+func circuit_breaker_record_success(cb) {
+    if cb.state == CB_HALF_OPEN {
+        cb.successes_in_half_open = cb.successes_in_half_open + 1
+        if cb.successes_in_half_open >= 2 {
+            cb.state = CB_CLOSED
+            cb.failures = 0
+        }
+    } else {
+        cb.failures = 0
+    }
+}
+
+func circuit_breaker_record_failure(cb, now) {
+    cb.failures = cb.failures + 1
+    cb.last_failure_time = now
+    if cb.failures >= cb.failure_threshold {
+        cb.state = CB_OPEN
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 44. Retry with Exponential Backoff
+// ════════════════════════════════════════════════════════════════════
+
+func retry_config_new(max_retries, initial_delay_ms, max_delay_ms, backoff_factor) {
+    if max_retries == null { max_retries = 3 }
+    if initial_delay_ms == null { initial_delay_ms = 100 }
+    if max_delay_ms == null { max_delay_ms = 30000 }
+    if backoff_factor == null { backoff_factor = 2.0 }
+    {
+        "max_retries": max_retries,
+        "initial_delay_ms": initial_delay_ms,
+        "max_delay_ms": max_delay_ms,
+        "backoff_factor": backoff_factor
+    }
+}
+
+func retry_get_delay(config, attempt) {
+    let delay = config.initial_delay_ms
+    let i = 0
+    while i < attempt {
+        delay = int(delay * config.backoff_factor)
+        i = i + 1
+    }
+    if delay > config.max_delay_ms { delay = config.max_delay_ms }
+    delay
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 45. LRU Cache Improvements
+// ════════════════════════════════════════════════════════════════════
+
+func lru_cache_new(capacity) {
+    {"capacity": capacity, "items": [], "map": {}}
+}
+
+func lru_cache_get(cache, key) {
+    if !cache.map.has(key) { return null }
+    // Move to front (most recently used)
+    const val = cache.map[key]
+    let new_items = [key]
+    for item in cache.items {
+        if item != key { new_items.push(item) }
+    }
+    cache.items = new_items
+    val
+}
+
+func lru_cache_put(cache, key, value) {
+    if cache.map.has(key) {
+        cache.map[key] = value
+        // Move to front
+        let new_items = [key]
+        for item in cache.items {
+            if item != key { new_items.push(item) }
+        }
+        cache.items = new_items
+        return null
+    }
+    // Evict if at capacity
+    if len(cache.items) >= cache.capacity {
+        const evicted = cache.items[len(cache.items) - 1]
+        cache.items = cache.items.slice(0, len(cache.items) - 1)
+        cache.map.remove(evicted)
+    }
+    cache.items = [key] + cache.items
+    cache.map[key] = value
+}
+
+func lru_cache_remove(cache, key) {
+    if !cache.map.has(key) { return null }
+    cache.map.remove(key)
+    let new_items = []
+    for item in cache.items {
+        if item != key { new_items.push(item) }
+    }
+    cache.items = new_items
+}
+
+func lru_cache_contains(cache, key) { cache.map.has(key) }
+func lru_cache_size(cache) { len(cache.items) }
+func lru_cache_keys(cache) { cache.items }
+
+// ════════════════════════════════════════════════════════════════════
+// 46. Trie Improvements (Prefix Search, Autocomplete)
+// ════════════════════════════════════════════════════════════════════
+
+func trie_new() { {"children": {}, "is_end": false, "value": null} }
+
+func trie_insert(trie, key, value) {
+    let node = trie
+    let i = 0
+    while i < len(key) {
+        const c = key[i]
+        if !node.children.has(c) {
+            node.children[c] = {"children": {}, "is_end": false, "value": null}
+        }
+        node = node.children[c]
+        i = i + 1
+    }
+    node.is_end = true
+    node.value = value
+}
+
+func trie_search(trie, key) {
+    let node = trie
+    let i = 0
+    while i < len(key) {
+        const c = key[i]
+        if !node.children.has(c) { return null }
+        node = node.children[c]
+        i = i + 1
+    }
+    if node.is_end { node.value } else { null }
+}
+
+func trie_starts_with(trie, prefix) {
+    let node = trie
+    let i = 0
+    while i < len(prefix) {
+        const c = prefix[i]
+        if !node.children.has(c) { return false }
+        node = node.children[c]
+        i = i + 1
+    }
+    true
+}
+
+func trie_autocomplete(trie, prefix, max_results) {
+    if max_results == null { max_results = 10 }
+    let node = trie
+    let i = 0
+    while i < len(prefix) {
+        const c = prefix[i]
+        if !node.children.has(c) { return [] }
+        node = node.children[c]
+        i = i + 1
+    }
+    let results = []
+    trie_collect(node, prefix, results, max_results)
+    results
+}
+
+func trie_collect(node, current, results, max) {
+    if len(results) >= max { return null }
+    if node.is_end { results.push(current) }
+    for c in node.children.keys() {
+        trie_collect(node.children[c], current + c, results, max)
+    }
+}
+
+func trie_prefix_search(trie, prefix) {
+    trie_autocomplete(trie, prefix, 1000)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 47. Graph Algorithms
+// ════════════════════════════════════════════════════════════════════
+
+// Graph: {"nodes": [node_id, ...], "edges": [[from, to, weight], ...]}
+func graph_new() { {"nodes": [], "edges": []} }
+
+func graph_add_node(g, id) {
+    if !g.nodes.contains(id) { g.nodes.push(id) }
+}
+
+func graph_add_edge(g, from, to, weight) {
+    if weight == null { weight = 1 }
+    g.edges.push([from, to, weight])
+}
+
+// Dijkstra's shortest path from source to all reachable nodes.
+func graph_dijkstra(g, source) {
+    let dist = {}
+    let prev = {}
+    let visited = {}
+    let queue = []
+
+    for node in g.nodes {
+        dist[node] = 999999999
+        prev[node] = null
+    }
+    dist[source] = 0
+    queue.push(source)
+
+    while len(queue) > 0 {
+        // Find unvisited node with smallest distance
+        let min_dist = 999999999
+        let min_idx = 0
+        let i = 0
+        for q in queue {
+            if dist[q] < min_dist {
+                min_dist = dist[q]
+                min_idx = i
+            }
+            i = i + 1
+        }
+        const u = queue[min_idx]
+        queue = queue.slice(0, min_idx) + queue.slice(min_idx + 1)
+        if visited.has(u) { continue }
+        visited[u] = true
+
+        // Relax neighbors
+        for edge in g.edges {
+            if edge[0] == u {
+                const v = edge[1]
+                const w = edge[2]
+                const alt = dist[u] + w
+                if alt < dist[v] {
+                    dist[v] = alt
+                    prev[v] = u
+                    if !visited.has(v) { queue.push(v) }
+                }
+            }
+        }
+    }
+    {"dist": dist, "prev": prev}
+}
+
+// Reconstruct path from Dijkstra result.
+func graph_shortest_path(g, source, target) {
+    const result = graph_dijkstra(g, source)
+    let path = []
+    let current = target
+    while current != null {
+        path.push(current)
+        current = result.prev[current]
+    }
+    path.reverse()
+    if len(path) > 0 && path[0] == source {
+        {"path": path, "distance": result.dist[target]}
+    } else {
+        {"path": [], "distance": -1}
+    }
+}
+
+// Floyd-Warshall all-pairs shortest paths.
+func graph_floyd_warshall(g) {
+    const n = len(g.nodes)
+    let dist = {}
+    // Initialize distance matrix
+    for u in g.nodes {
+        dist[u] = {}
+        for v in g.nodes {
+            dist[u][v] = if u == v { 0 } else { 999999999 }
+        }
+    }
+    for edge in g.edges {
+        dist[edge[0]][edge[1]] = edge[2]
+    }
+    // DP relaxation
+    for k in g.nodes {
+        for i in g.nodes {
+            for j in g.nodes {
+                const through_k = dist[i][k] + dist[k][j]
+                if through_k < dist[i][j] {
+                    dist[i][j] = through_k
+                }
+            }
+        }
+    }
+    dist
+}
+
+// Kruskal's minimum spanning tree.
+func graph_kruskal(g) {
+    // Union-Find
+    let parent = {}
+    let rank = {}
+    for node in g.nodes {
+        parent[node] = node
+        rank[node] = 0
+    }
+
+    func find(x) {
+        while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x] }
+        x
+    }
+
+    func union(x, y) {
+        const rx = find(x)
+        const ry = find(y)
+        if rx == ry { return false }
+        if rank[rx] < rank[ry] { parent[rx] = ry }
+        else if rank[rx] > rank[ry] { parent[ry] = rx }
+        else { parent[ry] = rx; rank[rx] = rank[rx] + 1 }
+        true
+    }
+
+    // Sort edges by weight
+    let sorted_edges = g.edges.slice(0)
+    sorted_edges.sort((a, b) => a[2] - b[2])
+
+    let mst = []
+    let total_weight = 0
+    for edge in sorted_edges {
+        if union(edge[0], edge[1]) {
+            mst.push(edge)
+            total_weight = total_weight + edge[2]
+        }
+    }
+    {"edges": mst, "total_weight": total_weight}
+}
+
+// A* pathfinding with heuristic.
+func graph_astar(g, start, goal, heuristic) {
+    let open_set = [start]
+    let came_from = {}
+    let g_score = {}
+    let f_score = {}
+
+    for node in g.nodes {
+        g_score[node] = 999999999
+        f_score[node] = 999999999
+    }
+    g_score[start] = 0
+    f_score[start] = heuristic(start, goal)
+
+    while len(open_set) > 0 {
+        // Find node in open_set with lowest f_score
+        let best = open_set[0]
+        let best_f = f_score[best]
+        for node in open_set {
+            if f_score[node] < best_f {
+                best = node
+                best_f = f_score[node]
+            }
+        }
+
+        if best == goal {
+            // Reconstruct path
+            let path = [goal]
+            let current = goal
+            while came_from.has(current) {
+                current = came_from[current]
+                path.push(current)
+            }
+            path.reverse()
+            return {"path": path, "distance": g_score[goal]}
+        }
+
+        // Remove best from open_set
+        let new_open = []
+        for node in open_set { if node != best { new_open.push(node) } }
+        open_set = new_open
+
+        // Check neighbors
+        for edge in g.edges {
+            if edge[0] == best {
+                const neighbor = edge[1]
+                const tentative = g_score[best] + edge[2]
+                if tentative < g_score[neighbor] {
+                    came_from[neighbor] = best
+                    g_score[neighbor] = tentative
+                    f_score[neighbor] = tentative + heuristic(neighbor, goal)
+                    if !open_set.contains(neighbor) {
+                        open_set.push(neighbor)
+                    }
+                }
+            }
+        }
+    }
+    {"path": [], "distance": -1}
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 48. String Matching Algorithms
+// ════════════════════════════════════════════════════════════════════
+
+// KMP (Knuth-Morris-Pratt) pattern matching.
+func kmp_search(text, pattern) {
+    const n = len(text)
+    const m = len(pattern)
+    if m == 0 { return [] }
+
+    // Build failure function
+    let fail = [0]
+    let i = 1
+    let j = 0
+    while i < m {
+        fail.push(0)
+        i = i + 1
+    }
+    i = 1
+    while i < m {
+        while j > 0 && pattern[j] != pattern[i] { j = fail[j - 1] }
+        if pattern[j] == pattern[i] { j = j + 1 }
+        fail[i] = j
+        i = i + 1
+    }
+
+    // Search
+    let matches = []
+    j = 0
+    i = 0
+    while i < n {
+        while j > 0 && pattern[j] != text[i] { j = fail[j - 1] }
+        if pattern[j] == text[i] { j = j + 1 }
+        if j == m {
+            matches.push(i - m + 1)
+            j = fail[j - 1]
+        }
+        i = i + 1
+    }
+    matches
+}
+
+// Rabin-Karp pattern matching with rolling hash.
+func rabin_karp_search(text, pattern) {
+    const n = len(text)
+    const m = len(pattern)
+    if m == 0 || m > n { return [] }
+
+    const base = 256
+    const modulus = 1000000007
+    let matches = []
+
+    // Compute hash of pattern and first window
+    let pat_hash = 0
+    let txt_hash = 0
+    let h = 1
+    let i = 0
+    while i < m - 1 { h = (h * base) % modulus; i = i + 1 }
+
+    i = 0
+    while i < m {
+        pat_hash = (base * pat_hash + char_code_at(pattern, i)) % modulus
+        txt_hash = (base * txt_hash + char_code_at(text, i)) % modulus
+        i = i + 1
+    }
+
+    i = 0
+    while i <= n - m {
+        if pat_hash == txt_hash {
+            // Verify character by character
+            let match = true
+            let j = 0
+            while j < m {
+                if text[i + j] != pattern[j] { match = false; break }
+                j = j + 1
+            }
+            if match { matches.push(i) }
+        }
+        // Slide window
+        if i < n - m {
+            txt_hash = (base * (txt_hash - char_code_at(text, i) * h) + char_code_at(text, i + m)) % modulus
+            if txt_hash < 0 { txt_hash = txt_hash + modulus }
+        }
+        i = i + 1
+    }
+    matches
+}
+
+// Aho-Corasick multi-pattern search.
+func aho_corasick_new(patterns) {
+    // Build trie with failure links
+    let nodes = [{"children": {}, "fail": 0, "output": []}]
+
+    // Insert patterns
+    let pi = 0
+    while pi < len(patterns) {
+        const pat = patterns[pi]
+        let current = 0
+        let ci = 0
+        while ci < len(pat) {
+            const c = pat[ci]
+            if !nodes[current].children.has(c) {
+                nodes.push({"children": {}, "fail": 0, "output": []})
+                nodes[current].children[c] = len(nodes) - 1
+            }
+            current = nodes[current].children[c]
+            ci = ci + 1
+        }
+        nodes[current].output.push(pi)
+        pi = pi + 1
+    }
+
+    // Build failure links via BFS
+    let queue = []
+    for c in nodes[0].children.keys() {
+        const child = nodes[0].children[c]
+        nodes[child].fail = 0
+        queue.push(child)
+    }
+
+    while len(queue) > 0 {
+        const u = queue[0]
+        queue = queue.slice(1)
+        for c in nodes[u].children.keys() {
+            const v = nodes[u].children[c]
+            queue.push(v)
+            let f = nodes[u].fail
+            while f != 0 && !nodes[f].children.has(c) {
+                f = nodes[f].fail
+            }
+            nodes[v].fail = if nodes[f].children.has(c) && nodes[f].children[c] != v { nodes[f].children[c] } else { 0 }
+            // Merge output
+            const fail_output = nodes[nodes[v].fail].output
+            for o in fail_output { nodes[v].output.push(o) }
+        }
+    }
+
+    {"nodes": nodes, "patterns": patterns}
+}
+
+func aho_corasick_search(ac, text) {
+    let matches = []
+    let current = 0
+    let i = 0
+    while i < len(text) {
+        const c = text[i]
+        while current != 0 && !ac.nodes[current].children.has(c) {
+            current = ac.nodes[current].fail
+        }
+        if ac.nodes[current].children.has(c) {
+            current = ac.nodes[current].children[c]
+        }
+        // Report matches
+        for pat_idx in ac.nodes[current].output {
+            const pat = ac.patterns[pat_idx]
+            matches.push({"pattern": pat, "index": i - len(pat) + 1})
+        }
+        i = i + 1
+    }
+    matches
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 49. Enhanced Regex: Named Groups, Backreferences, Unicode Categories
+// ════════════════════════════════════════════════════════════════════
+
+// Named group extraction from regex matches.
+func regex_named_groups(pattern, text) {
+    // Extract named group definitions: (?P<name>...)
+    let groups = {}
+    let group_names = []
+    let pat_copy = pattern
+    let search_pos = 0
+    while true {
+        const idx = pat_copy.index_of("(?P<", search_pos)
+        if idx < 0 { break }
+        const name_end = pat_copy.index_of(">", idx + 4)
+        if name_end < 0 { break }
+        const name = pat_copy.substring(idx + 4, name_end)
+        group_names.push(name)
+        search_pos = name_end + 1
+    }
+    // Simplify: strip named group syntax for basic matching
+    let simple_pat = pattern
+    for name in group_names {
+        simple_pat = simple_pat.replace(f"(?P<{name}>", "(")
+    }
+    // Use basic regex match
+    const m = regex_match(simple_pat, text)
+    if m == null { return null }
+    // Map captured groups to names
+    let i = 0
+    while i < len(group_names) && i + 1 < len(m) {
+        groups[group_names[i]] = m[i + 1]
+        i = i + 1
+    }
+    groups
+}
+
+// Unicode character category check.
+func unicode_is_letter(c) {
+    const code = char_code_at(c, 0)
+    (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code > 127
+}
+
+func unicode_is_digit(c) {
+    const code = char_code_at(c, 0)
+    code >= 48 && code <= 57
+}
+
+func unicode_is_whitespace(c) {
+    const code = char_code_at(c, 0)
+    code == 32 || code == 9 || code == 10 || code == 13 || code == 12 || code == 160
+}
+
+func unicode_is_upper(c) {
+    const code = char_code_at(c, 0)
+    code >= 65 && code <= 90
+}
+
+func unicode_is_lower(c) {
+    const code = char_code_at(c, 0)
+    code >= 97 && code <= 122
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 50. DNS Resolution Helpers
+// ════════════════════════════════════════════════════════════════════
+
+// Parse a DNS name from a query string into labels.
+func dns_parse_name(name) {
+    const labels = name.split(".")
+    let valid = true
+    for label in labels {
+        if len(label) == 0 || len(label) > 63 { valid = false }
+    }
+    {"labels": labels, "valid": valid, "fqdn": name}
+}
+
+// Check if a hostname is a valid DNS name.
+func dns_is_valid_hostname(name) {
+    if len(name) == 0 || len(name) > 253 { return false }
+    const labels = name.split(".")
+    for label in labels {
+        if len(label) == 0 || len(label) > 63 { return false }
+        // Must start with alphanumeric
+        const first = label[0]
+        if !((first >= "a" && first <= "z") || (first >= "A" && first <= "Z") || (first >= "0" && first <= "9")) {
+            return false
+        }
+    }
+    true
+}
+
+// Build a DNS query packet (simplified).
+func dns_build_query(name, query_type) {
+    if query_type == null { query_type = 1 } // A record
+    let packet = {}
+    packet.id = 1234
+    packet.flags = 256 // standard query, recursion desired
+    packet.questions = [{"name": name, "type": query_type, "class": 1}]
+    packet
+}
+
+// DNS record types.
+const DNS_TYPE_A = 1
+const DNS_TYPE_AAAA = 28
+const DNS_TYPE_CNAME = 5
+const DNS_TYPE_MX = 15
+const DNS_TYPE_NS = 2
+const DNS_TYPE_TXT = 16
+const DNS_TYPE_SRV = 33
+const DNS_TYPE_SOA = 6
+const DNS_TYPE_PTR = 12
+
+func dns_type_name(type_code) {
+    if type_code == 1 { return "A" }
+    if type_code == 28 { return "AAAA" }
+    if type_code == 5 { return "CNAME" }
+    if type_code == 15 { return "MX" }
+    if type_code == 2 { return "NS" }
+    if type_code == 16 { return "TXT" }
+    if type_code == 33 { return "SRV" }
+    if type_code == 6 { return "SOA" }
+    if type_code == 12 { return "PTR" }
+    f"TYPE{type_code}"
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 51. Enhanced Regex (Lookahead, Unicode)
+// ════════════════════════════════════════════════════════════════════
+
+// Positive lookahead: checks if pattern matches at position without consuming.
+func regex_lookahead(pattern, text, pos) {
+    const sub = text.substring(pos)
+    const m = regex_match(pattern, sub)
+    m != null
+}
+
+// Negative lookahead: returns true if pattern does NOT match.
+func regex_negative_lookahead(pattern, text, pos) {
+    !regex_lookahead(pattern, text, pos)
+}
+
+// Positive lookbehind: checks if pattern matches text before position.
+func regex_lookbehind(pattern, text, pos) {
+    if pos <= 0 { return false }
+    // Try matching the last N characters where N = len(pattern) estimate
+    let check_len = len(pattern) * 2
+    if check_len > pos { check_len = pos }
+    const sub = text.substring(pos - check_len, pos)
+    const m = regex_match(pattern + "$", sub)
+    m != null
+}
+
+// Backreference substitution in replacement strings.
+// \1, \2 etc. refer to capture groups.
+func regex_replace_backrefs(match_result, replacement) {
+    let result = replacement
+    if match_result == null { return result }
+    let i = 0
+    while i < len(match_result) {
+        const ref = "\\" + to_string(i)
+        if result.contains(ref) {
+            result = result.replace(ref, to_string(match_result[i]))
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Character class checks for regex engine.
+func regex_is_word_char(c) {
+    (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+}
+
+func regex_is_boundary(text, pos) {
+    const before = if pos > 0 { regex_is_word_char(text[pos - 1]) } else { false }
+    const after = if pos < len(text) { regex_is_word_char(text[pos]) } else { false }
+    before != after
+}
+
+// Unicode category checking for \p{...} patterns.
+func regex_unicode_category(c, category) {
+    if category == "L" || category == "Letter" { return unicode_is_letter(c) }
+    if category == "N" || category == "Number" { return unicode_is_digit(c) }
+    if category == "Z" || category == "Separator" { return unicode_is_whitespace(c) }
+    if category == "Lu" || category == "Uppercase_Letter" { return unicode_is_upper(c) }
+    if category == "Ll" || category == "Lowercase_Letter" { return unicode_is_lower(c) }
+    if category == "P" || category == "Punctuation" {
+        const code = char_code_at(c, 0)
+        return (code >= 33 && code <= 47) || (code >= 58 && code <= 64) || (code >= 91 && code <= 96) || (code >= 123 && code <= 126)
+    }
+    false
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 52. Priority Queue (Binary Heap)
+// ════════════════════════════════════════════════════════════════════
+
+func heap_new(compare_fn) {
+    if compare_fn == null { compare_fn = (a, b) => a - b }
+    {"items": [], "cmp": compare_fn}
+}
+
+func heap_push(h, value) {
+    h.items.push(value)
+    heap_sift_up(h, len(h.items) - 1)
+}
+
+func heap_pop(h) {
+    if len(h.items) == 0 { return null }
+    const top = h.items[0]
+    const last = h.items.pop()
+    if len(h.items) > 0 {
+        h.items[0] = last
+        heap_sift_down(h, 0)
+    }
+    top
+}
+
+func heap_peek(h) {
+    if len(h.items) == 0 { null } else { h.items[0] }
+}
+
+func heap_size(h) { len(h.items) }
+
+func heap_sift_up(h, idx) {
+    while idx > 0 {
+        const parent = int((idx - 1) / 2)
+        if h.cmp(h.items[idx], h.items[parent]) < 0 {
+            const tmp = h.items[idx]
+            h.items[idx] = h.items[parent]
+            h.items[parent] = tmp
+            idx = parent
+        } else {
+            break
+        }
+    }
+}
+
+func heap_sift_down(h, idx) {
+    const n = len(h.items)
+    while true {
+        let smallest = idx
+        const left = 2 * idx + 1
+        const right = 2 * idx + 2
+        if left < n && h.cmp(h.items[left], h.items[smallest]) < 0 { smallest = left }
+        if right < n && h.cmp(h.items[right], h.items[smallest]) < 0 { smallest = right }
+        if smallest == idx { break }
+        const tmp = h.items[idx]
+        h.items[idx] = h.items[smallest]
+        h.items[smallest] = tmp
+        idx = smallest
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 53. Ring Buffer / Circular Buffer
+// ════════════════════════════════════════════════════════════════════
+
+func ring_buffer_new(capacity) {
+    let data = []
+    let i = 0
+    while i < capacity { data.push(null); i = i + 1 }
+    {"data": data, "capacity": capacity, "head": 0, "tail": 0, "count": 0}
+}
+
+func ring_buffer_push(rb, value) {
+    rb.data[rb.tail] = value
+    rb.tail = (rb.tail + 1) % rb.capacity
+    if rb.count < rb.capacity {
+        rb.count = rb.count + 1
+    } else {
+        rb.head = (rb.head + 1) % rb.capacity
+    }
+}
+
+func ring_buffer_pop(rb) {
+    if rb.count == 0 { return null }
+    const value = rb.data[rb.head]
+    rb.head = (rb.head + 1) % rb.capacity
+    rb.count = rb.count - 1
+    value
+}
+
+func ring_buffer_peek(rb) {
+    if rb.count == 0 { null } else { rb.data[rb.head] }
+}
+
+func ring_buffer_size(rb) { rb.count }
+func ring_buffer_is_full(rb) { rb.count == rb.capacity }
+func ring_buffer_is_empty(rb) { rb.count == 0 }
+
+func ring_buffer_to_array(rb) {
+    let result = []
+    let i = 0
+    while i < rb.count {
+        const idx = (rb.head + i) % rb.capacity
+        result.push(rb.data[idx])
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 54. Disjoint Set (Union-Find)
+// ════════════════════════════════════════════════════════════════════
+
+func union_find_new(n) {
+    let parent = []
+    let rank = []
+    let i = 0
+    while i < n {
+        parent.push(i)
+        rank.push(0)
+        i = i + 1
+    }
+    {"parent": parent, "rank": rank, "count": n}
+}
+
+func union_find_find(uf, x) {
+    while uf.parent[x] != x {
+        uf.parent[x] = uf.parent[uf.parent[x]] // path compression
+        x = uf.parent[x]
+    }
+    x
+}
+
+func union_find_union(uf, x, y) {
+    const rx = union_find_find(uf, x)
+    const ry = union_find_find(uf, y)
+    if rx == ry { return false }
+    if uf.rank[rx] < uf.rank[ry] {
+        uf.parent[rx] = ry
+    } else if uf.rank[rx] > uf.rank[ry] {
+        uf.parent[ry] = rx
+    } else {
+        uf.parent[ry] = rx
+        uf.rank[rx] = uf.rank[rx] + 1
+    }
+    uf.count = uf.count - 1
+    true
+}
+
+func union_find_connected(uf, x, y) {
+    union_find_find(uf, x) == union_find_find(uf, y)
+}
+
+func union_find_components(uf) { uf.count }
+
+// ════════════════════════════════════════════════════════════════════
+// 55. Topological Sort
+// ════════════════════════════════════════════════════════════════════
+
+func topological_sort(g) {
+    // Kahn's algorithm
+    let in_degree = {}
+    for node in g.nodes { in_degree[node] = 0 }
+    for edge in g.edges {
+        in_degree[edge[1]] = in_degree[edge[1]] + 1
+    }
+    let queue = []
+    for node in g.nodes {
+        if in_degree[node] == 0 { queue.push(node) }
+    }
+    let result = []
+    while len(queue) > 0 {
+        const u = queue[0]
+        queue = queue.slice(1)
+        result.push(u)
+        for edge in g.edges {
+            if edge[0] == u {
+                in_degree[edge[1]] = in_degree[edge[1]] - 1
+                if in_degree[edge[1]] == 0 {
+                    queue.push(edge[1])
+                }
+            }
+        }
+    }
+    if len(result) != len(g.nodes) {
+        return {"error": "cycle detected", "partial": result}
+    }
+    {"order": result}
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 56. Interval Tree
+// ════════════════════════════════════════════════════════════════════
+
+func interval_tree_new() { {"intervals": []} }
+
+func interval_tree_insert(tree, lo, hi, data) {
+    tree.intervals.push({"lo": lo, "hi": hi, "data": data})
+    // Keep sorted by lo for efficient querying
+    tree.intervals.sort((a, b) => a.lo - b.lo)
+}
+
+func interval_tree_query(tree, point) {
+    let results = []
+    for interval in tree.intervals {
+        if interval.lo <= point && point <= interval.hi {
+            results.push(interval)
+        }
+        if interval.lo > point { break }
+    }
+    results
+}
+
+func interval_tree_overlap(tree, lo, hi) {
+    let results = []
+    for interval in tree.intervals {
+        if interval.lo <= hi && interval.hi >= lo {
+            results.push(interval)
+        }
+        if interval.lo > hi { break }
+    }
+    results
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 57. Leaky Bucket Rate Limiter
+// ════════════════════════════════════════════════════════════════════
+
+func leaky_bucket_new(capacity, leak_rate) {
+    {"capacity": capacity, "level": 0.0, "leak_rate": leak_rate, "last_time": 0}
+}
+
+func leaky_bucket_allow(bucket, now) {
+    // Leak accumulated water
+    if bucket.last_time > 0 {
+        const elapsed = now - bucket.last_time
+        bucket.level = bucket.level - elapsed * bucket.leak_rate
+        if bucket.level < 0.0 { bucket.level = 0.0 }
+    }
+    bucket.last_time = now
+    if bucket.level + 1.0 <= bucket.capacity {
+        bucket.level = bucket.level + 1.0
+        true
+    } else {
+        false
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 58. Sliding Window Counter
+// ════════════════════════════════════════════════════════════════════
+
+func sliding_window_new(window_size, max_count) {
+    {"window_size": window_size, "max_count": max_count, "events": []}
+}
+
+func sliding_window_allow(sw, now) {
+    // Remove expired events
+    let new_events = []
+    for event in sw.events {
+        if now - event < sw.window_size {
+            new_events.push(event)
+        }
+    }
+    sw.events = new_events
+    if len(sw.events) < sw.max_count {
+        sw.events.push(now)
+        true
+    } else {
+        false
+    }
+}
+
+func sliding_window_count(sw, now) {
+    let count = 0
+    for event in sw.events {
+        if now - event < sw.window_size { count = count + 1 }
+    }
+    count
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 59. Skip List (Probabilistic Sorted Data Structure)
+// ════════════════════════════════════════════════════════════════════
+
+func skip_list_new(max_level) {
+    if max_level == null { max_level = 16 }
+    let forward = []
+    let i = 0
+    while i < max_level { forward.push(null); i = i + 1 }
+    {"header": {"key": null, "value": null, "forward": forward}, "level": 0, "max_level": max_level}
+}
+
+func skip_list_random_level(sl) {
+    let level = 0
+    // Approximate coin flip using FNV hash of a counter
+    let counter = len(sl.header.forward)
+    while level < sl.max_level - 1 {
+        counter = (counter * 2654435761) % 2147483647
+        if counter % 2 == 0 { break }
+        level = level + 1
+    }
+    level
+}
+
+func skip_list_insert(sl, key, value) {
+    let update = []
+    let i = 0
+    while i < sl.max_level { update.push(null); i = i + 1 }
+
+    let current = sl.header
+    i = sl.level
+    while i >= 0 {
+        while current.forward[i] != null && current.forward[i].key < key {
+            current = current.forward[i]
+        }
+        update[i] = current
+        i = i - 1
+    }
+
+    const new_level = skip_list_random_level(sl)
+    if new_level > sl.level {
+        i = sl.level + 1
+        while i <= new_level {
+            update[i] = sl.header
+            i = i + 1
+        }
+        sl.level = new_level
+    }
+
+    let forward = []
+    i = 0
+    while i < sl.max_level { forward.push(null); i = i + 1 }
+    const new_node = {"key": key, "value": value, "forward": forward}
+
+    i = 0
+    while i <= new_level {
+        new_node.forward[i] = update[i].forward[i]
+        update[i].forward[i] = new_node
+        i = i + 1
+    }
+}
+
+func skip_list_search(sl, key) {
+    let current = sl.header
+    let i = sl.level
+    while i >= 0 {
+        while current.forward[i] != null && current.forward[i].key < key {
+            current = current.forward[i]
+        }
+        i = i - 1
+    }
+    current = current.forward[0]
+    if current != null && current.key == key {
+        current.value
+    } else {
+        null
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 60. Bit Manipulation Utilities
+// ════════════════════════════════════════════════════════════════════
+
+func bit_count_ones(n) {
+    let count = 0
+    let val = n
+    while val > 0 {
+        count = count + (val % 2)
+        val = int(val / 2)
+    }
+    count
+}
+
+func bit_count_zeros(n, bits) {
+    if bits == null { bits = 32 }
+    bits - bit_count_ones(n)
+}
+
+func bit_is_power_of_two(n) {
+    n > 0 && (n % 2 == 0 || n == 1) && bit_count_ones(n) == 1
+}
+
+func bit_next_power_of_two(n) {
+    let p = 1
+    while p < n { p = p * 2 }
+    p
+}
+
+func bit_leading_zeros(n) {
+    if n == 0 { return 32 }
+    let count = 0
+    let val = n
+    let bit = 2147483648 // 2^31
+    while bit > 0 {
+        if val >= bit { break }
+        count = count + 1
+        bit = int(bit / 2)
+    }
+    count
+}
+
+func bit_trailing_zeros(n) {
+    if n == 0 { return 32 }
+    let count = 0
+    let val = n
+    while val % 2 == 0 {
+        count = count + 1
+        val = int(val / 2)
+    }
+    count
+}
+
+func bit_reverse(n, bits) {
+    if bits == null { bits = 32 }
+    let result = 0
+    let val = n
+    let i = 0
+    while i < bits {
+        result = result * 2 + (val % 2)
+        val = int(val / 2)
+        i = i + 1
+    }
+    result
+}
+
+func bit_rotate_left(n, count, bits) {
+    if bits == null { bits = 32 }
+    const mask = (1 * 2 ** bits) - 1
+    ((n * (2 ** count)) + int(n / (2 ** (bits - count)))) % (mask + 1)
+}
+
+func bit_rotate_right(n, count, bits) {
+    if bits == null { bits = 32 }
+    bit_rotate_left(n, bits - count, bits)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 61. String Utilities (Additional)
+// ════════════════════════════════════════════════════════════════════
+
+// Center a string within a given width.
+func string_center(s, width, pad_char) {
+    if pad_char == null { pad_char = " " }
+    if len(s) >= width { return s }
+    const total_pad = width - len(s)
+    const left_pad = int(total_pad / 2)
+    const right_pad = total_pad - left_pad
+    pad_char.repeat(left_pad) + s + pad_char.repeat(right_pad)
+}
+
+// Truncate a string with ellipsis.
+func string_truncate(s, max_len, suffix) {
+    if suffix == null { suffix = "..." }
+    if len(s) <= max_len { return s }
+    s.substring(0, max_len - len(suffix)) + suffix
+}
+
+// Count occurrences of a substring.
+func string_count(s, sub) {
+    let count = 0
+    let pos = 0
+    while true {
+        const idx = s.index_of(sub, pos)
+        if idx < 0 { break }
+        count = count + 1
+        pos = idx + 1
+    }
+    count
+}
+
+// Capitalize the first letter of each word.
+func string_title_case(s) {
+    let result = ""
+    let capitalize_next = true
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == " " || c == "\t" || c == "\n" {
+            result = result + c
+            capitalize_next = true
+        } else if capitalize_next {
+            result = result + c.to_upper()
+            capitalize_next = false
+        } else {
+            result = result + c.to_lower()
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Convert to camelCase.
+func string_camel_case(s) {
+    const parts = s.replace("-", "_").split("_")
+    if len(parts) == 0 { return "" }
+    let result = parts[0].to_lower()
+    let i = 1
+    while i < len(parts) {
+        const part = parts[i]
+        if len(part) > 0 {
+            result = result + part[0].to_upper() + part.substring(1).to_lower()
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Convert to kebab-case.
+func string_kebab_case(s) {
+    let result = ""
+    let i = 0
+    let prev_lower = false
+    while i < len(s) {
+        const c = s[i]
+        if c == "_" || c == " " || c == "-" {
+            if len(result) > 0 && result[len(result) - 1] != "-" {
+                result = result + "-"
+            }
+            prev_lower = false
+        } else if c >= "A" && c <= "Z" {
+            if prev_lower && len(result) > 0 && result[len(result) - 1] != "-" {
+                result = result + "-"
+            }
+            result = result + c.to_lower()
+            prev_lower = false
+        } else {
+            result = result + c
+            prev_lower = c >= "a" && c <= "z"
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Check if string is a palindrome.
+func string_is_palindrome(s) {
+    const clean = s.to_lower()
+    let left = 0
+    let right = len(clean) - 1
+    while left < right {
+        if clean[left] != clean[right] { return false }
+        left = left + 1
+        right = right - 1
+    }
+    true
+}
+
+// Compute the longest common prefix of an array of strings.
+func string_longest_common_prefix(strings) {
+    if len(strings) == 0 { return "" }
+    let prefix = strings[0]
+    let i = 1
+    while i < len(strings) {
+        while !strings[i].starts_with(prefix) {
+            prefix = prefix.substring(0, len(prefix) - 1)
+            if len(prefix) == 0 { return "" }
+        }
+        i = i + 1
+    }
+    prefix
+}
+
+// Compute the longest common suffix.
+func string_longest_common_suffix(strings) {
+    let reversed = strings.map(s => {
+        let r = ""
+        let i = len(s) - 1
+        while i >= 0 { r = r + s[i]; i = i - 1 }
+        r
+    })
+    const lcp = string_longest_common_prefix(reversed)
+    let result = ""
+    let i = len(lcp) - 1
+    while i >= 0 { result = result + lcp[i]; i = i - 1 }
+    result
+}
+
+// Hamming distance between two equal-length strings.
+func string_hamming_distance(a, b) {
+    if len(a) != len(b) { return -1 }
+    let dist = 0
+    let i = 0
+    while i < len(a) {
+        if a[i] != b[i] { dist = dist + 1 }
+        i = i + 1
+    }
+    dist
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 62. Statistics Utilities (Extended)
+// ════════════════════════════════════════════════════════════════════
+
+func stats_variance(values) {
+    if len(values) == 0 { return 0.0 }
+    const mean = stats_mean(values)
+    let sum_sq = 0.0
+    for v in values {
+        const diff = v - mean
+        sum_sq = sum_sq + diff * diff
+    }
+    sum_sq / len(values)
+}
+
+func stats_std_dev(values) {
+    sqrt(stats_variance(values))
+}
+
+func stats_mean(values) {
+    if len(values) == 0 { return 0.0 }
+    let sum = 0.0
+    for v in values { sum = sum + v }
+    sum / len(values)
+}
+
+func stats_median(values) {
+    if len(values) == 0 { return 0.0 }
+    let sorted = values.slice(0)
+    sorted.sort((a, b) => a - b)
+    const mid = int(len(sorted) / 2)
+    if len(sorted) % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+func stats_mode(values) {
+    let counts = {}
+    for v in values {
+        const k = to_string(v)
+        if counts.has(k) { counts[k] = counts[k] + 1 }
+        else { counts[k] = 1 }
+    }
+    let max_count = 0
+    let mode = null
+    for k in counts.keys() {
+        if counts[k] > max_count {
+            max_count = counts[k]
+            mode = k
+        }
+    }
+    mode
+}
+
+func stats_percentile(values, p) {
+    if len(values) == 0 { return 0.0 }
+    let sorted = values.slice(0)
+    sorted.sort((a, b) => a - b)
+    const idx = p / 100.0 * (len(sorted) - 1)
+    const lower = int(idx)
+    const upper = lower + 1
+    if upper >= len(sorted) { return sorted[lower] }
+    const frac = idx - lower
+    sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+}
+
+func stats_min(values) {
+    if len(values) == 0 { return null }
+    let m = values[0]
+    for v in values { if v < m { m = v } }
+    m
+}
+
+func stats_max(values) {
+    if len(values) == 0 { return null }
+    let m = values[0]
+    for v in values { if v > m { m = v } }
+    m
+}
+
+func stats_sum(values) {
+    let s = 0.0
+    for v in values { s = s + v }
+    s
+}
+
+func stats_range(values) {
+    stats_max(values) - stats_min(values)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 63. CSV Writer (Enhanced)
+// ════════════════════════════════════════════════════════════════════
+
+func csv_escape(value) {
+    const s = to_string(value)
+    if s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") {
+        return "\"" + s.replace("\"", "\"\"") + "\""
+    }
+    s
+}
+
+func csv_write_rows(headers, rows, separator) {
+    if separator == null { separator = "," }
+    let lines = []
+    if len(headers) > 0 {
+        lines.push(headers.map(h => csv_escape(h)).join(separator))
+    }
+    for row in rows {
+        lines.push(row.map(v => csv_escape(v)).join(separator))
+    }
+    lines.join("\n") + "\n"
+}
+
+func csv_to_maps(headers, rows) {
+    let result = []
+    for row in rows {
+        let entry = {}
+        let i = 0
+        while i < len(headers) && i < len(row) {
+            entry[headers[i]] = row[i]
+            i = i + 1
+        }
+        result.push(entry)
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 64. TOML Emitter
+// ════════════════════════════════════════════════════════════════════
+
+func toml_emit(table) {
+    let result = ""
+    toml_emit_table(table, "", result)
+}
+
+func toml_emit_table(table, prefix, result) {
+    let inline_keys = []
+    let subtable_keys = []
+
+    for key in table.keys() {
+        const val = table[key]
+        if typeof(val) == "map" && !val.has("__toml_array") {
+            subtable_keys.push(key)
+        } else {
+            inline_keys.push(key)
+        }
+    }
+
+    // Emit simple key-value pairs first
+    for key in inline_keys {
+        result = result + key + " = " + toml_emit_value(table[key]) + "\n"
+    }
+
+    // Emit subtables
+    for key in subtable_keys {
+        const full_key = if len(prefix) > 0 { prefix + "." + key } else { key }
+        result = result + "\n[" + full_key + "]\n"
+        result = toml_emit_table(table[key], full_key, result)
+    }
+
+    result
+}
+
+func toml_emit_value(val) {
+    if val == null { return "null" }
+    const t = typeof(val)
+    if t == "string" {
+        if val.contains("\n") {
+            return "\"\"\"" + val + "\"\"\""
+        }
+        return "\"" + val.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    }
+    if t == "int" { return to_string(val) }
+    if t == "float" {
+        const s = to_string(val)
+        if !s.contains(".") { return s + ".0" }
+        return s
+    }
+    if t == "bool" { return if val { "true" } else { "false" } }
+    if t == "array" {
+        const parts = val.map(v => toml_emit_value(v))
+        return "[" + parts.join(", ") + "]"
+    }
+    if t == "map" {
+        // Inline table
+        let pairs = []
+        for k in val.keys() {
+            pairs.push(k + " = " + toml_emit_value(val[k]))
+        }
+        return "{" + pairs.join(", ") + "}"
+    }
+    to_string(val)
+}

@@ -664,3 +664,1727 @@ func lint_check_magic_number(expr, line) {
         _ => {}
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W200: Name should use snake_case ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_is_snake_case(name) {
+    if name.starts_with("_") || len(name) <= 1 { return true }
+    let i = 0
+    while i < len(name) {
+        const c = name[i]
+        const is_lower = c >= "a" && c <= "z"
+        const is_digit = c >= "0" && c <= "9"
+        const is_under = c == "_"
+        if !is_lower && !is_digit && !is_under { return false }
+        i = i + 1
+    }
+    true
+}
+
+func lint_is_screaming_case(name) {
+    let i = 0
+    while i < len(name) {
+        const c = name[i]
+        const is_upper = c >= "A" && c <= "Z"
+        const is_digit = c >= "0" && c <= "9"
+        const is_under = c == "_"
+        if !is_upper && !is_digit && !is_under { return false }
+        i = i + 1
+    }
+    true
+}
+
+func lint_check_snake_case(name, line) {
+    if lint_is_snake_case(name) || lint_is_screaming_case(name) { return null }
+    lint_warn(f"W200: '{name}' should be snake_case at line {line}")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W201: Type name should use PascalCase ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_is_pascal_case(name) {
+    if len(name) == 0 || name.starts_with("_") { return true }
+    const first = name[0]
+    if !(first >= "A" && first <= "Z") { return false }
+    !name.contains("_")
+}
+
+func lint_check_pascal_case(name, line) {
+    if lint_is_pascal_case(name) { return null }
+    lint_warn(f"W201: '{name}' should be PascalCase at line {line}")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W202: Unreachable code ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_dead_code(stmts) {
+    let terminated = false
+    for stmt in stmts {
+        if terminated {
+            lint_warn(f"W202: unreachable code at line {stmt.span.start_line}")
+            continue
+        }
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SReturn(_) => { terminated = true },
+            StmtKind::SBreak(_, _) => { terminated = true },
+            StmtKind::SContinue(_) => { terminated = true },
+            StmtKind::SThrow(_) => { terminated = true },
+            _ => {}
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W203: Non-exhaustive match ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_exhaustive_match(arms, line, enum_defs) {
+    if len(arms) == 0 { return null }
+    // Check for catch-all
+    for arm in arms {
+        const pat = arm.pattern
+        match pat {
+            Pattern::PWildcard => { return null },
+            Pattern::PVariable(_) => { return null },
+            _ => {}
+        }
+    }
+    // Collect enum variants used
+    let enum_name = ""
+    let used_variants = []
+    for arm in arms {
+        const pat = arm.pattern
+        match pat {
+            Pattern::PEnum(en, variant, _) => {
+                if enum_name == "" { enum_name = en }
+                if en == enum_name { used_variants.push(variant) }
+            },
+            _ => {}
+        }
+    }
+    if enum_name == "" { return null }
+    // Look up enum definition
+    for edef in enum_defs {
+        if edef[0] == enum_name {
+            const all_variants = edef[1]
+            let missing = []
+            for v in all_variants {
+                if !used_variants.contains(v) { missing.push(v) }
+            }
+            if len(missing) > 0 {
+                lint_warn(f"W203: non-exhaustive match on {enum_name}: missing {missing.join(', ')} at line {line}")
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W204: Condition always true/false ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_constant_condition(cond, has_break_in_body) {
+    if cond == null { return null }
+    const ek = cond.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => {
+                    // Suppress for while true with break
+                    if b && has_break_in_body { return null }
+                    lint_warn(f"W204: condition is always {b} at line {cond.span.start_line}")
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W205: Self-comparison ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_self_comparison(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            const is_cmp = op == BinOp::Eq || op == BinOp::NotEq || op == BinOp::Lt || op == BinOp::Gt || op == BinOp::LtEq || op == BinOp::GtEq
+            if !is_cmp { return null }
+            if lint_exprs_equal(left, right) {
+                lint_warn(f"W205: comparing a value to itself at line {expr.span.start_line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_exprs_equal(a, b) {
+    if a == null || b == null { return false }
+    const ak = a.kind
+    const bk = b.kind
+    match ak {
+        ExprKind::EVariable(va) => {
+            match bk {
+                ExprKind::EVariable(vb) => va == vb,
+                _ => false
+            }
+        },
+        ExprKind::EFieldAccess(oa, fa) => {
+            match bk {
+                ExprKind::EFieldAccess(ob, fb) => fa == fb && lint_exprs_equal(oa, ob),
+                _ => false
+            }
+        },
+        ExprKind::EIndex(oa, ia) => {
+            match bk {
+                ExprKind::EIndex(ob, ib) => lint_exprs_equal(oa, ob) && lint_exprs_equal(ia, ib),
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W206: Empty block body ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_empty_block(block, context, line) {
+    if block == null { return null }
+    if len(block.stmts) == 0 && block.tail_expr == null {
+        lint_warn(f"W206: empty {context} body at line {line}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W207: Unreachable match arm after wildcard ──────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unreachable_arms(arms, line) {
+    let seen_catch_all = false
+    for arm in arms {
+        if seen_catch_all {
+            lint_warn(f"W207: unreachable match arm after wildcard at line {line}")
+            continue
+        }
+        const pat = arm.pattern
+        match pat {
+            Pattern::PWildcard => { seen_catch_all = true },
+            Pattern::PVariable(_) => { seen_catch_all = true },
+            _ => {}
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W208: Duplicate import ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_duplicate_imports(stmts) {
+    let seen = {}
+    for stmt in stmts {
+        const sk = stmt.kind
+        let path = null
+        match sk {
+            StmtKind::SImport(p) => { path = p },
+            StmtKind::SImportModule(parts, _, _) => { path = parts.join(".") },
+            _ => {}
+        }
+        if path != null {
+            if seen.has(path) {
+                lint_warn(f"W208: duplicate import '{path}' at line {stmt.span.start_line}")
+            }
+            seen[path] = true
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W209: Variable shadows previous binding ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_shadowing(stmts) {
+    let seen = {}
+    for stmt in stmts {
+        const sk = stmt.kind
+        let names = []
+        match sk {
+            StmtKind::SLet(name, _) => { names = [name] },
+            StmtKind::SLetMut(name, _) => { names = [name] },
+            StmtKind::SConst(name, _) => { names = [name] },
+            StmtKind::SFuncDef(fd) => { names = [fd.name] },
+            _ => {}
+        }
+        for name in names {
+            if name.starts_with("_") { continue }
+            if seen.has(name) {
+                lint_warn(f"W209: '{name}' shadows a previous binding at line {stmt.span.start_line}")
+            } else {
+                seen[name] = stmt.span.start_line
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W212: Control flow in finally block ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_control_flow_in_finally(block) {
+    if block == null { return null }
+    for stmt in block.stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SReturn(_) => { lint_warn(f"W212: return in finally block overrides try/catch result at line {stmt.span.start_line}") },
+            StmtKind::SBreak(_, _) => { lint_warn(f"W212: break in finally block overrides try/catch result at line {stmt.span.start_line}") },
+            StmtKind::SContinue(_) => { lint_warn(f"W212: continue in finally block overrides try/catch result at line {stmt.span.start_line}") },
+            StmtKind::SThrow(_) => { lint_warn(f"W212: throw in finally block overrides try/catch result at line {stmt.span.start_line}") },
+            _ => {}
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W214: Loop without break ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_block_has_break(block) {
+    if block == null { return false }
+    for stmt in block.stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SBreak(_, _) => { return true },
+            StmtKind::SIf(_, then_b, else_b) => {
+                if lint_block_has_break(then_b) { return true }
+                if lint_block_has_break(else_b) { return true }
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W215: if cond { true } else { false } ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_bool_if_else(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EIfElse(_, then_b, else_b) => {
+            if then_b == null || else_b == null { return null }
+            const then_val = lint_block_bool_value(then_b)
+            const else_val = lint_block_bool_value(else_b)
+            if then_val == true && else_val == false {
+                lint_warn(f"W215: `if cond {{ true }} else {{ false }}` can be simplified at line {expr.span.start_line}")
+            }
+            if then_val == false && else_val == true {
+                lint_warn(f"W215: `if cond {{ false }} else {{ true }}` can be simplified to `!cond` at line {expr.span.start_line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_block_bool_value(block) {
+    if block == null { return null }
+    if len(block.stmts) > 0 { return null }
+    if block.tail_expr == null { return null }
+    const ek = block.tail_expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(b) => b,
+                _ => null
+            }
+        },
+        _ => null
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W216: Empty enum ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_empty_enum(variants, name, line) {
+    if len(variants) == 0 {
+        lint_warn(f"W216: empty enum '{name}' has no variants at line {line}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W229: Match arm with empty body ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_empty_match_arms(arms, line) {
+    for arm in arms {
+        if arm.body == null { continue }
+        const ek = arm.body.kind
+        match ek {
+            ExprKind::EBlock(blk) => {
+                if len(blk.stmts) == 0 && blk.tail_expr == null {
+                    lint_warn(f"W229: empty match arm body at line {line}")
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W230: Self-assignment ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_self_assignment(name, value, line) {
+    if value == null { return null }
+    const vk = value.kind
+    match vk {
+        ExprKind::EVariable(v) => {
+            if v == name {
+                lint_warn(f"W230: self-assignment '{name} = {name}' at line {line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W231: Boolean literal in if-else ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_boolean_if_else(expr) {
+    // Alias to W215 check
+    lint_check_bool_if_else(expr)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W233: Deep nesting ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_nesting(stmts, depth, max_depth) {
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SIf(_, then_b, else_b) => {
+                const new_depth = depth + 1
+                if new_depth > max_depth {
+                    lint_warn(f"W233: code nested {new_depth} levels deep at line {stmt.span.start_line}")
+                }
+                if then_b != null { lint_check_nesting(then_b.stmts, new_depth, max_depth) }
+                if else_b != null { lint_check_nesting(else_b.stmts, new_depth, max_depth) }
+            },
+            StmtKind::SWhileLoop(_, _, body) => {
+                const new_depth = depth + 1
+                if new_depth > max_depth {
+                    lint_warn(f"W233: code nested {new_depth} levels deep at line {stmt.span.start_line}")
+                }
+                if body != null { lint_check_nesting(body.stmts, new_depth, max_depth) }
+            },
+            StmtKind::SForLoop(_, _, _, body) => {
+                const new_depth = depth + 1
+                if new_depth > max_depth {
+                    lint_warn(f"W233: code nested {new_depth} levels deep at line {stmt.span.start_line}")
+                }
+                if body != null { lint_check_nesting(body.stmts, new_depth, max_depth) }
+            },
+            StmtKind::STryCatch(_, _, _, _) => {
+                const new_depth = depth + 1
+                if new_depth > max_depth {
+                    lint_warn(f"W233: code nested {new_depth} levels deep at line {stmt.span.start_line}")
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W234: Duplicate struct field names ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_duplicate_fields(fields, context, line) {
+    let seen = {}
+    for field in fields {
+        const name = field.name
+        if seen.has(name) {
+            lint_warn(f"W234: duplicate {context} field '{name}' at line {line}")
+        }
+        seen[name] = true
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W235: Duplicate enum variant names ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_duplicate_variants(variants, enum_name, line) {
+    let seen = {}
+    for v in variants {
+        const name = v.name
+        if seen.has(name) {
+            lint_warn(f"W235: duplicate enum variant '{name}' in '{enum_name}' at line {line}")
+        }
+        seen[name] = true
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W236/W244: TODO/FIXME/HACK comment ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_todo_comments(source) {
+    const lines = source.split("\n")
+    let line_num = 1
+    for line in lines {
+        const idx = line.index_of("//")
+        if idx >= 0 {
+            const comment = line.substring(idx).to_upper()
+            if comment.contains("TODO") || comment.contains("FIXME") || comment.contains("HACK") || comment.contains("XXX") {
+                lint_warn(f"W236: found comment marker at line {line_num}")
+            }
+        }
+        line_num = line_num + 1
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W237: Magic number ──────────────────────────────────────════════
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_magic_number_in_expr(expr, in_binding) {
+    if expr == null || in_binding { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            const is_cmp = op == BinOp::Eq || op == BinOp::NotEq || op == BinOp::Lt || op == BinOp::Gt || op == BinOp::LtEq || op == BinOp::GtEq
+            if is_cmp {
+                lint_check_literal_magic(left)
+                lint_check_literal_magic(right)
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_check_literal_magic(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(n) => {
+                    if n > 1 || n < -1 {
+                        lint_warn(f"W237: magic number {n} at line {expr.span.start_line}")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W238: Unused variable binding ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unused_variables(stmts) {
+    let declared = []
+    let used = {}
+
+    // Collect declarations
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLet(name, _) => { if !name.starts_with("_") { declared.push([name, stmt.span.start_line]) } },
+            StmtKind::SLetMut(name, _) => { if !name.starts_with("_") { declared.push([name, stmt.span.start_line]) } },
+            _ => {}
+        }
+    }
+
+    // Collect all used names
+    func collect_used_in_expr(e) {
+        if e == null { return null }
+        const ek = e.kind
+        match ek {
+            ExprKind::EVariable(name) => { used[name] = true },
+            ExprKind::EBinaryOp(_, l, r) => { collect_used_in_expr(l); collect_used_in_expr(r) },
+            ExprKind::EUnaryOp(_, o) => { collect_used_in_expr(o) },
+            ExprKind::ECall(name, args, _) => {
+                used[name] = true
+                for a in args { collect_used_in_expr(a) }
+            },
+            ExprKind::EMethodCall(obj, _, args, _) => {
+                collect_used_in_expr(obj)
+                for a in args { collect_used_in_expr(a) }
+            },
+            ExprKind::EFieldAccess(obj, _) => { collect_used_in_expr(obj) },
+            ExprKind::EIndex(obj, idx) => { collect_used_in_expr(obj); collect_used_in_expr(idx) },
+            ExprKind::EPipe(l, r) => { collect_used_in_expr(l); collect_used_in_expr(r) },
+            _ => {}
+        }
+    }
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SExprStmt(e) => { collect_used_in_expr(e) },
+            StmtKind::SOutput(e) => { collect_used_in_expr(e) },
+            StmtKind::SReturn(e) => { collect_used_in_expr(e) },
+            StmtKind::SLet(_, e) => { collect_used_in_expr(e) },
+            StmtKind::SLetMut(_, e) => { collect_used_in_expr(e) },
+            StmtKind::SConst(_, e) => { collect_used_in_expr(e) },
+            StmtKind::SAssignment(name, e) => { used[name] = true; collect_used_in_expr(e) },
+            StmtKind::SCompoundAssign(name, _, e) => { used[name] = true; collect_used_in_expr(e) },
+            _ => {}
+        }
+    }
+
+    for decl in declared {
+        if !used.has(decl[0]) {
+            lint_warn(f"W238: unused variable '{decl[0]}' at line {decl[1]}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W239: Unused mut ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unnecessary_mut(stmts) {
+    let mut_vars = []
+    let reassigned = {}
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLetMut(name, _) => {
+                if !name.starts_with("_") { mut_vars.push([name, stmt.span.start_line]) }
+            },
+            StmtKind::SAssignment(name, _) => { reassigned[name] = true },
+            StmtKind::SCompoundAssign(name, _, _) => { reassigned[name] = true },
+            _ => {}
+        }
+    }
+
+    for mv in mut_vars {
+        if !reassigned.has(mv[0]) {
+            lint_warn(f"W239: variable '{mv[0]}' is declared as mut but never reassigned at line {mv[1]}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W240: Needless trailing return ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_needless_return(stmts, line) {
+    if len(stmts) == 0 { return null }
+    const last = stmts[len(stmts) - 1]
+    const sk = last.kind
+    match sk {
+        StmtKind::SReturn(expr) => {
+            if expr != null {
+                lint_warn(f"W240: needless return as last statement at line {last.span.start_line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W241: Redundant boolean comparison ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_bool_comparison(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            if op != BinOp::Eq && op != BinOp::NotEq { return null }
+            const left_is_bool = lint_is_bool_literal(left)
+            const right_is_bool = lint_is_bool_literal(right)
+            if left_is_bool || right_is_bool {
+                lint_warn(f"W241: comparison to boolean literal at line {expr.span.start_line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_is_bool_literal(expr) {
+    if expr == null { return false }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::BoolLit(_) => true,
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W242: Nested if can be collapsed with && ────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_collapsible_if(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EIfElse(_, then_b, else_b) => {
+            if else_b != null { return null }
+            if then_b == null { return null }
+            if len(then_b.stmts) != 1 { return null }
+            const inner_sk = then_b.stmts[0].kind
+            match inner_sk {
+                StmtKind::SExprStmt(inner_expr) => {
+                    const inner_ek = inner_expr.kind
+                    match inner_ek {
+                        ExprKind::EIfElse(_, _, inner_else) => {
+                            if inner_else == null {
+                                lint_warn(f"W242: nested if can be collapsed with && at line {expr.span.start_line}")
+                            }
+                        },
+                        _ => {}
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W243: Too many parameters ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_too_many_params(fdef, line) {
+    const max_params = 7
+    if len(fdef.params) > max_params {
+        lint_warn(f"W243: function '{fdef.name}' has {len(fdef.params)} parameters (max {max_params}) at line {line}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W246: Match with no arms ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_empty_match(arms, line) {
+    if len(arms) == 0 {
+        lint_warn(f"W246: match expression has no arms at line {line}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W249: Single-arm match (use if let) ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_single_arm_match(arms, line) {
+    if len(arms) == 1 {
+        lint_warn(f"W249: match with single arm — consider using if let at line {line}")
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W251: Long function body ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_function_length(fdef, line) {
+    const max_lines = 100
+    if fdef.body != null {
+        const body_lines = fdef.body.span.end_line - fdef.body.span.start_line
+        if body_lines > max_lines {
+            lint_warn(f"W251: function '{fdef.name}' is {body_lines} lines long (max {max_lines}) at line {line}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W252: Loop implements map/filter ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_manual_map(stmt) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SForLoop(_, _, _, body) => {
+            if body == null { return null }
+            for s in body.stmts {
+                const inner_sk = s.kind
+                match inner_sk {
+                    StmtKind::SExprStmt(expr) => {
+                        const expr_k = expr.kind
+                        match expr_k {
+                            ExprKind::EMethodCall(_, method, _, _) => {
+                                if method == "push" {
+                                    lint_warn(f"W252: loop with push() may be replaceable with .map() at line {stmt.span.start_line}")
+                                    return null
+                                }
+                            },
+                            _ => {}
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Lint Pass ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Run all lint rules on a program AST. Returns lint_warnings array.
+func lint_program(program) {
+    lint_warnings = []
+    let enum_defs = []
+
+    // First pass: collect enum definitions
+    func collect_enums(stmts) {
+        for stmt in stmts {
+            const sk = stmt.kind
+            match sk {
+                StmtKind::SEnumDef(name, variants, _) => {
+                    let vnames = []
+                    for v in variants { vnames.push(v.name) }
+                    enum_defs.push([name, vnames])
+                },
+                _ => {}
+            }
+        }
+    }
+    collect_enums(program.statements)
+
+    // Second pass: lint all statements
+    func lint_stmt_deep(stmt) {
+        const sk = stmt.kind
+        const line = stmt.span.start_line
+
+        match sk {
+            StmtKind::SLet(name, value) => {
+                lint_check_snake_case(name, line)
+                lint_check_self_assignment(name, value, line)
+                lint_expr(value)
+            },
+            StmtKind::SLetMut(name, value) => {
+                lint_check_snake_case(name, line)
+                lint_check_self_assignment(name, value, line)
+                lint_expr(value)
+            },
+            StmtKind::SConst(name, value) => {
+                lint_check_snake_case(name, line)
+                lint_expr(value)
+            },
+            StmtKind::SFuncDef(fdef) => {
+                lint_check_snake_case(fdef.name, line)
+                lint_check_too_many_params(fdef, line)
+                lint_check_function_length(fdef, line)
+                if fdef.body != null {
+                    lint_check_empty_block(fdef.body, "function", line)
+                    lint_check_needless_return(fdef.body.stmts, line)
+                    lint_check_dead_code(fdef.body.stmts)
+                    lint_check_unused_variables(fdef.body.stmts)
+                    lint_check_unnecessary_mut(fdef.body.stmts)
+                    lint_check_shadowing(fdef.body.stmts)
+                    for s in fdef.body.stmts { lint_stmt_deep(s) }
+                    // W250 cognitive complexity
+                    const complexity = lint_compute_complexity(fdef.body.stmts, 0)
+                    if complexity > 25 {
+                        lint_warn(f"W250: function '{fdef.name}' has cognitive complexity {complexity} (>25) at line {line}")
+                    }
+                }
+                for p in fdef.params {
+                    lint_check_snake_case(p.name, line)
+                }
+            },
+            StmtKind::SAsyncFuncDef(fdef) => {
+                lint_check_snake_case(fdef.name, line)
+                lint_check_too_many_params(fdef, line)
+                if fdef.body != null {
+                    lint_check_empty_block(fdef.body, "function", line)
+                    lint_check_needless_return(fdef.body.stmts, line)
+                    for s in fdef.body.stmts { lint_stmt_deep(s) }
+                }
+            },
+            StmtKind::SEnumDef(name, variants, _) => {
+                lint_check_pascal_case(name, line)
+                lint_check_empty_enum(variants, name, line)
+                lint_check_duplicate_variants(variants, name, line)
+                for v in variants { lint_check_pascal_case(v.name, line) }
+            },
+            StmtKind::SStructDef(name, fields, _) => {
+                lint_check_pascal_case(name, line)
+                lint_check_duplicate_fields(fields, "struct", line)
+            },
+            StmtKind::SWhileLoop(_, cond, body) => {
+                const has_break = lint_block_has_break(body)
+                lint_check_constant_condition(cond, has_break)
+                lint_check_empty_block(body, "while-loop", line)
+                lint_expr(cond)
+                if body != null { for s in body.stmts { lint_stmt_deep(s) } }
+            },
+            StmtKind::SForLoop(_, _, iter_expr, body) => {
+                lint_expr(iter_expr)
+                lint_check_empty_block(body, "for-loop", line)
+                lint_check_manual_map(stmt)
+                if body != null { for s in body.stmts { lint_stmt_deep(s) } }
+            },
+            StmtKind::SIf(cond, then_b, else_b) => {
+                lint_check_constant_condition(cond, false)
+                lint_expr(cond)
+                if then_b != null { for s in then_b.stmts { lint_stmt_deep(s) } }
+                if else_b != null { for s in else_b.stmts { lint_stmt_deep(s) } }
+            },
+            StmtKind::SMatch(subject, arms) => {
+                lint_expr(subject)
+                lint_check_empty_match(arms, line)
+                lint_check_single_arm_match(arms, line)
+                lint_check_unreachable_arms(arms, line)
+                lint_check_empty_match_arms(arms, line)
+                lint_check_exhaustive_match(arms, line, enum_defs)
+            },
+            StmtKind::STryCatch(try_e, _, catch_e, finally_e) => {
+                lint_expr(try_e)
+                lint_expr(catch_e)
+                if finally_e != null {
+                    const fek = finally_e.kind
+                    match fek {
+                        ExprKind::EBlock(blk) => { lint_check_control_flow_in_finally(blk) },
+                        _ => {}
+                    }
+                }
+            },
+            StmtKind::SAssignment(name, value) => {
+                lint_check_self_assignment(name, value, line)
+                lint_expr(value)
+            },
+            StmtKind::SExprStmt(e) => {
+                lint_expr(e)
+                lint_check_self_comparison(e)
+                lint_check_bool_comparison(e)
+                lint_check_collapsible_if(e)
+                lint_check_bool_if_else(e)
+            },
+            StmtKind::SOutput(e) => { lint_expr(e) },
+            StmtKind::SReturn(e) => { lint_expr(e) },
+            StmtKind::SThrow(e) => { lint_expr(e) },
+            _ => {}
+        }
+    }
+
+    // Run top-level checks
+    lint_check_duplicate_imports(program.statements)
+    lint_check_shadowing(program.statements)
+    lint_check_dead_code(program.statements)
+    lint_check_unused_variables(program.statements)
+    lint_check_unnecessary_mut(program.statements)
+    lint_check_nesting(program.statements, 0, 5)
+
+    for stmt in program.statements {
+        lint_stmt_deep(stmt)
+    }
+
+    lint_warnings
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W100: Unused variable ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// W100 is a stricter variant of W238 that checks all bindings, not just let.
+func lint_check_unused_all_bindings(stmts) {
+    let bound = []
+    let referenced = {}
+
+    func collect_refs(e) {
+        if e == null { return null }
+        const ek = e.kind
+        match ek {
+            ExprKind::EVariable(name) => { referenced[name] = true },
+            ExprKind::EBinaryOp(_, l, r) => { collect_refs(l); collect_refs(r) },
+            ExprKind::EUnaryOp(_, o) => { collect_refs(o) },
+            ExprKind::ECall(name, args, _) => {
+                referenced[name] = true
+                for a in args { collect_refs(a) }
+            },
+            ExprKind::EMethodCall(obj, _, args, _) => {
+                collect_refs(obj)
+                for a in args { collect_refs(a) }
+            },
+            ExprKind::EFieldAccess(obj, _) => { collect_refs(obj) },
+            ExprKind::EIndex(obj, idx) => { collect_refs(obj); collect_refs(idx) },
+            ExprKind::EPipe(l, r) => { collect_refs(l); collect_refs(r) },
+            ExprKind::EIfElse(c, t, e2) => {
+                collect_refs(c)
+                if t != null { for s in t.stmts { collect_refs_stmt(s) } }
+                if e2 != null { for s in e2.stmts { collect_refs_stmt(s) } }
+            },
+            ExprKind::ELambda(_, body) => { collect_refs(body) },
+            ExprKind::ENullCoalesce(l, r) => { collect_refs(l); collect_refs(r) },
+            ExprKind::ERange(s, e2, _) => { collect_refs(s); collect_refs(e2) },
+            ExprKind::ESpread(inner) => { collect_refs(inner) },
+            ExprKind::EAwait(inner) => { collect_refs(inner) },
+            ExprKind::ESpawn(inner) => { collect_refs(inner) },
+            ExprKind::ETryPropagate(inner) => { collect_refs(inner) },
+            ExprKind::EStringInterp(parts) => {
+                for part in parts {
+                    match part {
+                        StringPart::ExprPart(e2) => { collect_refs(e2) },
+                        _ => {}
+                    }
+                }
+            },
+            ExprKind::ELiteral(lit) => {
+                match lit {
+                    Literal::ArrayLit(elems) => { for e2 in elems { collect_refs(e2) } },
+                    Literal::MapLit(entries) => { for entry in entries { collect_refs(entry[1]) } },
+                    _ => {}
+                }
+            },
+            ExprKind::EStructConstruct(_, fields) => {
+                for f in fields {
+                    if typeof(f) == "array" && len(f) == 2 { collect_refs(f[1]) }
+                }
+            },
+            ExprKind::EEnumConstruct(_, _, args) => {
+                for a in args { collect_refs(a) }
+            },
+            ExprKind::ETupleLiteral(elems) => {
+                for e2 in elems { collect_refs(e2) }
+            },
+            ExprKind::EMatch(subject, arms) => {
+                collect_refs(subject)
+                for arm in arms { collect_refs(arm.body) }
+            },
+            ExprKind::EBlock(blk) => {
+                for s in blk.stmts { collect_refs_stmt(s) }
+                if blk.tail_expr != null { collect_refs(blk.tail_expr) }
+            },
+            ExprKind::ELoop(body) => {
+                for s in body.stmts { collect_refs_stmt(s) }
+            },
+            _ => {}
+        }
+    }
+
+    func collect_refs_stmt(s) {
+        const sk = s.kind
+        match sk {
+            StmtKind::SLet(_, e) => { collect_refs(e) },
+            StmtKind::SLetMut(_, e) => { collect_refs(e) },
+            StmtKind::SConst(_, e) => { collect_refs(e) },
+            StmtKind::SAssignment(name, e) => { referenced[name] = true; collect_refs(e) },
+            StmtKind::SCompoundAssign(name, _, e) => { referenced[name] = true; collect_refs(e) },
+            StmtKind::SExprStmt(e) => { collect_refs(e) },
+            StmtKind::SOutput(e) => { collect_refs(e) },
+            StmtKind::SReturn(e) => { collect_refs(e) },
+            StmtKind::SThrow(e) => { collect_refs(e) },
+            StmtKind::SDefer(e) => { collect_refs(e) },
+            StmtKind::SFieldAssign(obj, _, e) => { collect_refs(obj); collect_refs(e) },
+            StmtKind::SIndexAssign(obj, idx, e) => { collect_refs(obj); collect_refs(idx); collect_refs(e) },
+            StmtKind::SFuncDef(fd) => {
+                if fd.body != null {
+                    for s2 in fd.body.stmts { collect_refs_stmt(s2) }
+                    if fd.body.tail_expr != null { collect_refs(fd.body.tail_expr) }
+                }
+            },
+            StmtKind::SForLoop(_, _, iter_e, body) => {
+                collect_refs(iter_e)
+                if body != null { for s2 in body.stmts { collect_refs_stmt(s2) } }
+            },
+            StmtKind::SWhileLoop(_, cond, body) => {
+                collect_refs(cond)
+                if body != null { for s2 in body.stmts { collect_refs_stmt(s2) } }
+            },
+            StmtKind::SIf(cond, tb, eb) => {
+                collect_refs(cond)
+                if tb != null { for s2 in tb.stmts { collect_refs_stmt(s2) } }
+                if eb != null { for s2 in eb.stmts { collect_refs_stmt(s2) } }
+            },
+            StmtKind::SMatch(subject, arms) => {
+                collect_refs(subject)
+                for arm in arms { collect_refs(arm.body) }
+            },
+            StmtKind::STryCatch(te, _, ce, fe) => {
+                collect_refs(te)
+                collect_refs(ce)
+                if fe != null { collect_refs(fe) }
+            },
+            _ => {}
+        }
+    }
+
+    // Collect all bindings
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SLet(name, _) => {
+                if !name.starts_with("_") { bound.push([name, stmt.span.start_line]) }
+            },
+            StmtKind::SLetMut(name, _) => {
+                if !name.starts_with("_") { bound.push([name, stmt.span.start_line]) }
+            },
+            StmtKind::SConst(name, _) => {
+                if !name.starts_with("_") { bound.push([name, stmt.span.start_line]) }
+            },
+            _ => {}
+        }
+    }
+
+    // Collect all references
+    for stmt in stmts { collect_refs_stmt(stmt) }
+
+    // Report unused
+    for b in bound {
+        if !referenced.has(b[0]) {
+            lint_warn(f"W100: unused variable '{b[0]}' at line {b[1]}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W101: Unused import ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unused_imports(stmts) {
+    let imports = []
+    let used_names = {}
+
+    // Collect imports
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SImport(path) => {
+                const parts = path.split(".")
+                if len(parts) > 0 {
+                    imports.push([parts[len(parts) - 1], stmt.span.start_line])
+                }
+            },
+            StmtKind::SImportModule(parts, alias, _) => {
+                if len(alias) > 0 {
+                    imports.push([alias, stmt.span.start_line])
+                } else if len(parts) > 0 {
+                    imports.push([parts[len(parts) - 1], stmt.span.start_line])
+                }
+            },
+            _ => {}
+        }
+    }
+
+    // Collect all used identifiers (simplified: just variable and call names)
+    func collect_used(e) {
+        if e == null { return null }
+        const ek = e.kind
+        match ek {
+            ExprKind::EVariable(name) => { used_names[name] = true },
+            ExprKind::ECall(name, args, _) => {
+                used_names[name] = true
+                for a in args { collect_used(a) }
+            },
+            ExprKind::EMethodCall(obj, _, args, _) => {
+                collect_used(obj)
+                for a in args { collect_used(a) }
+            },
+            ExprKind::EBinaryOp(_, l, r) => { collect_used(l); collect_used(r) },
+            ExprKind::EUnaryOp(_, o) => { collect_used(o) },
+            ExprKind::EFieldAccess(obj, _) => { collect_used(obj) },
+            ExprKind::EIndex(obj, idx) => { collect_used(obj); collect_used(idx) },
+            _ => {}
+        }
+    }
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SExprStmt(e) => { collect_used(e) },
+            StmtKind::SOutput(e) => { collect_used(e) },
+            StmtKind::SLet(_, e) => { collect_used(e) },
+            StmtKind::SLetMut(_, e) => { collect_used(e) },
+            StmtKind::SConst(_, e) => { collect_used(e) },
+            StmtKind::SReturn(e) => { collect_used(e) },
+            StmtKind::SThrow(e) => { collect_used(e) },
+            StmtKind::SAssignment(_, e) => { collect_used(e) },
+            StmtKind::SFuncDef(fd) => {
+                if fd.body != null {
+                    for s in fd.body.stmts {
+                        const inner_sk = s.kind
+                        match inner_sk {
+                            StmtKind::SExprStmt(e) => { collect_used(e) },
+                            StmtKind::SReturn(e) => { collect_used(e) },
+                            StmtKind::SLet(_, e) => { collect_used(e) },
+                            StmtKind::SLetMut(_, e) => { collect_used(e) },
+                            _ => {}
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    for imp in imports {
+        if !used_names.has(imp[0]) {
+            lint_warn(f"W101: unused import '{imp[0]}' at line {imp[1]}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W103: Unused function ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unused_functions(stmts) {
+    let defined = []
+    let called = {}
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SFuncDef(fd) => {
+                if !fd.name.starts_with("_") && fd.name != "main" {
+                    defined.push([fd.name, stmt.span.start_line])
+                }
+            },
+            _ => {}
+        }
+    }
+
+    func collect_calls(e) {
+        if e == null { return null }
+        const ek = e.kind
+        match ek {
+            ExprKind::ECall(name, args, _) => {
+                called[name] = true
+                for a in args { collect_calls(a) }
+            },
+            ExprKind::EVariable(name) => { called[name] = true },
+            ExprKind::EMethodCall(obj, _, args, _) => {
+                collect_calls(obj)
+                for a in args { collect_calls(a) }
+            },
+            ExprKind::EBinaryOp(_, l, r) => { collect_calls(l); collect_calls(r) },
+            ExprKind::EPipe(l, r) => { collect_calls(l); collect_calls(r) },
+            _ => {}
+        }
+    }
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SExprStmt(e) => { collect_calls(e) },
+            StmtKind::SOutput(e) => { collect_calls(e) },
+            StmtKind::SLet(_, e) => { collect_calls(e) },
+            StmtKind::SLetMut(_, e) => { collect_calls(e) },
+            StmtKind::SConst(_, e) => { collect_calls(e) },
+            StmtKind::SReturn(e) => { collect_calls(e) },
+            StmtKind::SFuncDef(fd) => {
+                if fd.body != null {
+                    for s in fd.body.stmts {
+                        const inner_sk = s.kind
+                        match inner_sk {
+                            StmtKind::SExprStmt(e) => { collect_calls(e) },
+                            StmtKind::SReturn(e) => { collect_calls(e) },
+                            StmtKind::SOutput(e) => { collect_calls(e) },
+                            StmtKind::SLet(_, e) => { collect_calls(e) },
+                            _ => {}
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    for d in defined {
+        if !called.has(d[0]) {
+            lint_warn(f"W103: function '{d[0]}' is defined but never called at line {d[1]}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W106: Redundant operation ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_redundant_op(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::EBinaryOp(op, left, right) => {
+            // x == true → x
+            if op == BinOp::Eq && lint_is_bool_literal(right) {
+                lint_warn(f"W106: redundant comparison to boolean literal at line {expr.span.start_line}")
+            }
+            // x * 0 → 0
+            if op == BinOp::Mul && lint_is_zero(right) {
+                lint_warn(f"W107: suspicious arithmetic: multiplication by zero at line {expr.span.start_line}")
+            }
+            // x % 1 → 0
+            if op == BinOp::Mod && lint_is_one(right) {
+                lint_warn(f"W107: suspicious arithmetic: modulo by 1 at line {expr.span.start_line}")
+            }
+            // x + 0 → x
+            if op == BinOp::Add && lint_is_zero(right) {
+                lint_warn(f"W106: redundant addition of zero at line {expr.span.start_line}")
+            }
+            // x * 1 → x
+            if op == BinOp::Mul && lint_is_one(right) {
+                lint_warn(f"W106: redundant multiplication by one at line {expr.span.start_line}")
+            }
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            // --x (double negation)
+            const inner_ek = operand.kind
+            match inner_ek {
+                ExprKind::EUnaryOp(inner_op, _) => {
+                    if op == inner_op {
+                        lint_warn(f"W106: redundant double {op.symbol()} operation at line {expr.span.start_line}")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_is_zero(expr) {
+    if expr == null { return false }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(n) => n == 0,
+                Literal::FloatLit(f) => f == 0.0,
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
+func lint_is_one(expr) {
+    if expr == null { return false }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(n) => n == 1,
+                Literal::FloatLit(f) => f == 1.0,
+                _ => false
+            }
+        },
+        _ => false
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W108: Unnecessary return in tail position ───────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unnecessary_tail_return(stmts) {
+    if len(stmts) == 0 { return null }
+    const last = stmts[len(stmts) - 1]
+    const sk = last.kind
+    match sk {
+        StmtKind::SReturn(expr) => {
+            if expr != null {
+                lint_warn(f"W108: unnecessary return in tail position at line {last.span.start_line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W109: Unused function parameter ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_unused_params(fdef) {
+    if fdef.body == null { return null }
+    let used = {}
+
+    func collect_used_in_block(blk) {
+        if blk == null { return null }
+        for s in blk.stmts { collect_used_in_stmt(s) }
+        if blk.tail_expr != null { collect_used_in_expr(blk.tail_expr) }
+    }
+
+    func collect_used_in_expr(e) {
+        if e == null { return null }
+        const ek = e.kind
+        match ek {
+            ExprKind::EVariable(name) => { used[name] = true },
+            ExprKind::EBinaryOp(_, l, r) => { collect_used_in_expr(l); collect_used_in_expr(r) },
+            ExprKind::EUnaryOp(_, o) => { collect_used_in_expr(o) },
+            ExprKind::ECall(name, args, _) => {
+                used[name] = true
+                for a in args { collect_used_in_expr(a) }
+            },
+            ExprKind::EMethodCall(obj, _, args, _) => {
+                collect_used_in_expr(obj)
+                for a in args { collect_used_in_expr(a) }
+            },
+            ExprKind::EFieldAccess(obj, _) => { collect_used_in_expr(obj) },
+            ExprKind::EIndex(obj, idx) => { collect_used_in_expr(obj); collect_used_in_expr(idx) },
+            ExprKind::EPipe(l, r) => { collect_used_in_expr(l); collect_used_in_expr(r) },
+            ExprKind::EIfElse(c, t, e2) => {
+                collect_used_in_expr(c)
+                collect_used_in_block(t)
+                collect_used_in_block(e2)
+            },
+            ExprKind::EBlock(blk) => { collect_used_in_block(blk) },
+            ExprKind::ELambda(_, body) => { collect_used_in_expr(body) },
+            ExprKind::EMatch(subj, arms) => {
+                collect_used_in_expr(subj)
+                for arm in arms { collect_used_in_expr(arm.body) }
+            },
+            _ => {}
+        }
+    }
+
+    func collect_used_in_stmt(s) {
+        const sk = s.kind
+        match sk {
+            StmtKind::SExprStmt(e) => { collect_used_in_expr(e) },
+            StmtKind::SOutput(e) => { collect_used_in_expr(e) },
+            StmtKind::SReturn(e) => { collect_used_in_expr(e) },
+            StmtKind::SLet(_, e) => { collect_used_in_expr(e) },
+            StmtKind::SLetMut(_, e) => { collect_used_in_expr(e) },
+            StmtKind::SConst(_, e) => { collect_used_in_expr(e) },
+            StmtKind::SAssignment(name, e) => { used[name] = true; collect_used_in_expr(e) },
+            StmtKind::SCompoundAssign(name, _, e) => { used[name] = true; collect_used_in_expr(e) },
+            StmtKind::SThrow(e) => { collect_used_in_expr(e) },
+            StmtKind::SForLoop(_, _, iter, body) => {
+                collect_used_in_expr(iter)
+                collect_used_in_block(body)
+            },
+            StmtKind::SWhileLoop(_, cond, body) => {
+                collect_used_in_expr(cond)
+                collect_used_in_block(body)
+            },
+            StmtKind::SIf(cond, tb, eb) => {
+                collect_used_in_expr(cond)
+                collect_used_in_block(tb)
+                collect_used_in_block(eb)
+            },
+            _ => {}
+        }
+    }
+
+    collect_used_in_block(fdef.body)
+
+    for p in fdef.params {
+        if !p.name.starts_with("_") && !used.has(p.name) {
+            lint_warn(f"W109: unused function parameter '{p.name}' in '{fdef.name}' at line {fdef.span.start_line}")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W110: Variable declared mut but never reassigned ────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// (Alias for W239 — same logic, different code)
+func lint_check_mut_not_reassigned(stmts) {
+    lint_check_unnecessary_mut(stmts)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Lint Configuration and Filtering ────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Filter warnings by disabled rules.
+func lint_filter_warnings(warnings, disabled_rules) {
+    let filtered = []
+    for w in warnings {
+        let should_keep = true
+        for rule in disabled_rules {
+            if w.starts_with(rule + ":") { should_keep = false; break }
+        }
+        if should_keep { filtered.push(w) }
+    }
+    filtered
+}
+
+// Run lint with configuration.
+func lint_program_with_config(program, config) {
+    const warnings = lint_program(program)
+    let disabled = []
+    if config != null && config.has("disabled_rules") {
+        disabled = config.disabled_rules
+    }
+    if len(disabled) > 0 {
+        lint_filter_warnings(warnings, disabled)
+    } else {
+        warnings
+    }
+}
+
+// Get lint rule description by code.
+func lint_rule_description(code) {
+    if code == "W100" { return "unused variable" }
+    if code == "W101" { return "unused import" }
+    if code == "W103" { return "unused function" }
+    if code == "W106" { return "redundant operation" }
+    if code == "W107" { return "suspicious arithmetic" }
+    if code == "W108" { return "unnecessary return in tail position" }
+    if code == "W109" { return "unused function parameter" }
+    if code == "W110" { return "variable declared mut but never reassigned" }
+    if code == "W111" { return "name is reserved keyword" }
+    if code == "W200" { return "name should use snake_case" }
+    if code == "W201" { return "type name should use PascalCase" }
+    if code == "W202" { return "unreachable code" }
+    if code == "W203" { return "non-exhaustive match" }
+    if code == "W204" { return "condition always true/false" }
+    if code == "W205" { return "self-comparison" }
+    if code == "W206" { return "empty block body" }
+    if code == "W207" { return "unreachable match arm" }
+    if code == "W208" { return "duplicate import" }
+    if code == "W209" { return "variable shadows previous binding" }
+    if code == "W212" { return "control flow in finally block" }
+    if code == "W214" { return "loop without break" }
+    if code == "W215" { return "if cond { true } else { false } simplification" }
+    if code == "W216" { return "empty enum" }
+    if code == "W229" { return "match arm with empty body" }
+    if code == "W230" { return "self-assignment" }
+    if code == "W231" { return "if/else returning boolean literals" }
+    if code == "W233" { return "deep nesting (5+ levels)" }
+    if code == "W234" { return "duplicate struct field names" }
+    if code == "W235" { return "duplicate enum variant names" }
+    if code == "W236" { return "TODO/FIXME comment" }
+    if code == "W237" { return "magic number" }
+    if code == "W238" { return "unused variable binding" }
+    if code == "W239" { return "unused mut" }
+    if code == "W240" { return "unnecessary trailing return" }
+    if code == "W241" { return "redundant boolean comparison" }
+    if code == "W242" { return "nested if can be collapsed with &&" }
+    if code == "W243" { return "too many parameters (>7)" }
+    if code == "W244" { return "TODO/FIXME/HACK comment" }
+    if code == "W245" { return "deprecated function" }
+    if code == "W246" { return "match with no arms" }
+    if code == "W247" { return "unused import" }
+    if code == "W248" { return "unused function definition" }
+    if code == "W249" { return "single-arm match (use if let)" }
+    if code == "W250" { return "high cognitive complexity" }
+    if code == "W251" { return "long function body (>100 lines)" }
+    if code == "W252" { return "loop implements map/filter" }
+    "unknown lint rule"
+}
+
+// All known lint codes.
+const ALL_LINT_CODES = [
+    "W100", "W101", "W103", "W106", "W107", "W108", "W109", "W110", "W111",
+    "W112", "W113", "W114",
+    "W200", "W201", "W202", "W203", "W204", "W205", "W206", "W207", "W208", "W209",
+    "W212", "W214", "W215", "W216",
+    "W229", "W230", "W231", "W233", "W234", "W235", "W236", "W237", "W238", "W239",
+    "W240", "W241", "W242", "W243", "W244", "W245", "W246", "W247", "W248", "W249",
+    "W250", "W251", "W252"
+]
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W111: Name is reserved keyword ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+const RESERVED_KEYWORDS = [
+    "abstract", "become", "box", "final", "macro", "override",
+    "priv", "typeof", "unsized", "virtual", "yield", "crate",
+    "extern", "self", "super", "where", "dyn", "ref", "move"
+]
+
+func lint_check_reserved_name(name, line) {
+    for kw in RESERVED_KEYWORDS {
+        if name == kw {
+            lint_warn(f"W111: name '{name}' is a reserved keyword at line {line}")
+            return null
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W112: Default value type mismatch ───────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_default_type_mismatch(param, line) {
+    if param.default_val == null { return null }
+    if param.type_ann == "" { return null }
+    // Simple check: if param has type int but default is a string literal, etc.
+    const ek = param.default_val.kind
+    match ek {
+        ExprKind::ELiteral(lit) => {
+            match lit {
+                Literal::LInt(_) => {
+                    if param.type_ann != "int" && param.type_ann != "int64" && param.type_ann != "number" {
+                        lint_warn(f"W112: default value type may not match annotation '{param.type_ann}' at line {line}")
+                    }
+                },
+                Literal::StringLit(_) => {
+                    if param.type_ann != "string" && param.type_ann != "str" {
+                        lint_warn(f"W112: default value type may not match annotation '{param.type_ann}' at line {line}")
+                    }
+                },
+                Literal::BoolLit(_) => {
+                    if param.type_ann != "bool" && param.type_ann != "boolean" {
+                        lint_warn(f"W112: default value type may not match annotation '{param.type_ann}' at line {line}")
+                    }
+                },
+                _ => {}
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W113: Or-pattern variable name mismatch ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func lint_check_or_pattern_names(pat, line) {
+    match pat {
+        Pattern::POr(alternatives) => {
+            // Collect variable names from each alternative
+            let first_names = lint_collect_pattern_names(alternatives[0])
+            let i = 1
+            while i < len(alternatives) {
+                const names = lint_collect_pattern_names(alternatives[i])
+                // Check that same names appear in all alternatives
+                for name in first_names {
+                    if !names.contains(name) {
+                        lint_warn(f"W113: or-pattern variable '{name}' not bound in all alternatives at line {line}")
+                    }
+                }
+                for name in names {
+                    if !first_names.contains(name) {
+                        lint_warn(f"W113: or-pattern variable '{name}' not bound in all alternatives at line {line}")
+                    }
+                }
+                i = i + 1
+            }
+        },
+        _ => {}
+    }
+}
+
+func lint_collect_pattern_names(pat) {
+    let names = []
+    match pat {
+        Pattern::PVariable(name) => { names.push(name) },
+        Pattern::PEnum(_, _, bindings) => {
+            for b in bindings {
+                const inner = lint_collect_pattern_names(b)
+                for n in inner { names.push(n) }
+            }
+        },
+        Pattern::PArray(elems) => {
+            for e in elems {
+                const inner = lint_collect_pattern_names(e)
+                for n in inner { names.push(n) }
+            }
+        },
+        Pattern::POr(alts) => {
+            // Use first alternative's names
+            if len(alts) > 0 {
+                const inner = lint_collect_pattern_names(alts[0])
+                for n in inner { names.push(n) }
+            }
+        },
+        _ => {}
+    }
+    names
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── W114: Deprecated item usage ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Track deprecated items for the lint pass.
+let lint_deprecated_items = {}
+
+func lint_mark_deprecated(name, message) {
+    lint_deprecated_items[name] = message
+}
+
+func lint_check_deprecated_usage(expr) {
+    if expr == null { return null }
+    const ek = expr.kind
+    match ek {
+        ExprKind::ECall(name, _, _) => {
+            if lint_deprecated_items.has(name) {
+                lint_warn(f"W114: '{name}' is deprecated: {lint_deprecated_items[name]} at line {expr.span.start_line}")
+            }
+        },
+        ExprKind::EVariable(name) => {
+            if lint_deprecated_items.has(name) {
+                lint_warn(f"W114: '{name}' is deprecated: {lint_deprecated_items[name]} at line {expr.span.start_line}")
+            }
+        },
+        _ => {}
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Lint Summary and Reporting ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Count warnings by category.
+func lint_count_by_code(warnings) {
+    let counts = {}
+    for w in warnings {
+        // Extract code from "W123: message"
+        const colon = w.index_of(":")
+        if colon > 0 {
+            const code = w.substring(0, colon)
+            if counts.has(code) {
+                counts[code] = counts[code] + 1
+            } else {
+                counts[code] = 1
+            }
+        }
+    }
+    counts
+}
+
+// Format lint results as a report string.
+func lint_format_report(warnings) {
+    if len(warnings) == 0 { return "No warnings found.\n" }
+    let result = f"Found {len(warnings)} warning(s):\n\n"
+    for w in warnings {
+        result = result + "  " + w + "\n"
+    }
+    const counts = lint_count_by_code(warnings)
+    result = result + "\nSummary:\n"
+    for code in counts.keys() {
+        const desc = lint_rule_description(code)
+        result = result + f"  {code} ({desc}): {counts[code]}\n"
+    }
+    result
+}
+
+// Format lint results as JSON.
+func lint_format_json(warnings) {
+    let items = []
+    for w in warnings {
+        const colon = w.index_of(":")
+        let code = ""
+        let message = w
+        if colon > 0 {
+            code = w.substring(0, colon).trim()
+            message = w.substring(colon + 1).trim()
+        }
+        items.push(f"  {{\"code\": \"{code}\", \"message\": \"{message}\"}}")
+    }
+    "[\n" + items.join(",\n") + "\n]"
+}

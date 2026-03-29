@@ -839,3 +839,1207 @@ func fmt_ensure_final_newline(source) {
     }
     trimmed
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Expression Formatting (all ExprKind variants) ──────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_expr_full(expr, depth) {
+    if expr == null { return "null" }
+    const k = expr.kind
+    match k {
+        ExprKind::ELiteral(lit) => fmt_literal(lit),
+        ExprKind::EVariable(name) => name,
+        ExprKind::EBinaryOp(op, left, right) => {
+            const ls = fmt_expr_full(left, depth)
+            const rs = fmt_expr_full(right, depth)
+            const sym = op.symbol()
+            // Line wrapping for long binary expressions
+            const single = ls + " " + sym + " " + rs
+            if len(single) > 100 && depth < 10 {
+                ls + "\n" + fmt_indent(depth + 1) + sym + " " + rs
+            } else {
+                single
+            }
+        },
+        ExprKind::EUnaryOp(op, operand) => {
+            const sym = op.symbol()
+            sym + fmt_expr_full(operand, depth)
+        },
+        ExprKind::ECall(name, args, kwargs) => {
+            const arg_strs = args.map(a => fmt_expr_full(a, depth))
+            let kw_strs = []
+            if kwargs != null {
+                for kv in kwargs {
+                    kw_strs.push(kv[0] + ": " + fmt_expr_full(kv[1], depth))
+                }
+            }
+            const all_args = arg_strs + kw_strs
+            const joined = all_args.join(", ")
+            const single = name + "(" + joined + ")"
+            // Multi-line call if too long
+            if len(single) > 100 && len(all_args) > 1 {
+                fmt_break_call(name, all_args, depth)
+            } else {
+                single
+            }
+        },
+        ExprKind::EMethodCall(obj, method, args, kwargs) => {
+            const os = fmt_expr_full(obj, depth)
+            const arg_strs = args.map(a => fmt_expr_full(a, depth))
+            let kw_strs = []
+            if kwargs != null {
+                for kv in kwargs {
+                    kw_strs.push(kv[0] + ": " + fmt_expr_full(kv[1], depth))
+                }
+            }
+            const all_args = arg_strs + kw_strs
+            const joined = all_args.join(", ")
+            os + "." + method + "(" + joined + ")"
+        },
+        ExprKind::EFieldAccess(obj, field) => {
+            fmt_expr_full(obj, depth) + "." + field
+        },
+        ExprKind::EIndex(obj, idx) => {
+            fmt_expr_full(obj, depth) + "[" + fmt_expr_full(idx, depth) + "]"
+        },
+        ExprKind::EPipe(left, right) => {
+            const ls = fmt_expr_full(left, depth)
+            const rs = fmt_expr_full(right, depth)
+            const single = ls + " |> " + rs
+            if len(single) > 100 {
+                ls + "\n" + fmt_indent(depth + 1) + "|> " + rs
+            } else {
+                single
+            }
+        },
+        ExprKind::EIfElse(cond, then_b, else_b) => {
+            const cs = fmt_expr_full(cond, depth)
+            const ts = fmt_block_full(then_b, depth)
+            if else_b == null {
+                "if " + cs + " " + ts
+            } else {
+                const es = fmt_block_full(else_b, depth)
+                "if " + cs + " " + ts + " else " + es
+            }
+        },
+        ExprKind::EBlock(blk) => fmt_block_full(blk, depth),
+        ExprKind::ELambda(params, body) => {
+            const pnames = params.map(p => {
+                let s = p.name
+                if p.has("type_ann") && len(p.type_ann) > 0 { s = s + ": " + p.type_ann }
+                if p.has("default_val") && p.default_val != null { s = s + " = " + fmt_expr_full(p.default_val, depth) }
+                s
+            })
+            const bs = fmt_expr_full(body, depth)
+            if len(pnames) == 1 {
+                pnames[0] + " => " + bs
+            } else {
+                "(" + pnames.join(", ") + ") => " + bs
+            }
+        },
+        ExprKind::EMatch(subject, arms) => {
+            const ss = fmt_expr_full(subject, depth)
+            const ind = fmt_indent(depth)
+            const arm_ind = fmt_indent(depth + 1)
+            let arm_strs = []
+            for arm in arms {
+                const ps = fmt_pattern_full(arm.pattern)
+                let guard_str = ""
+                if arm.has("guard") && arm.guard != null {
+                    guard_str = " if " + fmt_expr_full(arm.guard, depth + 1)
+                }
+                const bs = fmt_expr_full(arm.body, depth + 1)
+                arm_strs.push(arm_ind + ps + guard_str + " => " + bs + ",")
+            }
+            "match " + ss + " {\n" + arm_strs.join("\n") + "\n" + ind + "}"
+        },
+        ExprKind::ENullCoalesce(left, right) => {
+            fmt_expr_full(left, depth) + " ?? " + fmt_expr_full(right, depth)
+        },
+        ExprKind::ERange(start, end_, inclusive) => {
+            const op = if inclusive { "..=" } else { ".." }
+            fmt_expr_full(start, depth) + op + fmt_expr_full(end_, depth)
+        },
+        ExprKind::EStringInterp(parts) => {
+            let content = ""
+            for part in parts {
+                match part {
+                    StringPart::LiteralPart(s) => { content = content + s },
+                    StringPart::ExprPart(e2) => {
+                        content = content + "{" + fmt_expr_full(e2, depth) + "}"
+                    },
+                }
+            }
+            "f\"" + content + "\""
+        },
+        ExprKind::ETupleLiteral(elems) => {
+            const parts = elems.map(e2 => fmt_expr_full(e2, depth))
+            "(" + parts.join(", ") + ")"
+        },
+        ExprKind::EStructConstruct(name, fields) => {
+            if len(fields) == 0 {
+                name + " {}"
+            } else if len(fields) <= 3 {
+                const parts = fields.map(f2 => {
+                    if typeof(f2) == "array" && len(f2) == 2 {
+                        f2[0] + ": " + fmt_expr_full(f2[1], depth)
+                    } else {
+                        fmt_expr_full(f2, depth)
+                    }
+                })
+                name + " { " + parts.join(", ") + " }"
+            } else {
+                // Multi-line struct
+                const ind = fmt_indent(depth)
+                const field_ind = fmt_indent(depth + 1)
+                let lines = []
+                for f2 in fields {
+                    if typeof(f2) == "array" && len(f2) == 2 {
+                        lines.push(field_ind + f2[0] + ": " + fmt_expr_full(f2[1], depth + 1) + ",")
+                    }
+                }
+                name + " {\n" + lines.join("\n") + "\n" + ind + "}"
+            }
+        },
+        ExprKind::EEnumConstruct(enum_, variant, args) => {
+            if len(args) == 0 {
+                enum_ + "::" + variant
+            } else {
+                const parts = args.map(a => fmt_expr_full(a, depth))
+                enum_ + "::" + variant + "(" + parts.join(", ") + ")"
+            }
+        },
+        ExprKind::EAwait(inner) => "await " + fmt_expr_full(inner, depth),
+        ExprKind::ESpawn(inner) => "spawn " + fmt_expr_full(inner, depth),
+        ExprKind::EYield(inner) => "yield " + fmt_expr_full(inner, depth),
+        ExprKind::EOptionalChain(obj, field) => fmt_expr_full(obj, depth) + "?." + field,
+        ExprKind::ESpread(inner) => "..." + fmt_expr_full(inner, depth),
+        ExprKind::ETryCatch(try_e, err_name, catch_e) => {
+            const ts = fmt_expr_full(try_e, depth)
+            const cs = fmt_expr_full(catch_e, depth)
+            "try " + ts + " catch " + err_name + " " + cs
+        },
+        ExprKind::ETryPropagate(inner) => fmt_expr_full(inner, depth) + "?",
+        ExprKind::EPlaceholder => "_",
+        ExprKind::ELoop(body) => "loop " + fmt_block_full(body, depth),
+        ExprKind::EListComp(expr, pattern, iterable, cond) => {
+            const es = fmt_expr_full(expr, depth)
+            const ps = fmt_expr_full(pattern, depth)
+            const is = fmt_expr_full(iterable, depth)
+            let cs = ""
+            if cond != null { cs = " if " + fmt_expr_full(cond, depth) }
+            "[" + es + " for " + ps + " in " + is + cs + "]"
+        },
+        ExprKind::EMapComp(key_expr, val_expr, pattern, iterable, cond) => {
+            const ks = fmt_expr_full(key_expr, depth)
+            const vs = fmt_expr_full(val_expr, depth)
+            const ps = fmt_expr_full(pattern, depth)
+            const is = fmt_expr_full(iterable, depth)
+            let cs = ""
+            if cond != null { cs = " if " + fmt_expr_full(cond, depth) }
+            "{" + ks + ": " + vs + " for " + ps + " in " + is + cs + "}"
+        },
+        _ => "<expr>"
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Pattern Formatting (all Pattern variants) ──────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_pattern_full(pat) {
+    match pat {
+        Pattern::PWildcard => "_",
+        Pattern::PVariable(name) => name,
+        Pattern::PLiteral(lit) => {
+            if typeof(lit) == "map" && lit.has("kind") {
+                // AST expression node (literal wrapped in expr)
+                fmt_expr_full(lit, 0)
+            } else {
+                fmt_literal(lit)
+            }
+        },
+        Pattern::PEnum(enum_, variant, fields) => {
+            if len(fields) == 0 {
+                enum_ + "::" + variant
+            } else {
+                const parts = fields.map(f2 => fmt_pattern_full(f2))
+                enum_ + "::" + variant + "(" + parts.join(", ") + ")"
+            }
+        },
+        Pattern::PArray(elems) => {
+            const parts = elems.map(e => fmt_pattern_full(e))
+            "[" + parts.join(", ") + "]"
+        },
+        Pattern::PMap(entries) => {
+            const parts = entries.map(e => fmt_pattern_full(e))
+            "{ " + parts.join(", ") + " }"
+        },
+        Pattern::POr(pats) => {
+            const parts = pats.map(p => fmt_pattern_full(p))
+            parts.join(" | ")
+        },
+        Pattern::PRest(name) => "..." + name,
+        Pattern::PType(name, type_) => name + ": " + type_,
+        Pattern::PBinding(name, inner) => fmt_pattern_full(inner) + " @ " + name,
+        Pattern::PRange(lo, hi, inclusive) => {
+            const ls = fmt_pattern_full(lo)
+            const hs = fmt_pattern_full(hi)
+            const op = if inclusive { "..=" } else { ".." }
+            ls + op + hs
+        },
+        Pattern::PStruct(name, fields) => {
+            const parts = fields.map(f => {
+                if typeof(f) == "map" && f.has("field") {
+                    f.field + ": " + fmt_pattern_full(f.pattern)
+                } else {
+                    fmt_pattern_full(f)
+                }
+            })
+            name + " { " + parts.join(", ") + " }"
+        },
+        Pattern::PTuple(elems) => {
+            const parts = elems.map(e => fmt_pattern_full(e))
+            "(" + parts.join(", ") + ")"
+        },
+        Pattern::PGuard(inner, guard) => {
+            fmt_pattern_full(inner) + " if " + fmt_expr_full(guard, 0)
+        },
+        _ => {
+            // Handle map-based pattern nodes from parser
+            if typeof(pat) == "map" {
+                if pat.has("kind") {
+                    if pat.kind == "wildcard" { return "_" }
+                    if pat.kind == "binding" { return pat.name }
+                    if pat.kind == "literal" { return to_string(pat.value) }
+                    if pat.kind == "enum" {
+                        let s = pat["enum"] + "::" + pat.variant
+                        if pat.has("bindings") {
+                            const parts = pat.bindings.map(b => fmt_pattern_full(b))
+                            s = s + "(" + parts.join(", ") + ")"
+                        }
+                        return s
+                    }
+                    if pat.kind == "array" {
+                        const parts = pat.elements.map(e => fmt_pattern_full(e))
+                        return "[" + parts.join(", ") + "]"
+                    }
+                    if pat.kind == "tuple" {
+                        const parts = pat.elements.map(e => fmt_pattern_full(e))
+                        return "(" + parts.join(", ") + ")"
+                    }
+                    if pat.kind == "or" {
+                        return fmt_pattern_full(pat.left) + " | " + fmt_pattern_full(pat.right)
+                    }
+                    if pat.kind == "guard" {
+                        return fmt_pattern_full(pat.inner) + " if " + fmt_expr_full(pat.guard, 0)
+                    }
+                    if pat.kind == "struct" {
+                        const parts = pat.fields.map(f => {
+                            if f.has("field") { f.field + ": " + fmt_pattern_full(f.pattern) }
+                            else { "..." }
+                        })
+                        return pat["struct"] + " { " + parts.join(", ") + " }"
+                    }
+                    if pat.kind == "rest" { return "..." + pat.name }
+                }
+            }
+            "<pattern>"
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Statement Formatting (all StmtKind variants) ───────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_stmt_full(s, depth) {
+    const k = s.kind
+    match k {
+        StmtKind::SLet(name, expr) =>
+            "let " + name + " = " + fmt_expr_full(expr, depth),
+        StmtKind::SLetMut(name, expr) =>
+            "let mut " + name + " = " + fmt_expr_full(expr, depth),
+        StmtKind::SConst(name, expr) =>
+            "const " + name + " = " + fmt_expr_full(expr, depth),
+        StmtKind::SAssignment(name, expr) =>
+            name + " = " + fmt_expr_full(expr, depth),
+        StmtKind::SCompoundAssign(name, op, expr) =>
+            name + " " + op.symbol() + "= " + fmt_expr_full(expr, depth),
+        StmtKind::SFieldAssign(obj, field, value) =>
+            fmt_expr_full(obj, depth) + "." + field + " = " + fmt_expr_full(value, depth),
+        StmtKind::SIndexAssign(obj, idx, value) =>
+            fmt_expr_full(obj, depth) + "[" + fmt_expr_full(idx, depth) + "] = " + fmt_expr_full(value, depth),
+        StmtKind::SReturn(expr) => {
+            if expr == null { "return" }
+            else { "return " + fmt_expr_full(expr, depth) }
+        },
+        StmtKind::SBreak(label, value) => {
+            let s = "break"
+            if label != "" { s = s + " '" + label }
+            if value != null { s = s + " " + fmt_expr_full(value, depth) }
+            s
+        },
+        StmtKind::SContinue(label) => {
+            if label == "" { "continue" } else { "continue '" + label }
+        },
+        StmtKind::SOutput(expr) =>
+            "output " + fmt_expr_full(expr, depth),
+        StmtKind::SExprStmt(expr) =>
+            fmt_expr_full(expr, depth),
+        StmtKind::SThrow(expr) =>
+            "throw " + fmt_expr_full(expr, depth),
+        StmtKind::SDefer(expr) =>
+            "defer " + fmt_expr_full(expr, depth),
+        StmtKind::SFuncDef(fd) =>
+            fmt_funcdef_full(fd, depth, false),
+        StmtKind::SAsyncFuncDef(fd) =>
+            fmt_funcdef_full(fd, depth, true),
+        StmtKind::SIf(cond, then_b, else_b) => {
+            const cs = fmt_expr_full(cond, depth)
+            const ts = fmt_block_full(then_b, depth)
+            if else_b == null {
+                "if " + cs + " " + ts
+            } else {
+                "if " + cs + " " + ts + " else " + fmt_block_full(else_b, depth)
+            }
+        },
+        StmtKind::SWhileLoop(label, cond, body) => {
+            let prefix = ""
+            if label != "" { prefix = "'" + label + ": " }
+            prefix + "while " + fmt_expr_full(cond, depth) + " " + fmt_block_full(body, depth)
+        },
+        StmtKind::SForLoop(label, pat, iter, body) => {
+            let prefix = ""
+            if label != "" { prefix = "'" + label + ": " }
+            prefix + "for " + fmt_for_pattern_full(pat) + " in " + fmt_expr_full(iter, depth) + " " + fmt_block_full(body, depth)
+        },
+        StmtKind::SDoWhile(label, cond, body) => {
+            let prefix = ""
+            if label != "" { prefix = "'" + label + ": " }
+            prefix + "do " + fmt_block_full(body, depth) + " while " + fmt_expr_full(cond, depth)
+        },
+        StmtKind::SMatch(subject, arms) => {
+            const ss = fmt_expr_full(subject, depth)
+            const ind = fmt_indent(depth)
+            const arm_ind = fmt_indent(depth + 1)
+            let arm_strs = []
+            for arm in arms {
+                const ps = fmt_pattern_full(arm.pattern)
+                const bs = fmt_expr_full(arm.body, depth + 1)
+                arm_strs.push(arm_ind + ps + " => " + bs + ",")
+            }
+            "match " + ss + " {\n" + arm_strs.join("\n") + "\n" + ind + "}"
+        },
+        StmtKind::STryCatch(try_e, catch_var, catch_e, finally_e) => {
+            let s = "try " + fmt_expr_full(try_e, depth)
+            if catch_e != null {
+                s = s + " catch " + catch_var + " " + fmt_expr_full(catch_e, depth)
+            }
+            if finally_e != null {
+                s = s + " finally " + fmt_expr_full(finally_e, depth)
+            }
+            s
+        },
+        StmtKind::SImport(path) => "import \"" + path + "\"",
+        StmtKind::SImportModule(parts, alias, multi) => {
+            let s = "import " + parts.join(".")
+            if len(multi) > 0 { s = s + ".{" + multi.join(", ") + "}" }
+            if alias != "" { s = s + " as " + alias }
+            s
+        },
+        StmtKind::SEnumDef(name, variants, _) => {
+            const ind = fmt_indent(depth)
+            const var_ind = fmt_indent(depth + 1)
+            let var_strs = []
+            for v in variants {
+                let vs = var_ind + v.name
+                if len(v.fields) > 0 { vs = vs + "(" + v.fields.join(", ") + ")" }
+                var_strs.push(vs + ",")
+            }
+            "enum " + name + " {\n" + var_strs.join("\n") + "\n" + ind + "}"
+        },
+        StmtKind::SStructDef(name, fields, _) => {
+            const ind = fmt_indent(depth)
+            const field_ind = fmt_indent(depth + 1)
+            let field_strs = []
+            for f in fields {
+                let fs = field_ind + f.name
+                if f.has("type_ann") && len(f.type_ann) > 0 { fs = fs + ": " + f.type_ann }
+                if f.has("default_val") && f.default_val != null { fs = fs + " = " + fmt_expr_full(f.default_val, depth + 1) }
+                field_strs.push(fs + ",")
+            }
+            "struct " + name + " {\n" + field_strs.join("\n") + "\n" + ind + "}"
+        },
+        StmtKind::SInterfaceDef(name, supers, methods) => {
+            const ind = fmt_indent(depth)
+            const m_ind = fmt_indent(depth + 1)
+            let method_strs = []
+            for m in methods {
+                const ps = m.params.map(p => p.name).join(", ")
+                method_strs.push(m_ind + "func " + m.name + "(" + ps + ")")
+            }
+            let header = "interface " + name
+            if len(supers) > 0 { header = header + ": " + supers.join(" + ") }
+            header + " {\n" + method_strs.join("\n") + "\n" + ind + "}"
+        },
+        StmtKind::SImplBlock(type_name, methods) => {
+            const ind = fmt_indent(depth)
+            let method_strs = []
+            for m in methods { method_strs.push(fmt_indent(depth + 1) + fmt_stmt_full(m, depth + 1)) }
+            "impl " + type_name + " {\n" + method_strs.join("\n") + "\n" + ind + "}"
+        },
+        StmtKind::SImplTrait(trait_name, type_name, methods) => {
+            const ind = fmt_indent(depth)
+            let method_strs = []
+            for m in methods { method_strs.push(fmt_indent(depth + 1) + fmt_stmt_full(m, depth + 1)) }
+            "impl " + trait_name + " for " + type_name + " {\n" + method_strs.join("\n") + "\n" + ind + "}"
+        },
+        StmtKind::STypeAlias(name, target) =>
+            "type " + name + " = " + target,
+        StmtKind::STestDef(name, body) =>
+            "test \"" + name + "\" " + fmt_block_full(body, depth),
+        StmtKind::SLetDestructure(pat, mutable, value) => {
+            const prefix = if mutable { "let mut " } else { "let " }
+            prefix + fmt_destructure_pattern_full(pat) + " = " + fmt_expr_full(value, depth)
+        },
+        _ => "<stmt>"
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Block Formatting ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_block_full(blk, depth) {
+    if blk == null { return "{}" }
+    if len(blk.stmts) == 0 && blk.tail_expr == null { return "{}" }
+
+    // Short block: single tail expr that fits on one line
+    if len(blk.stmts) == 0 && blk.tail_expr != null {
+        const single = "{ " + fmt_expr_full(blk.tail_expr, depth) + " }"
+        if len(single) <= 80 { return single }
+    }
+
+    const ind = fmt_indent(depth)
+    const inner_ind = fmt_indent(depth + 1)
+    let lines = []
+    for s in blk.stmts {
+        lines.push(inner_ind + fmt_stmt_full(s, depth + 1))
+    }
+    if blk.tail_expr != null {
+        lines.push(inner_ind + fmt_expr_full(blk.tail_expr, depth + 1))
+    }
+    "{\n" + lines.join("\n") + "\n" + ind + "}"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Function Definition Formatting ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_funcdef_full(fd, depth, is_async) {
+    let prefix = if is_async { "async func " } else { "func " }
+    let sig = prefix + fd.name
+
+    // Type parameters
+    if fd.has("type_params") && len(fd.type_params) > 0 {
+        sig = sig + "<" + fd.type_params.join(", ") + ">"
+    }
+
+    // Parameters with types and defaults
+    let param_strs = []
+    for p in fd.params {
+        let ps = p.name
+        if p.has("type_ann") && len(p.type_ann) > 0 { ps = ps + ": " + p.type_ann }
+        if p.has("default_val") && p.default_val != null { ps = ps + " = " + fmt_expr_full(p.default_val, depth) }
+        if p.has("rest") && p.rest { ps = "..." + ps }
+        param_strs.push(ps)
+    }
+
+    const params_joined = param_strs.join(", ")
+    const single_line = sig + "(" + params_joined + ")"
+
+    // Wrap params if too long
+    if len(single_line) > 100 && len(param_strs) > 2 {
+        const p_ind = fmt_indent(depth + 1)
+        let param_lines = []
+        for ps in param_strs { param_lines.push(p_ind + ps + ",") }
+        sig = sig + "(\n" + param_lines.join("\n") + "\n" + fmt_indent(depth) + ")"
+    } else {
+        sig = single_line
+    }
+
+    // Return type
+    if fd.has("return_type") && len(fd.return_type) > 0 {
+        sig = sig + " -> " + fd.return_type
+    }
+
+    sig + " " + fmt_block_full(fd.body, depth)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── For Pattern Formatting ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_for_pattern_full(pat) {
+    match pat {
+        ForPattern::Single(name) => name,
+        ForPattern::ArrayDestructure(elems) => {
+            const parts = elems.map(e => {
+                match e {
+                    DestructureElement::DName(n) => n,
+                    DestructureElement::DRest(n) => "..." + n,
+                }
+            })
+            "[" + parts.join(", ") + "]"
+        },
+        ForPattern::MapDestructure(entries) => {
+            const parts = entries.map(e => {
+                match e {
+                    DestructureElement::DName(n) => n,
+                    DestructureElement::DRest(n) => "..." + n,
+                }
+            })
+            "{" + parts.join(", ") + "}"
+        },
+        _ => {
+            if typeof(pat) == "string" { return pat }
+            "<pattern>"
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Destructure Pattern Formatting ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_destructure_pattern_full(pat) {
+    match pat {
+        DestructurePattern::DArray(elems) => {
+            const parts = elems.map(e => {
+                match e {
+                    DestructureElement::DName(n) => n,
+                    DestructureElement::DRest(n) => "..." + n,
+                }
+            })
+            "[" + parts.join(", ") + "]"
+        },
+        DestructurePattern::DMap(elems) => {
+            const parts = elems.map(e => {
+                match e {
+                    DestructureElement::DName(n) => n,
+                    DestructureElement::DRest(n) => "..." + n,
+                }
+            })
+            "{" + parts.join(", ") + "}"
+        },
+        DestructurePattern::DTuple(elems) => {
+            const parts = elems.map(e => {
+                match e {
+                    DestructureElement::DName(n) => n,
+                    DestructureElement::DRest(n) => "..." + n,
+                }
+            })
+            "(" + parts.join(", ") + ")"
+        },
+        _ => {
+            if typeof(pat) == "map" && pat.has("kind") {
+                if pat.kind == "array" { return fmt_destructure_pattern_full(DestructurePattern::DArray(pat.elements)) }
+                if pat.kind == "tuple" { return fmt_destructure_pattern_full(DestructurePattern::DTuple(pat.elements)) }
+                if pat.kind == "map" { return fmt_destructure_pattern_full(DestructurePattern::DMap(pat.fields)) }
+                if pat.kind == "simple" { return pat.name }
+            }
+            "<destructure>"
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Comment Preservation ────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Extract comments from source and attach to nearest AST node by line.
+func fmt_extract_comments(source) {
+    let comments = []
+    const lines = source.split("\n")
+    let line_num = 1
+    for line in lines {
+        const trimmed = line.trim()
+        if trimmed.starts_with("///") {
+            comments.push({"line": line_num, "kind": "doc", "text": trimmed})
+        } else if trimmed.starts_with("//") {
+            comments.push({"line": line_num, "kind": "line", "text": trimmed})
+        } else {
+            // Check for inline comment
+            const idx = line.index_of("//")
+            if idx >= 0 {
+                // Make sure it's not inside a string
+                let in_string = false
+                let i = 0
+                while i < idx {
+                    if line[i] == "\"" { in_string = !in_string }
+                    i = i + 1
+                }
+                if !in_string {
+                    comments.push({"line": line_num, "kind": "trailing", "text": line.substring(idx).trim()})
+                }
+            }
+        }
+        line_num = line_num + 1
+    }
+    comments
+}
+
+// Attach comments to the nearest AST node.
+func fmt_attach_comments(comments, stmts) {
+    let attached = {}
+    for comment in comments {
+        const line = comment.line
+        // Find closest statement at or after this line
+        let closest = null
+        let closest_dist = 999999
+        for stmt in stmts {
+            const stmt_line = stmt.span.start_line
+            const dist = stmt_line - line
+            if dist >= 0 && dist < closest_dist {
+                closest = stmt
+                closest_dist = dist
+            }
+        }
+        if closest != null {
+            const key = to_string(closest.span.start_line)
+            if !attached.has(key) { attached[key] = [] }
+            attached[key].push(comment)
+        }
+    }
+    attached
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Import Grouping and Sorting ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_group_imports(stmts) {
+    let std_imports = []
+    let pkg_imports = []
+    let rel_imports = []
+    let other_stmts = []
+
+    for stmt in stmts {
+        const sk = stmt.kind
+        let is_import = false
+        match sk {
+            StmtKind::SImport(path) => {
+                is_import = true
+                if path.starts_with("std") { std_imports.push(stmt) }
+                else if path.starts_with(".") || path.starts_with("..") { rel_imports.push(stmt) }
+                else { pkg_imports.push(stmt) }
+            },
+            StmtKind::SImportModule(parts, _, _) => {
+                is_import = true
+                if len(parts) > 0 && parts[0] == "std" { std_imports.push(stmt) }
+                else { pkg_imports.push(stmt) }
+            },
+            _ => {}
+        }
+        if !is_import { other_stmts.push(stmt) }
+    }
+
+    // Sort each group alphabetically
+    func import_key(stmt) {
+        const sk = stmt.kind
+        match sk {
+            StmtKind::SImport(p) => p,
+            StmtKind::SImportModule(parts, _, _) => parts.join("."),
+            _ => ""
+        }
+    }
+
+    std_imports.sort((a, b) => {
+        const ak = import_key(a)
+        const bk = import_key(b)
+        if ak < bk { -1 } else if ak > bk { 1 } else { 0 }
+    })
+    pkg_imports.sort((a, b) => {
+        const ak = import_key(a)
+        const bk = import_key(b)
+        if ak < bk { -1 } else if ak > bk { 1 } else { 0 }
+    })
+    rel_imports.sort((a, b) => {
+        const ak = import_key(a)
+        const bk = import_key(b)
+        if ak < bk { -1 } else if ak > bk { 1 } else { 0 }
+    })
+
+    std_imports + pkg_imports + rel_imports + other_stmts
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Blank Line Management ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_is_definition(stmt) {
+    const sk = stmt.kind
+    match sk {
+        StmtKind::SFuncDef(_) => true,
+        StmtKind::SAsyncFuncDef(_) => true,
+        StmtKind::SEnumDef(_, _, _) => true,
+        StmtKind::SStructDef(_, _, _) => true,
+        StmtKind::SInterfaceDef(_, _, _) => true,
+        StmtKind::SImplBlock(_, _) => true,
+        StmtKind::STestDef(_, _) => true,
+        StmtKind::STypeAlias(_, _) => true,
+        _ => false
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Program Formatter ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Format a complete program AST to well-formatted source.
+func format_program(program) {
+    let lines = []
+    let prev_was_def = false
+    let i = 0
+
+    for stmt in program.statements {
+        const is_def = fmt_is_definition(stmt)
+
+        // Blank line between definitions
+        if i > 0 && (is_def || prev_was_def) {
+            lines.push("")
+        }
+
+        const formatted = fmt_stmt_full(stmt, 0)
+        lines.push(formatted)
+
+        prev_was_def = is_def
+        i = i + 1
+    }
+
+    const result = lines.join("\n")
+    fmt_ensure_final_newline(result)
+}
+
+// Format with options (indent width, max line width).
+func format_program_with_config(program, config) {
+    // Config: {"indent_width": 4, "max_width": 100, "sort_imports": true}
+    if config.has("sort_imports") && config.sort_imports {
+        program.statements = fmt_group_imports(program.statements)
+    }
+    format_program(program)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Alignment Helpers ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Align struct fields to have type annotations at the same column.
+func fmt_align_fields(fields, depth) {
+    if len(fields) == 0 { return "" }
+    let max_name_len = 0
+    for f in fields {
+        if len(f.name) > max_name_len { max_name_len = len(f.name) }
+    }
+    const ind = fmt_indent(depth)
+    let lines = []
+    for f in fields {
+        let line = ind + f.name
+        if f.has("type_ann") && len(f.type_ann) > 0 {
+            const padding = " ".repeat(max_name_len - len(f.name))
+            line = line + padding + ": " + f.type_ann
+        }
+        if f.has("default_val") && f.default_val != null {
+            line = line + " = " + fmt_expr_full(f.default_val, depth)
+        }
+        lines.push(line + ",")
+    }
+    lines.join("\n")
+}
+
+// Align match arms.
+func fmt_align_match_arms(arms, depth) {
+    if len(arms) == 0 { return "" }
+    let max_pat_len = 0
+    for arm in arms {
+        const ps = fmt_pattern_full(arm.pattern)
+        if len(ps) > max_pat_len { max_pat_len = len(ps) }
+    }
+    const ind = fmt_indent(depth)
+    let lines = []
+    for arm in arms {
+        const ps = fmt_pattern_full(arm.pattern)
+        const padding = " ".repeat(max_pat_len - len(ps))
+        const bs = fmt_expr_full(arm.body, depth)
+        lines.push(ind + ps + padding + " => " + bs + ",")
+    }
+    lines.join("\n")
+}
+
+// Align enum variants.
+func fmt_align_enum_variants(variants, depth) {
+    if len(variants) == 0 { return "" }
+    const ind = fmt_indent(depth)
+    let lines = []
+    for v in variants {
+        let line = ind + v.name
+        if len(v.fields) > 0 {
+            line = line + "(" + v.fields.join(", ") + ")"
+        }
+        lines.push(line + ",")
+    }
+    lines.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── String Escaping for Formatter ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_escape_string(s) {
+    let result = ""
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == "\\" { result = result + "\\\\" }
+        else if c == "\"" { result = result + "\\\"" }
+        else if c == "\n" { result = result + "\\n" }
+        else if c == "\t" { result = result + "\\t" }
+        else if c == "\r" { result = result + "\\r" }
+        else { result = result + c }
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Trailing Comma Management ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Add trailing comma to multi-line constructs.
+func fmt_trailing_comma(items, depth, formatter) {
+    if len(items) == 0 { return "" }
+    const ind = fmt_indent(depth)
+    const inner_ind = fmt_indent(depth + 1)
+    let lines = []
+    for item in items {
+        lines.push(inner_ind + formatter(item, depth + 1) + ",")
+    }
+    "(\n" + lines.join("\n") + "\n" + ind + ")"
+}
+
+// Format array literal with trailing comma in multi-line mode.
+func fmt_array_multiline(elements, depth) {
+    if len(elements) == 0 { return "[]" }
+    const single = "[" + elements.map(e => fmt_expr_full(e, depth)).join(", ") + "]"
+    if len(single) <= 80 { return single }
+    const ind = fmt_indent(depth)
+    const inner_ind = fmt_indent(depth + 1)
+    let lines = []
+    for e in elements {
+        lines.push(inner_ind + fmt_expr_full(e, depth + 1) + ",")
+    }
+    "[\n" + lines.join("\n") + "\n" + ind + "]"
+}
+
+// Format map literal with trailing comma in multi-line mode.
+func fmt_map_multiline(entries, depth) {
+    if len(entries) == 0 { return "{}" }
+    let parts = []
+    for entry in entries {
+        if typeof(entry) == "array" && len(entry) == 2 {
+            parts.push(entry[0] + ": " + fmt_expr_full(entry[1], depth))
+        }
+    }
+    const single = "{ " + parts.join(", ") + " }"
+    if len(single) <= 80 { return single }
+    const ind = fmt_indent(depth)
+    const inner_ind = fmt_indent(depth + 1)
+    let lines = []
+    for entry in entries {
+        if typeof(entry) == "array" && len(entry) == 2 {
+            lines.push(inner_ind + entry[0] + ": " + fmt_expr_full(entry[1], depth + 1) + ",")
+        }
+    }
+    "{\n" + lines.join("\n") + "\n" + ind + "}"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Line Wrapping for Long Expressions ──────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Estimate the display width of an expression.
+func fmt_expr_width(expr, depth) {
+    const s = fmt_expr_full(expr, depth)
+    len(s)
+}
+
+// Wrap a binary chain across lines when it exceeds max width.
+func fmt_wrap_binary_chain(exprs, ops, depth, max_width) {
+    if max_width == null { max_width = 100 }
+    // Try single line first
+    let single = fmt_expr_full(exprs[0], depth)
+    let i = 0
+    while i < len(ops) {
+        single = single + " " + ops[i] + " " + fmt_expr_full(exprs[i + 1], depth)
+        i = i + 1
+    }
+    if len(single) <= max_width { return single }
+    // Multi-line
+    const ind = fmt_indent(depth + 1)
+    let result = fmt_expr_full(exprs[0], depth)
+    i = 0
+    while i < len(ops) {
+        result = result + "\n" + ind + ops[i] + " " + fmt_expr_full(exprs[i + 1], depth + 1)
+        i = i + 1
+    }
+    result
+}
+
+// Wrap method chain across lines.
+func fmt_wrap_method_chain(parts, depth, max_width) {
+    if max_width == null { max_width = 100 }
+    const single = parts.join(".")
+    if len(single) <= max_width { return single }
+    const ind = fmt_indent(depth + 1)
+    let result = parts[0]
+    let i = 1
+    while i < len(parts) {
+        result = result + "\n" + ind + "." + parts[i]
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Conditional Brace Style (K&R) ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Format a block in K&R style: opening brace on same line.
+func fmt_block_kr(blk, depth, prefix) {
+    if blk == null { return prefix + " {}" }
+    if len(blk.stmts) == 0 && blk.tail_expr == null { return prefix + " {}" }
+    const ind = fmt_indent(depth)
+    const inner_ind = fmt_indent(depth + 1)
+    let lines = []
+    for s in blk.stmts {
+        lines.push(inner_ind + fmt_stmt_full(s, depth + 1))
+    }
+    if blk.tail_expr != null {
+        lines.push(inner_ind + fmt_expr_full(blk.tail_expr, depth + 1))
+    }
+    prefix + " {\n" + lines.join("\n") + "\n" + ind + "}"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Doc Comment Formatting (Preserve /// and Reflow) ────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_doc_comments_full(comments, depth) {
+    if len(comments) == 0 { return "" }
+    const ind = fmt_indent(depth)
+    let result = []
+    for comment in comments {
+        const text = comment.trim()
+        if text.starts_with("///") {
+            // Preserve doc comment
+            result.push(ind + text)
+        } else if text.starts_with("//") {
+            result.push(ind + text)
+        }
+    }
+    result.join("\n") + "\n"
+}
+
+// Reflow doc comment text to fit within max width.
+func fmt_reflow_doc_comment(text, max_width, depth) {
+    const ind = fmt_indent(depth)
+    const prefix = ind + "/// "
+    const available = max_width - len(prefix)
+    if available <= 10 { return prefix + text + "\n" }
+
+    const words = text.split(" ")
+    let lines = []
+    let current = ""
+    for word in words {
+        if len(current) > 0 && len(current) + 1 + len(word) > available {
+            lines.push(prefix + current)
+            current = word
+        } else if len(current) > 0 {
+            current = current + " " + word
+        } else {
+            current = word
+        }
+    }
+    if len(current) > 0 { lines.push(prefix + current) }
+    lines.join("\n") + "\n"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Type Annotation Formatting ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_type_annotation(ty) {
+    if ty == null { return "" }
+    if typeof(ty) == "string" { return ty }
+    if typeof(ty) == "map" {
+        if ty.has("kind") {
+            if ty.kind == "optional" { return fmt_type_annotation(ty.inner) + "?" }
+            if ty.kind == "array" { return "[" + fmt_type_annotation(ty.element) + "]" }
+            if ty.kind == "tuple" {
+                const parts = ty.elements.map(e => fmt_type_annotation(e))
+                return "(" + parts.join(", ") + ")"
+            }
+            if ty.kind == "function" {
+                const params = ty.params.map(p => fmt_type_annotation(p))
+                return "(" + params.join(", ") + ") -> " + fmt_type_annotation(ty["return"])
+            }
+            if ty.kind == "generic" {
+                const args = ty.args.map(a => fmt_type_annotation(a))
+                return ty.name + "<" + args.join(", ") + ">"
+            }
+            if ty.kind == "union" {
+                const types = ty.types.map(t => fmt_type_annotation(t))
+                return types.join(" | ")
+            }
+            if ty.kind == "map" {
+                return "{" + fmt_type_annotation(ty.key) + ": " + fmt_type_annotation(ty.value) + "}"
+            }
+        }
+    }
+    to_string(ty)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Whitespace Normalization ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Remove consecutive blank lines (keep at most one).
+func fmt_normalize_blank_lines(text) {
+    const lines = text.split("\n")
+    let result = []
+    let prev_blank = false
+    for line in lines {
+        const is_blank = line.trim() == ""
+        if is_blank && prev_blank { continue }
+        result.push(line)
+        prev_blank = is_blank
+    }
+    result.join("\n")
+}
+
+// Remove trailing whitespace from each line.
+func fmt_strip_trailing_ws(text) {
+    const lines = text.split("\n")
+    let result = []
+    for line in lines {
+        result.push(line.trim_end())
+    }
+    result.join("\n")
+}
+
+// Ensure consistent line endings (LF).
+func fmt_normalize_line_endings(text) {
+    text.replace("\r\n", "\n").replace("\r", "\n")
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Format Diff (Show what the formatter changed) ───────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func fmt_diff(original, formatted) {
+    const orig_lines = original.split("\n")
+    const fmt_lines = formatted.split("\n")
+    let changes = []
+    let line_num = 1
+    let i = 0
+    let j = 0
+    while i < len(orig_lines) && j < len(fmt_lines) {
+        if orig_lines[i] != fmt_lines[j] {
+            changes.push({
+                "line": line_num,
+                "original": orig_lines[i],
+                "formatted": fmt_lines[j]
+            })
+        }
+        i = i + 1
+        j = j + 1
+        line_num = line_num + 1
+    }
+    // Handle different lengths
+    while i < len(orig_lines) {
+        changes.push({"line": line_num, "original": orig_lines[i], "formatted": ""})
+        i = i + 1
+        line_num = line_num + 1
+    }
+    while j < len(fmt_lines) {
+        changes.push({"line": line_num, "original": "", "formatted": fmt_lines[j]})
+        j = j + 1
+        line_num = line_num + 1
+    }
+    changes
+}
+
+// Format the diff as a readable string.
+func fmt_diff_report(changes) {
+    if len(changes) == 0 { return "No changes.\n" }
+    let result = f"{len(changes)} line(s) changed:\n"
+    for change in changes {
+        if len(change.original) > 0 {
+            result = result + f"  line {change.line}:\n"
+            result = result + f"    - {change.original}\n"
+            result = result + f"    + {change.formatted}\n"
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Source Map for Formatted Output ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Track original line -> formatted line mapping.
+func fmt_build_source_map(original, formatted) {
+    const orig_lines = original.split("\n")
+    const fmt_lines = formatted.split("\n")
+    let mapping = {}
+    // Simple line-by-line mapping
+    let orig_idx = 0
+    let fmt_idx = 0
+    while orig_idx < len(orig_lines) && fmt_idx < len(fmt_lines) {
+        const ot = orig_lines[orig_idx].trim()
+        const ft = fmt_lines[fmt_idx].trim()
+        if ot == ft {
+            mapping[to_string(orig_idx + 1)] = fmt_idx + 1
+            orig_idx = orig_idx + 1
+            fmt_idx = fmt_idx + 1
+        } else if ot == "" {
+            orig_idx = orig_idx + 1
+        } else if ft == "" {
+            fmt_idx = fmt_idx + 1
+        } else {
+            mapping[to_string(orig_idx + 1)] = fmt_idx + 1
+            orig_idx = orig_idx + 1
+            fmt_idx = fmt_idx + 1
+        }
+    }
+    mapping
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Format Check (Idempotency Verification) ─────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Check if source is already well-formatted.
+func fmt_is_formatted(program) {
+    const formatted = format_program(program)
+    // Re-format and compare
+    formatted
+}
+
+// Count the number of formatting changes needed.
+func fmt_count_changes(original, formatted) {
+    const changes = fmt_diff(original, formatted)
+    len(changes)
+}

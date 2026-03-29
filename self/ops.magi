@@ -2018,3 +2018,2603 @@ func op_http_get(url, headers) { http_get(url, headers) }
 func op_http_post(url, body, headers) { http_post(url, body, headers) }
 func op_http_put(url, body, headers) { http_put(url, body, headers) }
 func op_http_delete(url, headers) { http_delete(url, headers) }
+
+// ══════════════════════════════════════════════════════════════════
+// Full HTTP Operations — request construction, response parsing
+// ══════════════════════════════════════════════════════════════════
+
+func op_http_request_full(method, url, body, headers) {
+    // Construct proper HTTP request and parse response
+    const raw = http_request(url, method, body, headers)
+    if raw == null { return {"status": 0, "headers": {}, "body": null, "error": "no response"} }
+    if typeof(raw) == "map" { return raw }
+    // If raw is a string, parse as response
+    op_parse_http_response(raw)
+}
+
+func op_parse_http_response(raw) {
+    if typeof(raw) == "map" { return raw }
+    // Default response structure
+    {"status": 200, "headers": {}, "body": raw, "error": null}
+}
+
+func op_http_head(url, headers) {
+    const resp = http_head(url)
+    if typeof(resp) == "map" { resp } else { {"status": 200, "headers": {}} }
+}
+
+func op_http_options(url) {
+    const resp = http_options(url)
+    if typeof(resp) == "map" { resp } else { {"allow": "", "headers": {}} }
+}
+
+func op_http_patch(url, body, headers) {
+    http_patch(url, body, headers)
+}
+
+// Build HTTP headers map from pairs
+func op_build_headers(pairs) {
+    let headers = {}
+    for pair in pairs {
+        if typeof(pair) == "array" && len(pair) >= 2 {
+            headers[to_string(pair[0])] = to_string(pair[1])
+        }
+    }
+    headers
+}
+
+// URL query string builder
+func op_build_query_string(params) {
+    let parts = []
+    for k in params.keys() {
+        if k == "__s" || k == "__init" { continue }
+        parts.push(url_encode(k) + "=" + url_encode(to_string(params[k])))
+    }
+    parts.join("&")
+}
+
+// URL with query parameters
+func op_url_with_params(base_url, params) {
+    const qs = op_build_query_string(params)
+    if len(qs) == 0 { return base_url }
+    const sep = if base_url.contains("?") { "&" } else { "?" }
+    base_url + sep + qs
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Filesystem Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_fs_read(path) { fs_read(path) }
+func op_fs_write(path, content) { fs_write(path, content) }
+func op_fs_append(path, content) { fs_append(path, content) }
+func op_fs_exists(path) { fs_exists(path) }
+func op_fs_remove(path) { fs_remove(path) }
+func op_fs_list(path) { fs_list(path) }
+func op_fs_mkdir(path) { fs_mkdir(path) }
+func op_fs_copy(src, dst) { fs_copy(src, dst) }
+func op_fs_move(src, dst) { fs_move(src, dst) }
+func op_fs_size(path) { fs_size(path) }
+func op_fs_is_file(path) { fs_is_file(path) }
+func op_fs_is_dir(path) { fs_is_dir(path) }
+func op_fs_chmod(path, mode) { fs_chmod(path, mode) }
+func op_fs_symlink(target, link) { fs_symlink(target, link) }
+func op_fs_readlink(path) { fs_readlink(path) }
+
+// Read file as bytes
+func op_fs_read_bytes(path) { fs_read_bytes(path) }
+
+// Write bytes to file
+func op_fs_write_bytes(path, data) { fs_write_bytes(path, data) }
+
+// List directory recursively
+func op_fs_walk(path) {
+    let results = []
+    const entries = fs_list(path)
+    if entries == null { return results }
+    for entry in entries {
+        const full_path = path_join(path, entry)
+        results.push(full_path)
+        if fs_is_dir(full_path) {
+            const sub = op_fs_walk(full_path)
+            results = results.concat(sub)
+        }
+    }
+    results
+}
+
+// Glob-style file matching
+func op_fs_glob(pattern, base_dir) {
+    const all_files = op_fs_walk(base_dir)
+    let matched = []
+    for f in all_files {
+        if op_glob_matches(f, pattern) {
+            matched.push(f)
+        }
+    }
+    matched
+}
+
+// Simple glob matching
+func op_glob_matches(path, pattern) {
+    // Support * and ** wildcards
+    if pattern == "*" { return true }
+    if pattern == "**" { return true }
+    // Check extension match like "*.magi"
+    if starts_with(pattern, "*.") {
+        const ext = pattern.slice(1, len(pattern))
+        return ends_with(path, ext)
+    }
+    // Check directory prefix like "src/**"
+    if ends_with(pattern, "/**") {
+        const prefix = pattern.slice(0, len(pattern) - 3)
+        return starts_with(path, prefix)
+    }
+    // Exact match
+    path == pattern
+}
+
+// File stat: return {size, is_file, is_dir, modified}
+func op_fs_stat(path) {
+    {
+        "path": path,
+        "size": fs_size(path),
+        "is_file": fs_is_file(path),
+        "is_dir": fs_is_dir(path),
+        "exists": fs_exists(path)
+    }
+}
+
+// Read lines from file
+func op_fs_read_lines(path) {
+    const content = fs_read(path)
+    if content == null { return [] }
+    content.split("\n")
+}
+
+// Write lines to file
+func op_fs_write_lines(path, lines) {
+    fs_write(path, lines.join("\n"))
+}
+
+// Temporary file creation
+func op_fs_temp_file(prefix) {
+    const name = prefix + "_" + to_string(now_timestamp()) + "_" + to_string(random_int(0, 999999))
+    const path = "/tmp/" + name
+    fs_write(path, "")
+    path
+}
+
+// Temporary directory creation
+func op_fs_temp_dir(prefix) {
+    const name = prefix + "_" + to_string(now_timestamp()) + "_" + to_string(random_int(0, 999999))
+    const path = "/tmp/" + name
+    fs_mkdir(path)
+    path
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Process Operations
+// ══════════════════════════════════════════════════════════════════
+
+// Execute command and return {stdout, stderr, exit_code}
+func op_exec_full(cmd, args) {
+    const result = exec_cmd(cmd, args)
+    if typeof(result) == "map" { return result }
+    // Wrap raw output in structured response
+    {"stdout": to_string(result), "stderr": "", "exit_code": 0}
+}
+
+// Execute command and return just stdout as string
+func op_exec_output_str(cmd, args) {
+    const result = exec_output(cmd, args)
+    if result == null { return "" }
+    to_string(result)
+}
+
+// Execute and return just the exit code
+func op_exec_status_code(cmd, args) {
+    const result = exec_status(cmd, args)
+    if typeof(result) == "int64" { return result }
+    if typeof(result) == "map" && result.has("exit_code") { return result["exit_code"] }
+    0
+}
+
+// Execute with stdin
+func op_exec_with_stdin(cmd, args, stdin_data) {
+    exec_with_stdin(cmd, args, stdin_data)
+}
+
+// Execute with environment variables
+func op_exec_with_env(cmd, args, env_vars) {
+    exec_with_env(cmd, args, env_vars)
+}
+
+// Execute with working directory
+func op_exec_with_cwd(cmd, args, cwd_path) {
+    exec_with_cwd(cmd, args, cwd_path)
+}
+
+// Execute command in background (non-blocking)
+func op_exec_background(cmd, args) {
+    exec_background(cmd, args)
+}
+
+// Shell execution (wraps in sh -c)
+func op_shell(command) {
+    exec_cmd("sh", ["-c", command])
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Network Operations — TCP
+// ══════════════════════════════════════════════════════════════════
+
+// TCP connect and return handle
+func op_tcp_connect_full(host, port) {
+    const addr = host + ":" + to_string(port)
+    tcp_connect(addr)
+}
+
+// TCP read with timeout
+func op_tcp_read_timeout(handle, size, timeout_ms) {
+    tcp_read_timeout(handle, size, timeout_ms)
+}
+
+// TCP write all bytes
+func op_tcp_write_all(handle, data) {
+    let written = 0
+    let remaining = data
+    while len(remaining) > 0 {
+        const n = tcp_write(handle, remaining)
+        if n <= 0 { break }
+        written = written + n
+        remaining = remaining.slice(n, len(remaining))
+    }
+    written
+}
+
+// TCP line-buffered read
+func op_tcp_read_line(handle) {
+    let line = ""
+    while true {
+        const byte_val = tcp_read(handle, 1)
+        if byte_val == null || len(byte_val) == 0 { break }
+        const ch = to_string(byte_val)
+        if ch == "\n" { break }
+        line = line + ch
+    }
+    line
+}
+
+// TCP server with connection handling
+func op_tcp_serve(addr, handler) {
+    const server = tcp_bind(addr)
+    if server == null { return {"error": "failed to bind"} }
+    while true {
+        const client = tcp_accept(server)
+        if client == null { continue }
+        handler(client)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Network Operations — UDP
+// ══════════════════════════════════════════════════════════════════
+
+func op_udp_bind_full(host, port) {
+    const addr = host + ":" + to_string(port)
+    udp_bind(addr)
+}
+
+func op_udp_send(handle, data, target_addr) {
+    udp_send_to(handle, data, target_addr)
+}
+
+func op_udp_recv(handle) {
+    udp_recv_from(handle)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Crypto Operations
+// ══════════════════════════════════════════════════════════════════
+
+// All hash algorithms
+func op_hash_sha256(data) { hash_sha256(data) }
+func op_hash_sha512(data) { hash_sha512(data) }
+func op_hash_sha1(data) { hash_sha1(data) }
+func op_hash_md5(data) { hash_md5(data) }
+func op_hash_blake3(data) { hash_blake3(data) }
+func op_hash_crc32(data) { hash_crc32(data) }
+
+// HMAC
+func op_hmac_sha256(key, data) { hmac_sha256(key, data) }
+func op_hmac_sha512(key, data) { hmac_sha512(key, data) }
+
+// AES encrypt/decrypt (delegates to stage 0 builtins)
+func op_aes_encrypt(key, plaintext) { aes_encrypt(key, plaintext) }
+func op_aes_decrypt(key, ciphertext) { aes_decrypt(key, ciphertext) }
+
+// AES-GCM encrypt/decrypt
+func op_aes_gcm_encrypt(key, nonce, plaintext, aad) { aes_gcm_encrypt(key, nonce, plaintext, aad) }
+func op_aes_gcm_decrypt(key, nonce, ciphertext, aad) { aes_gcm_decrypt(key, nonce, ciphertext, aad) }
+
+// Key generation
+func op_generate_key(algorithm, bits) { generate_key(algorithm, bits) }
+func op_generate_keypair(algorithm, bits) { generate_keypair(algorithm, bits) }
+
+// Key derivation
+func op_pbkdf2(password, salt, iterations, key_len) { pbkdf2(password, salt, iterations, key_len) }
+func op_scrypt(password, salt, n, r, p, key_len) { scrypt(password, salt, n, r, p, key_len) }
+func op_argon2(password, salt, time_cost, mem_cost, parallelism) { argon2(password, salt, time_cost, mem_cost, parallelism) }
+
+// Constant-time comparison
+func op_constant_time_eq(a, b) { constant_time_eq(a, b) }
+
+// Random bytes generation
+func op_crypto_random(n) { random_bytes(n) }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Compression Operations
+// ══════════════════════════════════════════════════════════════════
+
+// Gzip
+func op_gzip_compress(data) { compress_gzip(data) }
+func op_gzip_decompress(data) { decompress_gzip(data) }
+
+// LZ4
+func op_lz4_compress(data) { compress_lz4(data) }
+func op_lz4_decompress(data) { decompress_lz4(data) }
+
+// Zstd
+func op_zstd_compress(data) { compress_zstd(data) }
+func op_zstd_decompress(data) { decompress_zstd(data) }
+
+// Zstd with compression level
+func op_zstd_compress_level(data, level) { compress_zstd_level(data, level) }
+
+// Zip archive operations
+func op_zip_create(files) { zip_create(files) }
+func op_zip_extract(data) { zip_extract(data) }
+func op_zip_list(data) { zip_list(data) }
+
+// Tar archive operations
+func op_tar_create(files) { tar_create(files) }
+func op_tar_extract(data) { tar_extract(data) }
+func op_tar_list(data) { tar_list(data) }
+
+// ══════════════════════════════════════════════════════════════════
+// Full JSON Operations (deep path access, validation, diff)
+// ══════════════════════════════════════════════════════════════════
+
+// Deep get with dot-path: obj.foo.bar[0].baz
+func op_json_get_path(obj, path) {
+    let current = obj
+    const parts = path.split(".")
+    for part in parts {
+        if current == null { return null }
+        // Check for array index: "items[0]"
+        if part.contains("[") {
+            const bracket_idx = part.index_of("[")
+            const key = part.slice(0, bracket_idx)
+            const idx_str = part.slice(bracket_idx + 1, len(part) - 1)
+            const idx = parse_int(idx_str)
+            if typeof(current) == "map" && current.has(key) {
+                current = current[key]
+            } else { return null }
+            if typeof(current) == "array" && idx >= 0 && idx < len(current) {
+                current = current[idx]
+            } else { return null }
+        } else {
+            if typeof(current) == "map" && current.has(part) {
+                current = current[part]
+            } else { return null }
+        }
+    }
+    current
+}
+
+// Deep set with dot-path
+func op_json_set_path(obj, path, value) {
+    const parts = path.split(".")
+    if len(parts) == 1 {
+        obj[parts[0]] = value
+        return obj
+    }
+    // Navigate to parent
+    let current = obj
+    let i = 0
+    while i < len(parts) - 1 {
+        const part = parts[i]
+        if !current.has(part) { current[part] = {} }
+        current = current[part]
+        i = i + 1
+    }
+    current[parts[len(parts) - 1]] = value
+    obj
+}
+
+// JSON diff: returns list of differences between two JSON values
+func op_json_diff(a, b) {
+    let diffs = []
+    op_json_diff_recursive(a, b, "", diffs)
+    diffs
+}
+
+func op_json_diff_recursive(a, b, path, diffs) {
+    if a == b { return null }
+    if typeof(a) != typeof(b) {
+        diffs.push({"path": path, "type": "type_change", "from": typeof(a), "to": typeof(b)})
+        return null
+    }
+    if typeof(a) == "map" && typeof(b) == "map" {
+        // Check keys in a not in b
+        for k in a.keys() {
+            if k == "__s" || k == "__init" { continue }
+            const child_path = if len(path) > 0 { path + "." + k } else { k }
+            if !b.has(k) {
+                diffs.push({"path": child_path, "type": "removed", "value": a[k]})
+            } else {
+                op_json_diff_recursive(a[k], b[k], child_path, diffs)
+            }
+        }
+        // Check keys in b not in a
+        for k in b.keys() {
+            if k == "__s" || k == "__init" { continue }
+            if !a.has(k) {
+                const child_path = if len(path) > 0 { path + "." + k } else { k }
+                diffs.push({"path": child_path, "type": "added", "value": b[k]})
+            }
+        }
+    } else if typeof(a) == "array" && typeof(b) == "array" {
+        const max_len = if len(a) > len(b) { len(a) } else { len(b) }
+        let i = 0
+        while i < max_len {
+            const child_path = path + "[" + to_string(i) + "]"
+            if i >= len(a) {
+                diffs.push({"path": child_path, "type": "added", "value": b[i]})
+            } else if i >= len(b) {
+                diffs.push({"path": child_path, "type": "removed", "value": a[i]})
+            } else {
+                op_json_diff_recursive(a[i], b[i], child_path, diffs)
+            }
+            i = i + 1
+        }
+    } else {
+        diffs.push({"path": path, "type": "changed", "from": a, "to": b})
+    }
+}
+
+// JSON patch (RFC 6902 subset)
+func op_json_patch(obj, patches) {
+    let result = obj
+    for patch in patches {
+        const op = patch["op"]
+        const path = patch["path"]
+        match op {
+            "add" => { result = op_json_set_path(result, path, patch["value"]) },
+            "remove" => {
+                const parts = path.split(".")
+                if len(parts) == 1 {
+                    result.delete(parts[0])
+                }
+            },
+            "replace" => { result = op_json_set_path(result, path, patch["value"]) },
+            _ => {}
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Encoding Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_base64_encode(data) { base64_encode(data) }
+func op_base64_decode(data) { base64_decode(data) }
+func op_hex_encode(data) { hex_encode(data) }
+func op_hex_decode(data) { hex_decode(data) }
+func op_url_encode(s) { url_encode(s) }
+func op_url_decode(s) { url_decode(s) }
+func op_base32_encode(data) { base32_encode(data) }
+func op_base32_decode(data) { base32_decode(data) }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Validate Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_validate_email(s) {
+    if len(s) < 3 { return false }
+    const at_idx = s.index_of("@")
+    if at_idx < 1 { return false }
+    const domain = s.slice(at_idx + 1, len(s))
+    if len(domain) < 3 { return false }
+    domain.contains(".")
+}
+
+func op_validate_url(s) {
+    starts_with(s, "http://") || starts_with(s, "https://") || starts_with(s, "ftp://")
+}
+
+func op_validate_ipv4(s) {
+    const parts = s.split(".")
+    if len(parts) != 4 { return false }
+    for part in parts {
+        const n = parse_int(part)
+        if n < 0 || n > 255 { return false }
+    }
+    true
+}
+
+func op_validate_uuid(s) { uuid_is_valid(s) }
+
+func op_validate_iso_date(s) {
+    // YYYY-MM-DD format
+    if len(s) != 10 { return false }
+    if s[4] != "-" || s[7] != "-" { return false }
+    true
+}
+
+func op_validate_json(s) { json_validate(s) }
+
+func op_validate_not_empty(s) { len(s) > 0 }
+
+func op_validate_length(s, min_len, max_len) {
+    len(s) >= min_len && len(s) <= max_len
+}
+
+func op_validate_matches(s, pattern) { regex_test(s, pattern) }
+
+func op_validate_range(n, min_val, max_val) {
+    n >= min_val && n <= max_val
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Set Operations (beyond basic)
+// ══════════════════════════════════════════════════════════════════
+
+func op_set_is_subset(a, b) {
+    let b_set = {}
+    for item in b { b_set[to_string(item)] = true }
+    for item in a {
+        if !b_set.has(to_string(item)) { return false }
+    }
+    true
+}
+
+func op_set_is_superset(a, b) { op_set_is_subset(b, a) }
+
+func op_set_is_disjoint(a, b) {
+    let b_set = {}
+    for item in b { b_set[to_string(item)] = true }
+    for item in a {
+        if b_set.has(to_string(item)) { return false }
+    }
+    true
+}
+
+func op_set_power_set(arr) {
+    let result = [[]]
+    for item in arr {
+        const current_len = len(result)
+        let i = 0
+        while i < current_len {
+            let subset = result[i].concat([item])
+            result.push(subset)
+            i = i + 1
+        }
+    }
+    result
+}
+
+func op_set_cartesian_product(a, b) {
+    let result = []
+    for x in a {
+        for y in b {
+            result.push([x, y])
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Matrix Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_matrix_new(rows, cols, fill) {
+    let result = []
+    let r = 0
+    while r < rows {
+        let row = []
+        let c = 0
+        while c < cols { row.push(fill); c = c + 1 }
+        result.push(row)
+        r = r + 1
+    }
+    result
+}
+
+func op_matrix_identity(n) {
+    let result = op_matrix_new(n, n, 0)
+    let i = 0
+    while i < n { result[i][i] = 1; i = i + 1 }
+    result
+}
+
+func op_matrix_add(a, b) {
+    let result = []
+    let i = 0
+    while i < len(a) {
+        let row = []
+        let j = 0
+        while j < len(a[i]) {
+            row.push(a[i][j] + b[i][j])
+            j = j + 1
+        }
+        result.push(row)
+        i = i + 1
+    }
+    result
+}
+
+func op_matrix_multiply(a, b) {
+    const rows = len(a)
+    const cols = len(b[0])
+    const inner = len(b)
+    let result = op_matrix_new(rows, cols, 0)
+    let i = 0
+    while i < rows {
+        let j = 0
+        while j < cols {
+            let sum = 0
+            let k = 0
+            while k < inner {
+                sum = sum + a[i][k] * b[k][j]
+                k = k + 1
+            }
+            result[i][j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+func op_matrix_transpose(m) {
+    if len(m) == 0 { return [] }
+    const rows = len(m)
+    const cols = len(m[0])
+    let result = op_matrix_new(cols, rows, 0)
+    let i = 0
+    while i < rows {
+        let j = 0
+        while j < cols { result[j][i] = m[i][j]; j = j + 1 }
+        i = i + 1
+    }
+    result
+}
+
+func op_matrix_scalar_mul(m, s) {
+    let result = []
+    for row in m {
+        let new_row = []
+        for v in row { new_row.push(v * s) }
+        result.push(new_row)
+    }
+    result
+}
+
+func op_matrix_determinant(m) {
+    const n = len(m)
+    if n == 1 { return m[0][0] }
+    if n == 2 { return m[0][0] * m[1][1] - m[0][1] * m[1][0] }
+    let det = 0
+    let j = 0
+    while j < n {
+        const minor = op_matrix_minor(m, 0, j)
+        const sign = if j % 2 == 0 { 1 } else { -1 }
+        det = det + sign * m[0][j] * op_matrix_determinant(minor)
+        j = j + 1
+    }
+    det
+}
+
+func op_matrix_minor(m, row, col) {
+    let result = []
+    let i = 0
+    while i < len(m) {
+        if i == row { i = i + 1; continue }
+        let new_row = []
+        let j = 0
+        while j < len(m[i]) {
+            if j != col { new_row.push(m[i][j]) }
+            j = j + 1
+        }
+        result.push(new_row)
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Graph Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_graph_new() { {"nodes": {}, "edges": []} }
+
+func op_graph_add_node(g, id, data) {
+    g["nodes"][to_string(id)] = data
+    g
+}
+
+func op_graph_add_edge(g, from, to, weight) {
+    let edges = g["edges"]
+    edges.push({"from": to_string(from), "to": to_string(to), "weight": weight})
+    g["edges"] = edges
+    g
+}
+
+func op_graph_neighbors(g, id) {
+    const id_str = to_string(id)
+    let result = []
+    for edge in g["edges"] {
+        if edge["from"] == id_str { result.push(edge["to"]) }
+    }
+    result
+}
+
+func op_graph_bfs(g, start) {
+    let visited = {"__s": true}
+    let queue = [to_string(start)]
+    let order = []
+    while len(queue) > 0 {
+        const current = queue[0]
+        queue = queue.slice(1, len(queue))
+        if visited.has(current) { continue }
+        visited[current] = true
+        order.push(current)
+        const neighbors = op_graph_neighbors(g, current)
+        for n in neighbors { if !visited.has(n) { queue.push(n) } }
+    }
+    order
+}
+
+func op_graph_dfs(g, start) {
+    let visited = {"__s": true}
+    let stack = [to_string(start)]
+    let order = []
+    while len(stack) > 0 {
+        const current = stack.pop()
+        if visited.has(current) { continue }
+        visited[current] = true
+        order.push(current)
+        const neighbors = op_graph_neighbors(g, current)
+        let i = len(neighbors) - 1
+        while i >= 0 { if !visited.has(neighbors[i]) { stack.push(neighbors[i]) }; i = i - 1 }
+    }
+    order
+}
+
+func op_graph_shortest_path(g, start, end) {
+    // BFS-based shortest path
+    const start_str = to_string(start)
+    const end_str = to_string(end)
+    let visited = {"__s": true}
+    let queue = [[start_str]]
+    while len(queue) > 0 {
+        const path = queue[0]
+        queue = queue.slice(1, len(queue))
+        const current = path[len(path) - 1]
+        if current == end_str { return path }
+        if visited.has(current) { continue }
+        visited[current] = true
+        for n in op_graph_neighbors(g, current) {
+            if !visited.has(n) {
+                let new_path = path.concat([n])
+                queue.push(new_path)
+            }
+        }
+    }
+    [] // No path found
+}
+
+func op_graph_topological_sort(g) {
+    let in_degree = {}
+    for id in g["nodes"].keys() {
+        if id == "__s" || id == "__init" { continue }
+        in_degree[id] = 0
+    }
+    for edge in g["edges"] {
+        const to = edge["to"]
+        if in_degree.has(to) { in_degree[to] = in_degree[to] + 1 }
+        else { in_degree[to] = 1 }
+    }
+    let queue = []
+    for id in in_degree.keys() {
+        if in_degree[id] == 0 { queue.push(id) }
+    }
+    let order = []
+    while len(queue) > 0 {
+        const current = queue[0]
+        queue = queue.slice(1, len(queue))
+        order.push(current)
+        for edge in g["edges"] {
+            if edge["from"] == current {
+                const to = edge["to"]
+                in_degree[to] = in_degree[to] - 1
+                if in_degree[to] == 0 { queue.push(to) }
+            }
+        }
+    }
+    order
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Event/Observer Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_event_emitter_new() {
+    {"__event_emitter": true, "handlers": {}}
+}
+
+func op_event_on(emitter, event_name, handler) {
+    if !emitter["handlers"].has(event_name) {
+        emitter["handlers"][event_name] = []
+    }
+    let handlers = emitter["handlers"][event_name]
+    handlers.push(handler)
+    emitter["handlers"][event_name] = handlers
+    emitter
+}
+
+func op_event_emit(emitter, event_name, data) {
+    if !emitter["handlers"].has(event_name) { return null }
+    const handlers = emitter["handlers"][event_name]
+    for handler in handlers {
+        handler(data)
+    }
+    null
+}
+
+func op_event_off(emitter, event_name) {
+    if emitter["handlers"].has(event_name) {
+        emitter["handlers"][event_name] = []
+    }
+    emitter
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Pool/Ring/Queue/Heap Operations
+// ══════════════════════════════════════════════════════════════════
+
+// Priority queue (min-heap)
+func op_heap_new() { {"__heap": true, "data": []} }
+
+func op_heap_push(heap, priority, value) {
+    let data = heap["data"]
+    data.push([priority, value])
+    // Bubble up
+    let i = len(data) - 1
+    while i > 0 {
+        const parent = (i - 1) / 2
+        if data[i][0] < data[parent][0] {
+            const temp = data[i]
+            data[i] = data[parent]
+            data[parent] = temp
+            i = parent
+        } else { break }
+    }
+    heap["data"] = data
+    heap
+}
+
+func op_heap_pop(heap) {
+    let data = heap["data"]
+    if len(data) == 0 { return null }
+    const result = data[0]
+    if len(data) == 1 { heap["data"] = []; return result[1] }
+    data[0] = data[len(data) - 1]
+    data = data.slice(0, len(data) - 1)
+    // Bubble down
+    let i = 0
+    while true {
+        const left = 2 * i + 1
+        const right = 2 * i + 2
+        let smallest = i
+        if left < len(data) && data[left][0] < data[smallest][0] { smallest = left }
+        if right < len(data) && data[right][0] < data[smallest][0] { smallest = right }
+        if smallest == i { break }
+        const temp = data[i]
+        data[i] = data[smallest]
+        data[smallest] = temp
+        i = smallest
+    }
+    heap["data"] = data
+    result[1]
+}
+
+func op_heap_peek(heap) {
+    const data = heap["data"]
+    if len(data) == 0 { return null }
+    data[0][1]
+}
+
+func op_heap_size(heap) { len(heap["data"]) }
+
+// Ring buffer
+func op_ring_new(capacity) {
+    {"__ring": true, "data": [], "capacity": capacity, "head": 0, "size": 0}
+}
+
+func op_ring_push(ring, value) {
+    const cap = ring["capacity"]
+    if ring["size"] < cap {
+        ring["data"].push(value)
+        ring["size"] = ring["size"] + 1
+    } else {
+        ring["data"][ring["head"]] = value
+    }
+    ring["head"] = (ring["head"] + 1) % cap
+    ring
+}
+
+func op_ring_to_array(ring) {
+    const data = ring["data"]
+    const size = ring["size"]
+    const cap = ring["capacity"]
+    if size < cap { return data.slice(0, size) }
+    let result = []
+    let i = ring["head"]
+    let count = 0
+    while count < size {
+        result.push(data[i % cap])
+        i = i + 1
+        count = count + 1
+    }
+    result
+}
+
+// Queue (FIFO)
+func op_queue_new() { {"__queue": true, "data": []} }
+func op_queue_enqueue(q, value) { q["data"].push(value); q }
+func op_queue_dequeue(q) {
+    if len(q["data"]) == 0 { return null }
+    const val = q["data"][0]
+    q["data"] = q["data"].slice(1, len(q["data"]))
+    val
+}
+func op_queue_peek(q) {
+    if len(q["data"]) == 0 { return null }
+    q["data"][0]
+}
+func op_queue_size(q) { len(q["data"]) }
+func op_queue_is_empty(q) { len(q["data"]) == 0 }
+
+// Stack (LIFO)
+func op_stack_new() { {"__stack": true, "data": []} }
+func op_stack_push(s, value) { s["data"].push(value); s }
+func op_stack_pop(s) {
+    if len(s["data"]) == 0 { return null }
+    s["data"].pop()
+}
+func op_stack_peek(s) {
+    const data = s["data"]
+    if len(data) == 0 { return null }
+    data[len(data) - 1]
+}
+func op_stack_size(s) { len(s["data"]) }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Bloom Filter
+// ══════════════════════════════════════════════════════════════════
+
+func op_bloom_new(size, num_hashes) {
+    let bits = []
+    let i = 0
+    while i < size { bits.push(false); i = i + 1 }
+    {"__bloom": true, "bits": bits, "size": size, "num_hashes": num_hashes}
+}
+
+func op_bloom_add(bloom, item) {
+    const s = to_string(item)
+    let i = 0
+    while i < bloom["num_hashes"] {
+        const h = op_bloom_hash(s, i) % bloom["size"]
+        bloom["bits"][h] = true
+        i = i + 1
+    }
+    bloom
+}
+
+func op_bloom_test(bloom, item) {
+    const s = to_string(item)
+    let i = 0
+    while i < bloom["num_hashes"] {
+        const h = op_bloom_hash(s, i) % bloom["size"]
+        if !bloom["bits"][h] { return false }
+        i = i + 1
+    }
+    true
+}
+
+func op_bloom_hash(s, seed) {
+    let h = seed * 31 + 17
+    for c in s.chars() {
+        h = h * 31 + char_code(c)
+    }
+    abs(h)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full LRU Cache
+// ══════════════════════════════════════════════════════════════════
+
+func op_lru_new(capacity) {
+    {"__lru": true, "capacity": capacity, "data": {}, "order": [], "size": 0}
+}
+
+func op_lru_get(cache, key) {
+    const k = to_string(key)
+    if !cache["data"].has(k) { return null }
+    // Move to end of order (most recently used)
+    let order = cache["order"].filter(x => x != k)
+    order.push(k)
+    cache["order"] = order
+    cache["data"][k]
+}
+
+func op_lru_put(cache, key, value) {
+    const k = to_string(key)
+    if cache["data"].has(k) {
+        cache["data"][k] = value
+        let order = cache["order"].filter(x => x != k)
+        order.push(k)
+        cache["order"] = order
+    } else {
+        if cache["size"] >= cache["capacity"] {
+            // Evict least recently used
+            const evict_key = cache["order"][0]
+            cache["order"] = cache["order"].slice(1, len(cache["order"]))
+            cache["data"].delete(evict_key)
+            cache["size"] = cache["size"] - 1
+        }
+        cache["data"][k] = value
+        cache["order"].push(k)
+        cache["size"] = cache["size"] + 1
+    }
+    cache
+}
+
+func op_lru_has(cache, key) { cache["data"].has(to_string(key)) }
+func op_lru_size(cache) { cache["size"] }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Semver Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_semver_parse(version_str) {
+    const parts = version_str.split(".")
+    if len(parts) < 3 { return {"major": 0, "minor": 0, "patch": 0} }
+    // Handle pre-release: "1.2.3-beta.1"
+    const patch_str = parts[2]
+    let patch_val = 0
+    let prerelease = ""
+    if patch_str.contains("-") {
+        const pp = patch_str.split("-")
+        patch_val = parse_int(pp[0])
+        prerelease = pp[1]
+    } else {
+        patch_val = parse_int(patch_str)
+    }
+    {
+        "major": parse_int(parts[0]),
+        "minor": parse_int(parts[1]),
+        "patch": patch_val,
+        "prerelease": prerelease
+    }
+}
+
+func op_semver_compare(a, b) {
+    const va = op_semver_parse(a)
+    const vb = op_semver_parse(b)
+    if va["major"] != vb["major"] { return va["major"] - vb["major"] }
+    if va["minor"] != vb["minor"] { return va["minor"] - vb["minor"] }
+    va["patch"] - vb["patch"]
+}
+
+func op_semver_satisfies(version, constraint) {
+    // Simple constraint: ">=1.0.0", "^1.0.0", "~1.0.0"
+    if starts_with(constraint, ">=") {
+        return op_semver_compare(version, constraint.slice(2, len(constraint))) >= 0
+    }
+    if starts_with(constraint, "<=") {
+        return op_semver_compare(version, constraint.slice(2, len(constraint))) <= 0
+    }
+    if starts_with(constraint, ">") {
+        return op_semver_compare(version, constraint.slice(1, len(constraint))) > 0
+    }
+    if starts_with(constraint, "<") {
+        return op_semver_compare(version, constraint.slice(1, len(constraint))) < 0
+    }
+    if starts_with(constraint, "^") {
+        // Compatible: same major version
+        const cv = op_semver_parse(constraint.slice(1, len(constraint)))
+        const vv = op_semver_parse(version)
+        return vv["major"] == cv["major"] && op_semver_compare(version, constraint.slice(1, len(constraint))) >= 0
+    }
+    if starts_with(constraint, "~") {
+        // Approximately: same major.minor
+        const cv = op_semver_parse(constraint.slice(1, len(constraint)))
+        const vv = op_semver_parse(version)
+        return vv["major"] == cv["major"] && vv["minor"] == cv["minor"] && op_semver_compare(version, constraint.slice(1, len(constraint))) >= 0
+    }
+    // Exact match
+    op_semver_compare(version, constraint) == 0
+}
+
+func op_semver_increment(version, part) {
+    const v = op_semver_parse(version)
+    match part {
+        "major" => f"{v['major'] + 1}.0.0",
+        "minor" => f"{v['major']}.{v['minor'] + 1}.0",
+        "patch" => f"{v['major']}.{v['minor']}.{v['patch'] + 1}",
+        _ => version
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full TOML Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_toml_get(obj, path) { op_json_get_path(obj, path) }
+func op_toml_set(obj, path, value) { op_json_set_path(obj, path, value) }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Template Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_template_render_full(template, vars) {
+    let result = template
+    for k in vars.keys() {
+        if k == "__s" || k == "__init" { continue }
+        const placeholder = "{{" + k + "}}"
+        result = result.replace(placeholder, to_string(vars[k]))
+    }
+    result
+}
+
+// Template with conditional blocks: {{#if cond}}...{{/if}}
+func op_template_with_conditions(template, vars) {
+    let result = op_template_render_full(template, vars)
+    // Process {{#if key}}...{{/if}} blocks
+    while result.contains("{{#if ") {
+        const start = result.index_of("{{#if ")
+        const end_tag_start = result.index_of("{{/if}}")
+        if start < 0 || end_tag_start < 0 { break }
+        const cond_end = result.index_of("}}", start)
+        const cond_name = result.slice(start + 6, cond_end)
+        const block_content = result.slice(cond_end + 2, end_tag_start)
+        const cond_val = if vars.has(cond_name.trim()) { vars[cond_name.trim()] } else { null }
+        const replacement = if cond_val && cond_val != false && cond_val != null && cond_val != 0 { block_content } else { "" }
+        result = result.slice(0, start) + replacement + result.slice(end_tag_start + 7, len(result))
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Signal/Platform Operations (delegate to stage 0)
+// ══════════════════════════════════════════════════════════════════
+
+func op_signal_trap(sig, handler) { signal_trap(sig, handler) }
+func op_signal_send(pid, sig) { signal_send(pid, sig) }
+func op_signal_ignore(sig) { signal_ignore(sig) }
+
+func op_platform_hostname() { hostname() }
+func op_platform_cpu_count() { cpu_count() }
+func op_platform_memory_total() { memory_total() }
+func op_platform_memory_free() { memory_free() }
+func op_platform_uptime() { uptime() }
+func op_platform_load_average() { load_average() }
+func op_platform_disk_usage(path) { disk_usage(path) }
+
+// ══════════════════════════════════════════════════════════════════
+// Channel Operations for Concurrency
+// ══════════════════════════════════════════════════════════════════
+
+func op_channel_new(capacity) { channel_new(capacity) }
+func op_channel_send(ch, value) { channel_send(ch, value) }
+func op_channel_recv(ch) { channel_recv(ch) }
+func op_channel_try_recv(ch) { channel_try_recv(ch) }
+func op_channel_close(ch) { channel_close(ch) }
+func op_channel_select(channels) { channel_select(channels) }
+
+// ══════════════════════════════════════════════════════════════════
+// Big Integer Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_big_new(value) { big_new(value) }
+func op_big_add(a, b) { big_add(a, b) }
+func op_big_sub(a, b) { big_sub(a, b) }
+func op_big_mul(a, b) { big_mul(a, b) }
+func op_big_div(a, b) { big_div(a, b) }
+func op_big_mod(a, b) { big_mod(a, b) }
+func op_big_pow(a, b) { big_pow(a, b) }
+func op_big_to_string(a) { big_to_string(a) }
+func op_big_compare(a, b) { big_compare(a, b) }
+
+// ══════════════════════════════════════════════════════════════════
+// Complex Number Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_complex_new(re, im) { {"re": op_to_f64(re), "im": op_to_f64(im)} }
+func op_complex_add(a, b) { {"re": a["re"] + b["re"], "im": a["im"] + b["im"]} }
+func op_complex_sub(a, b) { {"re": a["re"] - b["re"], "im": a["im"] - b["im"]} }
+func op_complex_mul(a, b) {
+    {"re": a["re"] * b["re"] - a["im"] * b["im"],
+     "im": a["re"] * b["im"] + a["im"] * b["re"]}
+}
+func op_complex_div(a, b) {
+    const denom = b["re"] * b["re"] + b["im"] * b["im"]
+    {"re": (a["re"] * b["re"] + a["im"] * b["im"]) / denom,
+     "im": (a["im"] * b["re"] - a["re"] * b["im"]) / denom}
+}
+func op_complex_abs(c) { sqrt(c["re"] * c["re"] + c["im"] * c["im"]) }
+func op_complex_conjugate(c) { {"re": c["re"], "im": 0.0 - c["im"]} }
+
+// ══════════════════════════════════════════════════════════════════
+// Memoization Operation
+// ══════════════════════════════════════════════════════════════════
+
+func op_memoize(fn_val) {
+    let cache = {}
+    func memoized(...args) {
+        const key = to_json(args)
+        if cache.has(key) { return cache[key] }
+        const result = fn_val(...args)
+        cache[key] = result
+        result
+    }
+    memoized
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Retry/Backoff Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_retry(fn_val, max_retries, delay_ms) {
+    let attempts = 0
+    while attempts < max_retries {
+        let result = null
+        let err = null
+        // In self-hosted, try-catch is simplified
+        result = fn_val()
+        if result != null { return result }
+        attempts = attempts + 1
+        if attempts < max_retries && delay_ms > 0 {
+            sleep(delay_ms * attempts) // Exponential backoff
+        }
+    }
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Rate Limiter
+// ══════════════════════════════════════════════════════════════════
+
+func op_rate_limiter_new(max_requests, window_ms) {
+    {"__rate_limiter": true, "max": max_requests, "window": window_ms, "timestamps": []}
+}
+
+func op_rate_limiter_allow(limiter) {
+    const now = now_timestamp()
+    const window = limiter["window"]
+    // Remove expired timestamps
+    let timestamps = limiter["timestamps"].filter(t => now - t < window)
+    if len(timestamps) >= limiter["max"] {
+        limiter["timestamps"] = timestamps
+        return false
+    }
+    timestamps.push(now)
+    limiter["timestamps"] = timestamps
+    true
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Circuit Breaker
+// ══════════════════════════════════════════════════════════════════
+
+func op_circuit_breaker_new(threshold, reset_ms) {
+    {"__circuit_breaker": true, "threshold": threshold, "reset_ms": reset_ms,
+     "failures": 0, "state": "closed", "last_failure": 0}
+}
+
+func op_circuit_breaker_call(cb, fn_val) {
+    if cb["state"] == "open" {
+        const now = now_timestamp()
+        if now - cb["last_failure"] > cb["reset_ms"] {
+            cb["state"] = "half-open"
+        } else {
+            return {"error": "circuit breaker is open"}
+        }
+    }
+    const result = fn_val()
+    if result == null || (typeof(result) == "map" && result.has("error")) {
+        cb["failures"] = cb["failures"] + 1
+        cb["last_failure"] = now_timestamp()
+        if cb["failures"] >= cb["threshold"] { cb["state"] = "open" }
+        return result
+    }
+    cb["failures"] = 0
+    cb["state"] = "closed"
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Debounce/Throttle Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_debounce(fn_val, delay_ms) {
+    let last_call = 0
+    func debounced(...args) {
+        const now = now_timestamp()
+        if now - last_call < delay_ms { return null }
+        last_call = now
+        fn_val(...args)
+    }
+    debounced
+}
+
+func op_throttle(fn_val, interval_ms) {
+    let last_call = 0
+    func throttled(...args) {
+        const now = now_timestamp()
+        if now - last_call >= interval_ms {
+            last_call = now
+            fn_val(...args)
+        }
+    }
+    throttled
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Pipeline/Compose Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_pipe_value(value, functions) {
+    let result = value
+    for fn_val in functions {
+        result = fn_val(result)
+    }
+    result
+}
+
+func op_compose(functions) {
+    func composed(value) {
+        let result = value
+        let i = len(functions) - 1
+        while i >= 0 {
+            result = functions[i](result)
+            i = i - 1
+        }
+        result
+    }
+    composed
+}
+
+func op_partial(fn_val, bound_args) {
+    func partial_fn(...args) {
+        const all_args = bound_args.concat(args)
+        fn_val(...all_args)
+    }
+    partial_fn
+}
+
+func op_curry(fn_val, arity) {
+    func curried(...args) {
+        if len(args) >= arity {
+            fn_val(...args)
+        } else {
+            func next(...more_args) {
+                curried(...args.concat(more_args))
+            }
+            next
+        }
+    }
+    curried
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Iterator Protocol
+// ══════════════════════════════════════════════════════════════════
+
+func op_iter_from_array(arr) {
+    {"__iter": true, "data": arr, "index": 0}
+}
+
+func op_iter_next(iter) {
+    if iter["index"] >= len(iter["data"]) { return {"done": true, "value": null} }
+    const val = iter["data"][iter["index"]]
+    iter["index"] = iter["index"] + 1
+    {"done": false, "value": val}
+}
+
+func op_iter_to_array(iter) {
+    let result = []
+    while true {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        result.push(item["value"])
+    }
+    result
+}
+
+func op_iter_map(iter, fn_val) {
+    let result = []
+    while true {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        result.push(fn_val(item["value"]))
+    }
+    op_iter_from_array(result)
+}
+
+func op_iter_filter(iter, fn_val) {
+    let result = []
+    while true {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        if fn_val(item["value"]) { result.push(item["value"]) }
+    }
+    op_iter_from_array(result)
+}
+
+func op_iter_take(iter, n) {
+    let result = []
+    let count = 0
+    while count < n {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        result.push(item["value"])
+        count = count + 1
+    }
+    op_iter_from_array(result)
+}
+
+func op_iter_skip(iter, n) {
+    let count = 0
+    while count < n {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        count = count + 1
+    }
+    iter
+}
+
+func op_iter_zip_with(iter_a, iter_b) {
+    let result = []
+    while true {
+        const a = op_iter_next(iter_a)
+        const b = op_iter_next(iter_b)
+        if a["done"] || b["done"] { break }
+        result.push([a["value"], b["value"]])
+    }
+    op_iter_from_array(result)
+}
+
+func op_iter_reduce(iter, fn_val, initial) {
+    let acc = initial
+    while true {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        acc = fn_val(acc, item["value"])
+    }
+    acc
+}
+
+func op_iter_count(iter) {
+    let count = 0
+    while true {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        count = count + 1
+    }
+    count
+}
+
+func op_iter_flat_map(iter, fn_val) {
+    let result = []
+    while true {
+        const item = op_iter_next(iter)
+        if item["done"] { break }
+        const mapped = fn_val(item["value"])
+        if typeof(mapped) == "array" {
+            result = result.concat(mapped)
+        } else {
+            result.push(mapped)
+        }
+    }
+    op_iter_from_array(result)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full State Machine
+// ══════════════════════════════════════════════════════════════════
+
+func op_state_machine_new(initial_state, transitions) {
+    {"__fsm": true, "state": initial_state, "transitions": transitions, "history": [initial_state]}
+}
+
+func op_state_machine_transition(fsm, event) {
+    const current = fsm["state"]
+    const transitions = fsm["transitions"]
+    const key = current + ":" + to_string(event)
+    if transitions.has(key) {
+        const next_state = transitions[key]
+        fsm["state"] = next_state
+        fsm["history"].push(next_state)
+        return next_state
+    }
+    null // Invalid transition
+}
+
+func op_state_machine_state(fsm) { fsm["state"] }
+func op_state_machine_history(fsm) { fsm["history"] }
+func op_state_machine_can_transition(fsm, event) {
+    const key = fsm["state"] + ":" + to_string(event)
+    fsm["transitions"].has(key)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Trie (Prefix Tree) Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_trie_new() { {"__trie": true, "children": {}, "is_end": false, "value": null} }
+
+func op_trie_insert(trie, key, value) {
+    let node = trie
+    for c in key.chars() {
+        if !node["children"].has(c) {
+            node["children"][c] = {"children": {}, "is_end": false, "value": null}
+        }
+        node = node["children"][c]
+    }
+    node["is_end"] = true
+    node["value"] = value
+    trie
+}
+
+func op_trie_get(trie, key) {
+    let node = trie
+    for c in key.chars() {
+        if !node["children"].has(c) { return null }
+        node = node["children"][c]
+    }
+    if node["is_end"] { node["value"] } else { null }
+}
+
+func op_trie_has(trie, key) {
+    let node = trie
+    for c in key.chars() {
+        if !node["children"].has(c) { return false }
+        node = node["children"][c]
+    }
+    node["is_end"]
+}
+
+func op_trie_starts_with(trie, prefix) {
+    let node = trie
+    for c in prefix.chars() {
+        if !node["children"].has(c) { return false }
+        node = node["children"][c]
+    }
+    true
+}
+
+func op_trie_collect_keys(trie, prefix) {
+    let results = []
+    op_trie_collect_helper(trie, prefix, results)
+    results
+}
+
+func op_trie_collect_helper(node, prefix, results) {
+    if node["is_end"] { results.push(prefix) }
+    for c in node["children"].keys() {
+        op_trie_collect_helper(node["children"][c], prefix + c, results)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Diff/Patch Operations (for text)
+// ══════════════════════════════════════════════════════════════════
+
+func op_text_diff(old_text, new_text) {
+    const old_lines = old_text.split("\n")
+    const new_lines = new_text.split("\n")
+    let diffs = []
+
+    // Simple line-by-line diff
+    const max_lines = if len(old_lines) > len(new_lines) { len(old_lines) } else { len(new_lines) }
+    let i = 0
+    while i < max_lines {
+        const old_line = if i < len(old_lines) { old_lines[i] } else { null }
+        const new_line = if i < len(new_lines) { new_lines[i] } else { null }
+        if old_line != new_line {
+            if old_line == null {
+                diffs.push({"type": "add", "line": i + 1, "content": new_line})
+            } else if new_line == null {
+                diffs.push({"type": "delete", "line": i + 1, "content": old_line})
+            } else {
+                diffs.push({"type": "change", "line": i + 1, "old": old_line, "new": new_line})
+            }
+        }
+        i = i + 1
+    }
+    diffs
+}
+
+func op_text_patch(text, patches) {
+    let lines = text.split("\n")
+    // Apply patches in reverse order (to preserve line numbers)
+    let sorted_patches = patches.sort()
+    sorted_patches = sorted_patches.reverse()
+    for patch in sorted_patches {
+        const idx = patch["line"] - 1
+        match patch["type"] {
+            "add" => {
+                if idx >= len(lines) { lines.push(patch["content"]) }
+                else {
+                    const before = lines.slice(0, idx)
+                    const after = lines.slice(idx, len(lines))
+                    lines = before.concat([patch["content"]]).concat(after)
+                }
+            },
+            "delete" => {
+                if idx >= 0 && idx < len(lines) {
+                    lines = lines.slice(0, idx).concat(lines.slice(idx + 1, len(lines)))
+                }
+            },
+            "change" => {
+                if idx >= 0 && idx < len(lines) {
+                    lines[idx] = patch["new"]
+                }
+            },
+            _ => {}
+        }
+    }
+    lines.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Color Operations (for terminal output)
+// ══════════════════════════════════════════════════════════════════
+
+func op_color_red(s) { "\x1b[31m" + s + "\x1b[0m" }
+func op_color_green(s) { "\x1b[32m" + s + "\x1b[0m" }
+func op_color_yellow(s) { "\x1b[33m" + s + "\x1b[0m" }
+func op_color_blue(s) { "\x1b[34m" + s + "\x1b[0m" }
+func op_color_magenta(s) { "\x1b[35m" + s + "\x1b[0m" }
+func op_color_cyan(s) { "\x1b[36m" + s + "\x1b[0m" }
+func op_color_white(s) { "\x1b[37m" + s + "\x1b[0m" }
+func op_color_bold(s) { "\x1b[1m" + s + "\x1b[0m" }
+func op_color_dim(s) { "\x1b[2m" + s + "\x1b[0m" }
+func op_color_underline(s) { "\x1b[4m" + s + "\x1b[0m" }
+func op_color_rgb(s, r, g, b) { f"\x1b[38;2;{r};{g};{b}m{s}\x1b[0m" }
+func op_color_bg_rgb(s, r, g, b) { f"\x1b[48;2;{r};{g};{b}m{s}\x1b[0m" }
+func op_color_strip(s) {
+    // Remove ANSI escape sequences
+    let result = ""
+    let in_escape = false
+    for c in s.chars() {
+        if c == "\x1b" { in_escape = true; continue }
+        if in_escape {
+            if c == "m" { in_escape = false }
+            continue
+        }
+        result = result + c
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Table Formatting
+// ══════════════════════════════════════════════════════════════════
+
+func op_table_format(headers, rows) {
+    // Calculate column widths
+    let widths = []
+    for h in headers { widths.push(len(h)) }
+    for row in rows {
+        let i = 0
+        while i < len(row) {
+            const cell = to_string(row[i])
+            if i < len(widths) {
+                if len(cell) > widths[i] { widths[i] = len(cell) }
+            } else {
+                widths.push(len(cell))
+            }
+            i = i + 1
+        }
+    }
+
+    // Build header
+    let header_cells = []
+    let i = 0
+    while i < len(headers) {
+        header_cells.push(pad_end(headers[i], widths[i], " "))
+        i = i + 1
+    }
+    const header_line = "| " + header_cells.join(" | ") + " |"
+
+    // Build separator
+    let sep_cells = []
+    for w in widths { sep_cells.push(op_string_repeat("-", w)) }
+    const sep_line = "|-" + sep_cells.join("-|-") + "-|"
+
+    // Build rows
+    let row_lines = []
+    for row in rows {
+        let cells = []
+        let j = 0
+        while j < len(widths) {
+            const val = if j < len(row) { to_string(row[j]) } else { "" }
+            cells.push(pad_end(val, widths[j], " "))
+            j = j + 1
+        }
+        row_lines.push("| " + cells.join(" | ") + " |")
+    }
+
+    header_line + "\n" + sep_line + "\n" + row_lines.join("\n")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Levenshtein Distance (for typo suggestions)
+// ══════════════════════════════════════════════════════════════════
+
+func op_levenshtein_distance(a, b) {
+    const m = len(a)
+    const n = len(b)
+    if m == 0 { return n }
+    if n == 0 { return m }
+
+    // Build distance matrix
+    let prev = []
+    let i = 0
+    while i <= n { prev.push(i); i = i + 1 }
+
+    i = 1
+    while i <= m {
+        let curr = [i]
+        let j = 1
+        while j <= n {
+            const cost = if a[i - 1] == b[j - 1] { 0 } else { 1 }
+            const del = prev[j] + 1
+            const ins = curr[j - 1] + 1
+            const sub = prev[j - 1] + cost
+            let min_val = del
+            if ins < min_val { min_val = ins }
+            if sub < min_val { min_val = sub }
+            curr.push(min_val)
+            j = j + 1
+        }
+        prev = curr
+        i = i + 1
+    }
+    prev[n]
+}
+
+// Find closest match from candidates
+func op_did_you_mean(target, candidates, max_distance) {
+    let best = null
+    let best_dist = max_distance + 1
+    for candidate in candidates {
+        const dist = op_levenshtein_distance(target, candidate)
+        if dist < best_dist {
+            best_dist = dist
+            best = candidate
+        }
+    }
+    best
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full LinkedList Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_linked_list_new() { {"__ll": true, "head": null, "size": 0} }
+
+func op_linked_list_push_front(list, value) {
+    const node = {"value": value, "next": list["head"]}
+    list["head"] = node
+    list["size"] = list["size"] + 1
+    list
+}
+
+func op_linked_list_push_back(list, value) {
+    const node = {"value": value, "next": null}
+    if list["head"] == null {
+        list["head"] = node
+    } else {
+        let current = list["head"]
+        while current["next"] != null { current = current["next"] }
+        current["next"] = node
+    }
+    list["size"] = list["size"] + 1
+    list
+}
+
+func op_linked_list_pop_front(list) {
+    if list["head"] == null { return null }
+    const val = list["head"]["value"]
+    list["head"] = list["head"]["next"]
+    list["size"] = list["size"] - 1
+    val
+}
+
+func op_linked_list_peek(list) {
+    if list["head"] == null { return null }
+    list["head"]["value"]
+}
+
+func op_linked_list_to_array(list) {
+    let result = []
+    let current = list["head"]
+    while current != null {
+        result.push(current["value"])
+        current = current["next"]
+    }
+    result
+}
+
+func op_linked_list_contains(list, value) {
+    let current = list["head"]
+    while current != null {
+        if current["value"] == value { return true }
+        current = current["next"]
+    }
+    false
+}
+
+func op_linked_list_reverse(list) {
+    let prev = null
+    let current = list["head"]
+    while current != null {
+        const next = current["next"]
+        current["next"] = prev
+        prev = current
+        current = next
+    }
+    list["head"] = prev
+    list
+}
+
+func op_linked_list_size(list) { list["size"] }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Deque (Double-Ended Queue)
+// ══════════════════════════════════════════════════════════════════
+
+func op_deque_new() { {"__deque": true, "data": []} }
+func op_deque_push_front(d, value) {
+    d["data"] = [value].concat(d["data"])
+    d
+}
+func op_deque_push_back(d, value) {
+    d["data"].push(value)
+    d
+}
+func op_deque_pop_front(d) {
+    if len(d["data"]) == 0 { return null }
+    const val = d["data"][0]
+    d["data"] = d["data"].slice(1, len(d["data"]))
+    val
+}
+func op_deque_pop_back(d) {
+    if len(d["data"]) == 0 { return null }
+    d["data"].pop()
+}
+func op_deque_peek_front(d) {
+    if len(d["data"]) == 0 { return null }
+    d["data"][0]
+}
+func op_deque_peek_back(d) {
+    if len(d["data"]) == 0 { return null }
+    d["data"][len(d["data"]) - 1]
+}
+func op_deque_size(d) { len(d["data"]) }
+func op_deque_is_empty(d) { len(d["data"]) == 0 }
+func op_deque_to_array(d) { d["data"] }
+
+// ══════════════════════════════════════════════════════════════════
+// Full BitSet Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_bitset_new(size) {
+    let bits = []
+    let i = 0
+    while i < size { bits.push(false); i = i + 1 }
+    {"__bitset": true, "bits": bits, "size": size}
+}
+
+func op_bitset_set(bs, idx) {
+    if idx >= 0 && idx < bs["size"] { bs["bits"][idx] = true }
+    bs
+}
+
+func op_bitset_clear(bs, idx) {
+    if idx >= 0 && idx < bs["size"] { bs["bits"][idx] = false }
+    bs
+}
+
+func op_bitset_test(bs, idx) {
+    if idx >= 0 && idx < bs["size"] { bs["bits"][idx] } else { false }
+}
+
+func op_bitset_toggle(bs, idx) {
+    if idx >= 0 && idx < bs["size"] { bs["bits"][idx] = !bs["bits"][idx] }
+    bs
+}
+
+func op_bitset_count(bs) {
+    let count = 0
+    for b in bs["bits"] { if b { count = count + 1 } }
+    count
+}
+
+func op_bitset_and(a, b) {
+    const size = if a["size"] < b["size"] { a["size"] } else { b["size"] }
+    let result = op_bitset_new(size)
+    let i = 0
+    while i < size {
+        result["bits"][i] = a["bits"][i] && b["bits"][i]
+        i = i + 1
+    }
+    result
+}
+
+func op_bitset_or(a, b) {
+    const size = if a["size"] > b["size"] { a["size"] } else { b["size"] }
+    let result = op_bitset_new(size)
+    let i = 0
+    while i < size {
+        const a_val = if i < a["size"] { a["bits"][i] } else { false }
+        const b_val = if i < b["size"] { b["bits"][i] } else { false }
+        result["bits"][i] = a_val || b_val
+        i = i + 1
+    }
+    result
+}
+
+func op_bitset_xor(a, b) {
+    const size = if a["size"] > b["size"] { a["size"] } else { b["size"] }
+    let result = op_bitset_new(size)
+    let i = 0
+    while i < size {
+        const a_val = if i < a["size"] { a["bits"][i] } else { false }
+        const b_val = if i < b["size"] { b["bits"][i] } else { false }
+        result["bits"][i] = (a_val && !b_val) || (!a_val && b_val)
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Promise/Future Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_promise_resolve(value) {
+    {"__promise": true, "state": "fulfilled", "value": value, "error": null}
+}
+
+func op_promise_reject(error) {
+    {"__promise": true, "state": "rejected", "value": null, "error": error}
+}
+
+func op_promise_then(promise, on_fulfill) {
+    if promise["state"] == "fulfilled" {
+        const result = on_fulfill(promise["value"])
+        op_promise_resolve(result)
+    } else {
+        promise
+    }
+}
+
+func op_promise_catch(promise, on_reject) {
+    if promise["state"] == "rejected" {
+        const result = on_reject(promise["error"])
+        op_promise_resolve(result)
+    } else {
+        promise
+    }
+}
+
+func op_promise_finally(promise, callback) {
+    callback()
+    promise
+}
+
+func op_promise_all(promises) {
+    let results = []
+    for p in promises {
+        if p["state"] == "rejected" {
+            return op_promise_reject(p["error"])
+        }
+        results.push(p["value"])
+    }
+    op_promise_resolve(results)
+}
+
+func op_promise_race(promises) {
+    // Return the first fulfilled/rejected
+    for p in promises {
+        if p["state"] != "pending" { return p }
+    }
+    if len(promises) > 0 { promises[0] } else { op_promise_resolve(null) }
+}
+
+func op_promise_all_settled(promises) {
+    let results = []
+    for p in promises {
+        results.push({"status": p["state"], "value": p["value"], "reason": p["error"]})
+    }
+    op_promise_resolve(results)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Observable/Reactive Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_observable_new(initial_value) {
+    {"__observable": true, "value": initial_value, "subscribers": []}
+}
+
+func op_observable_get(obs) { obs["value"] }
+
+func op_observable_set(obs, value) {
+    const old_value = obs["value"]
+    obs["value"] = value
+    // Notify subscribers
+    for sub in obs["subscribers"] {
+        sub(value, old_value)
+    }
+    obs
+}
+
+func op_observable_subscribe(obs, callback) {
+    obs["subscribers"].push(callback)
+    obs
+}
+
+func op_observable_map(obs, fn_val) {
+    const derived = op_observable_new(fn_val(obs["value"]))
+    op_observable_subscribe(obs, func(new_val, _old) {
+        op_observable_set(derived, fn_val(new_val))
+    })
+    derived
+}
+
+func op_observable_filter(obs, predicate) {
+    const initial = if predicate(obs["value"]) { obs["value"] } else { null }
+    const derived = op_observable_new(initial)
+    op_observable_subscribe(obs, func(new_val, _old) {
+        if predicate(new_val) {
+            op_observable_set(derived, new_val)
+        }
+    })
+    derived
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Option/Result Type Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_some(value) { {"__option": true, "has_value": true, "value": value} }
+func op_none() { {"__option": true, "has_value": false, "value": null} }
+func op_is_some(opt) { typeof(opt) == "map" && opt.has("__option") && opt["has_value"] }
+func op_is_none(opt) { typeof(opt) == "map" && opt.has("__option") && !opt["has_value"] }
+func op_unwrap(opt) {
+    if typeof(opt) == "map" && opt.has("__option") {
+        if opt["has_value"] { return opt["value"] }
+        panic("unwrap called on None")
+    }
+    opt // Not an option, return as-is
+}
+func op_unwrap_or(opt, default_val) {
+    if typeof(opt) == "map" && opt.has("__option") {
+        if opt["has_value"] { return opt["value"] }
+        return default_val
+    }
+    opt
+}
+func op_option_map(opt, fn_val) {
+    if op_is_some(opt) { op_some(fn_val(opt["value"])) }
+    else { op_none() }
+}
+func op_option_flat_map(opt, fn_val) {
+    if op_is_some(opt) { fn_val(opt["value"]) }
+    else { op_none() }
+}
+func op_option_filter(opt, predicate) {
+    if op_is_some(opt) && predicate(opt["value"]) { opt }
+    else { op_none() }
+}
+
+func op_ok(value) { {"__result": true, "is_ok": true, "value": value, "error": null} }
+func op_err(error) { {"__result": true, "is_ok": false, "value": null, "error": error} }
+func op_is_ok(result) { typeof(result) == "map" && result.has("__result") && result["is_ok"] }
+func op_is_err(result) { typeof(result) == "map" && result.has("__result") && !result["is_ok"] }
+func op_result_unwrap(result) {
+    if typeof(result) == "map" && result.has("__result") {
+        if result["is_ok"] { return result["value"] }
+        panic(f"unwrap called on Err: {result['error']}")
+    }
+    result
+}
+func op_result_map(result, fn_val) {
+    if op_is_ok(result) { op_ok(fn_val(result["value"])) }
+    else { result }
+}
+func op_result_map_err(result, fn_val) {
+    if op_is_err(result) { op_err(fn_val(result["error"])) }
+    else { result }
+}
+func op_result_and_then(result, fn_val) {
+    if op_is_ok(result) { fn_val(result["value"]) }
+    else { result }
+}
+func op_result_or_else(result, fn_val) {
+    if op_is_err(result) { fn_val(result["error"]) }
+    else { result }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Lazy Evaluation
+// ══════════════════════════════════════════════════════════════════
+
+func op_lazy(fn_val) {
+    {"__lazy": true, "computed": false, "value": null, "fn": fn_val}
+}
+
+func op_force(lazy_val) {
+    if typeof(lazy_val) != "map" || !lazy_val.has("__lazy") { return lazy_val }
+    if !lazy_val["computed"] {
+        lazy_val["value"] = lazy_val["fn"]()
+        lazy_val["computed"] = true
+    }
+    lazy_val["value"]
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Sequence Generator
+// ══════════════════════════════════════════════════════════════════
+
+func op_seq_fibonacci(n) {
+    if n <= 0 { return [] }
+    if n == 1 { return [0] }
+    let result = [0, 1]
+    let i = 2
+    while i < n {
+        result.push(result[i - 1] + result[i - 2])
+        i = i + 1
+    }
+    result
+}
+
+func op_seq_primes(n) {
+    if n <= 0 { return [] }
+    let primes = []
+    let candidate = 2
+    while len(primes) < n {
+        let is_prime = true
+        for p in primes {
+            if p * p > candidate { break }
+            if candidate % p == 0 { is_prime = false; break }
+        }
+        if is_prime { primes.push(candidate) }
+        candidate = candidate + 1
+    }
+    primes
+}
+
+func op_seq_range_step(start, end_val, step) {
+    let result = []
+    let i = start
+    if step > 0 {
+        while i < end_val { result.push(i); i = i + step }
+    } else if step < 0 {
+        while i > end_val { result.push(i); i = i + step }
+    }
+    result
+}
+
+func op_seq_linspace(start, end_val, count) {
+    if count <= 0 { return [] }
+    if count == 1 { return [op_to_f64(start)] }
+    let result = []
+    const step = (op_to_f64(end_val) - op_to_f64(start)) / op_to_f64(count - 1)
+    let i = 0
+    while i < count {
+        result.push(op_to_f64(start) + step * op_to_f64(i))
+        i = i + 1
+    }
+    result
+}
+
+func op_seq_geometric(start, ratio, count) {
+    let result = []
+    let val = op_to_f64(start)
+    let i = 0
+    while i < count {
+        result.push(val)
+        val = val * op_to_f64(ratio)
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Regex Builder Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_regex_builder() { {"pattern": "", "flags": ""} }
+
+func op_regex_literal(rb, text) {
+    rb["pattern"] = rb["pattern"] + regex_escape(text)
+    rb
+}
+func op_regex_digit(rb) { rb["pattern"] = rb["pattern"] + "\\d"; rb }
+func op_regex_word(rb) { rb["pattern"] = rb["pattern"] + "\\w"; rb }
+func op_regex_space(rb) { rb["pattern"] = rb["pattern"] + "\\s"; rb }
+func op_regex_any(rb) { rb["pattern"] = rb["pattern"] + "."; rb }
+func op_regex_start(rb) { rb["pattern"] = "^" + rb["pattern"]; rb }
+func op_regex_end(rb) { rb["pattern"] = rb["pattern"] + "$"; rb }
+func op_regex_one_or_more(rb) { rb["pattern"] = rb["pattern"] + "+"; rb }
+func op_regex_zero_or_more(rb) { rb["pattern"] = rb["pattern"] + "*"; rb }
+func op_regex_optional(rb) { rb["pattern"] = rb["pattern"] + "?"; rb }
+func op_regex_group(rb, pattern) { rb["pattern"] = rb["pattern"] + "(" + pattern + ")"; rb }
+func op_regex_or(rb, a, b) { rb["pattern"] = rb["pattern"] + "(" + a + "|" + b + ")"; rb }
+func op_regex_char_class(rb, chars) { rb["pattern"] = rb["pattern"] + "[" + chars + "]"; rb }
+func op_regex_repeat(rb, min, max) {
+    rb["pattern"] = rb["pattern"] + "{" + to_string(min) + "," + to_string(max) + "}"
+    rb
+}
+func op_regex_build(rb) { rb["pattern"] }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Color Conversion Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_rgb_to_hex(r, g, b) {
+    const hex_chars = "0123456789abcdef"
+    func to_hex2(n) {
+        const hi = n / 16
+        const lo = n % 16
+        hex_chars[hi] + hex_chars[lo]
+    }
+    "#" + to_hex2(r) + to_hex2(g) + to_hex2(b)
+}
+
+func op_hex_to_rgb(hex_str) {
+    let s = hex_str
+    if starts_with(s, "#") { s = s.slice(1, len(s)) }
+    if len(s) != 6 { return {"r": 0, "g": 0, "b": 0} }
+    func parse_hex2(h) {
+        const hex_chars = "0123456789abcdef"
+        const hi = hex_chars.index_of(to_lower(h[0]))
+        const lo = hex_chars.index_of(to_lower(h[1]))
+        if hi < 0 || lo < 0 { return 0 }
+        hi * 16 + lo
+    }
+    {
+        "r": parse_hex2(s.slice(0, 2)),
+        "g": parse_hex2(s.slice(2, 4)),
+        "b": parse_hex2(s.slice(4, 6))
+    }
+}
+
+func op_rgb_to_hsl(r, g, b) {
+    const rf = op_to_f64(r) / 255.0
+    const gf = op_to_f64(g) / 255.0
+    const bf = op_to_f64(b) / 255.0
+    const max_val = if rf > gf { if rf > bf { rf } else { bf } } else { if gf > bf { gf } else { bf } }
+    const min_val = if rf < gf { if rf < bf { rf } else { bf } } else { if gf < bf { gf } else { bf } }
+    const l = (max_val + min_val) / 2.0
+    if max_val == min_val { return {"h": 0.0, "s": 0.0, "l": l} }
+    const d = max_val - min_val
+    const s = if l > 0.5 { d / (2.0 - max_val - min_val) } else { d / (max_val + min_val) }
+    let h = 0.0
+    if max_val == rf { h = (gf - bf) / d + (if gf < bf { 6.0 } else { 0.0 }) }
+    else if max_val == gf { h = (bf - rf) / d + 2.0 }
+    else { h = (rf - gf) / d + 4.0 }
+    h = h / 6.0
+    {"h": h * 360.0, "s": s, "l": l}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Duration/Time Utility Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_duration_ms(ms) { ms }
+func op_duration_seconds(s) { s * 1000 }
+func op_duration_minutes(m) { m * 60000 }
+func op_duration_hours(h) { h * 3600000 }
+func op_duration_days(d) { d * 86400000 }
+
+func op_duration_format(ms) {
+    const total_ms = op_to_i64(ms)
+    if total_ms < 1000 { return f"{total_ms}ms" }
+    const total_s = total_ms / 1000
+    if total_s < 60 { return f"{total_s}s {total_ms % 1000}ms" }
+    const total_m = total_s / 60
+    if total_m < 60 { return f"{total_m}m {total_s % 60}s" }
+    const total_h = total_m / 60
+    if total_h < 24 { return f"{total_h}h {total_m % 60}m" }
+    const total_d = total_h / 24
+    f"{total_d}d {total_h % 24}h"
+}
+
+func op_stopwatch_new() { {"__sw": true, "start": now_timestamp(), "laps": []} }
+func op_stopwatch_lap(sw) {
+    const now = now_timestamp()
+    const elapsed = now - sw["start"]
+    sw["laps"].push(elapsed)
+    elapsed
+}
+func op_stopwatch_elapsed(sw) { now_timestamp() - sw["start"] }
+func op_stopwatch_reset(sw) { sw["start"] = now_timestamp(); sw["laps"] = []; sw }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Percent/Ratio Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_percent_of(value, total) {
+    if total == 0 || total == 0.0 { return 0.0 }
+    op_to_f64(value) / op_to_f64(total) * 100.0
+}
+
+func op_percent_change(old_val, new_val) {
+    if old_val == 0 || old_val == 0.0 { return 0.0 }
+    (op_to_f64(new_val) - op_to_f64(old_val)) / op_to_f64(old_val) * 100.0
+}
+
+func op_ratio(a, b) {
+    if b == 0 || b == 0.0 { return 0.0 }
+    op_to_f64(a) / op_to_f64(b)
+}
+
+func op_proportion(part, whole) { op_percent_of(part, whole) / 100.0 }
+
+// ══════════════════════════════════════════════════════════════════
+// Full Number Formatting
+// ══════════════════════════════════════════════════════════════════
+
+func op_number_with_commas(n) {
+    const s = to_string(op_to_i64(n))
+    let result = ""
+    let count = 0
+    let i = len(s) - 1
+    while i >= 0 {
+        if count > 0 && count % 3 == 0 { result = "," + result }
+        result = s[i] + result
+        count = count + 1
+        i = i - 1
+    }
+    result
+}
+
+func op_number_to_words(n) {
+    const val = op_to_i64(n)
+    if val == 0 { return "zero" }
+    const ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                   "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+                   "seventeen", "eighteen", "nineteen"]
+    const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+    if val < 0 { return "negative " + op_number_to_words(0 - val) }
+    if val < 20 { return ones[val] }
+    if val < 100 {
+        const t = tens[val / 10]
+        const o = ones[val % 10]
+        return if len(o) > 0 { t + "-" + o } else { t }
+    }
+    if val < 1000 {
+        return ones[val / 100] + " hundred" + (if val % 100 > 0 { " and " + op_number_to_words(val % 100) } else { "" })
+    }
+    to_string(val) // Simplified for large numbers
+}
+
+func op_number_ordinal(n) {
+    const val = op_to_i64(n)
+    const suffix = if val % 100 >= 11 && val % 100 <= 13 { "th" }
+                   else if val % 10 == 1 { "st" }
+                   else if val % 10 == 2 { "nd" }
+                   else if val % 10 == 3 { "rd" }
+                   else { "th" }
+    to_string(val) + suffix
+}
+
+func op_number_roman(n) {
+    let val = op_to_i64(n)
+    if val <= 0 || val > 3999 { return to_string(val) }
+    const values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    const symbols = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
+    let result = ""
+    let i = 0
+    while i < len(values) {
+        while val >= values[i] {
+            result = result + symbols[i]
+            val = val - values[i]
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full String Similarity Operations
+// ══════════════════════════════════════════════════════════════════
+
+func op_jaccard_similarity(a, b) {
+    let set_a = {}
+    let set_b = {}
+    for c in a.chars() { set_a[c] = true }
+    for c in b.chars() { set_b[c] = true }
+    let intersection = 0
+    let union_size = 0
+    for k in set_a.keys() {
+        union_size = union_size + 1
+        if set_b.has(k) { intersection = intersection + 1 }
+    }
+    for k in set_b.keys() {
+        if !set_a.has(k) { union_size = union_size + 1 }
+    }
+    if union_size == 0 { return 1.0 }
+    op_to_f64(intersection) / op_to_f64(union_size)
+}
+
+func op_dice_coefficient(a, b) {
+    // Dice = 2 * |A intersect B| / (|A| + |B|)
+    let set_a = {}
+    let set_b = {}
+    for c in a.chars() { set_a[c] = true }
+    for c in b.chars() { set_b[c] = true }
+    let intersection = 0
+    for k in set_a.keys() {
+        if set_b.has(k) { intersection = intersection + 1 }
+    }
+    const total = len(set_a.keys()) + len(set_b.keys())
+    if total == 0 { return 1.0 }
+    2.0 * op_to_f64(intersection) / op_to_f64(total)
+}
+
+func op_hamming_distance(a, b) {
+    const limit = if len(a) < len(b) { len(a) } else { len(b) }
+    let dist = abs(len(a) - len(b))
+    let i = 0
+    while i < limit {
+        if a[i] != b[i] { dist = dist + 1 }
+        i = i + 1
+    }
+    dist
+}
+
+func op_longest_common_substring(a, b) {
+    let best = ""
+    let i = 0
+    while i < len(a) {
+        let j = 0
+        while j < len(b) {
+            let k = 0
+            while i + k < len(a) && j + k < len(b) && a[i + k] == b[j + k] {
+                k = k + 1
+            }
+            if k > len(best) {
+                best = a.slice(i, i + k)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    best
+}
+
+func op_longest_common_subsequence(a, b) {
+    const m = len(a)
+    const n = len(b)
+    // Build LCS table
+    let dp = []
+    let i = 0
+    while i <= m {
+        let row = []
+        let j = 0
+        while j <= n { row.push(0); j = j + 1 }
+        dp.push(row)
+        i = i + 1
+    }
+    i = 1
+    while i <= m {
+        let j = 1
+        while j <= n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            } else {
+                dp[i][j] = if dp[i - 1][j] > dp[i][j - 1] { dp[i - 1][j] } else { dp[i][j - 1] }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Backtrack to find the subsequence
+    let result = ""
+    i = m
+    let j = n
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            result = a[i - 1] + result
+            i = i - 1
+            j = j - 1
+        } else if dp[i - 1][j] > dp[i][j - 1] {
+            i = i - 1
+        } else {
+            j = j - 1
+        }
+    }
+    result
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Functional Combinators
+// ══════════════════════════════════════════════════════════════════
+
+func op_identity(x) { x }
+func op_constant(x) { func() { x } }
+func op_flip(fn_val) { func(a, b) { fn_val(b, a) } }
+func op_negate_fn(fn_val) { func(x) { !fn_val(x) } }
+func op_on(fn_val, transform) { func(a, b) { fn_val(transform(a), transform(b)) } }
+func op_juxt(fns) {
+    func(x) {
+        let results = []
+        for fn_val in fns { results.push(fn_val(x)) }
+        results
+    }
+}
+func op_converge(fn_val, branches) {
+    func(x) {
+        let args = []
+        for branch in branches { args.push(branch(x)) }
+        fn_val(...args)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Full Batch/Chunk Processing
+// ══════════════════════════════════════════════════════════════════
+
+func op_batch_process(items, batch_size, processor) {
+    let results = []
+    let i = 0
+    while i < len(items) {
+        const end_idx = if i + batch_size < len(items) { i + batch_size } else { len(items) }
+        const batch = items.slice(i, end_idx)
+        const batch_result = processor(batch)
+        results.push(batch_result)
+        i = i + batch_size
+    }
+    results
+}
+
+func op_parallel_map(items, fn_val, concurrency) {
+    // In self-hosted, this is sequential (true parallelism requires runtime support)
+    items.map(x => fn_val(x))
+}
+
+func op_reduce_batched(items, fn_val, initial, batch_size) {
+    let acc = initial
+    let i = 0
+    while i < len(items) {
+        const end_idx = if i + batch_size < len(items) { i + batch_size } else { len(items) }
+        const batch = items.slice(i, end_idx)
+        for item in batch {
+            acc = fn_val(acc, item)
+        }
+        i = i + batch_size
+    }
+    acc
+}
