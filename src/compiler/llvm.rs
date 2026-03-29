@@ -271,6 +271,7 @@ fn emit_native(
     }
 
     // Patch runtime to chain native package dispatchers
+    
     if link_args.len() > 2 {
         // A native package was found — patch the runtime to call its dispatcher
         let patched_rt = format!("{}.patched.c", output_path);
