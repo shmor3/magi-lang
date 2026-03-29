@@ -6040,3 +6040,488 @@ func eval_operation_extended(op_name, args) {
     _ => null,
     }
 }
+
+// ══════════════════════════════════════════════════════════════════
+// ── Extended Operation Implementations ──────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// ── Trigonometric Operations (full set) ─────────────────────────
+
+func op_sinh(args) {
+    const x = op_to_f64(args[0])
+    (exp(x) - exp(0.0 - x)) / 2.0
+}
+
+func op_cosh(args) {
+    const x = op_to_f64(args[0])
+    (exp(x) + exp(0.0 - x)) / 2.0
+}
+
+func op_tanh(args) {
+    const x = op_to_f64(args[0])
+    const ex = exp(x)
+    const emx = exp(0.0 - x)
+    (ex - emx) / (ex + emx)
+}
+
+func op_asinh(args) {
+    const x = op_to_f64(args[0])
+    ln(x + sqrt(x * x + 1.0))
+}
+
+func op_acosh(args) {
+    const x = op_to_f64(args[0])
+    if x < 1.0 { panic("acosh: argument must be >= 1.0") }
+    ln(x + sqrt(x * x - 1.0))
+}
+
+func op_atanh(args) {
+    const x = op_to_f64(args[0])
+    if x <= -1.0 || x >= 1.0 { panic("atanh: argument must be in (-1, 1)") }
+    0.5 * ln((1.0 + x) / (1.0 - x))
+}
+
+func op_deg_to_rad(args) {
+    const deg = op_to_f64(args[0])
+    deg * 3.141592653589793 / 180.0
+}
+
+func op_rad_to_deg(args) {
+    const rad = op_to_f64(args[0])
+    rad * 180.0 / 3.141592653589793
+}
+
+// ── Advanced Math ───────────────────────────────────────────────
+
+func op_factorial(args) {
+    const n = op_to_i64(args[0])
+    if n < 0 { panic("factorial: negative argument") }
+    if n <= 1 { return 1 }
+    let result = 1
+    let i = 2
+    while i <= n { result = result * i; i = i + 1 }
+    result
+}
+
+func op_gcd(args) {
+    let a = abs(op_to_i64(args[0]))
+    let b = abs(op_to_i64(args[1]))
+    while b != 0 {
+        const t = b
+        b = a % b
+        a = t
+    }
+    a
+}
+
+func op_lcm(args) {
+    const a = op_to_i64(args[0])
+    const b = op_to_i64(args[1])
+    if a == 0 || b == 0 { return 0 }
+    abs(a * b) / op_gcd([a, b])
+}
+
+func op_is_prime(args) {
+    const n = op_to_i64(args[0])
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 || n % 3 == 0 { return false }
+    let i = 5
+    while i * i <= n {
+        if n % i == 0 || n % (i + 2) == 0 { return false }
+        i = i + 6
+    }
+    true
+}
+
+func op_fibonacci(args) {
+    const n = op_to_i64(args[0])
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    let a = 0
+    let b = 1
+    let i = 2
+    while i <= n {
+        const c = a + b
+        a = b
+        b = c
+        i = i + 1
+    }
+    b
+}
+
+func op_combinations(args) {
+    const n = op_to_i64(args[0])
+    const k = op_to_i64(args[1])
+    if k < 0 || k > n { return 0 }
+    if k == 0 || k == n { return 1 }
+    let result = 1
+    let i = 0
+    while i < min(k, n - k) {
+        result = result * (n - i) / (i + 1)
+        i = i + 1
+    }
+    result
+}
+
+func op_permutations(args) {
+    const n = op_to_i64(args[0])
+    const k = op_to_i64(args[1])
+    if k < 0 || k > n { return 0 }
+    let result = 1
+    let i = 0
+    while i < k {
+        result = result * (n - i)
+        i = i + 1
+    }
+    result
+}
+
+// ── String Operations (extended) ────────────────────────────────
+
+func op_string_center(args) {
+    const s = to_string(args[0])
+    const width = op_to_i64(args[1])
+    const fill = if len(args) > 2 { to_string(args[2]) } else { " " }
+    if len(s) >= width { return s }
+    const total_pad = width - len(s)
+    const left_pad = int(total_pad / 2)
+    const right_pad = total_pad - left_pad
+    fill.repeat(left_pad) + s + fill.repeat(right_pad)
+}
+
+func op_string_count(args) {
+    const s = to_string(args[0])
+    const sub = to_string(args[1])
+    if len(sub) == 0 { return len(s) + 1 }
+    let count = 0
+    let pos = 0
+    while pos <= len(s) - len(sub) {
+        const idx = s[pos..len(s)].index_of(sub)
+        if idx < 0 { break }
+        count = count + 1
+        pos = pos + idx + len(sub)
+    }
+    count
+}
+
+func op_string_is_digit(args) {
+    const s = to_string(args[0])
+    if len(s) == 0 { return false }
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c < "0" || c > "9" { return false }
+        i = i + 1
+    }
+    true
+}
+
+func op_string_is_alpha(args) {
+    const s = to_string(args[0])
+    if len(s) == 0 { return false }
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if !((c >= "a" && c <= "z") || (c >= "A" && c <= "Z")) { return false }
+        i = i + 1
+    }
+    true
+}
+
+func op_string_is_alnum(args) {
+    const s = to_string(args[0])
+    if len(s) == 0 { return false }
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if !((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9")) { return false }
+        i = i + 1
+    }
+    true
+}
+
+func op_string_title_case(args) {
+    const s = to_string(args[0])
+    let result = ""
+    let capitalize = true
+    let i = 0
+    while i < len(s) {
+        const c = s[i]
+        if c == " " || c == "\t" || c == "\n" || c == "-" || c == "_" {
+            result = result + c
+            capitalize = true
+        } else if capitalize {
+            if c >= "a" && c <= "z" {
+                result = result + char_from_code(char_code_at(c, 0) - 32)
+            } else {
+                result = result + c
+            }
+            capitalize = false
+        } else {
+            result = result + c
+        }
+        i = i + 1
+    }
+    result
+}
+
+func op_string_camel_case(args) {
+    const s = to_string(args[0])
+    const parts = s.replace("-", "_").split("_")
+    if len(parts) == 0 { return "" }
+    let result = parts[0].to_lower()
+    let i = 1
+    while i < len(parts) {
+        const part = parts[i]
+        if len(part) > 0 {
+            const first = part[0]
+            const upper = if first >= "a" && first <= "z" { char_from_code(char_code_at(first, 0) - 32) } else { first }
+            result = result + upper + part[1..len(part)].to_lower()
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ── Array Operations (extended) ─────────────────────────────────
+
+func op_array_zip(args) {
+    const a = args[0]
+    const b = args[1]
+    const min_len = min(len(a), len(b))
+    let result = []
+    let i = 0
+    while i < min_len {
+        result.push([a[i], b[i]])
+        i = i + 1
+    }
+    result
+}
+
+func op_array_unzip(args) {
+    const pairs = args[0]
+    let a = []
+    let b = []
+    for pair in pairs {
+        a.push(pair[0])
+        b.push(pair[1])
+    }
+    [a, b]
+}
+
+func op_array_chunk(args) {
+    const arr = args[0]
+    const size = op_to_i64(args[1])
+    if size <= 0 { return [arr] }
+    let chunks = []
+    let i = 0
+    while i < len(arr) {
+        const end = min(i + size, len(arr))
+        let chunk = []
+        let j = i
+        while j < end { chunk.push(arr[j]); j = j + 1 }
+        chunks.push(chunk)
+        i = i + size
+    }
+    chunks
+}
+
+func op_array_window(args) {
+    const arr = args[0]
+    const size = op_to_i64(args[1])
+    if size <= 0 || size > len(arr) { return [] }
+    let windows = []
+    let i = 0
+    while i <= len(arr) - size {
+        let window = []
+        let j = 0
+        while j < size { window.push(arr[i + j]); j = j + 1 }
+        windows.push(window)
+        i = i + 1
+    }
+    windows
+}
+
+func op_array_unique(args) {
+    const arr = args[0]
+    let seen = {"__s": true}
+    let result = []
+    for item in arr {
+        const key = to_string(item)
+        if !seen.has(key) {
+            seen[key] = true
+            result.push(item)
+        }
+    }
+    result
+}
+
+func op_array_flatten_deep(args) {
+    const arr = args[0]
+    const depth = if len(args) > 1 { op_to_i64(args[1]) } else { 999 }
+    flatten_recursive(arr, depth)
+}
+
+func flatten_recursive(arr, depth) {
+    if depth <= 0 { return arr }
+    let result = []
+    for item in arr {
+        if typeof(item) == "array" {
+            const flattened = flatten_recursive(item, depth - 1)
+            for f in flattened { result.push(f) }
+        } else {
+            result.push(item)
+        }
+    }
+    result
+}
+
+func op_array_group_by(args) {
+    const arr = args[0]
+    const key_fn = args[1]
+    let groups = {"__s": true}
+    for item in arr {
+        const key = to_string(key_fn(item))
+        if !groups.has(key) { groups[key] = [] }
+        groups[key].push(item)
+    }
+    groups
+}
+
+func op_array_partition(args) {
+    const arr = args[0]
+    const pred = args[1]
+    let pass = []
+    let fail = []
+    for item in arr {
+        if pred(item) { pass.push(item) } else { fail.push(item) }
+    }
+    [pass, fail]
+}
+
+func op_array_scan(args) {
+    const arr = args[0]
+    const init = args[1]
+    const fn = args[2]
+    let acc = init
+    let result = [acc]
+    for item in arr {
+        acc = fn(acc, item)
+        result.push(acc)
+    }
+    result
+}
+
+// ── Map Operations (extended) ───────────────────────────────────
+
+func op_map_map_keys(args) {
+    const m = args[0]
+    const fn = args[1]
+    let result = {"__s": true}
+    for key in m.keys() {
+        if key == "__s" { continue }
+        const new_key = to_string(fn(key))
+        result[new_key] = m[key]
+    }
+    result
+}
+
+func op_map_map_values(args) {
+    const m = args[0]
+    const fn = args[1]
+    let result = {"__s": true}
+    for key in m.keys() {
+        if key == "__s" { continue }
+        result[key] = fn(m[key])
+    }
+    result
+}
+
+func op_map_select_keys(args) {
+    const m = args[0]
+    const keys_list = args[1]
+    let result = {"__s": true}
+    for key in keys_list {
+        if m.has(key) { result[key] = m[key] }
+    }
+    result
+}
+
+func op_map_reject_keys(args) {
+    const m = args[0]
+    const keys_list = args[1]
+    let reject_set = {"__s": true}
+    for key in keys_list { reject_set[key] = true }
+    let result = {"__s": true}
+    for key in m.keys() {
+        if key == "__s" { continue }
+        if !reject_set.has(key) { result[key] = m[key] }
+    }
+    result
+}
+
+func op_map_deep_merge(args) {
+    const a = args[0]
+    const b = args[1]
+    let result = {"__s": true}
+    // Copy all from a
+    for key in a.keys() {
+        if key == "__s" { continue }
+        result[key] = a[key]
+    }
+    // Merge from b, deep-merging maps
+    for key in b.keys() {
+        if key == "__s" { continue }
+        if result.has(key) && typeof(result[key]) == "map" && typeof(b[key]) == "map" {
+            result[key] = op_map_deep_merge([result[key], b[key]])
+        } else {
+            result[key] = b[key]
+        }
+    }
+    result
+}
+
+// ── Additional dispatch entries ─────────────────────────────────
+
+func eval_operation_extended(op_name, args) {
+    match op_name {
+        "sinh" => op_sinh(args),
+        "cosh" => op_cosh(args),
+        "tanh" => op_tanh(args),
+        "asinh" => op_asinh(args),
+        "acosh" => op_acosh(args),
+        "atanh" => op_atanh(args),
+        "deg_to_rad" | "to_radians" => op_deg_to_rad(args),
+        "rad_to_deg" | "to_degrees" => op_rad_to_deg(args),
+        "factorial" => op_factorial(args),
+        "gcd" => op_gcd(args),
+        "lcm" => op_lcm(args),
+        "is_prime" => op_is_prime(args),
+        "fibonacci" | "fib" => op_fibonacci(args),
+        "combinations" | "nCr" => op_combinations(args),
+        "permutations" | "nPr" => op_permutations(args),
+        "string_center" | "center" => op_string_center(args),
+        "string_count" | "count_substr" => op_string_count(args),
+        "is_digit" => op_string_is_digit(args),
+        "is_alpha" => op_string_is_alpha(args),
+        "is_alnum" => op_string_is_alnum(args),
+        "title_case" => op_string_title_case(args),
+        "camel_case" => op_string_camel_case(args),
+        "zip" => op_array_zip(args),
+        "unzip" => op_array_unzip(args),
+        "chunk" | "chunks" => op_array_chunk(args),
+        "window" | "windows" | "sliding_window" => op_array_window(args),
+        "unique" | "distinct" => op_array_unique(args),
+        "flatten_deep" | "deep_flatten" => op_array_flatten_deep(args),
+        "group_by" => op_array_group_by(args),
+        "partition" => op_array_partition(args),
+        "scan" | "accumulate" => op_array_scan(args),
+        "map_keys" => op_map_map_keys(args),
+        "map_values" => op_map_map_values(args),
+        "select_keys" | "pick" => op_map_select_keys(args),
+        "reject_keys" | "omit" => op_map_reject_keys(args),
+        "deep_merge" => op_map_deep_merge(args),
+        _ => null,
+    }
+}
