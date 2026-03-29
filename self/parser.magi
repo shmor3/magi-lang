@@ -3962,3 +3962,734 @@ func ast_debug_program(program) {
     }
     lines.join("\n")
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Error Recovery with Synchronization Points ──────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+let p_errors = []
+let p_recovering = false
+
+func p_error(msg) {
+    const tok = p_peek()
+    const err = {
+        "message": msg,
+        "line": tok.line,
+        "col": tok.col,
+        "token": tok.text,
+    }
+    p_errors.push(err)
+    p_recovering = true
+}
+
+// Synchronization points: statement boundaries
+func p_synchronize() {
+    p_recovering = false
+    while !p_at_eof() {
+        const kind = p_peek_kind()
+        // Stop at statement-starting tokens
+        if kind == TokenKind::Semicolon {
+            p_advance()
+            return null
+        }
+        // Check for tokens that begin a new statement
+        const text = p_peek().text
+        if text == "func" || text == "let" || text == "const" || text == "if" ||
+           text == "for" || text == "while" || text == "loop" || text == "match" ||
+           text == "return" || text == "break" || text == "continue" ||
+           text == "import" || text == "use" || text == "struct" || text == "enum" ||
+           text == "interface" || text == "test" || text == "try" || text == "throw" ||
+           text == "async" || text == "spawn" || text == "pub" || text == "type" {
+            return null
+        }
+        // Check for closing delimiters (might be end of block)
+        if kind == TokenKind::RBrace || kind == TokenKind::RParen || kind == TokenKind::RBracket {
+            return null
+        }
+        p_advance()
+    }
+}
+
+// Error-recovering parse: collects errors instead of panicking
+func parse_recovering(source) {
+    const save_tokens = p_tokens
+    const save_pos = p_pos
+    const save_errors = p_errors
+    const save_recovering = p_recovering
+
+    p_tokens = tokenize(source)
+    p_pos = 0
+    p_errors = []
+    p_recovering = false
+
+    let stmts = []
+    const span = p_current_span()
+
+    while !p_at_eof() {
+        p_skip_semis()
+        if p_at_eof() { break }
+        const result = parse_statement_safe()
+        if result != null {
+            stmts.push(result)
+        }
+        p_skip_semis()
+    }
+
+    const program = program_new(stmts, span)
+    const errors = p_errors
+
+    p_tokens = save_tokens
+    p_pos = save_pos
+    p_errors = save_errors
+    p_recovering = save_recovering
+
+    {"program": program, "errors": errors}
+}
+
+func parse_statement_safe() {
+    // Try to parse a statement; on error, synchronize
+    const kind = p_peek_kind()
+    const text = p_peek().text
+
+    // If we're in recovery mode and hit a sync point, recover
+    if p_recovering {
+        p_synchronize()
+        if p_at_eof() { return null }
+    }
+
+    // Attempt parse with error catching
+    const start_pos = p_pos
+    const result = try_parse_statement()
+    if result != null {
+        return result
+    }
+
+    // Parse failed: emit error and synchronize
+    if p_pos == start_pos {
+        // Didn't advance — force advance to avoid infinite loop
+        const tok = p_advance()
+        p_error(f"unexpected token '{tok.text}'")
+    }
+    p_synchronize()
+    null
+}
+
+func try_parse_statement() {
+    // Delegates to parse_statement but catches panics
+    // In the self-hosted compiler, we can't truly catch panics,
+    // so we check for known valid statement starters
+    const kind = p_peek_kind()
+    const text = p_peek().text
+
+    if kind == TokenKind::Eof { return null }
+
+    if text == "func" || text == "let" || text == "const" || text == "if" ||
+       text == "for" || text == "while" || text == "loop" || text == "match" ||
+       text == "return" || text == "break" || text == "continue" ||
+       text == "import" || text == "use" || text == "struct" || text == "enum" ||
+       text == "interface" || text == "test" || text == "try" || text == "throw" ||
+       text == "async" || text == "spawn" || text == "pub" || text == "type" ||
+       text == "output" || text == "do" {
+        return parse_statement()
+    }
+
+    // Try as expression statement
+    if kind == TokenKind::Ident || kind == TokenKind::IntLit || kind == TokenKind::FloatLit ||
+       kind == TokenKind::StringLit || kind == TokenKind::LParen || kind == TokenKind::LBracket ||
+       kind == TokenKind::LBrace || text == "!" || text == "-" || text == "true" ||
+       text == "false" || text == "null" {
+        return parse_statement()
+    }
+
+    null
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Type Annotation Parser for All Type Forms ──────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse a full type annotation: T, [T], {K: V}, (T, T) -> R, T?, T | U
+func parse_type_annotation() {
+    let ty = parse_type_primary()
+
+    // Handle postfix type operators
+    while !p_at_eof() {
+        if p_at(TokenKind::Question) {
+            p_advance()
+            ty = type_optional(ty)
+        } else if p_at(TokenKind::Pipe) {
+            p_advance()
+            const right = parse_type_primary()
+            ty = type_union(ty, right)
+        } else if p_at(TokenKind::Ampersand) {
+            p_advance()
+            const right = parse_type_primary()
+            ty = type_intersection(ty, right)
+        } else {
+            break
+        }
+    }
+
+    // Check for function type: (T, U) -> R
+    if p_peek().text == "->" {
+        p_advance()
+        const return_type = parse_type_annotation()
+        ty = type_function(ty, return_type)
+    }
+
+    ty
+}
+
+func parse_type_primary() {
+    const kind = p_peek_kind()
+    const text = p_peek().text
+
+    // Parenthesized type or tuple type
+    if kind == TokenKind::LParen {
+        p_advance()
+        if p_at(TokenKind::RParen) {
+            p_advance()
+            return type_unit()
+        }
+        let types = [parse_type_annotation()]
+        while p_at(TokenKind::Comma) {
+            p_advance()
+            types.push(parse_type_annotation())
+        }
+        p_expect(TokenKind::RParen)
+        if len(types) == 1 {
+            return types[0]  // Just parenthesized
+        }
+        return type_tuple(types)
+    }
+
+    // Array type: [T]
+    if kind == TokenKind::LBracket {
+        p_advance()
+        const elem_type = parse_type_annotation()
+        p_expect(TokenKind::RBracket)
+        return type_array(elem_type)
+    }
+
+    // Map type: {K: V}
+    if kind == TokenKind::LBrace {
+        p_advance()
+        const key_type = parse_type_annotation()
+        p_expect(TokenKind::Colon)
+        const val_type = parse_type_annotation()
+        p_expect(TokenKind::RBrace)
+        return type_map(key_type, val_type)
+    }
+
+    // Named type with optional generic parameters
+    if kind == TokenKind::Ident {
+        const name = p_expect_ident()
+        // Check for generic parameters: Name<T, U>
+        if p_at(TokenKind::Lt) {
+            p_advance()
+            let type_args = [parse_type_annotation()]
+            while p_at(TokenKind::Comma) {
+                p_advance()
+                type_args.push(parse_type_annotation())
+            }
+            p_expect(TokenKind::Gt)
+            return type_generic(name, type_args)
+        }
+        // Check for qualified name: module.Type
+        if p_at(TokenKind::Dot) {
+            p_advance()
+            const member = p_expect_ident()
+            return type_qualified(name, member)
+        }
+        return type_named(name)
+    }
+
+    // Primitive types as keywords
+    if text == "int" || text == "float" || text == "string" || text == "bool" || text == "null" || text == "any" || text == "void" || text == "never" {
+        p_advance()
+        return type_named(text)
+    }
+
+    p_error(f"expected type annotation, got '{text}'")
+    type_named("any")  // Error recovery: return 'any'
+}
+
+// Type constructors
+func type_named(name) { {"kind": "named", "name": name} }
+func type_array(elem) { {"kind": "array", "element": elem} }
+func type_map(key, val) { {"kind": "map", "key": key, "value": val} }
+func type_tuple(types) { {"kind": "tuple", "types": types} }
+func type_optional(inner) { {"kind": "optional", "inner": inner} }
+func type_union(left, right) { {"kind": "union", "left": left, "right": right} }
+func type_intersection(left, right) { {"kind": "intersection", "left": left, "right": right} }
+func type_function(params, ret) { {"kind": "function", "params": params, "return": ret} }
+func type_generic(name, args) { {"kind": "generic", "name": name, "args": args} }
+func type_qualified(module, name) { {"kind": "qualified", "module": module, "name": name} }
+func type_unit() { {"kind": "unit"} }
+
+// Format a type annotation back to string
+func type_to_string(ty) {
+    if ty == null { return "any" }
+    match ty["kind"] {
+        "named" => ty["name"],
+        "array" => "[" + type_to_string(ty["element"]) + "]",
+        "map" => "{" + type_to_string(ty["key"]) + ": " + type_to_string(ty["value"]) + "}",
+        "tuple" => "(" + ty["types"].map(t => type_to_string(t)).join(", ") + ")",
+        "optional" => type_to_string(ty["inner"]) + "?",
+        "union" => type_to_string(ty["left"]) + " | " + type_to_string(ty["right"]),
+        "intersection" => type_to_string(ty["left"]) + " & " + type_to_string(ty["right"]),
+        "function" => type_to_string(ty["params"]) + " -> " + type_to_string(ty["return"]),
+        "generic" => ty["name"] + "<" + ty["args"].map(a => type_to_string(a)).join(", ") + ">",
+        "qualified" => ty["module"] + "." + ty["name"],
+        "unit" => "()",
+        _ => "any",
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Generic Bounds with Where Clauses ──────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse generic parameters: <T, U: Comparable, V: Hash + Eq>
+func parse_generic_params() {
+    if !p_at(TokenKind::Lt) { return [] }
+    p_advance()
+    let params = []
+
+    while !p_at(TokenKind::Gt) && !p_at_eof() {
+        const name = p_expect_ident()
+        let bounds = []
+
+        // Check for bounds: T: Bound1 + Bound2
+        if p_at(TokenKind::Colon) {
+            p_advance()
+            bounds.push(parse_type_annotation())
+            while p_peek().text == "+" {
+                p_advance()
+                bounds.push(parse_type_annotation())
+            }
+        }
+
+        params.push({"name": name, "bounds": bounds})
+
+        if p_at(TokenKind::Comma) {
+            p_advance()
+        } else {
+            break
+        }
+    }
+
+    p_expect(TokenKind::Gt)
+    params
+}
+
+// Parse where clause: where T: Hash + Eq, U: Display
+func parse_where_clause() {
+    if p_peek().text != "where" { return [] }
+    p_advance()
+
+    let constraints = []
+
+    while !p_at_eof() {
+        const type_name = p_expect_ident()
+        p_expect(TokenKind::Colon)
+        let bounds = [parse_type_annotation()]
+        while p_peek().text == "+" {
+            p_advance()
+            bounds.push(parse_type_annotation())
+        }
+        constraints.push({"type": type_name, "bounds": bounds})
+
+        if p_at(TokenKind::Comma) {
+            p_advance()
+        } else {
+            break
+        }
+    }
+
+    constraints
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Async/Await Expression Parsing ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func parse_async_expr() {
+    const span = p_current_span()
+    p_advance()  // consume 'async'
+
+    if p_peek().text == "func" {
+        // async func definition
+        return parse_async_func_def(span)
+    }
+
+    // async block: async { ... }
+    if p_at(TokenKind::LBrace) {
+        const body = parse_block()
+        return expr_new(ExprKind::EAsync(body), span)
+    }
+
+    p_error("expected 'func' or '{' after 'async'")
+    null
+}
+
+func parse_await_expr() {
+    const span = p_current_span()
+    p_advance()  // consume 'await'
+    const operand = parse_unary()
+    expr_new(ExprKind::EAwait(operand), span)
+}
+
+func parse_async_func_def(span) {
+    p_advance()  // consume 'func'
+    const name = p_expect_ident()
+    const type_params = parse_generic_params()
+    p_expect(TokenKind::LParen)
+    const params = parse_param_list()
+    p_expect(TokenKind::RParen)
+
+    let ret_type = null
+    if p_peek().text == "->" {
+        p_advance()
+        ret_type = parse_type_annotation()
+    }
+
+    const where_clause = parse_where_clause()
+    const body = parse_block()
+
+    const fd = FuncDef {
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret_type,
+        body: body,
+        span: span,
+        is_async: true,
+        is_getter: false,
+        is_setter: false,
+        where_clause: where_clause,
+    }
+    stmt_new(StmtKind::SFuncDef(fd), span)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Select Statement Parsing ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+func parse_select_stmt() {
+    const span = p_current_span()
+    p_advance()  // consume 'select'
+    p_expect(TokenKind::LBrace)
+
+    let cases = []
+    while !p_at(TokenKind::RBrace) && !p_at_eof() {
+        const case_item = parse_select_case()
+        cases.push(case_item)
+        if p_at(TokenKind::Comma) { p_advance() }
+    }
+    p_expect(TokenKind::RBrace)
+
+    expr_new(ExprKind::ESelect(cases), span)
+}
+
+func parse_select_case() {
+    const span = p_current_span()
+    const text = p_peek().text
+
+    if text == "default" {
+        p_advance()
+        p_expect(TokenKind::FatArrow)
+        const body = parse_expr_or_block()
+        return {"kind": "default", "body": body, "span": span}
+    }
+
+    // Channel operation: ch <- val  or  val = <- ch
+    const op = parse_expression()
+    p_expect(TokenKind::FatArrow)
+    const body = parse_expr_or_block()
+    {"kind": "case", "operation": op, "body": body, "span": span}
+}
+
+func parse_expr_or_block() {
+    if p_at(TokenKind::LBrace) {
+        const block = parse_block()
+        expr_new(ExprKind::EBlock(block), p_current_span())
+    } else {
+        parse_expression()
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full Attribute Argument Parsing ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse: #[attr_name(arg1, arg2, key = value)]
+func parse_attribute() {
+    const span = p_current_span()
+    p_advance()  // consume '#'
+    p_expect(TokenKind::LBracket)
+
+    const name = p_expect_ident()
+    let args = []
+    let kwargs = {"__s": true}
+
+    if p_at(TokenKind::LParen) {
+        p_advance()
+        while !p_at(TokenKind::RParen) && !p_at_eof() {
+            // Check for key = value
+            if p_at(TokenKind::Ident) {
+                const save = p_pos
+                const maybe_key = p_advance()
+                if p_at(TokenKind::Eq) {
+                    p_advance()
+                    const value = parse_expression()
+                    kwargs[maybe_key.text] = value
+                } else {
+                    // Not a kwarg, rewind and parse as positional
+                    p_pos = save
+                    const val = parse_expression()
+                    args.push(val)
+                }
+            } else {
+                const val = parse_expression()
+                args.push(val)
+            }
+            if p_at(TokenKind::Comma) { p_advance() }
+        }
+        p_expect(TokenKind::RParen)
+    }
+
+    p_expect(TokenKind::RBracket)
+    {"name": name, "args": args, "kwargs": kwargs, "span": span}
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Full String Interpolation with Nested Complex Expressions ───────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse f-string: f"text {expr} text {expr:format} text"
+func parse_fstring_interpolation(text) {
+    let parts = []
+    let i = 0
+    let current = ""
+
+    while i < len(text) {
+        const c = text[i]
+
+        if c == "\\" && i + 1 < len(text) {
+            current = current + text[i + 1]
+            i = i + 2
+            continue
+        }
+
+        if c == "{" {
+            // Start of interpolation
+            if len(current) > 0 {
+                parts.push({"kind": "text", "value": current})
+                current = ""
+            }
+            i = i + 1
+            // Parse the expression inside { }
+            let expr_text = ""
+            let format_spec = ""
+            let brace_depth = 1
+            while i < len(text) && brace_depth > 0 {
+                const ic = text[i]
+                if ic == "{" { brace_depth = brace_depth + 1 }
+                if ic == "}" { brace_depth = brace_depth - 1; if brace_depth == 0 { break } }
+                if ic == ":" && brace_depth == 1 {
+                    // Format specifier
+                    i = i + 1
+                    while i < len(text) && text[i] != "}" {
+                        format_spec = format_spec + text[i]
+                        i = i + 1
+                    }
+                    break
+                }
+                expr_text = expr_text + ic
+                i = i + 1
+            }
+            i = i + 1  // skip closing }
+
+            parts.push({
+                "kind": "expr",
+                "text": expr_text.trim(),
+                "format": format_spec,
+            })
+            continue
+        }
+
+        current = current + c
+        i = i + 1
+    }
+
+    if len(current) > 0 {
+        parts.push({"kind": "text", "value": current})
+    }
+
+    parts
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Operator Overloading Syntax in Interface Declarations ───────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Parse operator declarations in interfaces:
+// interface Addable {
+//     operator +(self, other: Self) -> Self
+//     operator ==(self, other: Self) -> bool
+// }
+func parse_interface_operator() {
+    const span = p_current_span()
+    p_advance()  // consume 'operator'
+
+    // Read the operator symbol
+    const op_tok = p_advance()
+    const op = op_tok.text
+
+    p_expect(TokenKind::LParen)
+    const params = parse_param_list()
+    p_expect(TokenKind::RParen)
+
+    let ret_type = null
+    if p_peek().text == "->" {
+        p_advance()
+        ret_type = parse_type_annotation()
+    }
+
+    {
+        "kind": "operator",
+        "op": op,
+        "params": params,
+        "return_type": ret_type,
+        "span": span,
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Complete Postfix Parsing ────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// Full postfix chain: obj.field.method(a).items[0]?.name
+func parse_postfix(expr) {
+    let result = expr
+
+    while !p_at_eof() {
+        // Field access: .field
+        if p_at(TokenKind::Dot) {
+            p_advance()
+            const field = p_expect_ident()
+            // Check for method call: .method(args)
+            if p_at(TokenKind::LParen) {
+                p_advance()
+                let args = []
+                let kwargs = {"__s": true}
+                while !p_at(TokenKind::RParen) && !p_at_eof() {
+                    // Check for named argument
+                    if p_at(TokenKind::Ident) {
+                        const save = p_pos
+                        const maybe_name = p_advance()
+                        if p_at(TokenKind::Eq) {
+                            p_advance()
+                            const val = parse_expression()
+                            kwargs[maybe_name.text] = val
+                        } else {
+                            p_pos = save
+                            args.push(parse_expression())
+                        }
+                    } else {
+                        args.push(parse_expression())
+                    }
+                    if p_at(TokenKind::Comma) { p_advance() }
+                }
+                p_expect(TokenKind::RParen)
+                const span = result.span
+                result = expr_new(ExprKind::EMethodCall(result, field, args, kwargs), span)
+            } else {
+                const span = result.span
+                result = expr_new(ExprKind::EFieldAccess(result, field), span)
+            }
+            continue
+        }
+
+        // Index: [expr]
+        if p_at(TokenKind::LBracket) {
+            p_advance()
+            // Check for slice: [start..end]
+            if p_at(TokenKind::DotDot) {
+                p_advance()
+                const end_expr = parse_expression()
+                p_expect(TokenKind::RBracket)
+                const span = result.span
+                result = expr_new(ExprKind::ESlice(result, null, end_expr), span)
+            } else {
+                const idx = parse_expression()
+                if p_at(TokenKind::DotDot) {
+                    p_advance()
+                    let end_expr = null
+                    if !p_at(TokenKind::RBracket) {
+                        end_expr = parse_expression()
+                    }
+                    p_expect(TokenKind::RBracket)
+                    const span = result.span
+                    result = expr_new(ExprKind::ESlice(result, idx, end_expr), span)
+                } else {
+                    p_expect(TokenKind::RBracket)
+                    const span = result.span
+                    result = expr_new(ExprKind::EIndex(result, idx), span)
+                }
+            }
+            continue
+        }
+
+        // Optional chaining: ?.field
+        if p_peek().text == "?" && p_pos + 1 < len(p_tokens) && p_tokens[p_pos + 1].kind == TokenKind::Dot {
+            p_advance()  // skip ?
+            p_advance()  // skip .
+            const field = p_expect_ident()
+            if p_at(TokenKind::LParen) {
+                p_advance()
+                let args = []
+                while !p_at(TokenKind::RParen) && !p_at_eof() {
+                    args.push(parse_expression())
+                    if p_at(TokenKind::Comma) { p_advance() }
+                }
+                p_expect(TokenKind::RParen)
+                const span = result.span
+                result = expr_new(ExprKind::EOptionalMethodCall(result, field, args), span)
+            } else {
+                const span = result.span
+                result = expr_new(ExprKind::EOptionalField(result, field), span)
+            }
+            continue
+        }
+
+        // Function call: expr(args) — only if no space before (
+        if p_at(TokenKind::LParen) {
+            // Only chain call if previous token was an ident or closing bracket
+            const prev_kind = result.kind
+            const is_callable = match prev_kind {
+                ExprKind::EVariable(_) => true,
+                ExprKind::EFieldAccess(_, _) => true,
+                ExprKind::EMethodCall(_, _, _, _) => true,
+                ExprKind::EIndex(_, _) => true,
+                _ => false,
+            }
+            if !is_callable { break }
+
+            p_advance()
+            let args = []
+            while !p_at(TokenKind::RParen) && !p_at_eof() {
+                args.push(parse_expression())
+                if p_at(TokenKind::Comma) { p_advance() }
+            }
+            p_expect(TokenKind::RParen)
+            const span = result.span
+            result = expr_new(ExprKind::ECall("__call__", args, null), span)
+            continue
+        }
+
+        break
+    }
+    result
+}
