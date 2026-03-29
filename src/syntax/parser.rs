@@ -1603,7 +1603,13 @@ impl Parser {
                 None
             };
             let default = if !is_rest && !is_kwargs && self.eat(&TokenKind::Eq) {
-                Some(self.parse_expression()?)
+                // For lambda params (end_token == Bar), parse a limited expression
+                // that doesn't consume | (the closing delimiter).
+                if *end_token == TokenKind::Bar {
+                    Some(self.parse_binary_expr(10)?) // prec 10 excludes BitOr (prec 3)
+                } else {
+                    Some(self.parse_expression()?)
+                }
             } else {
                 None
             };
@@ -2335,6 +2341,7 @@ impl Parser {
                 TokenKind::Percent => BinOp::Mod,
                 TokenKind::In => BinOp::In,
                 TokenKind::Ampersand => BinOp::BitAnd,
+                TokenKind::Bar => BinOp::BitOr,
                 TokenKind::Caret => BinOp::BitXor,
                 TokenKind::Shl => BinOp::Shl,
                 TokenKind::Shr => BinOp::Shr,

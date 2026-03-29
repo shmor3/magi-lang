@@ -5625,13 +5625,13 @@ func rabin_karp_search(text, pattern) {
     while i <= n - m {
         if pat_hash == txt_hash {
             // Verify character by character
-            let match = true
+            let matched = true
             let j = 0
             while j < m {
-                if text[i + j] != pattern[j] { match = false; break }
+                if text[i + j] != pattern[j] { matched = false; break }
                 j = j + 1
             }
-            if match { matches.push(i) }
+            if matched { matches.push(i) }
         }
         // Slide window
         if i < n - m {
