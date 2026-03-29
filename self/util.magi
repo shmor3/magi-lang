@@ -8879,10 +8879,12 @@ func promise_reject(reason) {
 }
 
 // Create a pending promise
+let __promise_current = null
 func promise_new(executor) {
     let p = {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
-    const resolve = v => { p["__state"] = "fulfilled"; p["__value"] = v; promise_flush(p) }
-    const reject = r => { p["__state"] = "rejected"; p["__value"] = r; promise_flush(p) }
+    __promise_current = p
+    const resolve = v => { __promise_current["__state"] = "fulfilled"; __promise_current["__value"] = v; promise_flush(__promise_current) }
+    const reject = r => { __promise_current["__state"] = "rejected"; __promise_current["__value"] = r; promise_flush(__promise_current) }
     executor(resolve, reject)
     p
 }

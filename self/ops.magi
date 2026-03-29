@@ -6801,14 +6801,14 @@ func format_string(s, spec) {
     if width > 0 && len(result) < width {
         const padding = width - len(result)
         match align {
-            "<" => result = result + fill.repeat(padding),
-            ">" => result = fill.repeat(padding) + result,
+            "<" => { result = result + fill.repeat(padding) },
+            ">" => { result = fill.repeat(padding) + result },
             "^" => {
                 const left = padding / 2
                 const right = padding - left
                 result = fill.repeat(left) + result + fill.repeat(right)
             },
-            _ => result = result + fill.repeat(padding),
+            _ => { result = result + fill.repeat(padding) },
         }
     }
     result

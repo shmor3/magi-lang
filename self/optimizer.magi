@@ -1022,7 +1022,7 @@ func opt_flatten_block(blk, span) {
         const s = blk.stmts[0]
         const k = s.kind
         match k {
-            StmtKind::SExprStmt(expr) => return expr,
+            StmtKind::SExprStmt(expr) => { return expr },
             _ => {},
         }
     }

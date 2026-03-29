@@ -5352,12 +5352,12 @@ func tc_infer_block_type(block) {
             const last = stmts[len(stmts) - 1]
             if typeof(last) == "map" && last.has("kind") {
                 match last.kind {
-                    StmtKind::SExprStmt(expr) => return tc_infer_expr(expr),
+                    StmtKind::SExprStmt(expr) => { return tc_infer_expr(expr) },
                     StmtKind::SReturn(expr) => {
                         if expr != null { return tc_infer_expr(expr) }
                         return TYPE_NULL
                     },
-                    _ => return TYPE_NULL,
+                    _ => { return TYPE_NULL },
                 }
             }
         }
@@ -5571,7 +5571,7 @@ func tc_analyze_null_check(cond) {
                         match right.kind {
                             ExprKind::ELiteral(Literal::NullLit) => {
                                 match left.kind {
-                                    ExprKind::EVariable(name) => return {"var": name, "non_null": true},
+                                    ExprKind::EVariable(name) => { return {"var": name, "non_null": true} },
                                     _ => {},
                                 }
                             },
@@ -5583,7 +5583,7 @@ func tc_analyze_null_check(cond) {
                         match left.kind {
                             ExprKind::ELiteral(Literal::NullLit) => {
                                 match right.kind {
-                                    ExprKind::EVariable(name) => return {"var": name, "non_null": true},
+                                    ExprKind::EVariable(name) => { return {"var": name, "non_null": true} },
                                     _ => {},
                                 }
                             },
@@ -5597,7 +5597,7 @@ func tc_analyze_null_check(cond) {
                         match right.kind {
                             ExprKind::ELiteral(Literal::NullLit) => {
                                 match left.kind {
-                                    ExprKind::EVariable(name) => return {"var": name, "null_in_then": true},
+                                    ExprKind::EVariable(name) => { return {"var": name, "null_in_then": true} },
                                     _ => {},
                                 }
                             },
@@ -6314,7 +6314,7 @@ func tc_exprs_identical(a, b) {
         match a.kind {
             ExprKind::EVariable(name_a) => {
                 match b.kind {
-                    ExprKind::EVariable(name_b) => return name_a == name_b,
+                    ExprKind::EVariable(name_b) => { return name_a == name_b },
                     _ => {},
                 }
             },
@@ -6808,8 +6808,8 @@ func tc_check_enum_construct(enum_name, variant_name, args, line) {
 // SECTION: Integer Overflow Detection
 // ═══════════════════════════════════════════════════════════════════
 
-const MAX_SAFE_INT = 9007199254740991
-const MIN_SAFE_INT = -9007199254740991
+const MAX_SAFE_INT = 140737488355327
+const MIN_SAFE_INT = -140737488355327
 
 func tc_check_integer_overflow(val, line) {
     if typeof(val) == "int64" {
