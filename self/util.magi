@@ -2688,20 +2688,20 @@ func ordered_map_entries(om) {
 }
 
 // Iterate over ordered map calling fn(key, value) for each entry.
-func ordered_map_each(om, fn) {
+func ordered_map_each(om, cb) {
     let i = 0
     while i < len(om["__keys"]) {
-        fn(om["__keys"][i], om["__values"][i])
+        cb(om["__keys"][i], om["__values"][i])
         i = i + 1
     }
 }
 
 // Map over ordered map values, returning a new ordered map.
-func ordered_map_map_values(om, fn) {
+func ordered_map_map_values(om, cb) {
     let result = ordered_map_new()
     let i = 0
     while i < len(om["__keys"]) {
-        ordered_map_set(result, om["__keys"][i], fn(om["__values"][i]))
+        ordered_map_set(result, om["__keys"][i], cb(om["__values"][i]))
         i = i + 1
     }
     result
@@ -3558,7 +3558,7 @@ func merge_arrays(left, right) {
 func group_by(arr, key_fn) {
     let groups = {}
     for item in arr {
-        const key = key_fn(item)
+        const key = key_cb(item)
         const k = to_string(key)
         if !groups.has(k) {
             groups[k] = []
@@ -4083,13 +4083,13 @@ func result_unwrap_or(r, default_val) {
 }
 
 // Map over an Ok value.
-func result_map(r, fn) {
-    if result_is_ok(r) { result_ok(fn(r["value"])) } else { r }
+func result_map(r, cb) {
+    if result_is_ok(r) { result_ok(cb(r["value"])) } else { r }
 }
 
 // Chain results.
-func result_and_then(r, fn) {
-    if result_is_ok(r) { fn(r["value"]) } else { r }
+func result_and_then(r, cb) {
+    if result_is_ok(r) { cb(r["value"]) } else { r }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -4120,8 +4120,8 @@ func option_unwrap_or(o, default_val) {
 }
 
 // Map over a Some value.
-func option_map(o, fn) {
-    if option_is_some(o) { option_some(fn(o["value"])) } else { o }
+func option_map(o, cb) {
+    if option_is_some(o) { option_some(cb(o["value"])) } else { o }
 }
 
 // Filter an option: returns None if predicate fails.
@@ -8749,14 +8749,14 @@ func stream_range(start, end) {
 }
 
 // Lazy map
-func stream_map(stream, fn) {
+func stream_map(stream, cb) {
     let new_stream = stream_clone(stream)
-    new_stream["__ops"].push({"type": "map", "fn": fn})
+    new_stream["__ops"].push({"type": "map", "fn": cb})
     new_stream
 }
 
 // Lazy filter
-func stream_filter(stream, fn) {
+func stream_filter(stream, cb) {
     let new_stream = stream_clone(stream)
     new_stream["__ops"].push({"type": "filter", "fn": fn})
     new_stream
@@ -8777,9 +8777,9 @@ func stream_skip(stream, n) {
 }
 
 // Lazy flat_map
-func stream_flat_map(stream, fn) {
+func stream_flat_map(stream, cb) {
     let new_stream = stream_clone(stream)
-    new_stream["__ops"].push({"type": "flat_map", "fn": fn})
+    new_stream["__ops"].push({"type": "flat_map", "fn": cb})
     new_stream
 }
 
@@ -8833,35 +8833,35 @@ func stream_collect(stream) {
 }
 
 // Terminal operations
-func stream_reduce(stream, initial, fn) {
+func stream_reduce(stream, initial, cb) {
     const items = stream_collect(stream)
     let acc = initial
-    for item in items { acc = fn(acc, item) }
+    for item in items { acc = cb(acc, item) }
     acc
 }
 
-func stream_for_each(stream, fn) {
+func stream_for_each(stream, cb) {
     const items = stream_collect(stream)
-    for item in items { fn(item) }
+    for item in items { cb(item) }
 }
 
 func stream_count(stream) {
     len(stream_collect(stream))
 }
 
-func stream_any(stream, fn) {
+func stream_any(stream, cb) {
     const items = stream_collect(stream)
-    items.any(fn)
+    items.any(cb)
 }
 
-func stream_all(stream, fn) {
+func stream_all(stream, cb) {
     const items = stream_collect(stream)
-    items.all(fn)
+    items.all(cb)
 }
 
-func stream_find(stream, fn) {
+func stream_find(stream, cb) {
     const items = stream_collect(stream)
-    items.find(fn)
+    items.find(cb)
 }
 
 // ════════════════════════════════════════════════════════════════════

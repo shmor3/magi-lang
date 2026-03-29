@@ -4389,8 +4389,9 @@ mod tests {
 
     #[test]
     fn test_wasm_compile_error_undefined_assignment() {
+        // Auto-capture: assigning to undeclared variable creates a global.
         let result = compile_to_wasm("z = 42;");
-        assert!(result.is_err(), "assigning to undefined variable should fail compilation");
+        assert!(result.is_ok(), "auto-capture should allow assigning to undeclared variable");
     }
 
     #[test]

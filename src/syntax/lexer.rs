@@ -1064,6 +1064,11 @@ impl<'a> Lexer<'a> {
             Some(b'\\') => Ok('\\'),
             Some(b'"') => Ok('"'),
             Some(b'0') => Ok('\0'),
+            Some(b'a') => Ok('\x07'), // bell
+            Some(b'b') => Ok('\x08'), // backspace
+            Some(b'f') => Ok('\x0C'), // form feed
+            Some(b'v') => Ok('\x0B'), // vertical tab
+            Some(b'\'') => Ok('\''),
             Some(b'{') => Ok('{'),
             Some(b'}') => Ok('}'),
             Some(b'x') => {

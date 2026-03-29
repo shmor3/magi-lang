@@ -268,9 +268,9 @@ func diag_emit(diag) {
 func diag_has_errors() { diag_error_count > 0 }
 
 func diag_render_all(source) {
-    let output = ""
+    let out_str = ""
     for d in diag_collected {
-        output = output + diag_render(d, source)
+        out_str = out_str + diag_render(d, source)
     }
     // Summary
     if diag_error_count > 0 || diag_warning_count > 0 {
@@ -281,9 +281,9 @@ func diag_render_all(source) {
         if diag_warning_count > 0 {
             parts.push(ANSI_YELLOW + ANSI_BOLD + to_string(diag_warning_count) + " warning(s)" + ANSI_RESET)
         }
-        output = output + parts.join(", ") + " generated.\n"
+        out_str = out_str + parts.join(", ") + " generated.\n"
     }
-    output
+    out_str
 }
 
 func diag_render_all_json() {

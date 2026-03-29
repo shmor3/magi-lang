@@ -2485,9 +2485,13 @@ impl Parser {
         let mut expr = self.parse_primary()?;
 
         loop {
-            if self.at(&TokenKind::LParen) {
+            if self.at(&TokenKind::LParen)
+                && self.peek().span.start_line == expr.span.end_line {
                 expr = self.parse_call_expr(expr)?;
-            } else if self.at(&TokenKind::LBracket) {
+            } else if self.at(&TokenKind::LBracket)
+                && self.peek().span.start_line == expr.span.end_line {
+                // Index access: expr[index] — must be on same line to avoid
+                // ambiguity with array literals on the next line.
                 self.advance();
                 let index = self.parse_expression()?;
                 let end = self.expect(&TokenKind::RBracket)?;
@@ -2998,6 +3002,35 @@ impl Parser {
                 })
             }
 
+            // Anonymous function: func(params) { body }
+            TokenKind::Fn | TokenKind::Func => {
+                let fn_start = self.advance().clone(); // consume fn/func
+                self.expect(&TokenKind::LParen)?;
+                let mut params = Vec::new();
+                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                    let p = self.expect_identifier()?;
+                    params.push(FunctionParam {
+                        name: p.text,
+                        type_annotation: None,
+                        default: None,
+                        rest: false,
+                        kwargs: false,
+                        span: p.span,
+                    });
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                self.expect(&TokenKind::RParen)?;
+                let body = Box::new(self.parse_expression()?);
+                let span = fn_start.span.merge(body.span);
+                Ok(Expression {
+                    kind: ExpressionKind::Lambda {
+                        params,
+                        body,
+                    },
+                    span,
+                })
+            }
+
             // Array literal: [a, b, c]
             TokenKind::LBracket => self.parse_array_literal(),
 
@@ -3348,7 +3381,14 @@ impl Parser {
             // should be allowed even when the match is inside an `if` condition.
             let saved_no_struct = self.no_struct_literal;
             self.no_struct_literal = false;
-            let body = if self.at(&TokenKind::LBrace) {
+            // Disambiguate { as block vs map literal:
+            // If { is followed by string/ident then :, it's a map literal
+            let is_map_literal = self.at(&TokenKind::LBrace) && matches!(
+                (self.peek_at_kind(1), self.peek_at_kind(2)),
+                (Some(TokenKind::StringLiteral), Some(TokenKind::Colon))
+                | (Some(TokenKind::Ident), Some(TokenKind::Colon))
+            );
+            let body = if self.at(&TokenKind::LBrace) && !is_map_literal {
                 self.parse_block()?
             } else if matches!(
                 self.peek_kind(),

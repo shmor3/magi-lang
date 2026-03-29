@@ -397,24 +397,24 @@ func mcp_tool_run_full(arguments) {
         result = eval_program(optimized)
     })
 
-    let output = ""
+    let out_str = ""
     if captured != null && captured != "" {
-        output = captured
+        out_str = captured
     }
     if result != null {
-        if output != "" { output = output + "\n" }
-        output = output + to_string(result)
+        if out_str != "" { out_str = out_str + "\n" }
+        out_str = out_str + to_string(result)
     }
 
     // Include warnings if any
     if len(warnings) > 0 {
-        output = output + "\n--- Warnings ---\n"
+        out_str = out_str + "\n--- Warnings ---\n"
         for w in warnings {
-            output = output + "  warning: " + to_string(w) + "\n"
+            out_str = out_str + "  warning: " + to_string(w) + "\n"
         }
     }
 
-    mcp_text_result(output)
+    mcp_text_result(out_str)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -458,11 +458,11 @@ func mcp_tool_check_full(arguments) {
     }
 
     // Format as structured text
-    let output = f"{len(errors)} errors, {len(warnings)} warnings\n"
+    let out_str = f"{len(errors)} errors, {len(warnings)} warnings\n"
     for d in diagnostics {
-        output = output + f"  [{d[\"severity\"]}] line {d[\"line\"]}: {d[\"message\"]}\n"
+        out_str = out_str + f"  [{d[\"severity\"]}] line {d[\"line\"]}: {d[\"message\"]}\n"
     }
-    mcp_text_result(output)
+    mcp_text_result(out_str)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -503,13 +503,13 @@ func mcp_tool_lint_full(arguments) {
     }
 
     // Format with codes and positions
-    let output = f"{len(warnings)} warnings\n"
+    let out_str = f"{len(warnings)} warnings\n"
     for w in warnings {
         const line = if w.has("line") { w["line"] } else { 0 }
         const code_str = if w.has("code") { " [" + w["code"] + "]" } else { "" }
-        output = output + f"  line {line}: {w}{code_str}\n"
+        out_str = out_str + f"  line {line}: {w}{code_str}\n"
     }
-    mcp_text_result(output)
+    mcp_text_result(out_str)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -598,11 +598,11 @@ func mcp_tool_stdlib_full(arguments) {
 
     if module == "" {
         // Return all modules with counts
-        let output = to_string(len(KNOWN_STDLIB_MODULES)) + " modules:\n"
+        let out_str = to_string(len(KNOWN_STDLIB_MODULES)) + " modules:\n"
         for mod_name in KNOWN_STDLIB_MODULES {
-            output = output + f"  {mod_name}\n"
+            out_str = out_str + f"  {mod_name}\n"
         }
-        return mcp_text_result(output)
+        return mcp_text_result(out_str)
     }
 
     // Check if module exists
@@ -627,11 +627,11 @@ func mcp_tool_version_full() {
         "tools": MCP_TOOL_COUNT,
         "capabilities": ["run", "check", "format", "lint", "parse", "stdlib", "version"]
     }
-    let output = f"MAGI v{VERSION} (self-hosted)\n"
-    output = output + f"Protocol: MCP {MCP_PROTOCOL_VERSION}\n"
-    output = output + f"Tools: {MCP_TOOL_COUNT}\n"
-    output = output + f"Capabilities: {info[\"capabilities\"].join(\", \")}"
-    mcp_text_result(output)
+    let out_str = f"MAGI v{VERSION} (self-hosted)\n"
+    out_str = out_str + f"Protocol: MCP {MCP_PROTOCOL_VERSION}\n"
+    out_str = out_str + f"Tools: {MCP_TOOL_COUNT}\n"
+    out_str = out_str + f"Capabilities: {info[\"capabilities\"].join(\", \")}"
+    mcp_text_result(out_str)
 }
 
 // ══════════════════════════════════════════════════════════════════════

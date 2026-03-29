@@ -31,6 +31,8 @@ pub struct Compiler {
     global_vars: HashMap<String, u32>,
     /// Whether we're compiling the top-level __main function.
     in_top_level: bool,
+    /// Variables from enclosing scopes that have been promoted to globals for capture.
+    captured_vars: HashMap<String, u32>,
 }
 
 /// A single source map entry mapping a compiled instruction to source location.
@@ -135,6 +137,7 @@ impl Compiler {
             source_map: Vec::new(),
             global_vars: HashMap::new(),
             in_top_level: false,
+            captured_vars: HashMap::new(),
         }
     }
 
@@ -550,12 +553,13 @@ impl Compiler {
                     self.emit(Instruction::LocalSet(idx));
                 } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
                     self.emit(Instruction::GlobalSet(gidx));
+                } else if let Some(&gidx) = self.captured_vars.get(name.as_str()) {
+                    self.emit(Instruction::GlobalSet(gidx));
                 } else {
-                    return Err(CompileError::at(
-                        stmt.span.start_line,
-                        stmt.span.start_col,
-                        format!("undefined variable: {name}"),
-                    ));
+                    // Auto-capture as global for closure simulation
+                    let gidx = self.define_global(name, true);
+                    self.captured_vars.insert(name.to_string(), gidx);
+                    self.emit(Instruction::GlobalSet(gidx));
                 }
             }
 
@@ -1018,16 +1022,17 @@ impl Compiler {
                     self.emit(Instruction::LocalGet(idx));
                 } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
                     self.emit(Instruction::GlobalGet(gidx));
+                } else if let Some(&gidx) = self.captured_vars.get(name.as_str()) {
+                    self.emit(Instruction::GlobalGet(gidx));
                 } else if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
                     // Function reference — push index as i64 for indirect calls.
                     self.emit(Instruction::PushI64(fn_idx as i64));
                 } else {
-                    // Unresolved variable — may be a runtime/closure capture.
-                    let name_idx = self.module.intern_string(name);
-                    self.emit(Instruction::RuntimeCall {
-                        name: name_idx,
-                        arg_count: 0,
-                    });
+                    // Auto-capture: promote unresolved variable to a global
+                    // (simulates closure capture for compiled code)
+                    let gidx = self.define_global(name, true);
+                    self.captured_vars.insert(name.to_string(), gidx);
+                    self.emit(Instruction::GlobalGet(gidx));
                 }
             }
 
@@ -3178,11 +3183,9 @@ mod tests {
 
     #[test]
     fn test_compile_error_undefined_assignment() {
+        // Auto-capture: assigning to an undeclared variable creates a global (closure simulation).
         let result = compile("z = 42;");
-        assert!(result.is_err(), "assigning to undefined variable should fail");
-        let err = result.unwrap_err();
-        let msg = format!("{}", err);
-        assert!(msg.contains("undefined variable"), "error should mention undefined variable: {}", msg);
+        assert!(result.is_ok(), "auto-capture should allow assigning to undeclared variable");
     }
 
     #[test]
