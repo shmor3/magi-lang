@@ -1,19 +1,8 @@
-// MAGI Self-Hosted Compiler — Linter
-//
-// Produces code quality warnings by walking the AST.
-// Warnings: unused variables, unreachable code, non-exhaustive match, empty blocks.
-
-// ── Lint State (module-level mutable) ──────────────────────────────
-
 let lint_warnings = []
 
 func lint_warn(msg) {
     lint_warnings.push(msg)
 }
-
-// ── Variable Scope Tracking ─────────────────────────────────────────
-
-// Each scope entry: { name -> { used: bool, line: int } }
 func lint_new_scope() {
     {"__ls": true}
 }
@@ -26,7 +15,6 @@ func lint_push_scope() {
 
 func lint_pop_scope() {
     const scope = lint_scopes.pop()
-    // Check for unused variables in the popped scope
     for key in scope.keys() {
         if key == "__ls" { continue }
         const entry = scope[key]
@@ -58,9 +46,6 @@ func lint_use(name) {
         idx = idx - 1
     }
 }
-
-// ── Lint Expression ─────────────────────────────────────────────────
-
 func lint_expr(e) {
     if e == null { return null }
     const k = e.kind
@@ -147,9 +132,6 @@ func lint_expr(e) {
         _ => null,
     }
 }
-
-// ── Match Exhaustiveness ────────────────────────────────────────────
-
 func lint_check_match_exhaustive(arms) {
     let has_wildcard = false
     for arm in arms {
@@ -164,9 +146,6 @@ func lint_check_match_exhaustive(arms) {
         lint_warn("match expression may be non-exhaustive (no wildcard or variable pattern)")
     }
 }
-
-// ── Unreachable Code Detection ──────────────────────────────────────
-
 func lint_is_terminator(stmt) {
     const k = stmt.kind
     match k {
@@ -189,12 +168,8 @@ func lint_check_stmts_reachability(stmts) {
         if lint_is_terminator(s) { terminated = true }
     }
 }
-
-// ── Lint Block ──────────────────────────────────────────────────────
-
 func lint_block(blk) {
     if blk == null { return null }
-    // Empty block warning
     if len(blk.stmts) == 0 && blk.tail_expr == null {
         const line = blk.span.start_line
         lint_warn(f"empty block at line {line}")
@@ -205,9 +180,6 @@ func lint_block(blk) {
     lint_expr(blk.tail_expr)
     lint_pop_scope()
 }
-
-// ── Lint Statement ──────────────────────────────────────────────────
-
 func lint_stmt(s) {
     const k = s.kind
     const line = s.span.start_line
@@ -295,11 +267,7 @@ func lint_funcdef(fd) {
     lint_block(fd.body)
     lint_pop_scope()
 }
-
-// ── Entry Point ─────────────────────────────────────────────────────
-
 func lint(program) {
-    // Reset state
     lint_warnings = []
     lint_scopes = [lint_new_scope()]
     lint_loop_depth = 0
@@ -309,10 +277,8 @@ func lint(program) {
         lint_stmt(s)
     }
 
-    // Pop global scope
     lint_pop_scope()
 
-    // Run additional lint passes
     lint_check_unused_imports(program.statements)
     lint_check_naming_conventions(program.statements)
     lint_check_unreachable_code(program.statements)
@@ -320,19 +286,9 @@ func lint(program) {
 
     lint_warnings
 }
-
-// ── Additional State ─────────────────────────────────────────────────
-
 let lint_loop_depth = 0
 let lint_func_depth = 0
 
-// ══════════════════════════════════════════════════════════════════════
-// ── W100-W114: Variable/Import/Function Warnings ────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// W100: Unused variables (implemented via scope pop above)
-
-// W101: Unused imports
 func lint_check_unused_imports(statements) {
     let imported_names = {"__s": true}
     let used_names = {"__s": true}
@@ -405,13 +361,11 @@ func lint_collect_expr_names(expr, names) {
     }
 }
 
-// W102: Redundant operations (e.g., x = x, if true, etc.)
 func lint_check_redundant(expr) {
     if expr == null { return null }
     const ek = expr.kind
     match ek {
         ExprKind::EBinaryOp(op, left, right) => {
-            // x + 0, x * 1, x - 0
             match op {
                 BinOp::Add => {
                     match right.kind {
@@ -446,19 +400,12 @@ func lint_check_redundant(expr) {
     }
 }
 
-// W103: Reserved keyword used as name
 func lint_check_reserved_keyword(name, line) {
     const reserved = ["class", "extends", "super", "new", "this", "private", "protected", "public", "abstract", "final", "native", "volatile", "transient"]
     if reserved.contains(name) {
         lint_warnings.push(f"W103: '{name}' is a reserved keyword at line {line}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W200-W252: Style and Complexity Warnings ────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// W200: Naming conventions
 func lint_check_naming_conventions(statements) {
     for stmt in statements {
         const line = stmt.span.start_line
@@ -466,7 +413,6 @@ func lint_check_naming_conventions(statements) {
         match sk {
             StmtKind::SFuncDef(fdef) => {
                 const name = fdef.name
-                // Functions should be snake_case
                 if name != to_lower(name) && !name.contains("_") && !name.contains(".") {
                     let has_upper = false
                     let i = 1
@@ -479,12 +425,10 @@ func lint_check_naming_conventions(statements) {
                     }
                 }
 
-                // Check param naming
                 for p in fdef.params {
                     lint_check_reserved_keyword(p.name, line)
                 }
 
-                // W240: Long functions
                 if fdef.body != null && len(fdef.body.stmts) > 50 {
                     lint_warnings.push(f"W240: function '{name}' has {len(fdef.body.stmts)} statements (>50), consider splitting at line {line}")
                 }
@@ -509,7 +453,6 @@ func lint_check_naming_conventions(statements) {
     }
 }
 
-// W210: Unreachable code
 func lint_check_unreachable_code(statements) {
     let found_terminal = false
     for stmt in statements {
@@ -527,10 +470,6 @@ func lint_check_unreachable_code(statements) {
         }
     }
 }
-
-// W211: Non-exhaustive match (checked in type_checker, but lint version for warnings)
-
-// W220: Self-comparison
 func lint_check_self_comparison(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -567,17 +506,14 @@ func lint_exprs_same(a, b) {
     }
 }
 
-// W221: Empty blocks
 func lint_check_empty_block(block, label, line) {
     if block != null && len(block.stmts) == 0 && block.tail_expr == null {
         lint_warnings.push(f"W221: empty {label} block at line {line}")
     }
 }
 
-// W222: Variable shadowing
 func lint_check_shadow(name, line) {
-    // Check if name exists in any outer scope
-    let i = len(lint_scopes) - 2 // skip current scope
+    let i = len(lint_scopes) - 2
     while i >= 0 {
         const scope = lint_scopes[i]
         if scope.has(name) && name != "__s" {
@@ -588,14 +524,12 @@ func lint_check_shadow(name, line) {
     }
 }
 
-// W230: Deep nesting
 func lint_check_nesting(depth, line) {
     if depth > 5 {
         lint_warnings.push(f"W230: nesting depth ({depth}) exceeds 5 at line {line}")
     }
 }
 
-// W241: Cognitive complexity
 func lint_check_function_complexity(statements) {
     for stmt in statements {
         const sk = stmt.kind
@@ -646,7 +580,6 @@ func lint_compute_complexity(statements, depth) {
     score
 }
 
-// W250: Magic numbers
 func lint_check_magic_number(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -664,11 +597,6 @@ func lint_check_magic_number(expr, line) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W200: Name should use snake_case ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_is_snake_case(name) {
     if name.starts_with("_") || len(name) <= 1 { return true }
     let i = 0
@@ -700,11 +628,6 @@ func lint_check_snake_case(name, line) {
     if lint_is_snake_case(name) || lint_is_screaming_case(name) { return null }
     lint_warn(f"W200: '{name}' should be snake_case at line {line}")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W201: Type name should use PascalCase ───────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_is_pascal_case(name) {
     if len(name) == 0 || name.starts_with("_") { return true }
     const first = name[0]
@@ -716,11 +639,6 @@ func lint_check_pascal_case(name, line) {
     if lint_is_pascal_case(name) { return null }
     lint_warn(f"W201: '{name}' should be PascalCase at line {line}")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W202: Unreachable code ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_dead_code(stmts) {
     let terminated = false
     for stmt in stmts {
@@ -738,14 +656,8 @@ func lint_check_dead_code(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W203: Non-exhaustive match ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_exhaustive_match(arms, line, enum_defs) {
     if len(arms) == 0 { return null }
-    // Check for catch-all
     for arm in arms {
         const pat = arm.pattern
         match pat {
@@ -754,7 +666,6 @@ func lint_check_exhaustive_match(arms, line, enum_defs) {
             _ => {}
         }
     }
-    // Collect enum variants used
     let enum_name = ""
     let used_variants = []
     for arm in arms {
@@ -768,7 +679,6 @@ func lint_check_exhaustive_match(arms, line, enum_defs) {
         }
     }
     if enum_name == "" { return null }
-    // Look up enum definition
     for edef in enum_defs {
         if edef[0] == enum_name {
             const all_variants = edef[1]
@@ -782,11 +692,6 @@ func lint_check_exhaustive_match(arms, line, enum_defs) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W204: Condition always true/false ───────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_constant_condition(cond, has_break_in_body) {
     if cond == null { return null }
     const ek = cond.kind
@@ -794,7 +699,6 @@ func lint_check_constant_condition(cond, has_break_in_body) {
         ExprKind::ELiteral(lit) => {
             match lit {
                 Literal::BoolLit(b) => {
-                    // Suppress for while true with break
                     if b && has_break_in_body { return null }
                     lint_warn(f"W204: condition is always {b} at line {cond.span.start_line}")
                 },
@@ -804,11 +708,6 @@ func lint_check_constant_condition(cond, has_break_in_body) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W205: Self-comparison ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_self_comparison(expr) {
     if expr == null { return null }
     const ek = expr.kind
@@ -850,22 +749,12 @@ func lint_exprs_equal(a, b) {
         _ => false
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W206: Empty block body ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_empty_block(block, context, line) {
     if block == null { return null }
     if len(block.stmts) == 0 && block.tail_expr == null {
         lint_warn(f"W206: empty {context} body at line {line}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W207: Unreachable match arm after wildcard ──────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unreachable_arms(arms, line) {
     let seen_catch_all = false
     for arm in arms {
@@ -881,11 +770,6 @@ func lint_check_unreachable_arms(arms, line) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W208: Duplicate import ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_duplicate_imports(stmts) {
     let seen = {}
     for stmt in stmts {
@@ -904,11 +788,6 @@ func lint_check_duplicate_imports(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W209: Variable shadows previous binding ─────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_shadowing(stmts) {
     let seen = {}
     for stmt in stmts {
@@ -931,11 +810,6 @@ func lint_check_shadowing(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W212: Control flow in finally block ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_control_flow_in_finally(block) {
     if block == null { return null }
     for stmt in block.stmts {
@@ -949,11 +823,6 @@ func lint_check_control_flow_in_finally(block) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W214: Loop without break ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_block_has_break(block) {
     if block == null { return false }
     for stmt in block.stmts {
@@ -969,11 +838,6 @@ func lint_block_has_break(block) {
     }
     false
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W215: if cond { true } else { false } ───────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_bool_if_else(expr) {
     if expr == null { return null }
     const ek = expr.kind
@@ -1008,21 +872,11 @@ func lint_block_bool_value(block) {
         _ => null
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W216: Empty enum ────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_empty_enum(variants, name, line) {
     if len(variants) == 0 {
         lint_warn(f"W216: empty enum '{name}' has no variants at line {line}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W229: Match arm with empty body ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_empty_match_arms(arms, line) {
     for arm in arms {
         if arm.body == null { continue }
@@ -1037,11 +891,6 @@ func lint_check_empty_match_arms(arms, line) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W230: Self-assignment ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_self_assignment(name, value, line) {
     if value == null { return null }
     const vk = value.kind
@@ -1054,20 +903,9 @@ func lint_check_self_assignment(name, value, line) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W231: Boolean literal in if-else ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_boolean_if_else(expr) {
-    // Alias to W215 check
     lint_check_bool_if_else(expr)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W233: Deep nesting ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_nesting(stmts, depth, max_depth) {
     for stmt in stmts {
         const sk = stmt.kind
@@ -1104,11 +942,6 @@ func lint_check_nesting(stmts, depth, max_depth) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W234: Duplicate struct field names ───────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_duplicate_fields(fields, context, line) {
     let seen = {}
     for field in fields {
@@ -1119,11 +952,6 @@ func lint_check_duplicate_fields(fields, context, line) {
         seen[name] = true
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W235: Duplicate enum variant names ──────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_duplicate_variants(variants, enum_name, line) {
     let seen = {}
     for v in variants {
@@ -1134,11 +962,6 @@ func lint_check_duplicate_variants(variants, enum_name, line) {
         seen[name] = true
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W236/W244: TODO/FIXME/HACK comment ──────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_todo_comments(source) {
     const lines = source.split("\n")
     let line_num = 1
@@ -1153,11 +976,6 @@ func lint_check_todo_comments(source) {
         line_num = line_num + 1
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W237: Magic number ──────────────────────────────────────════════
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_magic_number_in_expr(expr, in_binding) {
     if expr == null || in_binding { return null }
     const ek = expr.kind
@@ -1190,16 +1008,10 @@ func lint_check_literal_magic(expr) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W238: Unused variable binding ───────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unused_variables(stmts) {
     let declared = []
     let used = {}
 
-    // Collect declarations
     for stmt in stmts {
         const sk = stmt.kind
         match sk {
@@ -1209,7 +1021,6 @@ func lint_check_unused_variables(stmts) {
         }
     }
 
-    // Collect all used names
     func collect_used_in_expr(e) {
         if e == null { return null }
         const ek = e.kind
@@ -1253,11 +1064,6 @@ func lint_check_unused_variables(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W239: Unused mut ────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unnecessary_mut(stmts) {
     let mut_vars = []
     let reassigned = {}
@@ -1280,11 +1086,6 @@ func lint_check_unnecessary_mut(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W240: Needless trailing return ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_needless_return(stmts, line) {
     if len(stmts) == 0 { return null }
     const last = stmts[len(stmts) - 1]
@@ -1298,11 +1099,6 @@ func lint_check_needless_return(stmts, line) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W241: Redundant boolean comparison ──────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_bool_comparison(expr) {
     if expr == null { return null }
     const ek = expr.kind
@@ -1332,11 +1128,6 @@ func lint_is_bool_literal(expr) {
         _ => false
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W242: Nested if can be collapsed with && ────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_collapsible_if(expr) {
     if expr == null { return null }
     const ek = expr.kind
@@ -1364,42 +1155,22 @@ func lint_check_collapsible_if(expr) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W243: Too many parameters ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_too_many_params(fdef, line) {
     const max_params = 7
     if len(fdef.params) > max_params {
         lint_warn(f"W243: function '{fdef.name}' has {len(fdef.params)} parameters (max {max_params}) at line {line}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W246: Match with no arms ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_empty_match(arms, line) {
     if len(arms) == 0 {
         lint_warn(f"W246: match expression has no arms at line {line}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W249: Single-arm match (use if let) ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_single_arm_match(arms, line) {
     if len(arms) == 1 {
         lint_warn(f"W249: match with single arm — consider using if let at line {line}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W251: Long function body ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_function_length(fdef, line) {
     const max_lines = 100
     if fdef.body != null {
@@ -1409,11 +1180,6 @@ func lint_check_function_length(fdef, line) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W252: Loop implements map/filter ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_manual_map(stmt) {
     const sk = stmt.kind
     match sk {
@@ -1441,17 +1207,10 @@ func lint_check_manual_map(stmt) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Lint Pass ──────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Run all lint rules on a program AST. Returns lint_warnings array.
 func lint_program(program) {
     lint_warnings = []
     let enum_defs = []
 
-    // First pass: collect enum definitions
     func collect_enums(stmts) {
         for stmt in stmts {
             const sk = stmt.kind
@@ -1467,7 +1226,6 @@ func lint_program(program) {
     }
     collect_enums(program.statements)
 
-    // Second pass: lint all statements
     func lint_stmt_deep(stmt) {
         const sk = stmt.kind
         const line = stmt.span.start_line
@@ -1499,7 +1257,6 @@ func lint_program(program) {
                     lint_check_unnecessary_mut(fdef.body.stmts)
                     lint_check_shadowing(fdef.body.stmts)
                     for s in fdef.body.stmts { lint_stmt_deep(s) }
-                    // W250 cognitive complexity
                     const complexity = lint_compute_complexity(fdef.body.stmts, 0)
                     if complexity > 25 {
                         lint_warn(f"W250: function '{fdef.name}' has cognitive complexity {complexity} (>25) at line {line}")
@@ -1584,7 +1341,6 @@ func lint_program(program) {
         }
     }
 
-    // Run top-level checks
     lint_check_duplicate_imports(program.statements)
     lint_check_shadowing(program.statements)
     lint_check_dead_code(program.statements)
@@ -1598,12 +1354,6 @@ func lint_program(program) {
 
     lint_warnings
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W100: Unused variable ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// W100 is a stricter variant of W238 that checks all bindings, not just let.
 func lint_check_unused_all_bindings(stmts) {
     let bound = []
     let referenced = {}
@@ -1726,7 +1476,6 @@ func lint_check_unused_all_bindings(stmts) {
         }
     }
 
-    // Collect all bindings
     for stmt in stmts {
         const sk = stmt.kind
         match sk {
@@ -1743,26 +1492,18 @@ func lint_check_unused_all_bindings(stmts) {
         }
     }
 
-    // Collect all references
     for stmt in stmts { collect_refs_stmt(stmt) }
 
-    // Report unused
     for b in bound {
         if !referenced.has(b[0]) {
             lint_warn(f"W100: unused variable '{b[0]}' at line {b[1]}")
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W101: Unused import ─────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unused_imports(stmts) {
     let imports = []
     let used_names = {}
 
-    // Collect imports
     for stmt in stmts {
         const sk = stmt.kind
         match sk {
@@ -1783,7 +1524,6 @@ func lint_check_unused_imports(stmts) {
         }
     }
 
-    // Collect all used identifiers (simplified: just variable and call names)
     func collect_used(e) {
         if e == null { return null }
         const ek = e.kind
@@ -1840,11 +1580,6 @@ func lint_check_unused_imports(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W103: Unused function ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unused_functions(stmts) {
     let defined = []
     let called = {}
@@ -1913,39 +1648,28 @@ func lint_check_unused_functions(stmts) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W106: Redundant operation ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_redundant_op(expr) {
     if expr == null { return null }
     const ek = expr.kind
     match ek {
         ExprKind::EBinaryOp(op, left, right) => {
-            // x == true → x
             if op == BinOp::Eq && lint_is_bool_literal(right) {
                 lint_warn(f"W106: redundant comparison to boolean literal at line {expr.span.start_line}")
             }
-            // x * 0 → 0
             if op == BinOp::Mul && lint_is_zero(right) {
                 lint_warn(f"W107: suspicious arithmetic: multiplication by zero at line {expr.span.start_line}")
             }
-            // x % 1 → 0
             if op == BinOp::Mod && lint_is_one(right) {
                 lint_warn(f"W107: suspicious arithmetic: modulo by 1 at line {expr.span.start_line}")
             }
-            // x + 0 → x
             if op == BinOp::Add && lint_is_zero(right) {
                 lint_warn(f"W106: redundant addition of zero at line {expr.span.start_line}")
             }
-            // x * 1 → x
             if op == BinOp::Mul && lint_is_one(right) {
                 lint_warn(f"W106: redundant multiplication by one at line {expr.span.start_line}")
             }
         },
         ExprKind::EUnaryOp(op, operand) => {
-            // --x (double negation)
             const inner_ek = operand.kind
             match inner_ek {
                 ExprKind::EUnaryOp(inner_op, _) => {
@@ -1989,11 +1713,6 @@ func lint_is_one(expr) {
         _ => false
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W108: Unnecessary return in tail position ───────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unnecessary_tail_return(stmts) {
     if len(stmts) == 0 { return null }
     const last = stmts[len(stmts) - 1]
@@ -2007,11 +1726,6 @@ func lint_check_unnecessary_tail_return(stmts) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W109: Unused function parameter ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_unused_params(fdef) {
     if fdef.body == null { return null }
     let used = {}
@@ -2092,21 +1806,9 @@ func lint_check_unused_params(fdef) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W110: Variable declared mut but never reassigned ────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// (Alias for W239 — same logic, different code)
 func lint_check_mut_not_reassigned(stmts) {
     lint_check_unnecessary_mut(stmts)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Lint Configuration and Filtering ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Filter warnings by disabled rules.
 func lint_filter_warnings(warnings, disabled_rules) {
     let filtered = []
     for w in warnings {
@@ -2119,7 +1821,6 @@ func lint_filter_warnings(warnings, disabled_rules) {
     filtered
 }
 
-// Run lint with configuration.
 func lint_program_with_config(program, config) {
     const warnings = lint_program(program)
     let disabled = []
@@ -2133,7 +1834,6 @@ func lint_program_with_config(program, config) {
     }
 }
 
-// Get lint rule description by code.
 func lint_rule_description(code) {
     if code == "W100" { return "unused variable" }
     if code == "W101" { return "unused import" }
@@ -2184,7 +1884,6 @@ func lint_rule_description(code) {
     "unknown lint rule"
 }
 
-// All known lint codes.
 const ALL_LINT_CODES = [
     "W100", "W101", "W103", "W106", "W107", "W108", "W109", "W110", "W111",
     "W112", "W113", "W114",
@@ -2194,11 +1893,6 @@ const ALL_LINT_CODES = [
     "W240", "W241", "W242", "W243", "W244", "W245", "W246", "W247", "W248", "W249",
     "W250", "W251", "W252"
 ]
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W111: Name is reserved keyword ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 const RESERVED_KEYWORDS = [
     "abstract", "become", "box", "final", "macro", "override",
     "priv", "typeof", "unsized", "virtual", "yield", "crate",
@@ -2213,15 +1907,9 @@ func lint_check_reserved_name(name, line) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W112: Default value type mismatch ───────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_default_type_mismatch(param, line) {
     if param.default_val == null { return null }
     if param.type_ann == "" { return null }
-    // Simple check: if param has type int but default is a string literal, etc.
     const ek = param.default_val.kind
     match ek {
         ExprKind::ELiteral(lit) => {
@@ -2247,20 +1935,13 @@ func lint_check_default_type_mismatch(param, line) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W113: Or-pattern variable name mismatch ─────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func lint_check_or_pattern_names(pat, line) {
     match pat {
         Pattern::POr(alternatives) => {
-            // Collect variable names from each alternative
             let first_names = lint_collect_pattern_names(alternatives[0])
             let i = 1
             while i < len(alternatives) {
                 const names = lint_collect_pattern_names(alternatives[i])
-                // Check that same names appear in all alternatives
                 for name in first_names {
                     if !names.contains(name) {
                         lint_warn(f"W113: or-pattern variable '{name}' not bound in all alternatives at line {line}")
@@ -2295,7 +1976,6 @@ func lint_collect_pattern_names(pat) {
             }
         },
         Pattern::POr(alts) => {
-            // Use first alternative's names
             if len(alts) > 0 {
                 const inner = lint_collect_pattern_names(alts[0])
                 for n in inner { names.push(n) }
@@ -2305,12 +1985,6 @@ func lint_collect_pattern_names(pat) {
     }
     names
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── W114: Deprecated item usage ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Track deprecated items for the lint pass.
 let lint_deprecated_items = {}
 
 func lint_mark_deprecated(name, message) {
@@ -2334,16 +2008,9 @@ func lint_check_deprecated_usage(expr) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Lint Summary and Reporting ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Count warnings by category.
 func lint_count_by_code(warnings) {
     let counts = {}
     for w in warnings {
-        // Extract code from "W123: message"
         const colon = w.index_of(":")
         if colon > 0 {
             const code = w.substring(0, colon)
@@ -2357,7 +2024,6 @@ func lint_count_by_code(warnings) {
     counts
 }
 
-// Format lint results as a report string.
 func lint_format_report(warnings) {
     if len(warnings) == 0 { return "No warnings found.\n" }
     let result = f"Found {len(warnings)} warning(s):\n\n"
@@ -2373,7 +2039,6 @@ func lint_format_report(warnings) {
     result
 }
 
-// Format lint results as JSON.
 func lint_format_json(warnings) {
     let items = []
     for w in warnings {
@@ -2388,11 +2053,6 @@ func lint_format_json(warnings) {
     }
     "[\n" + items.join(",\n") + "\n]"
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Lint Rule Registry with Configurable Severity ──────────────
-// ══════════════════════════════════════════════════════════════════════
-
 const LINT_RULES = [
     {"code": "W001", "name": "unused-variable", "severity": "warning", "fixable": true,
      "description": "Variable is declared but never used"},
@@ -2492,8 +2152,7 @@ const LINT_RULES = [
      "description": "Operation has no effect (x + 0, x * 1, etc.)"},
 ]
 
-// Configurable lint configuration
-let lint_config = {"__s": true}  // code -> {enabled, severity}
+let lint_config = {"__s": true}
 
 func lint_configure(code, options) {
     lint_config[code] = options
@@ -2504,7 +2163,7 @@ func lint_is_enabled(code) {
         const cfg = lint_config[code]
         if cfg.has("enabled") { return cfg["enabled"] }
     }
-    true  // Enabled by default
+    true
 }
 
 func lint_get_severity(code) {
@@ -2512,15 +2171,11 @@ func lint_get_severity(code) {
         const cfg = lint_config[code]
         if cfg.has("severity") { return cfg["severity"] }
     }
-    // Default severity from rule definition
     for rule in LINT_RULES {
         if rule["code"] == code { return rule["severity"] }
     }
     "warning"
 }
-
-// ── Additional Lint Checks ──────────────────────────────────────────
-
 func lint_check_constant_condition(expr) {
     if expr == null { return null }
     const k = expr.kind
@@ -2552,7 +2207,6 @@ func lint_check_self_comparison(expr) {
 
 func lint_expr_equals(a, b) {
     if a == null || b == null { return false }
-    // Simple structural equality check
     const ka = a.kind
     const kb = b.kind
     match ka {
@@ -2674,9 +2328,6 @@ func lint_check_double_negation(expr) {
         _ => {},
     }
 }
-
-// ── Source-Level Lint Checks (comments, whitespace, line length) ─────
-
 func lint_source_checks(source) {
     const lines = source.split("\n")
     let has_tabs = false
@@ -2687,19 +2338,16 @@ func lint_source_checks(source) {
         line_num = line_num + 1
         const trimmed = line.trim()
 
-        // Check line length
         if len(line) > 120 && lint_is_enabled("W303") {
             lint_warn(f"W303: line {line_num} exceeds 120 characters ({len(line)})")
         }
 
-        // Check trailing whitespace
         if len(line) > 0 && line != trimmed && (line.ends_with(" ") || line.ends_with("\t")) {
             if lint_is_enabled("W304") {
                 lint_warn(f"W304: trailing whitespace at line {line_num}")
             }
         }
 
-        // Check TODO/FIXME/HACK comments
         if trimmed.contains("TODO") && lint_is_enabled("W300") {
             lint_warn(f"W300: TODO comment at line {line_num}")
         }
@@ -2710,24 +2358,18 @@ func lint_source_checks(source) {
             lint_warn(f"W302: HACK comment at line {line_num}")
         }
 
-        // Track indentation style
         if len(line) > 0 && line[0] == "\t" { has_tabs = true }
         if len(line) > 0 && line[0] == " " { has_spaces = true }
     }
 
-    // Mixed indentation
     if has_tabs && has_spaces && lint_is_enabled("W305") {
         lint_warn("W305: file uses both tabs and spaces for indentation")
     }
 
-    // No trailing newline
     if len(source) > 0 && !source.ends_with("\n") && lint_is_enabled("W306") {
         lint_warn("W306: file does not end with a newline")
     }
 }
-
-// ── Auto-Fix Suggestions for Each Rule ──────────────────────────────
-
 func lint_auto_fix(code, context) {
     match code {
         "W001" => {"action": "prefix_underscore", "description": "Prefix variable with underscore"},
@@ -2759,9 +2401,6 @@ func lint_auto_fix(code, context) {
         _ => null,
     }
 }
-
-// ── Full Lint Pipeline ──────────────────────────────────────────────
-
 func lint_full(source) {
     const save_warnings = lint_warnings
     const save_scopes = lint_scopes
@@ -2769,11 +2408,9 @@ func lint_full(source) {
     lint_warnings = []
     lint_scopes = [lint_new_scope()]
 
-    // AST-based checks
     const program = parse(source)
     lint_program(program)
 
-    // Source-level checks
     lint_source_checks(source)
 
     const warnings = lint_warnings
@@ -2781,9 +2418,6 @@ func lint_full(source) {
     lint_scopes = save_scopes
     warnings
 }
-
-// ── JSON Output Format ──────────────────────────────────────────────
-
 func lint_format_json_full(warnings, source_path) {
     let items = []
     for w in warnings {
@@ -2799,7 +2433,6 @@ func lint_format_json_full(warnings, source_path) {
             severity = lint_get_severity(code)
         }
 
-        // Extract line number from message
         const at_idx = message.index_of(" at line ")
         if at_idx >= 0 {
             const num_str = message[at_idx + 9..len(message)]
@@ -2809,7 +2442,6 @@ func lint_format_json_full(warnings, source_path) {
             if line == null { line = 0 }
         }
 
-        // Get auto-fix suggestion
         const fix = lint_auto_fix(code, null)
 
         let item = f"    {{\n"

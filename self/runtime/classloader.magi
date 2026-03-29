@@ -1,24 +1,6 @@
-// MAGI Self-Hosted Runtime — Class Loader
-//
-// Finds, loads, and caches .magc classfiles by name or path.
-// Search order:
-//   1. Cache (already loaded)
-//   2. Each search path directory: <dir>/<name>.magc
-//
-// Module-level mutable state for search paths and cache.
-
-// ── ClassLoader State (module-level mutable) ──────────────────────
-
-// Cache: map from name -> decoded classfile map
 let cl_cache = {"__init": true}
 
-// Search paths: array of directory strings
 let cl_paths = ["."]
-
-// ── Initialization ────────────────────────────────────────────────
-
-// Initialize the class loader with a set of search paths.
-// Resets cache and replaces any existing paths.
 func classloader_init(paths) {
     cl_cache = {"__init": true}
     cl_paths = ["."]
@@ -32,18 +14,10 @@ func classloader_init(paths) {
     null
 }
 
-// Add a single path to the search list (append to existing paths).
 func classloader_add_path(path) {
     cl_paths.push(path)
 }
-
-// ── Path Resolution ───────────────────────────────────────────────
-
-// Resolve a class name to an absolute file path.
-// Searches each directory for <name>.magc
-// Returns the path string if found, or null if not found.
 func classloader_resolve(name) {
-    // If name already ends with .magc, search as-is (strip for display)
     let filename = name
     if !filename.ends_with(".magc") {
         filename = name + ".magc"
@@ -65,14 +39,7 @@ func classloader_resolve(name) {
     }
     null
 }
-
-// ── Loading ───────────────────────────────────────────────────────
-
-// Load a .magc classfile by name (not path).
-// Returns decoded classfile map: { "source", "functions", "constants", "entry", "version" }
-// Panics if the class cannot be found.
 func classloader_load(name) {
-    // Check cache first (use plain name as key)
     if cl_cache.has(name) {
         return cl_cache[name]
     }
@@ -88,28 +55,20 @@ func classloader_load(name) {
     cf_map
 }
 
-// Load a .magc classfile from an explicit file path.
-// Returns decoded classfile map.
 func classloader_load_path(path) {
     const raw = file.read_bytes(path)
     decode_classfile(raw)
 }
 
-// Load from raw bytes under a given name (for testing / embedding).
 func classloader_load_bytes(name, bytes) {
     const cf_map = decode_classfile(bytes)
     cl_cache[name] = cf_map
     cf_map
 }
-
-// ── Cache Management ──────────────────────────────────────────────
-
-// Check if a class is already in the cache.
 func classloader_is_loaded(name) {
     cl_cache.has(name)
 }
 
-// Get a cached classfile map by name. Returns null if not cached.
 func classloader_get(name) {
     if cl_cache.has(name) {
         return cl_cache[name]
@@ -117,21 +76,15 @@ func classloader_get(name) {
     null
 }
 
-// Evict a single class from the cache.
 func classloader_evict(name) {
     if cl_cache.has(name) {
         cl_cache = delete(cl_cache, name)
     }
 }
 
-// Clear the entire cache.
 func classloader_clear_cache() {
     cl_cache = {"__init": true}
 }
-
-// ── Diagnostics ───────────────────────────────────────────────────
-
-// Return a list of all cached class names.
 func classloader_loaded_names() {
     let names = []
     for key in cl_cache.keys() {
@@ -142,7 +95,6 @@ func classloader_loaded_names() {
     names
 }
 
-// Return current search paths.
 func classloader_search_paths() {
     cl_paths
 }

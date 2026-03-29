@@ -1,9 +1,3 @@
-// MAGI Self-Hosted Compiler — Core Types
-
-// ── DataType ────────────────────────────────────────────────────────
-// Represents all MAGI values at runtime.
-// Uses simple variant data — no complex type annotations in enums.
-
 enum DataType {
     Null,
     Bool(bool),
@@ -62,9 +56,6 @@ func DataType.display(self) {
         _ => "<value>",
     }
 }
-
-// ── Span ────────────────────────────────────────────────────────────
-
 struct Span {
     start_line: int,
     start_col: int,
@@ -89,9 +80,6 @@ func Span.merge(self, other) {
                else { other.end_col }
     Span { start_line: sl, start_col: sc, end_line: el, end_col: ec, start_byte: 0, end_byte: 0 }
 }
-
-// ── Error Types ─────────────────────────────────────────────────────
-
 enum CompileError {
     Error(int, int, string),
     Unsupported(string),

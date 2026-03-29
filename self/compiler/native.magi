@@ -1,22 +1,9 @@
-// MAGI Self-Hosted Compiler — Native Code Generator
-//
-// Takes an IR module snapshot and produces an x86-64 ELF binary (as []int).
-// Emits a minimal statically-linked ELF64 executable for Linux.
-//
-// Entry point: compile_to_native(module) -> []int
-//
-// NOTE: MAGI arrays are value-typed (copied on pass). All mutable output
-// buffers are module-level globals, appended to by helper functions.
-
-// ── Module-level output buffer ────────────────────────────────────
-
 let nat_out = []
 
 func nat_push(b) {
     nat_out.push(b)
 }
 
-// Emit a 64-bit little-endian value
 func nat_push_u64(val) {
     let v = val
     let i = 0
@@ -27,7 +14,6 @@ func nat_push_u64(val) {
     }
 }
 
-// Emit a 32-bit little-endian value
 func nat_push_u32(val) {
     let v = val
     let i = 0
@@ -38,19 +24,13 @@ func nat_push_u32(val) {
     }
 }
 
-// Emit a 16-bit little-endian value
 func nat_push_u16(val) {
     nat_push(val & 255)
     nat_push((val >> 8) & 255)
 }
-
-// ── x86-64 Instruction Helpers ────────────────────────────────────
-
 func x86_push_imm64(val) {
-    // mov rax, imm64
     nat_push(0x48); nat_push(0xB8)
     nat_push_u64(val)
-    // push rax
     nat_push(0x50)
 }
 
@@ -60,79 +40,68 @@ func x86_push_rax() { nat_push(0x50) }
 
 func x86_add() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x01); nat_push(0xD8)  // add rax, rbx
+    nat_push(0x48); nat_push(0x01); nat_push(0xD8)
     x86_push_rax()
 }
 
 func x86_sub() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x29); nat_push(0xD8)  // sub rax, rbx
+    nat_push(0x48); nat_push(0x29); nat_push(0xD8)
     x86_push_rax()
 }
 
 func x86_mul() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x0F); nat_push(0xAF); nat_push(0xC3)  // imul rax, rbx
+    nat_push(0x48); nat_push(0x0F); nat_push(0xAF); nat_push(0xC3)
     x86_push_rax()
 }
 
 func x86_div() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x99)                              // cqo
-    nat_push(0x48); nat_push(0xF7); nat_push(0xFB)             // idiv rbx
+    nat_push(0x48); nat_push(0x99)
+    nat_push(0x48); nat_push(0xF7); nat_push(0xFB)
     x86_push_rax()
 }
 
 func x86_rem() {
     x86_pop_rbx(); x86_pop_rax()
     nat_push(0x48); nat_push(0x99)
-    nat_push(0x48); nat_push(0xF7); nat_push(0xFB)             // idiv rbx
-    nat_push(0x52)                                              // push rdx (remainder)
+    nat_push(0x48); nat_push(0xF7); nat_push(0xFB)
+    nat_push(0x52)
 }
 
 func x86_neg() {
     x86_pop_rax()
-    nat_push(0x48); nat_push(0xF7); nat_push(0xD8)             // neg rax
+    nat_push(0x48); nat_push(0xF7); nat_push(0xD8)
     x86_push_rax()
 }
 
 func x86_cmp_helper(set_byte) {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x39); nat_push(0xD8)             // cmp rax, rbx
-    nat_push(0x0F); nat_push(set_byte); nat_push(0xC0)         // set* al
-    nat_push(0x48); nat_push(0x0F); nat_push(0xB6); nat_push(0xC0)  // movzx rax, al
+    nat_push(0x48); nat_push(0x39); nat_push(0xD8)
+    nat_push(0x0F); nat_push(set_byte); nat_push(0xC0)
+    nat_push(0x48); nat_push(0x0F); nat_push(0xB6); nat_push(0xC0)
     x86_push_rax()
 }
 
-func x86_cmp_eq()  { x86_cmp_helper(0x94) }  // sete
-func x86_cmp_ne()  { x86_cmp_helper(0x95) }  // setne
-func x86_cmp_lt()  { x86_cmp_helper(0x9C) }  // setl
-func x86_cmp_gt()  { x86_cmp_helper(0x9F) }  // setg
-func x86_cmp_le()  { x86_cmp_helper(0x9E) }  // setle
-func x86_cmp_ge()  { x86_cmp_helper(0x9D) }  // setge
+func x86_cmp_eq()  { x86_cmp_helper(0x94) }
+func x86_cmp_ne()  { x86_cmp_helper(0x95) }
+func x86_cmp_lt()  { x86_cmp_helper(0x9C) }
+func x86_cmp_gt()  { x86_cmp_helper(0x9F) }
+func x86_cmp_le()  { x86_cmp_helper(0x9E) }
+func x86_cmp_ge()  { x86_cmp_helper(0x9D) }
 
-// sys_write: write a number from the top of the stack to stdout
-// Simplified stub: just pops and discards (print would need runtime support)
 func x86_print_stub() {
-    x86_pop_rax()  // discard the value
-    // In a real implementation this would convert to string and call sys_write
-    // Emit: nop (placeholder)
+    x86_pop_rax()
     nat_push(0x90)
 }
 
-// sys_exit(0)
 func x86_syscall_exit() {
-    // mov rax, 60
     nat_push(0x48); nat_push(0xC7); nat_push(0xC0)
     nat_push(0x3C); nat_push(0x00); nat_push(0x00); nat_push(0x00)
-    // xor rdi, rdi
     nat_push(0x48); nat_push(0x31); nat_push(0xFF)
-    // syscall
     nat_push(0x0F); nat_push(0x05)
 }
-
-// ── IR → x86-64 Translation ───────────────────────────────────────
-
 func native_translate_instr(instr) {
     const d = instr.dump()
 
@@ -150,14 +119,14 @@ func native_translate_instr(instr) {
     if d == "i64.ge"   { x86_cmp_ge();  return null }
     if d == "bool.not" {
         x86_pop_rax()
-        nat_push(0x48); nat_push(0x85); nat_push(0xC0)         // test rax, rax
-        nat_push(0x0F); nat_push(0x94); nat_push(0xC0)         // sete al
+        nat_push(0x48); nat_push(0x85); nat_push(0xC0)
+        nat_push(0x0F); nat_push(0x94); nat_push(0xC0)
         nat_push(0x48); nat_push(0x0F); nat_push(0xB6); nat_push(0xC0)
         x86_push_rax()
         return null
     }
     if d == "drop"     {
-        nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x08)  // add rsp, 8
+        nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x08)
         return null
     }
     if d == "return"   { nat_push(0xC3); return null }
@@ -186,7 +155,6 @@ func native_translate_instr(instr) {
     if d.starts_with("local_get(") {
         const idx_str = d.slice(10, len(d) - 1)
         const idx = parse_int(idx_str)
-        // mov rax, [rbp - (idx+1)*8]
         const offset = 0 - ((idx + 1) * 8)
         nat_push(0x48); nat_push(0x8B); nat_push(0x85)
         nat_push_u32(offset)
@@ -196,7 +164,6 @@ func native_translate_instr(instr) {
     if d.starts_with("local_set(") {
         const idx_str = d.slice(10, len(d) - 1)
         const idx = parse_int(idx_str)
-        // pop rax; mov [rbp - (idx+1)*8], rax
         x86_pop_rax()
         const offset = 0 - ((idx + 1) * 8)
         nat_push(0x48); nat_push(0x89); nat_push(0x85)
@@ -204,124 +171,81 @@ func native_translate_instr(instr) {
         return null
     }
     if d.starts_with("global_get(") {
-        // Stub: push 0
         x86_push_imm64(0)
         return null
     }
     if d.starts_with("global_set(") {
-        // Stub: pop and discard
         x86_pop_rax()
         return null
     }
     if d.starts_with("br(") || d.starts_with("br_if(") ||
        d == "block" || d == "loop" || d == "end" ||
        d == "if" || d == "if_void" || d == "else" {
-        // Control flow stubs: nop (proper impl needs jump patching)
         nat_push(0x90)
         return null
     }
     if d.starts_with("call(") {
-        // Stub: nop
         nat_push(0x90)
         return null
     }
-    // fallback: nop
     nat_push(0x90)
 }
-
-// ── ELF64 Header + Program Header ─────────────────────────────────
-
 func elf64_emit_header(entry_vaddr) {
-    // ELF magic
-    nat_push(127); nat_push(69); nat_push(76); nat_push(70)  // 0x7f E L F
-    nat_push(2)    // EI_CLASS: 64-bit
-    nat_push(1)    // EI_DATA: little-endian
-    nat_push(1)    // EI_VERSION
-    nat_push(0)    // EI_OSABI
-    // padding (8 bytes)
+    nat_push(127); nat_push(69); nat_push(76); nat_push(70)
+    nat_push(2)
+    nat_push(1)
+    nat_push(1)
+    nat_push(0)
     let p = 0
     while p < 8 { nat_push(0); p = p + 1 }
 
-    // e_type: ET_EXEC = 2
     nat_push_u16(2)
-    // e_machine: EM_X86_64 = 0x3E
     nat_push_u16(0x3E)
-    // e_version: 1
     nat_push_u32(1)
-    // e_entry
     nat_push_u64(entry_vaddr)
-    // e_phoff: 64 (program header right after ELF header)
     nat_push_u64(64)
-    // e_shoff: 0
     nat_push_u64(0)
-    // e_flags: 0
     nat_push_u32(0)
-    // e_ehsize: 64
     nat_push_u16(64)
-    // e_phentsize: 56
     nat_push_u16(56)
-    // e_phnum: 1
     nat_push_u16(1)
-    // e_shentsize: 64
     nat_push_u16(64)
-    // e_shnum: 0
     nat_push_u16(0)
-    // e_shstrndx: 0
     nat_push_u16(0)
 }
 
 func elf64_emit_phdr(vaddr, filesz) {
-    // p_type: PT_LOAD = 1
     nat_push_u32(1)
-    // p_flags: PF_R | PF_X = 5
     nat_push_u32(5)
-    // p_offset: 0
     nat_push_u64(0)
-    // p_vaddr
     nat_push_u64(vaddr)
-    // p_paddr
     nat_push_u64(vaddr)
-    // p_filesz
     nat_push_u64(filesz)
-    // p_memsz
     nat_push_u64(filesz)
-    // p_align: 0x200000
     nat_push_u64(0x200000)
 }
-
-// ── compile_to_native ─────────────────────────────────────────────
-
 func compile_to_native(module) {
     const functions = module["functions"]
     const nfuncs    = len(functions)
 
-    // Reset output buffer
     nat_out = []
 
-    // ── ELF layout constants ──────────────────────────────────────
     const LOAD_ADDR = 0x400000
     const HDR_SIZE  = 64
     const PHDR_SIZE = 56
-    const CODE_OFF  = HDR_SIZE + PHDR_SIZE   // = 120
+    const CODE_OFF  = HDR_SIZE + PHDR_SIZE
 
-    // Entry point virtual address = load base + code offset
     const entry_vaddr = LOAD_ADDR + CODE_OFF
 
-    // ── 1. ELF header (placeholder total size — we patch nothing) ─
     elf64_emit_header(entry_vaddr)
 
-    // ── 2. Program header ─────────────────────────────────────────
-    // We don't know total size yet; emit with 0 and it still works for the test.
     elf64_emit_phdr(LOAD_ADDR, 0)
 
-    // ── 3. Generate x86-64 code ───────────────────────────────────
-    // Function prologue: push rbp; mov rbp, rsp; sub rsp, 2048
-    nat_push(0x55)                                         // push rbp
-    nat_push(0x48); nat_push(0x89); nat_push(0xE5)         // mov rbp, rsp
-    nat_push(0x48); nat_push(0x81); nat_push(0xEC)         // sub rsp, ...
-    nat_push(0x00); nat_push(0x08); nat_push(0x00); nat_push(0x00)  // 2048
+    nat_push(0x55)
+    nat_push(0x48); nat_push(0x89); nat_push(0xE5)
+    nat_push(0x48); nat_push(0x81); nat_push(0xEC)
+    nat_push(0x00); nat_push(0x08); nat_push(0x00); nat_push(0x00)
 
-    // Translate all functions
     let fi = 0
     while fi < nfuncs {
         const fn_def = functions[fi]
@@ -335,85 +259,66 @@ func compile_to_native(module) {
         fi = fi + 1
     }
 
-    // Epilogue: pop rbp; sys_exit(0)
-    nat_push(0x5D)  // pop rbp
+    nat_push(0x5D)
     x86_syscall_exit()
 
-    // Return snapshot
     const result = nat_out
     nat_out = []
     result
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// FULL x86-64 INSTRUCTION ENCODING FOR ALL IR INSTRUCTIONS
-// ════════════════════════════════════════════════════════════════════════
-
-// ── x86-64 Register encoding (ModR/M) ──────────────────────────────
-// RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7
-
-// ── REX prefix ─────────────────────────────────────────────────────
 func x86_rex(w, r, x, b) {
-    // REX byte: 0100WRXB
     nat_push(0x40 + w * 8 + r * 4 + x * 2 + b)
 }
-
-// ── x86-64 Bitwise Operations ──────────────────────────────────────
-
 func x86_and() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x21); nat_push(0xD8)  // and rax, rbx
+    nat_push(0x48); nat_push(0x21); nat_push(0xD8)
     x86_push_rax()
 }
 
 func x86_or() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x09); nat_push(0xD8)  // or rax, rbx
+    nat_push(0x48); nat_push(0x09); nat_push(0xD8)
     x86_push_rax()
 }
 
 func x86_xor() {
     x86_pop_rbx(); x86_pop_rax()
-    nat_push(0x48); nat_push(0x31); nat_push(0xD8)  // xor rax, rbx
+    nat_push(0x48); nat_push(0x31); nat_push(0xD8)
     x86_push_rax()
 }
 
 func x86_shl() {
-    x86_pop_rbx()  // shift amount → rbx
-    // Move rbx to rcx (shl uses cl)
-    nat_push(0x48); nat_push(0x89); nat_push(0xD9)  // mov rcx, rbx
+    x86_pop_rbx()
+    nat_push(0x48); nat_push(0x89); nat_push(0xD9)
     x86_pop_rax()
-    nat_push(0x48); nat_push(0xD3); nat_push(0xE0)  // shl rax, cl
+    nat_push(0x48); nat_push(0xD3); nat_push(0xE0)
     x86_push_rax()
 }
 
 func x86_shr() {
     x86_pop_rbx()
-    nat_push(0x48); nat_push(0x89); nat_push(0xD9)  // mov rcx, rbx
+    nat_push(0x48); nat_push(0x89); nat_push(0xD9)
     x86_pop_rax()
-    nat_push(0x48); nat_push(0xD3); nat_push(0xF8)  // sar rax, cl
+    nat_push(0x48); nat_push(0xD3); nat_push(0xF8)
     x86_push_rax()
 }
 
 func x86_shr_u() {
     x86_pop_rbx()
-    nat_push(0x48); nat_push(0x89); nat_push(0xD9)  // mov rcx, rbx
+    nat_push(0x48); nat_push(0x89); nat_push(0xD9)
     x86_pop_rax()
-    nat_push(0x48); nat_push(0xD3); nat_push(0xE8)  // shr rax, cl
+    nat_push(0x48); nat_push(0xD3); nat_push(0xE8)
     x86_push_rax()
 }
-
-// ── x86-64 f64 Operations (SSE2) ──────────────────────────────────
-
 func x86_f64_add() {
-    // pop to xmm1, pop to xmm0, addsd, push
-    nat_push(0x58)  // pop rax (second operand)
-    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)  // movq xmm1, rax
-    nat_push(0x58)  // pop rax (first operand)
-    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)  // movq xmm0, rax
-    nat_push(0xF2); nat_push(0x0F); nat_push(0x58); nat_push(0xC1)  // addsd xmm0, xmm1
-    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)  // movq rax, xmm0
-    nat_push(0x50)  // push rax
+    nat_push(0x58)
+    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)
+    nat_push(0x58)
+    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
+    nat_push(0xF2); nat_push(0x0F); nat_push(0x58); nat_push(0xC1)
+    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
+    nat_push(0x50)
 }
 
 func x86_f64_sub() {
@@ -421,7 +326,7 @@ func x86_f64_sub() {
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)
     nat_push(0x58)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
-    nat_push(0xF2); nat_push(0x0F); nat_push(0x5C); nat_push(0xC1)  // subsd xmm0, xmm1
+    nat_push(0xF2); nat_push(0x0F); nat_push(0x5C); nat_push(0xC1)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
     nat_push(0x50)
 }
@@ -431,7 +336,7 @@ func x86_f64_mul() {
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)
     nat_push(0x58)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
-    nat_push(0xF2); nat_push(0x0F); nat_push(0x59); nat_push(0xC1)  // mulsd xmm0, xmm1
+    nat_push(0xF2); nat_push(0x0F); nat_push(0x59); nat_push(0xC1)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
     nat_push(0x50)
 }
@@ -441,20 +346,19 @@ func x86_f64_div() {
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)
     nat_push(0x58)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
-    nat_push(0xF2); nat_push(0x0F); nat_push(0x5E); nat_push(0xC1)  // divsd xmm0, xmm1
+    nat_push(0xF2); nat_push(0x0F); nat_push(0x5E); nat_push(0xC1)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
     nat_push(0x50)
 }
 
 func x86_f64_neg() {
     nat_push(0x58)
-    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)  // movq xmm0, rax
-    // XOR with sign bit mask
-    nat_push(0x48); nat_push(0xB8)  // mov rax, imm64
+    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
+    nat_push(0x48); nat_push(0xB8)
     nat_push(0x00); nat_push(0x00); nat_push(0x00); nat_push(0x00)
-    nat_push(0x00); nat_push(0x00); nat_push(0x00); nat_push(0x80)  // 0x8000000000000000
-    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)  // movq xmm1, rax
-    nat_push(0x66); nat_push(0x0F); nat_push(0x57); nat_push(0xC1)  // xorpd xmm0, xmm1
+    nat_push(0x00); nat_push(0x00); nat_push(0x00); nat_push(0x80)
+    nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC8)
+    nat_push(0x66); nat_push(0x0F); nat_push(0x57); nat_push(0xC1)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
     nat_push(0x50)
 }
@@ -462,155 +366,90 @@ func x86_f64_neg() {
 func x86_f64_sqrt() {
     nat_push(0x58)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
-    nat_push(0xF2); nat_push(0x0F); nat_push(0x51); nat_push(0xC0)  // sqrtsd xmm0, xmm0
+    nat_push(0xF2); nat_push(0x0F); nat_push(0x51); nat_push(0xC0)
     nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
     nat_push(0x50)
 }
-
-// ── System V AMD64 ABI Function Call ────────────────────────────────
-// Args: RDI, RSI, RDX, RCX, R8, R9 (integers/pointers)
-//       XMM0-XMM7 (floats)
-// Return: RAX (integer), XMM0 (float)
-// Caller-saved: RAX, RCX, RDX, RSI, RDI, R8-R11
-
 func x86_call_func(offset) {
-    // call rel32
     nat_push(0xE8)
     nat_push_u32(offset)
 }
-
-// ── Stack frame management ──────────────────────────────────────────
-
 func x86_function_prologue(local_bytes) {
-    // push rbp
     nat_push(0x55)
-    // mov rbp, rsp
     nat_push(0x48); nat_push(0x89); nat_push(0xE5)
-    // sub rsp, local_bytes (aligned to 16)
     const aligned = ((local_bytes + 15) / 16) * 16
     nat_push(0x48); nat_push(0x81); nat_push(0xEC)
     nat_push_u32(aligned)
 }
 
 func x86_function_epilogue() {
-    // mov rsp, rbp
     nat_push(0x48); nat_push(0x89); nat_push(0xEC)
-    // pop rbp
     nat_push(0x5D)
-    // ret
     nat_push(0xC3)
 }
-
-// ── sys_write with integer-to-string conversion ─────────────────────
-
 func x86_sys_write(fd) {
-    // sys_write(fd, buf, count)
-    // rax = 1 (sys_write)
-    // rdi = fd
-    // rsi = buf
-    // rdx = count
     nat_push(0x48); nat_push(0xC7); nat_push(0xC0)
-    nat_push(0x01); nat_push(0x00); nat_push(0x00); nat_push(0x00)  // mov rax, 1
+    nat_push(0x01); nat_push(0x00); nat_push(0x00); nat_push(0x00)
     nat_push(0x48); nat_push(0xC7); nat_push(0xC7)
-    nat_push(fd); nat_push(0x00); nat_push(0x00); nat_push(0x00)    // mov rdi, fd
-    // rsi and rdx must be set by caller
-    nat_push(0x0F); nat_push(0x05)  // syscall
+    nat_push(fd); nat_push(0x00); nat_push(0x00); nat_push(0x00)
+    nat_push(0x0F); nat_push(0x05)
 }
 
-// Integer-to-string conversion and print
-// Converts value in rax to decimal string on stack, then calls sys_write
 func x86_print_integer() {
-    // Save rax
     x86_push_rax()
 
-    // Allocate 20 bytes on stack for conversion buffer
-    nat_push(0x48); nat_push(0x83); nat_push(0xEC); nat_push(0x20)  // sub rsp, 32
+    nat_push(0x48); nat_push(0x83); nat_push(0xEC); nat_push(0x20)
 
-    x86_pop_rax()  // get the value
+    x86_pop_rax()
 
-    // Check for negative
-    nat_push(0x48); nat_push(0x85); nat_push(0xC0)  // test rax, rax
-    // Use simplified path: call sys_write with pre-built buffer
-    // For real implementation: divide by 10 in loop, collect digits
+    nat_push(0x48); nat_push(0x85); nat_push(0xC0)
 
-    // Simplified: write the raw value as a single byte for testing
-    // mov [rsp], al
     nat_push(0x88); nat_push(0x04); nat_push(0x24)
-    // lea rsi, [rsp]
     nat_push(0x48); nat_push(0x8D); nat_push(0x34); nat_push(0x24)
-    // mov rdx, 1
     nat_push(0x48); nat_push(0xC7); nat_push(0xC2)
     nat_push(0x01); nat_push(0x00); nat_push(0x00); nat_push(0x00)
 
     x86_sys_write(1)
 
-    // Cleanup
-    nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x20)  // add rsp, 32
+    nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x20)
 }
 
-// Full integer-to-decimal-string conversion
 func x86_itoa_print() {
-    // Full itoa: convert integer in rax to decimal string
-    // Uses stack buffer and repeated division by 10
 
     x86_pop_rax()
 
-    // sub rsp, 32 (buffer)
     nat_push(0x48); nat_push(0x83); nat_push(0xEC); nat_push(0x20)
 
-    // Handle negative: test rax, rax
     nat_push(0x48); nat_push(0x85); nat_push(0xC0)
 
-    // mov rcx, 0 (digit count)
     nat_push(0x48); nat_push(0x31); nat_push(0xC9)
 
-    // mov r8, 10
     nat_push(0x49); nat_push(0xC7); nat_push(0xC0)
     nat_push(0x0A); nat_push(0x00); nat_push(0x00); nat_push(0x00)
+    nat_push(0x48); nat_push(0x31); nat_push(0xD2)
+    nat_push(0x49); nat_push(0xF7); nat_push(0xF0)
+    nat_push(0x80); nat_push(0xC2); nat_push(0x30)
+    nat_push(0x88); nat_push(0x14); nat_push(0x0C)
+    nat_push(0x48); nat_push(0xFF); nat_push(0xC1)
+    nat_push(0x48); nat_push(0x85); nat_push(0xC0)
+    nat_push(0x75); nat_push(0xED)
 
-    // Conversion loop: divide by 10, push remainder as ASCII digit
-    // .loop:
-    //   xor rdx, rdx
-    //   div r8           ; rax = quotient, rdx = remainder
-    //   add dl, '0'      ; convert to ASCII
-    //   mov [rsp+rcx], dl
-    //   inc rcx
-    //   test rax, rax
-    //   jnz .loop
-
-    nat_push(0x48); nat_push(0x31); nat_push(0xD2)  // xor rdx, rdx
-    nat_push(0x49); nat_push(0xF7); nat_push(0xF0)  // div r8
-    nat_push(0x80); nat_push(0xC2); nat_push(0x30)  // add dl, 0x30
-    // mov [rsp+rcx], dl (using SIB addressing)
-    nat_push(0x88); nat_push(0x14); nat_push(0x0C)  // mov [rsp+rcx], dl
-    nat_push(0x48); nat_push(0xFF); nat_push(0xC1)  // inc rcx
-    nat_push(0x48); nat_push(0x85); nat_push(0xC0)  // test rax, rax
-    nat_push(0x75); nat_push(0xED)                    // jnz .-19 (loop back)
-
-    // Now reverse the digits and call sys_write
-    // lea rsi, [rsp]
     nat_push(0x48); nat_push(0x8D); nat_push(0x34); nat_push(0x24)
-    // mov rdx, rcx (count)
     nat_push(0x48); nat_push(0x89); nat_push(0xCA)
 
     x86_sys_write(1)
 
-    // Write newline
-    nat_push(0xC6); nat_push(0x04); nat_push(0x24); nat_push(0x0A)  // mov byte [rsp], 10
-    nat_push(0x48); nat_push(0x8D); nat_push(0x34); nat_push(0x24)  // lea rsi, [rsp]
+    nat_push(0xC6); nat_push(0x04); nat_push(0x24); nat_push(0x0A)
+    nat_push(0x48); nat_push(0x8D); nat_push(0x34); nat_push(0x24)
     nat_push(0x48); nat_push(0xC7); nat_push(0xC2)
     nat_push(0x01); nat_push(0x00); nat_push(0x00); nat_push(0x00)
     x86_sys_write(1)
 
-    // Cleanup
-    nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x20)  // add rsp, 32
+    nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x20)
 }
-
-// ── String literal data section ─────────────────────────────────────
-
-let nat_strings = []       // string literal offsets
-let nat_string_data = []   // raw string bytes
-let nat_data_offset = 0    // current offset in data section
+let nat_strings = []
+let nat_string_data = []
+let nat_data_offset = 0
 
 func nat_add_string(s) {
     const idx = len(nat_strings)
@@ -621,11 +460,9 @@ func nat_add_string(s) {
     let i = 0
     while i < len(s) {
         const c = s[i]
-        // Reuse wasm_char_code for ASCII encoding
         bytes.push(wasm_char_code(c))
         i = i + 1
     }
-    // Store: [4-byte LE length][bytes]
     const slen = len(bytes)
     nat_string_data.push(slen & 255)
     nat_string_data.push((slen >> 8) & 255)
@@ -639,26 +476,21 @@ func nat_add_string(s) {
     nat_data_offset = nat_data_offset + 4 + slen
     idx
 }
-
-// ── Jump fixup with proper relocation ───────────────────────────────
-
 let nat_jump_fixups = []  // each: { "patch_offset", "target_label" }
-let nat_labels = {}       // label name → byte offset in code
+let nat_labels = {}
 
 func nat_define_label(name) {
     nat_labels[name] = len(nat_out)
 }
 
 func nat_emit_jump_fixup(label_name) {
-    // Emit jmp rel32 with placeholder offset
     nat_push(0xE9)
     const patch_offset = len(nat_out)
-    nat_push_u32(0)  // placeholder
+    nat_push_u32(0)
     nat_jump_fixups.push({ "patch_offset": patch_offset, "target_label": label_name })
 }
 
 func nat_emit_jz_fixup(label_name) {
-    // Emit je rel32 with placeholder
     nat_push(0x0F); nat_push(0x84)
     const patch_offset = len(nat_out)
     nat_push_u32(0)
@@ -666,7 +498,6 @@ func nat_emit_jz_fixup(label_name) {
 }
 
 func nat_emit_jnz_fixup(label_name) {
-    // Emit jne rel32 with placeholder
     nat_push(0x0F); nat_push(0x85)
     const patch_offset = len(nat_out)
     nat_push_u32(0)
@@ -681,7 +512,6 @@ func nat_resolve_fixups() {
         const label = fixup["target_label"]
         const target = nat_labels[label]
         if target != null {
-            // rel32 = target - (patch_off + 4) (relative to end of instruction)
             const rel = target - (patch_off + 4)
             nat_out[patch_off] = rel & 255
             nat_out[patch_off + 1] = (rel >> 8) & 255
@@ -691,13 +521,9 @@ func nat_resolve_fixups() {
         i = i + 1
     }
 }
-
-// ── Full IR → x86-64 translation with all instructions ─────────────
-
 func native_translate_full(instr, func_offsets) {
     const d = instr.dump()
 
-    // ── Constants ────────────────────────────────────────────
     if d == "push_null" { x86_push_imm64(0); return null }
     if d.starts_with("push_i64(") {
         const n = parse_int(d.slice(9, len(d) - 1))
@@ -706,7 +532,7 @@ func native_translate_full(instr, func_offsets) {
     }
     if d.starts_with("push_f64(") {
         const n = parse_int(d.slice(9, len(d) - 1))
-        x86_push_imm64(n)  // f64 bits as i64
+        x86_push_imm64(n)
         return null
     }
     if d.starts_with("push_bool(") {
@@ -726,7 +552,6 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // ── Locals & Globals ────────────────────────────────────
     if d.starts_with("local_get(") {
         const idx = parse_int(d.slice(10, len(d) - 1))
         const offset = 0 - ((idx + 1) * 8)
@@ -745,15 +570,13 @@ func native_translate_full(instr, func_offsets) {
     }
     if d.starts_with("local_tee(") {
         const idx = parse_int(d.slice(10, len(d) - 1))
-        // Peek top of stack into rax, store to local
-        nat_push(0x48); nat_push(0x8B); nat_push(0x04); nat_push(0x24)  // mov rax, [rsp]
+        nat_push(0x48); nat_push(0x8B); nat_push(0x04); nat_push(0x24)
         const offset = 0 - ((idx + 1) * 8)
         nat_push(0x48); nat_push(0x89); nat_push(0x85)
         nat_push_u32(offset)
         return null
     }
     if d.starts_with("global_get(") {
-        // Stub: push 0
         x86_push_imm64(0)
         return null
     }
@@ -762,7 +585,6 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // ── i64 Arithmetic ──────────────────────────────────────
     if d == "i64.add"  { x86_add();  return null }
     if d == "i64.sub"  { x86_sub();  return null }
     if d == "i64.mul"  { x86_mul();  return null }
@@ -770,7 +592,6 @@ func native_translate_full(instr, func_offsets) {
     if d == "i64.rem"  { x86_rem();  return null }
     if d == "i64.neg"  { x86_neg();  return null }
 
-    // ── f64 Arithmetic ──────────────────────────────────────
     if d == "f64.add"  { x86_f64_add();  return null }
     if d == "f64.sub"  { x86_f64_sub();  return null }
     if d == "f64.mul"  { x86_f64_mul();  return null }
@@ -778,7 +599,6 @@ func native_translate_full(instr, func_offsets) {
     if d == "f64.neg"  { x86_f64_neg();  return null }
     if d == "f64.sqrt" { x86_f64_sqrt(); return null }
 
-    // ── i64 Bitwise ─────────────────────────────────────────
     if d == "i64.and"  { x86_and();   return null }
     if d == "i64.or"   { x86_or();    return null }
     if d == "i64.xor"  { x86_xor();   return null }
@@ -786,7 +606,6 @@ func native_translate_full(instr, func_offsets) {
     if d == "i64.shr_s" { x86_shr();  return null }
     if d == "i64.shr_u" { x86_shr_u(); return null }
 
-    // ── Comparisons ─────────────────────────────────────────
     if d == "i64.eq"   { x86_cmp_eq();  return null }
     if d == "i64.ne"   { x86_cmp_ne();  return null }
     if d == "i64.lt"   { x86_cmp_lt();  return null }
@@ -794,17 +613,15 @@ func native_translate_full(instr, func_offsets) {
     if d == "i64.le"   { x86_cmp_le();  return null }
     if d == "i64.ge"   { x86_cmp_ge();  return null }
 
-    // ── Logical ─────────────────────────────────────────────
     if d == "bool.not" {
         x86_pop_rax()
-        nat_push(0x48); nat_push(0x85); nat_push(0xC0)         // test rax, rax
-        nat_push(0x0F); nat_push(0x94); nat_push(0xC0)         // sete al
-        nat_push(0x48); nat_push(0x0F); nat_push(0xB6); nat_push(0xC0)  // movzx rax, al
+        nat_push(0x48); nat_push(0x85); nat_push(0xC0)
+        nat_push(0x0F); nat_push(0x94); nat_push(0xC0)
+        nat_push(0x48); nat_push(0x0F); nat_push(0xB6); nat_push(0xC0)
         x86_push_rax()
         return null
     }
 
-    // ── Control Flow ────────────────────────────────────────
     if d == "return"   { x86_function_epilogue(); return null }
     if d == "drop"     {
         nat_push(0x48); nat_push(0x83); nat_push(0xC4); nat_push(0x08)
@@ -815,10 +632,9 @@ func native_translate_full(instr, func_offsets) {
     if d == "array_get"     { nat_push(0x90); return null }
     if d == "array_set"     { nat_push(0x90); return null }
     if d == "array_len"     { nat_push(0x90); return null }
-    if d == "unreachable"   { nat_push(0xCC); return null }  // int3 trap
+    if d == "unreachable"   { nat_push(0xCC); return null }
     if d == "nop"      { nat_push(0x90); return null }
 
-    // ── Block/loop/if stubs ─────────────────────────────────
     if d == "block" || d == "loop" || d == "end" ||
        d == "if" || d == "if_void" || d == "else" {
         nat_push(0x90)
@@ -829,10 +645,8 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // ── Function calls ──────────────────────────────────────
     if d.starts_with("call(") {
-        // Extract function index and emit call rel32
-        nat_push(0x90)  // placeholder
+        nat_push(0x90)
         return null
     }
     if d.starts_with("call_indirect(") {
@@ -840,20 +654,16 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // ── Select ──────────────────────────────────────────────
     if d == "select" {
-        // pop cond, b, a; push (cond ? a : b)
-        x86_pop_rax()  // cond
-        x86_pop_rbx()  // b
-        // pop rcx = a
-        nat_push(0x59)  // pop rcx
-        nat_push(0x48); nat_push(0x85); nat_push(0xC0)  // test rax, rax
-        nat_push(0x48); nat_push(0x0F); nat_push(0x44); nat_push(0xCB)  // cmove rcx, rbx
-        nat_push(0x51)  // push rcx
+        x86_pop_rax()
+        x86_pop_rbx()
+        nat_push(0x59)
+        nat_push(0x48); nat_push(0x85); nat_push(0xC0)
+        nat_push(0x48); nat_push(0x0F); nat_push(0x44); nat_push(0xCB)
+        nat_push(0x51)
         return null
     }
 
-    // ── Memory operations ───────────────────────────────────
     if d == "mem_load_i64" || d == "mem_store_i64" ||
        d == "mem_load_f64" || d == "mem_store_f64" ||
        d == "mem_load_i32" || d == "mem_store_i32" {
@@ -865,27 +675,21 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // ── Conversions ─────────────────────────────────────────
     if d == "i64_to_f64" {
         x86_pop_rax()
-        // cvtsi2sd xmm0, rax
         nat_push(0xF2); nat_push(0x48); nat_push(0x0F); nat_push(0x2A); nat_push(0xC0)
-        // movq rax, xmm0
         nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x7E); nat_push(0xC0)
         x86_push_rax()
         return null
     }
     if d == "f64_to_i64" {
         x86_pop_rax()
-        // movq xmm0, rax
         nat_push(0x66); nat_push(0x48); nat_push(0x0F); nat_push(0x6E); nat_push(0xC0)
-        // cvttsd2si rax, xmm0
         nat_push(0xF2); nat_push(0x48); nat_push(0x0F); nat_push(0x2C); nat_push(0xC0)
         x86_push_rax()
         return null
     }
 
-    // ── Tagged value ops (stubs) ────────────────────────────
     if d == "tag_i64" || d == "tag_f64" || d == "tag_bool" ||
        d == "tag_string" || d == "untag_i64" || d == "untag_f64" ||
        d == "untag_bool" || d == "get_tag" {
@@ -893,7 +697,6 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // ── Map/string operations (stubs) ───────────────────────
     if d.starts_with("map_new(") || d == "map_get" || d == "map_set" ||
        d == "string_len" || d.starts_with("runtime_call(") ||
        d.starts_with("array_new(") {
@@ -901,14 +704,8 @@ func native_translate_full(instr, func_offsets) {
         return null
     }
 
-    // fallback: nop
     nat_push(0x90)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// aarch64 INSTRUCTION ENCODING
-// ════════════════════════════════════════════════════════════════════════
-
 let arm_out = []
 
 func arm_push(b) { arm_out.push(b) }
@@ -920,49 +717,37 @@ func arm_push_u32(val) {
     arm_push((v >> 16) & 255)
     arm_push((v >> 24) & 255)
 }
-
-// aarch64 instruction encoding (32-bit fixed width)
-// Register file: X0-X30 (64-bit), W0-W30 (32-bit), SP=X31
-
 func arm_add_imm(rd, rn, imm) {
-    // ADD Xd, Xn, #imm (shifted 0)
-    // 1 00 10001 00 imm12 Rn Rd
     const instr = 0x91000000 + (imm << 10) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_sub_imm(rd, rn, imm) {
-    // SUB Xd, Xn, #imm
     const instr = 0xD1000000 + (imm << 10) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_mov_imm(rd, imm) {
-    // MOVZ Xd, #imm (for small values)
     const instr = 0xD2800000 + (imm << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_add_reg(rd, rn, rm) {
-    // ADD Xd, Xn, Xm
     const instr = 0x8B000000 + (rm << 16) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_sub_reg(rd, rn, rm) {
-    // SUB Xd, Xn, Xm
     const instr = 0xCB000000 + (rm << 16) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_mul_reg(rd, rn, rm) {
-    // MUL Xd, Xn, Xm (alias MADD Xd, Xn, Xm, XZR)
     const instr = 0x9B007C00 + (rm << 16) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_sdiv_reg(rd, rn, rm) {
-    // SDIV Xd, Xn, Xm
     const instr = 0x9AC00C00 + (rm << 16) + (rn << 5) + rd
     arm_push_u32(instr)
 }
@@ -983,120 +768,89 @@ func arm_eor_reg(rd, rn, rm) {
 }
 
 func arm_lsl_reg(rd, rn, rm) {
-    // LSLV Xd, Xn, Xm
     const instr = 0x9AC02000 + (rm << 16) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_asr_reg(rd, rn, rm) {
-    // ASRV Xd, Xn, Xm
     const instr = 0x9AC02800 + (rm << 16) + (rn << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_neg(rd, rm) {
-    // NEG Xd, Xm (alias SUB Xd, XZR, Xm)
     const instr = 0xCB000000 + (rm << 16) + (31 << 5) + rd
     arm_push_u32(instr)
 }
 
 func arm_cmp_reg(rn, rm) {
-    // CMP Xn, Xm (alias SUBS XZR, Xn, Xm)
     const instr = 0xEB000000 + (rm << 16) + (rn << 5) + 31
     arm_push_u32(instr)
 }
 
 func arm_cset(rd, cond) {
-    // CSET Xd, cond (alias CSINC Xd, XZR, XZR, invert(cond))
     const inv_cond = cond ^ 1
     const instr = 0x9A9F0400 + (inv_cond << 12) + rd
     arm_push_u32(instr)
 }
 
-// Condition codes: EQ=0, NE=1, LT=11, GT=12, LE=13, GE=10
 func arm_cmp_and_set(rd, rn, rm, cond) {
     arm_cmp_reg(rn, rm)
     arm_cset(rd, cond)
 }
 
 func arm_str(rt, rn, offset) {
-    // STR Xt, [Xn, #offset] (unsigned offset)
     const scaled = offset / 8
     const instr = 0xF9000000 + (scaled << 10) + (rn << 5) + rt
     arm_push_u32(instr)
 }
 
 func arm_ldr(rt, rn, offset) {
-    // LDR Xt, [Xn, #offset]
     const scaled = offset / 8
     const instr = 0xF9400000 + (scaled << 10) + (rn << 5) + rt
     arm_push_u32(instr)
 }
 
 func arm_svc(imm) {
-    // SVC #imm (system call)
     const instr = 0xD4000001 + (imm << 5)
     arm_push_u32(instr)
 }
 
 func arm_ret() {
-    // RET (branch to X30)
     arm_push_u32(0xD65F03C0)
 }
 
 func arm_bl(offset) {
-    // BL rel26 (branch with link)
     const off26 = (offset / 4) & 0x3FFFFFF
     const instr = 0x94000000 + off26
     arm_push_u32(instr)
 }
 
 func arm_b(offset) {
-    // B rel26
     const off26 = (offset / 4) & 0x3FFFFFF
     const instr = 0x14000000 + off26
     arm_push_u32(instr)
 }
 
 func arm_syscall_exit(code) {
-    arm_mov_imm(0, code)  // X0 = exit code
-    arm_mov_imm(8, 93)    // X8 = __NR_exit (93 on aarch64)
+    arm_mov_imm(0, code)
+    arm_mov_imm(8, 93)
     arm_svc(0)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// MACH-O HEADER GENERATION (macOS support)
-// ════════════════════════════════════════════════════════════════════════
-
 func macho_emit_header(entry_offset, code_size) {
-    // Mach-O magic (64-bit)
-    nat_push_u32(0xFEEDFACF)  // MH_MAGIC_64
-    // CPU type: x86_64 = 0x01000007
+    nat_push_u32(0xFEEDFACF)
     nat_push_u32(0x01000007)
-    // CPU subtype: ALL = 3
     nat_push_u32(3)
-    // File type: MH_EXECUTE = 2
     nat_push_u32(2)
-    // Number of load commands
     nat_push_u32(2)
-    // Size of load commands
-    nat_push_u32(0)  // placeholder
-    // Flags
     nat_push_u32(0)
-    // Reserved (64-bit)
+    nat_push_u32(0)
     nat_push_u32(0)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// FULL ELF64 BUILDER WITH PROPER DATA SECTION
-// ════════════════════════════════════════════════════════════════════════
-
 func compile_to_native_full(module) {
     const functions = module["functions"]
     const strings   = module["strings"]
     const nfuncs    = len(functions)
 
-    // Reset
     nat_out = []
     nat_strings = []
     nat_string_data = []
@@ -1104,39 +858,27 @@ func compile_to_native_full(module) {
     nat_jump_fixups = []
     nat_labels = {}
 
-    // Intern strings
     let si = 0
     while si < len(strings) {
         nat_add_string(strings[si])
         si = si + 1
     }
 
-    // ── ELF layout ───────────────────────────────────────────
     const LOAD_ADDR = 0x400000
     const HDR_SIZE  = 64
     const PHDR_SIZE = 56
-    const PHDR_COUNT = 2  // code segment + data segment
+    const PHDR_COUNT = 2
     const CODE_OFF  = HDR_SIZE + PHDR_SIZE * PHDR_COUNT
 
     const entry_vaddr = LOAD_ADDR + CODE_OFF
 
-    // ── 1. ELF header ────────────────────────────────────────
     elf64_emit_header(entry_vaddr)
+    elf64_emit_phdr(LOAD_ADDR, 0)
 
-    // Patch e_phnum to 2
-    // (header already emitted by elf64_emit_header with phnum=1)
-
-    // ── 2. Program headers ───────────────────────────────────
-    // Code segment
-    elf64_emit_phdr(LOAD_ADDR, 0)  // size patched later
-
-    // ── 3. Generate x86-64 code ──────────────────────────────
     const code_start = len(nat_out)
 
-    // Function prologue
     x86_function_prologue(4096)
 
-    // Compile all functions
     let fi = 0
     while fi < nfuncs {
         nat_define_label(functions[fi]["name"])
@@ -1151,14 +893,11 @@ func compile_to_native_full(module) {
         fi = fi + 1
     }
 
-    // Epilogue
     x86_function_epilogue()
     x86_syscall_exit()
 
-    // Resolve jump fixups
     nat_resolve_fixups()
 
-    // Return snapshot
     const result = nat_out
     nat_out = []
     result

@@ -1,29 +1,12 @@
-// MAGI Self-Hosted Runtime — Mark-and-Sweep Garbage Collector
-//
-// Manages a heap of objects indexed by integer IDs.
-// Algorithm:
-//   1. Mark phase: starting from roots, recursively mark reachable objects.
-//   2. Sweep phase: free all unmarked objects.
-//   3. Threshold: trigger collection when allocated bytes exceed gc_threshold.
-//
-// All GC state is module-level mutable (same pattern as vm.magi / parser.magi).
-
-// ── GC State (module-level mutable) ──────────────────────────────
-
-// Object heap: map from int ID -> { "data": value, "marked": bool, "size": int }
 let gc_heap = {"__init": true}
 
-// Root set: map from int ID -> true (present = is a root)
 let gc_roots = {"__init": true}
 
 let gc_next_id     = 1
-let gc_allocated   = 0      // bytes currently allocated
-let gc_threshold   = 1048576  // 1 MB initial threshold
+let gc_allocated   = 0
+let gc_threshold   = 1048576
 let gc_collections = 0
 let gc_total_freed = 0
-
-// ── Size Estimation ───────────────────────────────────────────────
-
 func gc_estimate_size(value) {
     const t = typeof(value)
     if t == "null"   { return 8 }
@@ -35,9 +18,6 @@ func gc_estimate_size(value) {
     if t == "map"    { return 48 + len(value) * 32 }
     8
 }
-
-// ── Initialization ────────────────────────────────────────────────
-
 func gc_init() {
     gc_heap = {"__init": true}
     gc_roots = {"__init": true}
@@ -47,10 +27,6 @@ func gc_init() {
     gc_collections = 0
     gc_total_freed = 0
 }
-
-// ── Allocation ────────────────────────────────────────────────────
-
-// Allocate a value on the GC heap. Returns the object ID.
 func gc_alloc(value) {
     const id = gc_next_id
     gc_next_id = gc_next_id + 1
@@ -58,7 +34,6 @@ func gc_alloc(value) {
     gc_heap[id] = {"data": value, "marked": false, "size": size}
     gc_allocated = gc_allocated + size
 
-    // Trigger collection if over threshold
     if gc_allocated > gc_threshold {
         gc_collect()
     }
@@ -66,14 +41,12 @@ func gc_alloc(value) {
     id
 }
 
-// Read a value from the GC heap by ID. Returns null if not found.
 func gc_read(id) {
     const key = to_string(id)
     if !gc_heap.has(key) { return null }
     gc_heap[key]["data"]
 }
 
-// Write a new value to an existing GC object.
 func gc_write(id, value) {
     const key = to_string(id)
     if !gc_heap.has(key) { return null }
@@ -84,9 +57,6 @@ func gc_write(id, value) {
     gc_allocated = gc_allocated - old_size + new_size
     null
 }
-
-// ── Root Management ───────────────────────────────────────────────
-
 func gc_add_root(id) {
     gc_roots[to_string(id)] = true
 }
@@ -97,20 +67,15 @@ func gc_remove_root(id) {
         gc_roots = delete(gc_roots, key)
     }
 }
-
-// ── Mark Phase ────────────────────────────────────────────────────
-
-// Mark a single object and all objects it references.
 func gc_mark_object(id) {
     const key = to_string(id)
     if !gc_heap.has(key) { return null }
     let obj = gc_heap[key]
-    if obj["marked"] { return null }  // already marked
+    if obj["marked"] { return null }
 
     obj["marked"] = true
     gc_heap[key] = obj
 
-    // Trace references: arrays and maps may contain GC IDs (stored as int)
     const data = obj["data"]
     const t = typeof(data)
 
@@ -133,9 +98,7 @@ func gc_mark_object(id) {
     }
 }
 
-// Mark phase: mark all objects reachable from roots.
 func gc_mark_phase() {
-    // First, clear all marks
     for key in gc_heap.keys() {
         if key == "__init" { continue }
         let obj = gc_heap[key]
@@ -143,17 +106,11 @@ func gc_mark_phase() {
         gc_heap[key] = obj
     }
 
-    // Mark from each root
     for key in gc_roots.keys() {
         if key == "__init" { continue }
         gc_mark_object(to_int64(key))
     }
 }
-
-// ── Sweep Phase ───────────────────────────────────────────────────
-
-// Sweep phase: free all unmarked objects.
-// Returns number of objects freed.
 func gc_sweep_phase() {
     let freed_count = 0
     let freed_bytes = 0
@@ -180,28 +137,18 @@ func gc_sweep_phase() {
     gc_total_freed = gc_total_freed + freed_count
     freed_count
 }
-
-// ── Collection Cycle ──────────────────────────────────────────────
-
-// Run a full mark-and-sweep collection cycle.
 func gc_collect() {
     gc_mark_phase()
     const freed = gc_sweep_phase()
     gc_collections = gc_collections + 1
 
-    // Grow threshold if still using > 50% after collection
     if gc_allocated > gc_threshold / 2 {
         gc_threshold = gc_threshold * 2
     }
 
     freed
 }
-
-// ── Statistics ────────────────────────────────────────────────────
-
-// Return GC statistics as a map.
 func gc_stats() {
-    // Count live objects (excluding sentinel)
     let object_count = 0
     for key in gc_heap.keys() {
         if key != "__init" {
@@ -217,16 +164,11 @@ func gc_stats() {
         "threshold":     gc_threshold,
     }
 }
-
-// ── Heap Inspection ───────────────────────────────────────────────
-
-// Check if an object ID is alive (not collected).
 func gc_is_alive(id) {
     const key = to_string(id)
     gc_heap.has(key)
 }
 
-// Count live objects
 func gc_live_count() {
     let n = 0
     for key in gc_heap.keys() {
@@ -235,7 +177,6 @@ func gc_live_count() {
     n
 }
 
-// Force collect and return freed count
 func gc_force_collect() {
     gc_collect()
 }

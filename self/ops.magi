@@ -1,18 +1,6 @@
-// MAGI Self-Hosted Compiler — Operation Dispatch
-//
-// All 468 OperationType variants from src/types/operations.rs.
-// Pure computation ops are implemented in MAGI; OS/IO ops delegate to stage 0 builtins.
-//
-// Usage: eval_operation(op_name, args) -> result
-
-// ── Helper: safe arg access ──────────────────────────────────────
-
 func op_arg(args, idx, default_val) {
     if idx < len(args) { args[idx] } else { default_val }
 }
-
-// ── Helper: numeric coercion ─────────────────────────────────────
-
 func op_to_f64(v) {
     const t = typeof(v)
     if t == "float64" { return v }
@@ -31,16 +19,8 @@ func op_is_numeric(v) {
     const t = typeof(v)
     t == "int64" || t == "float64"
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Main dispatch — 468 operations
-// ══════════════════════════════════════════════════════════════════
-
 func eval_operation(op_name, args) {
     match op_name {
-
-    // ── Arithmetic (16) ──────────────────────────────────────────
-
     "add" => {
         const a = args[0]
         const b = args[1]
@@ -71,18 +51,12 @@ func eval_operation(op_name, args) {
     "round" => round(op_to_f64(args[0])),
     "floor" => floor(op_to_f64(args[0])),
     "ceil" => ceil(op_to_f64(args[0])),
-
-    // ── Comparison (6) ───────────────────────────────────────────
-
     "equal" => args[0] == args[1],
     "not_equal" => args[0] != args[1],
     "greater" => args[0] > args[1],
     "less" => args[0] < args[1],
     "greater_eq" => args[0] >= args[1],
     "less_eq" => args[0] <= args[1],
-
-    // ── Logic (4) ────────────────────────────────────────────────
-
     "and" => args[0] && args[1],
     "or" => args[0] || args[1],
     "not" => !args[0],
@@ -91,23 +65,16 @@ func eval_operation(op_name, args) {
         const b = args[1]
         (a && !b) || (!a && b)
     },
-
-    // ── Bitwise (6) ──────────────────────────────────────────────
-
     "bit_and" => args[0] & args[1],
     "bit_or" => (args[0] ^ args[1]) + (args[0] & args[1]),
     "bit_xor" => args[0] ^ args[1],
     "bit_not" => args[0] ^ -1,
     "bit_shift_left" => args[0] << args[1],
     "bit_shift_right" => args[0] >> args[1],
-
-    // ── Control Flow (5) ─────────────────────────────────────────
-
     "if_else" => {
         if args[0] { args[1] } else { op_arg(args, 2, null) }
     },
     "switch" => {
-        // args[0] = value, args[1] = cases map, args[2] = default
         const val = args[0]
         const cases = args[1]
         if typeof(cases) == "map" && cases.has(to_string(val)) {
@@ -120,23 +87,16 @@ func eval_operation(op_name, args) {
         if args[0] != null { args[0] } else { args[1] }
     },
     "try_catch" => {
-        // In self-hosted context, just return first arg (no real try-catch)
         args[0]
     },
     "error" => {
         panic(to_string(args[0]))
     },
-
-    // ── V2 Language Constructs (5) ───────────────────────────────
-
     "function_def" => args[0],
     "function_call" => args[0],
     "async_spawn" => args[0],
     "async_await" => args[0],
     "loop_group" => args[0],
-
-    // ── String (20) ──────────────────────────────────────────────
-
     "concat" => {
         let result = ""
         for a in args {
@@ -176,13 +136,8 @@ func eval_operation(op_name, args) {
         arr.join(sep)
     },
     "string_template" => {
-        // Simple template: args[0] = template, args[1] = map of vars
-        // Delegate to stage 0
         string_template(args[0], args[1])
     },
-
-    // ── Type Conversion (10) ─────────────────────────────────────
-
     "to_string" => to_string(args[0]),
     "to_int64" => {
         const v = args[0]
@@ -216,9 +171,6 @@ func eval_operation(op_name, args) {
     "to_json" => to_json(args[0]),
     "char_from_code" => char_from_code(op_to_i64(args[0])),
     "char_code" => char_code(args[0]),
-
-    // ── Array (17) ───────────────────────────────────────────────
-
     "array_get" => {
         const arr = args[0]
         const idx = op_to_i64(args[1])
@@ -288,9 +240,6 @@ func eval_operation(op_name, args) {
         }
         result
     },
-
-    // ── Map (10) ─────────────────────────────────────────────────
-
     "map_get" => {
         const m = args[0]
         const k = to_string(args[1])
@@ -334,9 +283,6 @@ func eval_operation(op_name, args) {
         result
     },
     "map_size" => len(args[0]),
-
-    // ── Bytes (17) ───────────────────────────────────────────────
-
     "bytes_length" => bytes_length(args[0]),
     "bytes_slice" => bytes_slice(args[0], op_to_i64(args[1]), op_to_i64(args[2])),
     "bytes_concat" => bytes_concat(args[0], args[1]),
@@ -354,9 +300,6 @@ func eval_operation(op_name, args) {
     "bytes_trim" => bytes_trim(args[0]),
     "bytes_from_string" => bytes_from_string(args[0]),
     "bytes_to_string" => bytes_to_string(args[0]),
-
-    // ── Errors (5) ───────────────────────────────────────────────
-
     "error_new" => {
         {"__error": true, "message": to_string(args[0]), "wrapped": null}
     },
@@ -382,9 +325,6 @@ func eval_operation(op_name, args) {
         }
         chain
     },
-
-    // ── Iteration (2) ────────────────────────────────────────────
-
     "range" => {
         const start = op_to_i64(args[0])
         const end_val = op_to_i64(args[1])
@@ -397,7 +337,6 @@ func eval_operation(op_name, args) {
         result
     },
     "reduce" => {
-        // args[0]=array, args[1]=lambda, args[2]=initial
         const arr = args[0]
         const fn_val = args[1]
         let acc = args[2]
@@ -406,13 +345,9 @@ func eval_operation(op_name, args) {
         }
         acc
     },
-
-    // ── JSON (10) ────────────────────────────────────────────────
-
     "json_get" => {
         const obj = args[0]
         const path = to_string(args[1])
-        // Simple dot-path access
         let current = obj
         const parts = path.split(".")
         for p in parts {
@@ -426,7 +361,6 @@ func eval_operation(op_name, args) {
         current
     },
     "json_set" => {
-        // Simple: only supports top-level key
         let obj = args[0]
         const key = to_string(args[1])
         obj[key] = args[2]
@@ -460,25 +394,18 @@ func eval_operation(op_name, args) {
         else { "unknown" }
     },
     "json_validate" => {
-        // Try parsing as JSON, return bool
         const s = to_string(args[0])
         json_validate(s)
     },
     "json_pretty_print" => json_pretty_print(args[0]),
     "json_compact" => json_compact(args[0]),
     "json_query" => json_query(args[0], args[1]),
-
-    // ── DateTime (6) ─────────────────────────────────────────────
-
     "now_timestamp" => now_timestamp(),
     "format_timestamp" => format_timestamp(args[0], op_arg(args, 1, "")),
     "parse_timestamp" => parse_timestamp(args[0], op_arg(args, 1, "")),
     "timestamp_add" => timestamp_add(args[0], args[1]),
     "timestamp_diff" => timestamp_diff(args[0], args[1]),
     "sleep" => sleep(op_to_i64(args[0])),
-
-    // ── Hash/Encode (8) ──────────────────────────────────────────
-
     "hash_sha256" => hash_sha256(args[0]),
     "hash_sha1" => hash_sha1(args[0]),
     "hash_blake3" => hash_blake3(args[0]),
@@ -487,9 +414,6 @@ func eval_operation(op_name, args) {
     "url_decode" => url_decode(args[0]),
     "hex_encode" => hex_encode(args[0]),
     "hex_decode" => hex_decode(args[0]),
-
-    // ── String Extended (8) ──────────────────────────────────────
-
     "string_reverse" => {
         const s = args[0]
         const chars = s.chars()
@@ -527,9 +451,6 @@ func eval_operation(op_name, args) {
         count
     },
     "string_format" => string_format(args[0], op_arg(args, 1, [])),
-
-    // ── Control Flow Extended (2) ────────────────────────────────
-
     "assert" => {
         if !args[0] {
             const msg = op_arg(args, 1, "assertion failed")
@@ -541,16 +462,10 @@ func eval_operation(op_name, args) {
         println(to_string(args[0]))
         null
     },
-
-    // ── Type Conversion Extended (2) ─────────────────────────────
-
     "typeof" => typeof(args[0]),
     "default" => {
         if args[0] != null { args[0] } else { args[1] }
     },
-
-    // ── Array Higher-Order (20) ──────────────────────────────────
-
     "array_map" => {
         const arr = args[0]
         const fn_val = args[1]
@@ -692,7 +607,6 @@ func eval_operation(op_name, args) {
     "array_sort_by" => {
         const arr = args[0]
         const fn_val = args[1]
-        // Decorate-sort-undecorate
         let decorated = arr.map(x => [fn_val(x), x])
         decorated = decorated.sort()
         decorated.map(pair => pair[1])
@@ -745,9 +659,6 @@ func eval_operation(op_name, args) {
         }
         [yes, no]
     },
-
-    // ── Map Higher-Order (3) ─────────────────────────────────────
-
     "map_map_values" => {
         const m = args[0]
         const fn_val = args[1]
@@ -776,13 +687,7 @@ func eval_operation(op_name, args) {
         m[k] = fn_val(old_val)
         m
     },
-
-    // ── String (1) ───────────────────────────────────────────────
-
     "string_chars" => args[0].chars(),
-
-    // ── Math Aggregate (6) ───────────────────────────────────────
-
     "math_sum" => {
         const arr = args[0]
         let total = 0
@@ -825,9 +730,6 @@ func eval_operation(op_name, args) {
         m
     },
     "math_count" => len(args[0]),
-
-    // ── Type Checking (7) ────────────────────────────────────────
-
     "is_null" => args[0] == null,
     "is_string" => typeof(args[0]) == "string",
     "is_number" => {
@@ -838,9 +740,6 @@ func eval_operation(op_name, args) {
     "is_map" => typeof(args[0]) == "map",
     "is_bool" => typeof(args[0]) == "bool",
     "is_bytes" => typeof(args[0]) == "bytes",
-
-    // ── Math Extended (27) ───────────────────────────────────────
-
     "sin" => sin(op_to_f64(args[0])),
     "cos" => cos(op_to_f64(args[0])),
     "tan" => tan(op_to_f64(args[0])),
@@ -910,7 +809,6 @@ func eval_operation(op_name, args) {
         abs(a - b) < eps
     },
     "remap" => {
-        // remap(value, in_min, in_max, out_min, out_max)
         const v = op_to_f64(args[0])
         const in_min = op_to_f64(args[1])
         const in_max = op_to_f64(args[2])
@@ -918,9 +816,6 @@ func eval_operation(op_name, args) {
         const out_max = op_to_f64(args[4])
         out_min + (v - in_min) * (out_max - out_min) / (in_max - in_min)
     },
-
-    // ── Random (10) ──────────────────────────────────────────────
-
     "random_int" => random_int(op_to_i64(args[0]), op_to_i64(args[1])),
     "random_float" => random_float(),
     "random_bool" => random_bool(),
@@ -931,9 +826,6 @@ func eval_operation(op_name, args) {
     "random_sample" => random_sample(args[0], op_to_i64(args[1])),
     "random_uuid" => random_uuid(),
     "random_string" => random_string(op_to_i64(args[0])),
-
-    // ── Filesystem (15) ──────────────────────────────────────────
-
     "fs_read" => fs_read(args[0]),
     "fs_write" => fs_write(args[0], args[1]),
     "fs_append" => fs_append(args[0], args[1]),
@@ -949,9 +841,6 @@ func eval_operation(op_name, args) {
     "fs_chmod" => fs_chmod(args[0], args[1]),
     "fs_symlink" => fs_symlink(args[0], args[1]),
     "fs_readlink" => fs_readlink(args[0]),
-
-    // ── Environment (7) ──────────────────────────────────────────
-
     "env_get" => env_get(args[0]),
     "env_has" => env_has(args[0]),
     "env_keys" => env_keys(),
@@ -959,9 +848,6 @@ func eval_operation(op_name, args) {
     "os_arch" => os_arch(),
     "process_pid" => process_pid(),
     "current_dir" => current_dir(),
-
-    // ── Network (10) ─────────────────────────────────────────────
-
     "http_get" => http_get(args[0]),
     "http_post" => http_post(args[0], args[1], op_arg(args, 2, {})),
     "http_put" => http_put(args[0], args[1], op_arg(args, 2, {})),
@@ -972,9 +858,6 @@ func eval_operation(op_name, args) {
     "http_patch" => http_patch(args[0], args[1], op_arg(args, 2, {})),
     "url_parse" => url_parse(args[0]),
     "url_join" => url_join(args[0], args[1]),
-
-    // ── TCP (7) ──────────────────────────────────────────────────
-
     "tcp_connect" => tcp_connect(args[0]),
     "tcp_write" => tcp_write(args[0], args[1]),
     "tcp_read" => tcp_read(args[0], op_to_i64(op_arg(args, 1, 4096))),
@@ -982,45 +865,27 @@ func eval_operation(op_name, args) {
     "tcp_bind" => tcp_bind(args[0]),
     "tcp_accept" => tcp_accept(args[0]),
     "tcp_server_close" => tcp_server_close(args[0]),
-
-    // ── UDP (4) ──────────────────────────────────────────────────
-
     "udp_bind" => udp_bind(args[0]),
     "udp_send_to" => udp_send_to(args[0], args[1], args[2]),
     "udp_recv_from" => udp_recv_from(args[0]),
     "udp_close" => udp_close(args[0]),
-
-    // ── WebSocket (4) ────────────────────────────────────────────
-
     "ws_connect" => ws_connect(args[0]),
     "ws_send" => ws_send(args[0], args[1]),
     "ws_receive" => ws_receive(args[0]),
     "ws_close" => ws_close(args[0]),
-
-    // ── SSE (3) ──────────────────────────────────────────────────
-
     "sse_connect" => sse_connect(args[0]),
     "sse_read_event" => sse_read_event(args[0]),
     "sse_close" => sse_close(args[0]),
-
-    // ── HTTP Server (4) ──────────────────────────────────────────
-
     "http_server_start" => http_server_start(args[0]),
     "http_server_receive" => http_server_receive(args[0]),
     "http_server_respond" => http_server_respond(args[0], args[1]),
     "http_server_stop" => http_server_stop(args[0]),
-
-    // ── Certificate (6) ──────────────────────────────────────────
-
     "cert_generate" => cert_generate(args[0]),
     "cert_parse" => cert_parse(args[0]),
     "cert_info" => cert_info(args[0]),
     "cert_verify" => cert_verify(args[0], args[1]),
     "key_generate" => key_generate(op_arg(args, 0, "rsa")),
     "cert_self_signed" => cert_self_signed(args[0], args[1]),
-
-    // ── Path (10) ────────────────────────────────────────────────
-
     "path_join" => path_join(args[0], args[1]),
     "path_basename" => path_basename(args[0]),
     "path_dirname" => path_dirname(args[0]),
@@ -1031,80 +896,47 @@ func eval_operation(op_name, args) {
     "path_split" => path_split(args[0]),
     "path_with_extension" => path_with_extension(args[0], args[1]),
     "path_parent" => path_parent(args[0]),
-
-    // ── YAML (6) ─────────────────────────────────────────────────
-
     "yaml_parse" => yaml_parse(args[0]),
     "yaml_stringify" => yaml_stringify(args[0]),
     "yaml_validate" => yaml_validate(args[0]),
     "yaml_to_json" => yaml_to_json(args[0]),
     "yaml_from_json" => yaml_from_json(args[0]),
     "yaml_merge" => yaml_merge(args[0], args[1]),
-
-    // ── XML (2) ──────────────────────────────────────────────────
-
     "xml_parse" => xml_parse(args[0]),
     "xml_stringify" => xml_stringify(args[0]),
-
-    // ── CSV (4) ──────────────────────────────────────────────────
-
     "csv_parse" => csv_parse(args[0]),
     "csv_stringify" => csv_stringify(args[0]),
     "csv_headers" => csv_headers(args[0]),
     "csv_parse_rows" => csv_parse_rows(args[0]),
-
-    // ── TOML (2) ─────────────────────────────────────────────────
-
     "toml_parse" => toml_parse(args[0]),
     "toml_stringify" => toml_stringify(args[0]),
-
-    // ── Regex (5) ────────────────────────────────────────────────
-
     "regex_split" => regex_split(args[0], args[1]),
     "regex_escape" => regex_escape(args[0]),
     "regex_test" => regex_test(args[0], args[1]),
     "regex_captures" => regex_captures(args[0], args[1]),
     "regex_find_all" => regex_find_all(args[0], args[1]),
-
-    // ── UUID (4) ─────────────────────────────────────────────────
-
     "uuid_v4" => random_uuid(),
     "uuid_parse" => uuid_parse(args[0]),
     "uuid_is_valid" => uuid_is_valid(args[0]),
     "uuid_nil" => "00000000-0000-0000-0000-000000000000",
-
-    // ── Crypto Extended (4) ──────────────────────────────────────
-
     "hash_sha512" => hash_sha512(args[0]),
     "hmac_sha256" => hmac_sha256(args[0], args[1]),
     "hash_crc32" => hash_crc32(args[0]),
     "constant_time_eq" => constant_time_eq(args[0], args[1]),
-
-    // ── Compress (6) ─────────────────────────────────────────────
-
     "compress_zstd" => compress_zstd(args[0]),
     "decompress_zstd" => decompress_zstd(args[0]),
     "compress_lz4" => compress_lz4(args[0]),
     "decompress_lz4" => decompress_lz4(args[0]),
     "compress_gzip" => compress_gzip(args[0]),
     "decompress_gzip" => decompress_gzip(args[0]),
-
-    // ── Format (6) ───────────────────────────────────────────────
-
     "fmt_number" => fmt_number(args[0], op_arg(args, 1, 0)),
     "fmt_bytes" => fmt_bytes(op_to_i64(args[0])),
     "fmt_duration" => fmt_duration(args[0]),
     "fmt_hex" => fmt_hex(args[0]),
     "fmt_binary" => fmt_binary(args[0]),
     "fmt_percent" => fmt_percent(op_to_f64(args[0]), op_arg(args, 1, 2)),
-
-    // ── Convert Extended (2) ─────────────────────────────────────
-
     "parse_int" => parse_int(args[0]),
     "parse_float" => parse_float(args[0]),
-
-    // ── Time Extended (8) ────────────────────────────────────────
-
     "duration" => duration(args[0]),
     "elapsed" => elapsed(args[0]),
     "time_sleep" => sleep(op_to_i64(args[0])),
@@ -1113,9 +945,6 @@ func eval_operation(op_name, args) {
     "time_diff" => time_diff(args[0], args[1]),
     "start_of" => start_of(args[0], args[1]),
     "end_of" => end_of(args[0], args[1]),
-
-    // ── Stats (12) ───────────────────────────────────────────────
-
     "stats_mean" => {
         const arr = args[0]
         if len(arr) == 0 { return 0.0 }
@@ -1152,7 +981,6 @@ func eval_operation(op_name, args) {
                 best_key = k
             }
         }
-        // Return the original value, not the string key
         for x in arr {
             if to_string(x) == best_key { return x }
         }
@@ -1229,9 +1057,6 @@ func eval_operation(op_name, args) {
     "stats_quantile" => stats_quantile(args[0], op_to_f64(args[1])),
     "stats_covariance" => stats_covariance(args[0], args[1]),
     "stats_correlation" => stats_correlation(args[0], args[1]),
-
-    // ── Text (10) ────────────────────────────────────────────────
-
     "text_wrap" => text_wrap(args[0], op_to_i64(args[1])),
     "text_dedent" => text_dedent(args[0]),
     "text_indent" => text_indent(args[0], args[1]),
@@ -1248,16 +1073,10 @@ func eval_operation(op_name, args) {
     "text_camel_case" => text_camel_case(args[0]),
     "text_snake_case" => text_snake_case(args[0]),
     "text_title_case" => text_title_case(args[0]),
-
-    // ── Encode Extended (4) ──────────────────────────────────────
-
     "html_escape" => html_escape(args[0]),
     "html_unescape" => html_unescape(args[0]),
     "base32_encode" => base32_encode(args[0]),
     "base32_decode" => base32_decode(args[0]),
-
-    // ── Reflect (8) ──────────────────────────────────────────────
-
     "reflect_type_of" => typeof(args[0]),
     "reflect_type_name" => {
         const v = args[0]
@@ -1293,9 +1112,6 @@ func eval_operation(op_name, args) {
         }
     },
     "reflect_inspect" => reflect_inspect(args[0]),
-
-    // ── Collections (8) ──────────────────────────────────────────
-
     "set_from" => {
         const arr = args[0]
         let seen = {}
@@ -1399,12 +1215,8 @@ func eval_operation(op_name, args) {
         entries.slice(0, n)
     },
     "ordered_map" => {
-        // Return args[0] as-is (maps are already ordered in MAGI)
         args[0]
     },
-
-    // ── Sort (8) ─────────────────────────────────────────────────
-
     "sort_asc" => args[0].sort(),
     "sort_desc" => args[0].sort().reverse(),
     "sort_by" => {
@@ -1445,28 +1257,16 @@ func eval_operation(op_name, args) {
         -1
     },
     "sort_reverse" => args[0].reverse(),
-
-    // ── Subprocess (3) ───────────────────────────────────────────
-
     "exec" => exec_cmd(args[0], op_arg(args, 1, [])),
     "exec_status" => exec_status(args[0], op_arg(args, 1, [])),
     "exec_output" => exec_output(args[0], op_arg(args, 1, [])),
-
-    // ── Sync (6) ─────────────────────────────────────────────────
-
     "mutex_new" => mutex_new(),
     "mutex_lock" => mutex_lock(args[0]),
     "mutex_unlock" => mutex_unlock(args[0]),
     "waitgroup_new" => waitgroup_new(),
     "waitgroup_done" => waitgroup_done(args[0]),
     "waitgroup_wait" => waitgroup_wait(args[0]),
-
-    // ── Concurrency (1) ──────────────────────────────────────────
-
     "await_all" => await_all(args[0]),
-
-    // ── Log (4) ──────────────────────────────────────────────────
-
     "log_info" => {
         println(f"[INFO] {to_string(args[0])}")
         null
@@ -1483,9 +1283,6 @@ func eval_operation(op_name, args) {
         println(f"[DEBUG] {to_string(args[0])}")
         null
     },
-
-    // ── Itertools (5) ────────────────────────────────────────────
-
     "iter_chain" => {
         let result = []
         for arr in args {
@@ -1496,7 +1293,6 @@ func eval_operation(op_name, args) {
         result
     },
     "iter_cycle" => {
-        // iter_cycle(arr, n) - repeat array n times
         const arr = args[0]
         const n = op_to_i64(args[1])
         let result = []
@@ -1508,7 +1304,6 @@ func eval_operation(op_name, args) {
         result
     },
     "iter_repeat" => {
-        // iter_repeat(val, n) - create array of val repeated n times
         const val = args[0]
         const n = op_to_i64(args[1])
         let result = []
@@ -1520,7 +1315,6 @@ func eval_operation(op_name, args) {
         result
     },
     "iter_product" => {
-        // Cartesian product of two arrays
         const a = args[0]
         const b = args[1]
         let result = []
@@ -1532,7 +1326,6 @@ func eval_operation(op_name, args) {
         result
     },
     "iter_pairwise" => {
-        // Adjacent pairs
         const arr = args[0]
         let result = []
         let i = 0
@@ -1542,18 +1335,9 @@ func eval_operation(op_name, args) {
         }
         result
     },
-
-    // ── Template (1) ─────────────────────────────────────────────
-
     "template_render" => template_render(args[0], args[1]),
-
-    // ── Flag (2) ─────────────────────────────────────────────────
-
     "flag_parse" => flag_parse(args[0]),
     "flag_args" => flag_args(),
-
-    // ── Additional Math (7) ──────────────────────────────────────
-
     "gamma" => gamma(op_to_f64(args[0])),
     "lgamma" => lgamma(op_to_f64(args[0])),
     "erf" => erf(op_to_f64(args[0])),
@@ -1561,33 +1345,18 @@ func eval_operation(op_name, args) {
     "expm1" => expm1(op_to_f64(args[0])),
     "nextafter" => nextafter(op_to_f64(args[0]), op_to_f64(args[1])),
     "signbit" => signbit(op_to_f64(args[0])),
-
-    // ── Additional OS (3) ────────────────────────────────────────
-
     "chown" => chown(args[0], op_to_i64(args[1]), op_to_i64(args[2])),
     "hardlink" => hardlink(args[0], args[1]),
     "pipe" => pipe(),
-
-    // ── Additional strconv (2) ───────────────────────────────────
-
     "format_float" => format_float(op_to_f64(args[0]), op_arg(args, 1, "g"), op_arg(args, 2, -1)),
     "parse_uint" => parse_uint(args[0], op_arg(args, 1, 10)),
-
-    // ── Additional CLI (3) ───────────────────────────────────────
-
     "cli_fix" => cli_fix(args[0]),
     "cli_clean" => cli_clean(args[0]),
     "cli_tree" => cli_tree(args[0]),
-
-    // ── Platform: Terminal (4) ───────────────────────────────────
-
     "raw_mode_enable" => raw_mode_enable(),
     "raw_mode_disable" => raw_mode_disable(),
     "read_byte" => read_byte(),
     "read_byte_timeout" => read_byte_timeout(op_to_i64(args[0])),
-
-    // ── Platform: SDL2 Graphics (11) ─────────────────────────────
-
     "sdl_init" => sdl_init(args[0], op_to_i64(args[1]), op_to_i64(args[2])),
     "sdl_set_color" => sdl_set_color(op_to_i64(args[0]), op_to_i64(args[1]), op_to_i64(args[2]), op_to_i64(args[3])),
     "sdl_clear" => sdl_clear(),
@@ -1599,16 +1368,10 @@ func eval_operation(op_name, args) {
     "sdl_delay" => sdl_delay(op_to_i64(args[0])),
     "sdl_ticks" => sdl_ticks(),
     "sdl_destroy" => sdl_destroy(),
-
-    // ── Platform: Audio (4) ──────────────────────────────────────
-
     "audio_stream_new" => audio_stream_new(op_to_i64(args[0]), op_to_i64(args[1])),
     "audio_write_samples" => audio_write_samples(args[0], args[1]),
     "audio_drain" => audio_drain(args[0]),
     "audio_close" => audio_close(args[0]),
-
-    // ── Platform: WebGPU (12) ────────────────────────────────────
-
     "gpu_init" => gpu_init(args[0]),
     "gpu_create_buffer" => gpu_create_buffer(args[0], args[1]),
     "gpu_create_shader" => gpu_create_shader(args[0]),
@@ -1621,18 +1384,10 @@ func eval_operation(op_name, args) {
     "gpu_write_buffer" => gpu_write_buffer(args[0], args[1]),
     "gpu_create_texture" => gpu_create_texture(args[0]),
     "gpu_destroy" => gpu_destroy(args[0]),
-
-    // ── Fallback ─────────────────────────────────────────────────
-
     _ => panic(f"unknown operation: {op_name}"),
 
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full String Operations with Edge Cases
-// ══════════════════════════════════════════════════════════════════
-
 func op_string_repeat(s, count) {
     if count <= 0 { return "" }
     let result = ""
@@ -1693,11 +1448,6 @@ func op_string_last_index_of(haystack, needle) {
     }
     -1
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Stats Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_stats_mean(arr) {
     if len(arr) == 0 { return 0.0 }
     let sum = 0.0
@@ -1758,11 +1508,6 @@ func op_stats_z_score(arr, value) {
     if sd == 0.0 { return 0.0 }
     (op_to_f64(value) - mean) / sd
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Text Case Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_text_camel_case(s) {
     let parts = []
     let current = ""
@@ -1819,11 +1564,6 @@ func op_text_kebab_case(s) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Format Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_fmt_number(n, decimals) {
     const factor = power(10.0, op_to_f64(decimals))
     to_string(round(op_to_f64(n) * factor) / factor)
@@ -1870,11 +1610,6 @@ func op_fmt_binary(n) {
 }
 
 func op_fmt_percent(n, decimals) { op_fmt_number(op_to_f64(n) * 100.0, decimals) + "%" }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Path Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_path_join(parts) { parts.join("/") }
 func op_path_dirname(path) {
     const idx = op_string_last_index_of(path, "/")
@@ -1910,11 +1645,6 @@ func op_path_normalize(path) {
     const joined = result.join("/")
     if op_path_is_absolute(path) { "/" + joined } else { joined }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Array Higher-Order Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_array_unique(arr) {
     let seen = {"__init": true}
     let result = []
@@ -1946,11 +1676,6 @@ func op_array_dedup(arr) {
     while i < len(arr) { if arr[i] != arr[i - 1] { result.push(arr[i]) }; i = i + 1 }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Map Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_map_from_entries(entries) {
     let result = {"__init": true}
     for entry in entries {
@@ -1989,11 +1714,6 @@ func op_map_deep_merge(a, b) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Crypto/Compress/Cert/Process/HTTP Operations (delegate to stage 0)
-// ══════════════════════════════════════════════════════════════════
-
 func op_crypto_md5(data) { md5(data) }
 func op_crypto_sha256(data) { sha256(data) }
 func op_crypto_sha512(data) { sha512(data) }
@@ -2018,23 +1738,15 @@ func op_http_get(url, headers) { http_get(url, headers) }
 func op_http_post(url, body, headers) { http_post(url, body, headers) }
 func op_http_put(url, body, headers) { http_put(url, body, headers) }
 func op_http_delete(url, headers) { http_delete(url, headers) }
-
-// ══════════════════════════════════════════════════════════════════
-// Full HTTP Operations — request construction, response parsing
-// ══════════════════════════════════════════════════════════════════
-
 func op_http_request_full(method, url, body, headers) {
-    // Construct proper HTTP request and parse response
     const raw = http_request(url, method, body, headers)
     if raw == null { return {"status": 0, "headers": {}, "body": null, "error": "no response"} }
     if typeof(raw) == "map" { return raw }
-    // If raw is a string, parse as response
     op_parse_http_response(raw)
 }
 
 func op_parse_http_response(raw) {
     if typeof(raw) == "map" { return raw }
-    // Default response structure
     {"status": 200, "headers": {}, "body": raw, "error": null}
 }
 
@@ -2052,7 +1764,6 @@ func op_http_patch(url, body, headers) {
     http_patch(url, body, headers)
 }
 
-// Build HTTP headers map from pairs
 func op_build_headers(pairs) {
     let headers = {}
     for pair in pairs {
@@ -2063,7 +1774,6 @@ func op_build_headers(pairs) {
     headers
 }
 
-// URL query string builder
 func op_build_query_string(params) {
     let parts = []
     for k in params.keys() {
@@ -2073,18 +1783,12 @@ func op_build_query_string(params) {
     parts.join("&")
 }
 
-// URL with query parameters
 func op_url_with_params(base_url, params) {
     const qs = op_build_query_string(params)
     if len(qs) == 0 { return base_url }
     const sep = if base_url.contains("?") { "&" } else { "?" }
     base_url + sep + qs
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Filesystem Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_fs_read(path) { fs_read(path) }
 func op_fs_write(path, content) { fs_write(path, content) }
 func op_fs_append(path, content) { fs_append(path, content) }
@@ -2101,13 +1805,10 @@ func op_fs_chmod(path, mode) { fs_chmod(path, mode) }
 func op_fs_symlink(target, link) { fs_symlink(target, link) }
 func op_fs_readlink(path) { fs_readlink(path) }
 
-// Read file as bytes
 func op_fs_read_bytes(path) { fs_read_bytes(path) }
 
-// Write bytes to file
 func op_fs_write_bytes(path, data) { fs_write_bytes(path, data) }
 
-// List directory recursively
 func op_fs_walk(path) {
     let results = []
     const entries = fs_list(path)
@@ -2123,7 +1824,6 @@ func op_fs_walk(path) {
     results
 }
 
-// Glob-style file matching
 func op_fs_glob(pattern, base_dir) {
     const all_files = op_fs_walk(base_dir)
     let matched = []
@@ -2135,26 +1835,20 @@ func op_fs_glob(pattern, base_dir) {
     matched
 }
 
-// Simple glob matching
 func op_glob_matches(path, pattern) {
-    // Support * and ** wildcards
     if pattern == "*" { return true }
     if pattern == "**" { return true }
-    // Check extension match like "*.magi"
     if starts_with(pattern, "*.") {
         const ext = pattern.slice(1, len(pattern))
         return ends_with(path, ext)
     }
-    // Check directory prefix like "src/**"
     if ends_with(pattern, "/**") {
         const prefix = pattern.slice(0, len(pattern) - 3)
         return starts_with(path, prefix)
     }
-    // Exact match
     path == pattern
 }
 
-// File stat: return {size, is_file, is_dir, modified}
 func op_fs_stat(path) {
     {
         "path": path,
@@ -2165,19 +1859,16 @@ func op_fs_stat(path) {
     }
 }
 
-// Read lines from file
 func op_fs_read_lines(path) {
     const content = fs_read(path)
     if content == null { return [] }
     content.split("\n")
 }
 
-// Write lines to file
 func op_fs_write_lines(path, lines) {
     fs_write(path, lines.join("\n"))
 }
 
-// Temporary file creation
 func op_fs_temp_file(prefix) {
     const name = prefix + "_" + to_string(now_timestamp()) + "_" + to_string(random_int(0, 999999))
     const path = "/tmp/" + name
@@ -2185,34 +1876,24 @@ func op_fs_temp_file(prefix) {
     path
 }
 
-// Temporary directory creation
 func op_fs_temp_dir(prefix) {
     const name = prefix + "_" + to_string(now_timestamp()) + "_" + to_string(random_int(0, 999999))
     const path = "/tmp/" + name
     fs_mkdir(path)
     path
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Process Operations
-// ══════════════════════════════════════════════════════════════════
-
-// Execute command and return {stdout, stderr, exit_code}
 func op_exec_full(cmd, args) {
     const result = exec_cmd(cmd, args)
     if typeof(result) == "map" { return result }
-    // Wrap raw output in structured response
     {"stdout": to_string(result), "stderr": "", "exit_code": 0}
 }
 
-// Execute command and return just stdout as string
 func op_exec_output_str(cmd, args) {
     const result = exec_output(cmd, args)
     if result == null { return "" }
     to_string(result)
 }
 
-// Execute and return just the exit code
 func op_exec_status_code(cmd, args) {
     const result = exec_status(cmd, args)
     if typeof(result) == "int64" { return result }
@@ -2220,47 +1901,34 @@ func op_exec_status_code(cmd, args) {
     0
 }
 
-// Execute with stdin
 func op_exec_with_stdin(cmd, args, stdin_data) {
     exec_with_stdin(cmd, args, stdin_data)
 }
 
-// Execute with environment variables
 func op_exec_with_env(cmd, args, env_vars) {
     exec_with_env(cmd, args, env_vars)
 }
 
-// Execute with working directory
 func op_exec_with_cwd(cmd, args, cwd_path) {
     exec_with_cwd(cmd, args, cwd_path)
 }
 
-// Execute command in background (non-blocking)
 func op_exec_background(cmd, args) {
     exec_background(cmd, args)
 }
 
-// Shell execution (wraps in sh -c)
 func op_shell(command) {
     exec_cmd("sh", ["-c", command])
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Network Operations — TCP
-// ══════════════════════════════════════════════════════════════════
-
-// TCP connect and return handle
 func op_tcp_connect_full(host, port) {
     const addr = host + ":" + to_string(port)
     tcp_connect(addr)
 }
 
-// TCP read with timeout
 func op_tcp_read_timeout(handle, size, timeout_ms) {
     tcp_read_timeout(handle, size, timeout_ms)
 }
 
-// TCP write all bytes
 func op_tcp_write_all(handle, data) {
     let written = 0
     let remaining = data
@@ -2273,7 +1941,6 @@ func op_tcp_write_all(handle, data) {
     written
 }
 
-// TCP line-buffered read
 func op_tcp_read_line(handle) {
     let line = ""
     while true {
@@ -2286,7 +1953,6 @@ func op_tcp_read_line(handle) {
     line
 }
 
-// TCP server with connection handling
 func op_tcp_serve(addr, handler) {
     const server = tcp_bind(addr)
     if server == null { return {"error": "failed to bind"} }
@@ -2296,11 +1962,6 @@ func op_tcp_serve(addr, handler) {
         handler(client)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Network Operations — UDP
-// ══════════════════════════════════════════════════════════════════
-
 func op_udp_bind_full(host, port) {
     const addr = host + ":" + to_string(port)
     udp_bind(addr)
@@ -2313,12 +1974,6 @@ func op_udp_send(handle, data, target_addr) {
 func op_udp_recv(handle) {
     udp_recv_from(handle)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Crypto Operations
-// ══════════════════════════════════════════════════════════════════
-
-// All hash algorithms
 func op_hash_sha256(data) { hash_sha256(data) }
 func op_hash_sha512(data) { hash_sha512(data) }
 func op_hash_sha1(data) { hash_sha1(data) }
@@ -2326,73 +1981,48 @@ func op_hash_md5(data) { hash_md5(data) }
 func op_hash_blake3(data) { hash_blake3(data) }
 func op_hash_crc32(data) { hash_crc32(data) }
 
-// HMAC
 func op_hmac_sha256(key, data) { hmac_sha256(key, data) }
 func op_hmac_sha512(key, data) { hmac_sha512(key, data) }
 
-// AES encrypt/decrypt (delegates to stage 0 builtins)
 func op_aes_encrypt(key, plaintext) { aes_encrypt(key, plaintext) }
 func op_aes_decrypt(key, ciphertext) { aes_decrypt(key, ciphertext) }
 
-// AES-GCM encrypt/decrypt
 func op_aes_gcm_encrypt(key, nonce, plaintext, aad) { aes_gcm_encrypt(key, nonce, plaintext, aad) }
 func op_aes_gcm_decrypt(key, nonce, ciphertext, aad) { aes_gcm_decrypt(key, nonce, ciphertext, aad) }
 
-// Key generation
 func op_generate_key(algorithm, bits) { generate_key(algorithm, bits) }
 func op_generate_keypair(algorithm, bits) { generate_keypair(algorithm, bits) }
 
-// Key derivation
 func op_pbkdf2(password, salt, iterations, key_len) { pbkdf2(password, salt, iterations, key_len) }
 func op_scrypt(password, salt, n, r, p, key_len) { scrypt(password, salt, n, r, p, key_len) }
 func op_argon2(password, salt, time_cost, mem_cost, parallelism) { argon2(password, salt, time_cost, mem_cost, parallelism) }
 
-// Constant-time comparison
 func op_constant_time_eq(a, b) { constant_time_eq(a, b) }
 
-// Random bytes generation
 func op_crypto_random(n) { random_bytes(n) }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Compression Operations
-// ══════════════════════════════════════════════════════════════════
-
-// Gzip
 func op_gzip_compress(data) { compress_gzip(data) }
 func op_gzip_decompress(data) { decompress_gzip(data) }
 
-// LZ4
 func op_lz4_compress(data) { compress_lz4(data) }
 func op_lz4_decompress(data) { decompress_lz4(data) }
 
-// Zstd
 func op_zstd_compress(data) { compress_zstd(data) }
 func op_zstd_decompress(data) { decompress_zstd(data) }
 
-// Zstd with compression level
 func op_zstd_compress_level(data, level) { compress_zstd_level(data, level) }
 
-// Zip archive operations
 func op_zip_create(files) { zip_create(files) }
 func op_zip_extract(data) { zip_extract(data) }
 func op_zip_list(data) { zip_list(data) }
 
-// Tar archive operations
 func op_tar_create(files) { tar_create(files) }
 func op_tar_extract(data) { tar_extract(data) }
 func op_tar_list(data) { tar_list(data) }
-
-// ══════════════════════════════════════════════════════════════════
-// Full JSON Operations (deep path access, validation, diff)
-// ══════════════════════════════════════════════════════════════════
-
-// Deep get with dot-path: obj.foo.bar[0].baz
 func op_json_get_path(obj, path) {
     let current = obj
     const parts = path.split(".")
     for part in parts {
         if current == null { return null }
-        // Check for array index: "items[0]"
         if part.contains("[") {
             const bracket_idx = part.index_of("[")
             const key = part.slice(0, bracket_idx)
@@ -2413,14 +2043,12 @@ func op_json_get_path(obj, path) {
     current
 }
 
-// Deep set with dot-path
 func op_json_set_path(obj, path, value) {
     const parts = path.split(".")
     if len(parts) == 1 {
         obj[parts[0]] = value
         return obj
     }
-    // Navigate to parent
     let current = obj
     let i = 0
     while i < len(parts) - 1 {
@@ -2433,7 +2061,6 @@ func op_json_set_path(obj, path, value) {
     obj
 }
 
-// JSON diff: returns list of differences between two JSON values
 func op_json_diff(a, b) {
     let diffs = []
     op_json_diff_recursive(a, b, "", diffs)
@@ -2447,7 +2074,6 @@ func op_json_diff_recursive(a, b, path, diffs) {
         return null
     }
     if typeof(a) == "map" && typeof(b) == "map" {
-        // Check keys in a not in b
         for k in a.keys() {
             if k == "__s" || k == "__init" { continue }
             const child_path = if len(path) > 0 { path + "." + k } else { k }
@@ -2457,7 +2083,6 @@ func op_json_diff_recursive(a, b, path, diffs) {
                 op_json_diff_recursive(a[k], b[k], child_path, diffs)
             }
         }
-        // Check keys in b not in a
         for k in b.keys() {
             if k == "__s" || k == "__init" { continue }
             if !a.has(k) {
@@ -2484,7 +2109,6 @@ func op_json_diff_recursive(a, b, path, diffs) {
     }
 }
 
-// JSON patch (RFC 6902 subset)
 func op_json_patch(obj, patches) {
     let result = obj
     for patch in patches {
@@ -2504,11 +2128,6 @@ func op_json_patch(obj, patches) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Encoding Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_base64_encode(data) { base64_encode(data) }
 func op_base64_decode(data) { base64_decode(data) }
 func op_hex_encode(data) { hex_encode(data) }
@@ -2517,11 +2136,6 @@ func op_url_encode(s) { url_encode(s) }
 func op_url_decode(s) { url_decode(s) }
 func op_base32_encode(data) { base32_encode(data) }
 func op_base32_decode(data) { base32_decode(data) }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Validate Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_validate_email(s) {
     if len(s) < 3 { return false }
     const at_idx = s.index_of("@")
@@ -2548,7 +2162,6 @@ func op_validate_ipv4(s) {
 func op_validate_uuid(s) { uuid_is_valid(s) }
 
 func op_validate_iso_date(s) {
-    // YYYY-MM-DD format
     if len(s) != 10 { return false }
     if s[4] != "-" || s[7] != "-" { return false }
     true
@@ -2567,11 +2180,6 @@ func op_validate_matches(s, pattern) { regex_test(s, pattern) }
 func op_validate_range(n, min_val, max_val) {
     n >= min_val && n <= max_val
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Set Operations (beyond basic)
-// ══════════════════════════════════════════════════════════════════
-
 func op_set_is_subset(a, b) {
     let b_set = {}
     for item in b { b_set[to_string(item)] = true }
@@ -2615,11 +2223,6 @@ func op_set_cartesian_product(a, b) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Matrix Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_matrix_new(rows, cols, fill) {
     let result = []
     let r = 0
@@ -2734,11 +2337,6 @@ func op_matrix_minor(m, row, col) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Graph Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_graph_new() { {"nodes": {}, "edges": []} }
 
 func op_graph_add_node(g, id, data) {
@@ -2795,7 +2393,6 @@ func op_graph_dfs(g, start) {
 }
 
 func op_graph_shortest_path(g, start, end) {
-    // BFS-based shortest path
     const start_str = to_string(start)
     const end_str = to_string(end)
     let visited = {"__s": true}
@@ -2814,7 +2411,7 @@ func op_graph_shortest_path(g, start, end) {
             }
         }
     }
-    [] // No path found
+    []
 }
 
 func op_graph_topological_sort(g) {
@@ -2847,11 +2444,6 @@ func op_graph_topological_sort(g) {
     }
     order
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Event/Observer Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_event_emitter_new() {
     {"__event_emitter": true, "handlers": {}}
 }
@@ -2881,18 +2473,11 @@ func op_event_off(emitter, event_name) {
     }
     emitter
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Pool/Ring/Queue/Heap Operations
-// ══════════════════════════════════════════════════════════════════
-
-// Priority queue (min-heap)
 func op_heap_new() { {"__heap": true, "data": []} }
 
 func op_heap_push(heap, priority, value) {
     let data = heap["data"]
     data.push([priority, value])
-    // Bubble up
     let i = len(data) - 1
     while i > 0 {
         const parent = (i - 1) / 2
@@ -2914,7 +2499,6 @@ func op_heap_pop(heap) {
     if len(data) == 1 { heap["data"] = []; return result[1] }
     data[0] = data[len(data) - 1]
     data = data.slice(0, len(data) - 1)
-    // Bubble down
     let i = 0
     while true {
         const left = 2 * i + 1
@@ -2940,7 +2524,6 @@ func op_heap_peek(heap) {
 
 func op_heap_size(heap) { len(heap["data"]) }
 
-// Ring buffer
 func op_ring_new(capacity) {
     {"__ring": true, "data": [], "capacity": capacity, "head": 0, "size": 0}
 }
@@ -2973,7 +2556,6 @@ func op_ring_to_array(ring) {
     result
 }
 
-// Queue (FIFO)
 func op_queue_new() { {"__queue": true, "data": []} }
 func op_queue_enqueue(q, value) { q["data"].push(value); q }
 func op_queue_dequeue(q) {
@@ -2989,7 +2571,6 @@ func op_queue_peek(q) {
 func op_queue_size(q) { len(q["data"]) }
 func op_queue_is_empty(q) { len(q["data"]) == 0 }
 
-// Stack (LIFO)
 func op_stack_new() { {"__stack": true, "data": []} }
 func op_stack_push(s, value) { s["data"].push(value); s }
 func op_stack_pop(s) {
@@ -3002,11 +2583,6 @@ func op_stack_peek(s) {
     data[len(data) - 1]
 }
 func op_stack_size(s) { len(s["data"]) }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Bloom Filter
-// ══════════════════════════════════════════════════════════════════
-
 func op_bloom_new(size, num_hashes) {
     let bits = []
     let i = 0
@@ -3043,11 +2619,6 @@ func op_bloom_hash(s, seed) {
     }
     abs(h)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full LRU Cache
-// ══════════════════════════════════════════════════════════════════
-
 func op_lru_new(capacity) {
     {"__lru": true, "capacity": capacity, "data": {}, "order": [], "size": 0}
 }
@@ -3055,7 +2626,6 @@ func op_lru_new(capacity) {
 func op_lru_get(cache, key) {
     const k = to_string(key)
     if !cache["data"].has(k) { return null }
-    // Move to end of order (most recently used)
     let order = cache["order"].filter(x => x != k)
     order.push(k)
     cache["order"] = order
@@ -3071,7 +2641,6 @@ func op_lru_put(cache, key, value) {
         cache["order"] = order
     } else {
         if cache["size"] >= cache["capacity"] {
-            // Evict least recently used
             const evict_key = cache["order"][0]
             cache["order"] = cache["order"].slice(1, len(cache["order"]))
             cache["data"].delete(evict_key)
@@ -3086,15 +2655,9 @@ func op_lru_put(cache, key, value) {
 
 func op_lru_has(cache, key) { cache["data"].has(to_string(key)) }
 func op_lru_size(cache) { cache["size"] }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Semver Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_semver_parse(version_str) {
     const parts = version_str.split(".")
     if len(parts) < 3 { return {"major": 0, "minor": 0, "patch": 0} }
-    // Handle pre-release: "1.2.3-beta.1"
     const patch_str = parts[2]
     let patch_val = 0
     let prerelease = ""
@@ -3122,7 +2685,6 @@ func op_semver_compare(a, b) {
 }
 
 func op_semver_satisfies(version, constraint) {
-    // Simple constraint: ">=1.0.0", "^1.0.0", "~1.0.0"
     if starts_with(constraint, ">=") {
         return op_semver_compare(version, constraint.slice(2, len(constraint))) >= 0
     }
@@ -3136,18 +2698,15 @@ func op_semver_satisfies(version, constraint) {
         return op_semver_compare(version, constraint.slice(1, len(constraint))) < 0
     }
     if starts_with(constraint, "^") {
-        // Compatible: same major version
         const cv = op_semver_parse(constraint.slice(1, len(constraint)))
         const vv = op_semver_parse(version)
         return vv["major"] == cv["major"] && op_semver_compare(version, constraint.slice(1, len(constraint))) >= 0
     }
     if starts_with(constraint, "~") {
-        // Approximately: same major.minor
         const cv = op_semver_parse(constraint.slice(1, len(constraint)))
         const vv = op_semver_parse(version)
         return vv["major"] == cv["major"] && vv["minor"] == cv["minor"] && op_semver_compare(version, constraint.slice(1, len(constraint))) >= 0
     }
-    // Exact match
     op_semver_compare(version, constraint) == 0
 }
 
@@ -3160,18 +2719,8 @@ func op_semver_increment(version, part) {
         _ => version
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full TOML Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_toml_get(obj, path) { op_json_get_path(obj, path) }
 func op_toml_set(obj, path, value) { op_json_set_path(obj, path, value) }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Template Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_template_render_full(template, vars) {
     let result = template
     for k in vars.keys() {
@@ -3182,10 +2731,8 @@ func op_template_render_full(template, vars) {
     result
 }
 
-// Template with conditional blocks: {{#if cond}}...{{/if}}
 func op_template_with_conditions(template, vars) {
     let result = op_template_render_full(template, vars)
-    // Process {{#if key}}...{{/if}} blocks
     while result.contains("{{#if ") {
         const start = result.index_of("{{#if ")
         const end_tag_start = result.index_of("{{/if}}")
@@ -3199,11 +2746,6 @@ func op_template_with_conditions(template, vars) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Signal/Platform Operations (delegate to stage 0)
-// ══════════════════════════════════════════════════════════════════
-
 func op_signal_trap(sig, handler) { signal_trap(sig, handler) }
 func op_signal_send(pid, sig) { signal_send(pid, sig) }
 func op_signal_ignore(sig) { signal_ignore(sig) }
@@ -3215,22 +2757,12 @@ func op_platform_memory_free() { memory_free() }
 func op_platform_uptime() { uptime() }
 func op_platform_load_average() { load_average() }
 func op_platform_disk_usage(path) { disk_usage(path) }
-
-// ══════════════════════════════════════════════════════════════════
-// Channel Operations for Concurrency
-// ══════════════════════════════════════════════════════════════════
-
 func op_channel_new(capacity) { channel_new(capacity) }
 func op_channel_send(ch, value) { channel_send(ch, value) }
 func op_channel_recv(ch) { channel_recv(ch) }
 func op_channel_try_recv(ch) { channel_try_recv(ch) }
 func op_channel_close(ch) { channel_close(ch) }
 func op_channel_select(channels) { channel_select(channels) }
-
-// ══════════════════════════════════════════════════════════════════
-// Big Integer Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_big_new(value) { big_new(value) }
 func op_big_add(a, b) { big_add(a, b) }
 func op_big_sub(a, b) { big_sub(a, b) }
@@ -3240,11 +2772,6 @@ func op_big_mod(a, b) { big_mod(a, b) }
 func op_big_pow(a, b) { big_pow(a, b) }
 func op_big_to_string(a) { big_to_string(a) }
 func op_big_compare(a, b) { big_compare(a, b) }
-
-// ══════════════════════════════════════════════════════════════════
-// Complex Number Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_complex_new(re, im) { {"re": op_to_f64(re), "im": op_to_f64(im)} }
 func op_complex_add(a, b) { {"re": a["re"] + b["re"], "im": a["im"] + b["im"]} }
 func op_complex_sub(a, b) { {"re": a["re"] - b["re"], "im": a["im"] - b["im"]} }
@@ -3259,11 +2786,6 @@ func op_complex_div(a, b) {
 }
 func op_complex_abs(c) { sqrt(c["re"] * c["re"] + c["im"] * c["im"]) }
 func op_complex_conjugate(c) { {"re": c["re"], "im": 0.0 - c["im"]} }
-
-// ══════════════════════════════════════════════════════════════════
-// Memoization Operation
-// ══════════════════════════════════════════════════════════════════
-
 func op_memoize(fn_val) {
     let cache = {}
     func memoized(...args) {
@@ -3275,31 +2797,20 @@ func op_memoize(fn_val) {
     }
     memoized
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Retry/Backoff Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_retry(fn_val, max_retries, delay_ms) {
     let attempts = 0
     while attempts < max_retries {
         let result = null
         let err = null
-        // In self-hosted, try-catch is simplified
         result = fn_val()
         if result != null { return result }
         attempts = attempts + 1
         if attempts < max_retries && delay_ms > 0 {
-            sleep(delay_ms * attempts) // Exponential backoff
+            sleep(delay_ms * attempts)
         }
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Rate Limiter
-// ══════════════════════════════════════════════════════════════════
-
 func op_rate_limiter_new(max_requests, window_ms) {
     {"__rate_limiter": true, "max": max_requests, "window": window_ms, "timestamps": []}
 }
@@ -3307,7 +2818,6 @@ func op_rate_limiter_new(max_requests, window_ms) {
 func op_rate_limiter_allow(limiter) {
     const now = now_timestamp()
     const window = limiter["window"]
-    // Remove expired timestamps
     let timestamps = limiter["timestamps"].filter(t => now - t < window)
     if len(timestamps) >= limiter["max"] {
         limiter["timestamps"] = timestamps
@@ -3317,11 +2827,6 @@ func op_rate_limiter_allow(limiter) {
     limiter["timestamps"] = timestamps
     true
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Circuit Breaker
-// ══════════════════════════════════════════════════════════════════
-
 func op_circuit_breaker_new(threshold, reset_ms) {
     {"__circuit_breaker": true, "threshold": threshold, "reset_ms": reset_ms,
      "failures": 0, "state": "closed", "last_failure": 0}
@@ -3347,11 +2852,6 @@ func op_circuit_breaker_call(cb, fn_val) {
     cb["state"] = "closed"
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Debounce/Throttle Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_debounce(fn_val, delay_ms) {
     let last_call = 0
     func debounced(...args) {
@@ -3374,11 +2874,6 @@ func op_throttle(fn_val, interval_ms) {
     }
     throttled
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Pipeline/Compose Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_pipe_value(value, functions) {
     let result = value
     for fn_val in functions {
@@ -3421,11 +2916,6 @@ func op_curry(fn_val, arity) {
     }
     curried
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Iterator Protocol
-// ══════════════════════════════════════════════════════════════════
-
 func op_iter_from_array(arr) {
     {"__iter": true, "data": arr, "index": 0}
 }
@@ -3534,11 +3024,6 @@ func op_iter_flat_map(iter, fn_val) {
     }
     op_iter_from_array(result)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full State Machine
-// ══════════════════════════════════════════════════════════════════
-
 func op_state_machine_new(initial_state, transitions) {
     {"__fsm": true, "state": initial_state, "transitions": transitions, "history": [initial_state]}
 }
@@ -3553,7 +3038,7 @@ func op_state_machine_transition(fsm, event) {
         fsm["history"].push(next_state)
         return next_state
     }
-    null // Invalid transition
+    null
 }
 
 func op_state_machine_state(fsm) { fsm["state"] }
@@ -3562,11 +3047,6 @@ func op_state_machine_can_transition(fsm, event) {
     const key = fsm["state"] + ":" + to_string(event)
     fsm["transitions"].has(key)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Trie (Prefix Tree) Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_trie_new() { {"__trie": true, "children": {}, "is_end": false, "value": null} }
 
 func op_trie_insert(trie, key, value) {
@@ -3621,17 +3101,11 @@ func op_trie_collect_helper(node, prefix, results) {
         op_trie_collect_helper(node["children"][c], prefix + c, results)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Diff/Patch Operations (for text)
-// ══════════════════════════════════════════════════════════════════
-
 func op_text_diff(old_text, new_text) {
     const old_lines = old_text.split("\n")
     const new_lines = new_text.split("\n")
     let diffs = []
 
-    // Simple line-by-line diff
     const max_lines = if len(old_lines) > len(new_lines) { len(old_lines) } else { len(new_lines) }
     let i = 0
     while i < max_lines {
@@ -3653,7 +3127,6 @@ func op_text_diff(old_text, new_text) {
 
 func op_text_patch(text, patches) {
     let lines = text.split("\n")
-    // Apply patches in reverse order (to preserve line numbers)
     let sorted_patches = patches.sort()
     sorted_patches = sorted_patches.reverse()
     for patch in sorted_patches {
@@ -3682,11 +3155,6 @@ func op_text_patch(text, patches) {
     }
     lines.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Color Operations (for terminal output)
-// ══════════════════════════════════════════════════════════════════
-
 func op_color_red(s) { "\x1b[31m" + s + "\x1b[0m" }
 func op_color_green(s) { "\x1b[32m" + s + "\x1b[0m" }
 func op_color_yellow(s) { "\x1b[33m" + s + "\x1b[0m" }
@@ -3700,7 +3168,6 @@ func op_color_underline(s) { "\x1b[4m" + s + "\x1b[0m" }
 func op_color_rgb(s, r, g, b) { f"\x1b[38;2;{r};{g};{b}m{s}\x1b[0m" }
 func op_color_bg_rgb(s, r, g, b) { f"\x1b[48;2;{r};{g};{b}m{s}\x1b[0m" }
 func op_color_strip(s) {
-    // Remove ANSI escape sequences
     let result = ""
     let in_escape = false
     for c in s.chars() {
@@ -3713,13 +3180,7 @@ func op_color_strip(s) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Table Formatting
-// ══════════════════════════════════════════════════════════════════
-
 func op_table_format(headers, rows) {
-    // Calculate column widths
     let widths = []
     for h in headers { widths.push(len(h)) }
     for row in rows {
@@ -3735,7 +3196,6 @@ func op_table_format(headers, rows) {
         }
     }
 
-    // Build header
     let header_cells = []
     let i = 0
     while i < len(headers) {
@@ -3744,12 +3204,10 @@ func op_table_format(headers, rows) {
     }
     const header_line = "| " + header_cells.join(" | ") + " |"
 
-    // Build separator
     let sep_cells = []
     for w in widths { sep_cells.push(op_string_repeat("-", w)) }
     const sep_line = "|-" + sep_cells.join("-|-") + "-|"
 
-    // Build rows
     let row_lines = []
     for row in rows {
         let cells = []
@@ -3764,18 +3222,12 @@ func op_table_format(headers, rows) {
 
     header_line + "\n" + sep_line + "\n" + row_lines.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Levenshtein Distance (for typo suggestions)
-// ══════════════════════════════════════════════════════════════════
-
 func op_levenshtein_distance(a, b) {
     const m = len(a)
     const n = len(b)
     if m == 0 { return n }
     if n == 0 { return m }
 
-    // Build distance matrix
     let prev = []
     let i = 0
     while i <= n { prev.push(i); i = i + 1 }
@@ -3801,7 +3253,6 @@ func op_levenshtein_distance(a, b) {
     prev[n]
 }
 
-// Find closest match from candidates
 func op_did_you_mean(target, candidates, max_distance) {
     let best = null
     let best_dist = max_distance + 1
@@ -3814,11 +3265,6 @@ func op_did_you_mean(target, candidates, max_distance) {
     }
     best
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full LinkedList Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_linked_list_new() { {"__ll": true, "head": null, "size": 0} }
 
 func op_linked_list_push_front(list, value) {
@@ -3887,11 +3333,6 @@ func op_linked_list_reverse(list) {
 }
 
 func op_linked_list_size(list) { list["size"] }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Deque (Double-Ended Queue)
-// ══════════════════════════════════════════════════════════════════
-
 func op_deque_new() { {"__deque": true, "data": []} }
 func op_deque_push_front(d, value) {
     d["data"] = [value].concat(d["data"])
@@ -3922,11 +3363,6 @@ func op_deque_peek_back(d) {
 func op_deque_size(d) { len(d["data"]) }
 func op_deque_is_empty(d) { len(d["data"]) == 0 }
 func op_deque_to_array(d) { d["data"] }
-
-// ══════════════════════════════════════════════════════════════════
-// Full BitSet Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_bitset_new(size) {
     let bits = []
     let i = 0
@@ -3995,11 +3431,6 @@ func op_bitset_xor(a, b) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Promise/Future Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_promise_resolve(value) {
     {"__promise": true, "state": "fulfilled", "value": value, "error": null}
 }
@@ -4043,7 +3474,6 @@ func op_promise_all(promises) {
 }
 
 func op_promise_race(promises) {
-    // Return the first fulfilled/rejected
     for p in promises {
         if p["state"] != "pending" { return p }
     }
@@ -4057,11 +3487,6 @@ func op_promise_all_settled(promises) {
     }
     op_promise_resolve(results)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Observable/Reactive Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_observable_new(initial_value) {
     {"__observable": true, "value": initial_value, "subscribers": []}
 }
@@ -4071,7 +3496,6 @@ func op_observable_get(obs) { obs["value"] }
 func op_observable_set(obs, value) {
     const old_value = obs["value"]
     obs["value"] = value
-    // Notify subscribers
     for sub in obs["subscribers"] {
         sub(value, old_value)
     }
@@ -4101,11 +3525,6 @@ func op_observable_filter(obs, predicate) {
     })
     derived
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Option/Result Type Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_some(value) { {"__option": true, "has_value": true, "value": value} }
 func op_none() { {"__option": true, "has_value": false, "value": null} }
 func op_is_some(opt) { typeof(opt) == "map" && opt.has("__option") && opt["has_value"] }
@@ -4115,7 +3534,7 @@ func op_unwrap(opt) {
         if opt["has_value"] { return opt["value"] }
         panic("unwrap called on None")
     }
-    opt // Not an option, return as-is
+    opt
 }
 func op_unwrap_or(opt, default_val) {
     if typeof(opt) == "map" && opt.has("__option") {
@@ -4164,11 +3583,6 @@ func op_result_or_else(result, fn_val) {
     if op_is_err(result) { fn_val(result["error"]) }
     else { result }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Lazy Evaluation
-// ══════════════════════════════════════════════════════════════════
-
 func op_lazy(fn_val) {
     {"__lazy": true, "computed": false, "value": null, "fn": fn_val}
 }
@@ -4181,11 +3595,6 @@ func op_force(lazy_val) {
     }
     lazy_val["value"]
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Sequence Generator
-// ══════════════════════════════════════════════════════════════════
-
 func op_seq_fibonacci(n) {
     if n <= 0 { return [] }
     if n == 1 { return [0] }
@@ -4249,11 +3658,6 @@ func op_seq_geometric(start, ratio, count) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Regex Builder Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_regex_builder() { {"pattern": "", "flags": ""} }
 
 func op_regex_literal(rb, text) {
@@ -4277,11 +3681,6 @@ func op_regex_repeat(rb, min, max) {
     rb
 }
 func op_regex_build(rb) { rb["pattern"] }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Color Conversion Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_rgb_to_hex(r, g, b) {
     const hex_chars = "0123456789abcdef"
     func to_hex2(n) {
@@ -4327,11 +3726,6 @@ func op_rgb_to_hsl(r, g, b) {
     h = h / 6.0
     {"h": h * 360.0, "s": s, "l": l}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Duration/Time Utility Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_duration_ms(ms) { ms }
 func op_duration_seconds(s) { s * 1000 }
 func op_duration_minutes(m) { m * 60000 }
@@ -4360,11 +3754,6 @@ func op_stopwatch_lap(sw) {
 }
 func op_stopwatch_elapsed(sw) { now_timestamp() - sw["start"] }
 func op_stopwatch_reset(sw) { sw["start"] = now_timestamp(); sw["laps"] = []; sw }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Percent/Ratio Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_percent_of(value, total) {
     if total == 0 || total == 0.0 { return 0.0 }
     op_to_f64(value) / op_to_f64(total) * 100.0
@@ -4381,11 +3770,6 @@ func op_ratio(a, b) {
 }
 
 func op_proportion(part, whole) { op_percent_of(part, whole) / 100.0 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Number Formatting
-// ══════════════════════════════════════════════════════════════════
-
 func op_number_with_commas(n) {
     const s = to_string(op_to_i64(n))
     let result = ""
@@ -4417,7 +3801,7 @@ func op_number_to_words(n) {
     if val < 1000 {
         return ones[val / 100] + " hundred" + (if val % 100 > 0 { " and " + op_number_to_words(val % 100) } else { "" })
     }
-    to_string(val) // Simplified for large numbers
+    to_string(val)
 }
 
 func op_number_ordinal(n) {
@@ -4446,11 +3830,6 @@ func op_number_roman(n) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full String Similarity Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_jaccard_similarity(a, b) {
     let set_a = {}
     let set_b = {}
@@ -4470,7 +3849,6 @@ func op_jaccard_similarity(a, b) {
 }
 
 func op_dice_coefficient(a, b) {
-    // Dice = 2 * |A intersect B| / (|A| + |B|)
     let set_a = {}
     let set_b = {}
     for c in a.chars() { set_a[c] = true }
@@ -4518,7 +3896,6 @@ func op_longest_common_substring(a, b) {
 func op_longest_common_subsequence(a, b) {
     const m = len(a)
     const n = len(b)
-    // Build LCS table
     let dp = []
     let i = 0
     while i <= m {
@@ -4541,7 +3918,6 @@ func op_longest_common_subsequence(a, b) {
         }
         i = i + 1
     }
-    // Backtrack to find the subsequence
     let result = ""
     i = m
     let j = n
@@ -4558,11 +3934,6 @@ func op_longest_common_subsequence(a, b) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Functional Combinators
-// ══════════════════════════════════════════════════════════════════
-
 func op_identity(x) { x }
 func op_constant(x) { func() { x } }
 func op_flip(fn_val) { func(a, b) { fn_val(b, a) } }
@@ -4582,11 +3953,6 @@ func op_converge(fn_val, branches) {
         fn_val(...args)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Batch/Chunk Processing
-// ══════════════════════════════════════════════════════════════════
-
 func op_batch_process(items, batch_size, processor) {
     let results = []
     let i = 0
@@ -4601,7 +3967,6 @@ func op_batch_process(items, batch_size, processor) {
 }
 
 func op_parallel_map(items, fn_val, concurrency) {
-    // In self-hosted, this is sequential (true parallelism requires runtime support)
     items.map(x => fn_val(x))
 }
 
@@ -4618,11 +3983,6 @@ func op_reduce_batched(items, fn_val, initial, batch_size) {
     }
     acc
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Interpolation Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_interpolate_linear(x, x0, y0, x1, y1) {
     const xf = op_to_f64(x)
     const x0f = op_to_f64(x0)
@@ -4651,11 +4011,6 @@ func op_bezier_point(t, p0, p1, p2, p3) {
     3.0 * u * tf * tf * op_to_f64(p2) +
     tf * tf * tf * op_to_f64(p3)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Geometry Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_point_distance(x1, y1, x2, y2) {
     const dx = op_to_f64(x2) - op_to_f64(x1)
     const dy = op_to_f64(y2) - op_to_f64(y1)
@@ -4669,7 +4024,7 @@ func op_point_midpoint(x1, y1, x2, y2) {
 
 func op_line_slope(x1, y1, x2, y2) {
     const dx = op_to_f64(x2) - op_to_f64(x1)
-    if dx == 0.0 { return null } // Vertical line
+    if dx == 0.0 { return null }
     (op_to_f64(y2) - op_to_f64(y1)) / dx
 }
 
@@ -4688,7 +4043,6 @@ func op_triangle_area(x1, y1, x2, y2, x3, y3) {
 }
 
 func op_polygon_area(points) {
-    // Shoelace formula
     const n = len(points)
     if n < 3 { return 0.0 }
     let area = 0.0
@@ -4721,11 +4075,6 @@ func op_rects_overlap(x1, y1, w1, h1, x2, y2, w2, h2) {
     op_to_f64(y1) < op_to_f64(y2) + op_to_f64(h2) &&
     op_to_f64(y1) + op_to_f64(h1) > op_to_f64(y2)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Vector2D/Vector3D Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_vec2(x, y) { {"x": op_to_f64(x), "y": op_to_f64(y)} }
 func op_vec2_add(a, b) { {"x": a["x"] + b["x"], "y": a["y"] + b["y"]} }
 func op_vec2_sub(a, b) { {"x": a["x"] - b["x"], "y": a["y"] - b["y"]} }
@@ -4776,12 +4125,6 @@ func op_vec3_lerp(a, b, t) {
      "y": a["y"] + (b["y"] - a["y"]) * tf,
      "z": a["z"] + (b["z"] - a["z"]) * tf}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Noise Generation
-// ══════════════════════════════════════════════════════════════════
-
-// Simple hash-based noise (deterministic)
 func op_noise_hash(x, y) {
     let n = op_to_i64(x) * 374761393 + op_to_i64(y) * 668265263
     n = (n ^ (n >> 13)) * 1274126177
@@ -4820,11 +4163,6 @@ func op_noise_fbm(x, y, octaves) {
     }
     total / max_val
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full ECS (Entity Component System) Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_ecs_world_new() {
     {"__ecs": true, "entities": {}, "next_id": 0, "components": {}}
 }
@@ -4842,7 +4180,6 @@ func op_ecs_add_component(world, entity_id, component_name, data) {
     let entity = world["entities"][eid]
     entity[component_name] = data
     world["entities"][eid] = entity
-    // Index by component
     if !world["components"].has(component_name) {
         world["components"][component_name] = []
     }
@@ -4860,7 +4197,6 @@ func op_ecs_get_component(world, entity_id, component_name) {
 }
 
 func op_ecs_query(world, component_names) {
-    // Return all entities that have ALL specified components
     if len(component_names) == 0 { return [] }
     let candidates = null
     for cname in component_names {
@@ -4883,7 +4219,6 @@ func op_ecs_remove_entity(world, entity_id) {
     if world["entities"].has(eid) {
         world["entities"].delete(eid)
     }
-    // Remove from component indices
     for cname in world["components"].keys() {
         if cname == "__s" { continue }
         world["components"][cname] = world["components"][cname].filter(id => id != entity_id)
@@ -4901,11 +4236,6 @@ func op_ecs_system(world, component_names, system_fn) {
         system_fn(entity_id, components)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full HTTP Operations — matching stage 0 response format
-// ══════════════════════════════════════════════════════════════════
-
 func op_http_response(status, body, headers) {
     let h = {}
     if headers != null && typeof(headers) == "map" {
@@ -4917,7 +4247,6 @@ func op_http_response(status, body, headers) {
 func op_http_get(args) {
     const url = op_arg(args, 0, "")
     if url == "" { panic("http_get: url required") }
-    // Delegate to host http_get builtin
     const resp = http_get(url)
     if typeof(resp) == "map" { return resp }
     op_http_response(200, to_string(resp), {})
@@ -4985,14 +4314,8 @@ func op_http_request(args) {
     if typeof(resp) == "map" { return resp }
     op_http_response(200, to_string(resp), {})
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full Certificate Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_cert_generate(args) {
     const cn = op_arg(args, 0, "localhost")
-    // Delegate to host cert_generate if available
     const result = cert_generate(cn)
     if typeof(result) == "map" { return result }
     {
@@ -5053,12 +4376,6 @@ func op_key_generate(args) {
         "public_pem": "",
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full WebSocket Operations
-// ══════════════════════════════════════════════════════════════════
-
-// Global WebSocket connection registry
 let ws_connections = {}
 let ws_next_id = 0
 
@@ -5067,7 +4384,6 @@ func op_ws_connect(args) {
     if url == "" { panic("ws_connect: url required") }
     const id = f"ws:{ws_next_id}"
     ws_next_id = ws_next_id + 1
-    // Delegate to host ws_connect if available
     const conn = ws_connect(url)
     if typeof(conn) == "string" { return conn }
     ws_connections[id] = {
@@ -5082,10 +4398,8 @@ func op_ws_send(args) {
     const conn_id = op_arg(args, 0, "")
     const message = op_arg(args, 1, "")
     if conn_id == "" { panic("ws_send: conn_id required") }
-    // Delegate to host
     const result = ws_send(conn_id, message)
     if result != null { return result }
-    // Track in local state
     if ws_connections.has(conn_id) {
         if !ws_connections[conn_id]["connected"] {
             panic("ws_send: connection closed")
@@ -5097,10 +4411,8 @@ func op_ws_send(args) {
 func op_ws_receive(args) {
     const conn_id = op_arg(args, 0, "")
     if conn_id == "" { panic("ws_receive: conn_id required") }
-    // Delegate to host
     const result = ws_receive(conn_id)
     if result != null { return result }
-    // Check local buffer
     if ws_connections.has(conn_id) {
         const conn = ws_connections[conn_id]
         if len(conn["buffer"]) > 0 {
@@ -5116,7 +4428,6 @@ func op_ws_receive(args) {
 func op_ws_close(args) {
     const conn_id = op_arg(args, 0, "")
     if conn_id == "" { return null }
-    // Delegate to host
     ws_close(conn_id)
     if ws_connections.has(conn_id) {
         let conn = ws_connections[conn_id]
@@ -5125,11 +4436,6 @@ func op_ws_close(args) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full SSE (Server-Sent Events) Operations
-// ══════════════════════════════════════════════════════════════════
-
 let sse_connections = {}
 let sse_next_id = 0
 
@@ -5138,7 +4444,6 @@ func op_sse_connect(args) {
     if url == "" { panic("sse_connect: url required") }
     const id = f"sse:{sse_next_id}"
     sse_next_id = sse_next_id + 1
-    // Delegate to host
     const conn = sse_connect(url)
     if typeof(conn) == "string" { return conn }
     sse_connections[id] = {
@@ -5152,10 +4457,8 @@ func op_sse_connect(args) {
 func op_sse_read_event(args) {
     const conn_id = op_arg(args, 0, "")
     if conn_id == "" { panic("sse_read_event: conn_id required") }
-    // Delegate to host
     const result = sse_read_event(conn_id)
     if result != null { return result }
-    // Check local buffer
     if sse_connections.has(conn_id) {
         const conn = sse_connections[conn_id]
         if len(conn["events"]) > 0 {
@@ -5179,11 +4482,6 @@ func op_sse_close(args) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Full HTTP Server Operations
-// ══════════════════════════════════════════════════════════════════
-
 let http_servers = {}
 let http_server_next_id = 0
 
@@ -5191,7 +4489,6 @@ func op_http_server_start(args) {
     const port = op_arg(args, 0, 8080)
     const id = f"srv:{http_server_next_id}"
     http_server_next_id = http_server_next_id + 1
-    // Delegate to host
     const result = http_server_start(port)
     if typeof(result) == "string" { return result }
     http_servers[id] = {
@@ -5205,10 +4502,8 @@ func op_http_server_start(args) {
 func op_http_server_receive(args) {
     const server_id = op_arg(args, 0, "")
     if server_id == "" { panic("http_server_receive: server_id required") }
-    // Delegate to host
     const result = http_server_receive(server_id)
     if result != null { return result }
-    // Return from local queue
     if http_servers.has(server_id) {
         const srv = http_servers[server_id]
         if len(srv["request_queue"]) > 0 {
@@ -5227,7 +4522,6 @@ func op_http_server_respond(args) {
     const status = op_arg(args, 2, 200)
     const body = op_arg(args, 3, "")
     const headers = op_arg(args, 4, {})
-    // Delegate to host
     http_server_respond(server_id, request_id, status, body, headers)
     null
 }
@@ -5243,11 +4537,6 @@ func op_http_server_stop(args) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// TCP Operations
-// ══════════════════════════════════════════════════════════════════
-
 let tcp_connections = {}
 let tcp_next_id = 0
 
@@ -5285,11 +4574,6 @@ func op_tcp_close(args) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// UDP Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_udp_bind(args) {
     const addr = op_arg(args, 0, "0.0.0.0:0")
     udp_bind(addr)
@@ -5312,11 +4596,6 @@ func op_udp_close(args) {
     udp_close(socket_id)
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// TLS Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_tls_connect(args) {
     const host = op_arg(args, 0, "")
     const port = op_arg(args, 1, 443)
@@ -5340,11 +4619,6 @@ func op_tls_close(args) {
     tls_close(conn_id)
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// DNS Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_dns_lookup(args) {
     const hostname = op_arg(args, 0, "")
     if hostname == "" { return [] }
@@ -5356,11 +4630,6 @@ func op_dns_reverse(args) {
     if ip == "" { return [] }
     dns_reverse(ip)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Compression Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_compress_zstd(args) {
     const data = op_arg(args, 0, "")
     compress_zstd(data)
@@ -5390,11 +4659,6 @@ func op_decompress_lz4(args) {
     const data = op_arg(args, 0, "")
     decompress_lz4(data)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Encoding Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_base64_encode(args) {
     const data = op_arg(args, 0, "")
     base64_encode(data)
@@ -5424,11 +4688,6 @@ func op_url_decode(args) {
     const data = op_arg(args, 0, "")
     url_decode(data)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Hashing Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_hash_sha256(args) {
     const data = op_arg(args, 0, "")
     sha256(data)
@@ -5455,11 +4714,6 @@ func op_hmac(args) {
     const algo = op_arg(args, 2, "sha256")
     hmac(key, data, algo)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// UUID Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_uuid_v4(args) {
     uuid_v4()
 }
@@ -5472,11 +4726,6 @@ func op_uuid_parse(args) {
     const s = op_arg(args, 0, "")
     uuid_parse(s)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Time Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_time_now(args) {
     time_now()
 }
@@ -5508,11 +4757,6 @@ func op_sleep(args) {
     sleep(ms)
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Regex Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_regex_match(args) {
     const pattern = op_arg(args, 0, "")
     const text = op_arg(args, 1, "")
@@ -5549,11 +4793,6 @@ func op_regex_split(args) {
     const text = op_arg(args, 1, "")
     regex_split(pattern, text)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// JSON / YAML / TOML / CSV Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_json_parse(args) {
     const s = op_arg(args, 0, "")
     json_parse(s)
@@ -5597,11 +4836,6 @@ func op_csv_stringify(args) {
     const delimiter = op_arg(args, 1, ",")
     csv_stringify(data, delimiter)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Process / OS Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_exec(args) {
     const cmd = op_arg(args, 0, "")
     const exec_args = op_arg(args, 1, [])
@@ -5646,11 +4880,6 @@ func op_os_hostname(args) {
 func op_os_cwd(args) {
     os_cwd()
 }
-
-// ══════════════════════════════════════════════════════════════════
-// File System Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_fs_read(args) {
     const path = op_arg(args, 0, "")
     if path == "" { panic("fs_read: path required") }
@@ -5736,11 +4965,6 @@ func op_fs_temp_file(args) {
 func op_fs_temp_dir(args) {
     fs_temp_dir()
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Path Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_path_join(args) {
     const parts = args
     let result = ""
@@ -5789,18 +5013,12 @@ func op_path_abs(args) {
 
 func op_path_clean(args) {
     const p = op_arg(args, 0, "")
-    // Simple path cleaning: remove double slashes and trailing slashes
     let result = p.replace("//", "/")
     while result.ends_with("/") && len(result) > 1 {
         result = result.slice(0, len(result) - 1)
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Concurrency Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_spawn(args) {
     const expr = op_arg(args, 0, null)
     spawn(expr)
@@ -5868,14 +5086,8 @@ func op_atomic_add(args) {
     const val = op_arg(args, 1, 1)
     atomic_add(a, val)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Extended dispatch: add new operations to the main eval_operation
-// ══════════════════════════════════════════════════════════════════
-
 func eval_operation_extended(op_name, args) {
     match op_name {
-    // HTTP
     "http_get" => op_http_get(args),
     "http_post" => op_http_post(args),
     "http_put" => op_http_put(args),
@@ -5885,53 +5097,44 @@ func eval_operation_extended(op_name, args) {
     "http_options" => op_http_options(args),
     "http_request" => op_http_request(args),
 
-    // Certificates
     "cert_generate" | "cert_self_signed" => op_cert_generate(args),
     "cert_parse" => op_cert_parse(args),
     "cert_info" => op_cert_info(args),
     "cert_verify" => op_cert_verify(args),
     "key_generate" => op_key_generate(args),
 
-    // WebSocket
     "ws_connect" | "websocket_connect" => op_ws_connect(args),
     "ws_send" | "websocket_send" => op_ws_send(args),
     "ws_receive" | "websocket_receive" | "ws_read" => op_ws_receive(args),
     "ws_close" | "websocket_close" => op_ws_close(args),
 
-    // SSE
     "sse_connect" => op_sse_connect(args),
     "sse_read_event" => op_sse_read_event(args),
     "sse_close" => op_sse_close(args),
 
-    // HTTP Server
     "http_server_start" => op_http_server_start(args),
     "http_server_receive" => op_http_server_receive(args),
     "http_server_respond" => op_http_server_respond(args),
     "http_server_stop" => op_http_server_stop(args),
 
-    // TCP
     "tcp_connect" => op_tcp_connect(args),
     "tcp_write" => op_tcp_write(args),
     "tcp_read" => op_tcp_read(args),
     "tcp_close" => op_tcp_close(args),
 
-    // UDP
     "udp_bind" => op_udp_bind(args),
     "udp_send" => op_udp_send(args),
     "udp_recv" => op_udp_recv(args),
     "udp_close" => op_udp_close(args),
 
-    // TLS
     "tls_connect" => op_tls_connect(args),
     "tls_write" => op_tls_write(args),
     "tls_read" => op_tls_read(args),
     "tls_close" => op_tls_close(args),
 
-    // DNS
     "dns_lookup" => op_dns_lookup(args),
     "dns_reverse" => op_dns_reverse(args),
 
-    // Compression
     "compress_zstd" => op_compress_zstd(args),
     "decompress_zstd" => op_decompress_zstd(args),
     "compress_gzip" => op_compress_gzip(args),
@@ -5939,7 +5142,6 @@ func eval_operation_extended(op_name, args) {
     "compress_lz4" => op_compress_lz4(args),
     "decompress_lz4" => op_decompress_lz4(args),
 
-    // Encoding
     "base64_encode" => op_base64_encode(args),
     "base64_decode" => op_base64_decode(args),
     "hex_encode" => op_hex_encode(args),
@@ -5947,19 +5149,16 @@ func eval_operation_extended(op_name, args) {
     "url_encode" => op_url_encode(args),
     "url_decode" => op_url_decode(args),
 
-    // Hashing
     "sha256" | "hash_sha256" => op_hash_sha256(args),
     "sha512" | "hash_sha512" => op_hash_sha512(args),
     "md5" | "hash_md5" => op_hash_md5(args),
     "blake3" | "hash_blake3" => op_hash_blake3(args),
     "hmac" => op_hmac(args),
 
-    // UUID
     "uuid_v4" | "uuid" => op_uuid_v4(args),
     "uuid_v7" => op_uuid_v7(args),
     "uuid_parse" => op_uuid_parse(args),
 
-    // Time
     "time_now" => op_time_now(args),
     "time_unix" => op_time_unix(args),
     "time_format" => op_time_format(args),
@@ -5967,7 +5166,6 @@ func eval_operation_extended(op_name, args) {
     "time_diff" => op_time_diff(args),
     "sleep" => op_sleep(args),
 
-    // Regex
     "regex_match" => op_regex_match(args),
     "regex_test" => op_regex_test(args),
     "regex_find" => op_regex_find(args),
@@ -5975,7 +5173,6 @@ func eval_operation_extended(op_name, args) {
     "regex_replace" => op_regex_replace(args),
     "regex_split" => op_regex_split(args),
 
-    // JSON/YAML/TOML/CSV
     "json_parse" => op_json_parse(args),
     "json_stringify" => op_json_stringify(args),
     "yaml_parse" => op_yaml_parse(args),
@@ -5985,7 +5182,6 @@ func eval_operation_extended(op_name, args) {
     "csv_parse" => op_csv_parse(args),
     "csv_stringify" => op_csv_stringify(args),
 
-    // Process/OS
     "exec" | "command" | "os_exec" => op_exec(args),
     "env_get" | "getenv" | "os_getenv" => op_env_get(args),
     "env_set" | "setenv" | "os_setenv" => op_env_set(args),
@@ -5996,7 +5192,6 @@ func eval_operation_extended(op_name, args) {
     "os_hostname" | "hostname" => op_os_hostname(args),
     "os_cwd" | "cwd" => op_os_cwd(args),
 
-    // File System
     "fs_read" | "read_file" | "file_read" => op_fs_read(args),
     "fs_write" | "write_file" | "file_write" => op_fs_write(args),
     "fs_append" | "file_append" => op_fs_append(args),
@@ -6013,7 +5208,6 @@ func eval_operation_extended(op_name, args) {
     "fs_temp_file" | "temp_file" => op_fs_temp_file(args),
     "fs_temp_dir" | "temp_dir" => op_fs_temp_dir(args),
 
-    // Path
     "path_join" => op_path_join(args),
     "path_dir" | "dirname" => op_path_dir(args),
     "path_base" | "basename" => op_path_base(args),
@@ -6022,7 +5216,6 @@ func eval_operation_extended(op_name, args) {
     "path_abs" | "abspath" => op_path_abs(args),
     "path_clean" | "filepath_clean" => op_path_clean(args),
 
-    // Concurrency
     "spawn" => op_spawn(args),
     "await" | "await_task" => op_await_task(args),
     "channel" | "chan_new" => op_channel(args),
@@ -6040,12 +5233,6 @@ func eval_operation_extended(op_name, args) {
     _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Extended Operation Implementations ──────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// ── Trigonometric Operations (full set) ─────────────────────────
 
 func op_sinh(args) {
     const x = op_to_f64(args[0])
@@ -6090,9 +5277,6 @@ func op_rad_to_deg(args) {
     const rad = op_to_f64(args[0])
     rad * 180.0 / 3.141592653589793
 }
-
-// ── Advanced Math ───────────────────────────────────────────────
-
 func op_factorial(args) {
     const n = op_to_i64(args[0])
     if n < 0 { panic("factorial: negative argument") }
@@ -6176,9 +5360,6 @@ func op_permutations(args) {
     }
     result
 }
-
-// ── String Operations (extended) ────────────────────────────────
-
 func op_string_center(args) {
     const s = to_string(args[0])
     const width = op_to_i64(args[1])
@@ -6283,9 +5464,6 @@ func op_string_camel_case(args) {
     }
     result
 }
-
-// ── Array Operations (extended) ─────────────────────────────────
-
 func op_array_zip(args) {
     const a = args[0]
     const b = args[1]
@@ -6412,9 +5590,6 @@ func op_array_scan(args) {
     }
     result
 }
-
-// ── Map Operations (extended) ───────────────────────────────────
-
 func op_map_map_keys(args) {
     const m = args[0]
     const cb = args[1]
@@ -6465,12 +5640,10 @@ func op_map_deep_merge(args) {
     const a = args[0]
     const b = args[1]
     let result = {"__s": true}
-    // Copy all from a
     for key in a.keys() {
         if key == "__s" { continue }
         result[key] = a[key]
     }
-    // Merge from b, deep-merging maps
     for key in b.keys() {
         if key == "__s" { continue }
         if result.has(key) && typeof(result[key]) == "map" && typeof(b[key]) == "map" {
@@ -6481,9 +5654,6 @@ func op_map_deep_merge(args) {
     }
     result
 }
-
-// ── Additional dispatch entries ─────────────────────────────────
-
 func eval_operation_extended(op_name, args) {
     match op_name {
         "sinh" => op_sinh(args),
@@ -6525,11 +5695,6 @@ func eval_operation_extended(op_name, args) {
         _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Stats Operations (moving average, exponential smoothing, histogram)
-// ══════════════════════════════════════════════════════════════════
-
 func op_moving_average(args) {
     const data = args[0]
     const window = if len(args) > 1 { op_to_i64(args[1]) } else { 3 }
@@ -6573,7 +5738,6 @@ func op_histogram(args) {
     const bins = if len(args) > 1 { op_to_i64(args[1]) } else { 10 }
     if typeof(data) != "array" || len(data) == 0 { return [] }
 
-    // Find min/max
     let min_val = op_to_f64(data[0])
     let max_val = op_to_f64(data[0])
     for d in data {
@@ -6587,7 +5751,6 @@ func op_histogram(args) {
 
     const bin_width = range / to_float64(bins)
 
-    // Initialize bins
     let counts = []
     let edges = []
     let i = 0
@@ -6598,7 +5761,6 @@ func op_histogram(args) {
     }
     edges.push(max_val)
 
-    // Count items in each bin
     for d in data {
         const v = op_to_f64(d)
         let bin_idx = to_int64((v - min_val) / bin_width)
@@ -6607,7 +5769,6 @@ func op_histogram(args) {
         counts[bin_idx] = counts[bin_idx] + 1
     }
 
-    // Build result
     let result = []
     i = 0
     while i < bins {
@@ -6697,11 +5858,6 @@ func op_zscore(args) {
 
     data.map(d => (op_to_f64(d) - mean) / std_dev)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Format Operations (all format specifiers)
-// ══════════════════════════════════════════════════════════════════
-
 func op_format(args) {
     const fmt = to_string(args[0])
     const values = if len(args) > 1 { args.slice(1) } else { [] }
@@ -6716,7 +5872,6 @@ func op_format(args) {
                 i = i + 2
                 continue
             }
-            // Find closing brace
             let end = i + 1
             while end < len(fmt) && fmt[end] != "}" { end = end + 1 }
             if end < len(fmt) {
@@ -6760,10 +5915,9 @@ func format_value(value, spec) {
 }
 
 func format_string(s, spec) {
-    // Parse width and alignment for strings
     let width = 0
     let fill = " "
-    let align = "<" // strings default left-aligned
+    let align = "<"
 
     let i = 0
     if len(spec) >= 2 && (spec[1] == "<" || spec[1] == ">" || spec[1] == "^") {
@@ -6775,7 +5929,6 @@ func format_string(s, spec) {
         i = 1
     }
 
-    // Parse width
     let width_str = ""
     while i < len(spec) && spec[i] >= "0" && spec[i] <= "9" {
         width_str = width_str + spec[i]
@@ -6783,7 +5936,6 @@ func format_string(s, spec) {
     }
     if len(width_str) > 0 { width = to_int64(width_str) }
 
-    // Parse precision (max length for strings)
     let max_len = -1
     if i < len(spec) && spec[i] == "." {
         i = i + 1
@@ -6813,11 +5965,6 @@ func format_string(s, spec) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Reflect Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_reflect_fields(args) {
     const obj = args[0]
     if typeof(obj) != "map" { return [] }
@@ -6841,8 +5988,6 @@ func op_reflect_methods(args) {
 func op_reflect_implements(args) {
     const obj = args[0]
     const iface_name = to_string(args[1])
-    // Check if object has all required methods of the interface
-    // Simplified: check if it has the fields expected
     if typeof(obj) != "map" { return false }
     true // Structural typing: any map "implements" any interface
 }
@@ -6897,11 +6042,6 @@ func op_reflect_enum_variant(args) {
     const v = args[0]
     if typeof(v) == "map" && v.has("__variant") { v["__variant"] } else { null }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// Itertools Operations
-// ══════════════════════════════════════════════════════════════════
-
 func op_combinations(args) {
     const items = args[0]
     const k = if len(args) > 1 { op_to_i64(args[1]) } else { 2 }

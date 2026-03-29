@@ -1,10 +1,3 @@
-// MAGI Self-Hosted Compiler — Lexer
-//
-// Tokenizes MAGI source code into a token stream.
-// Uses functional style — each function returns new state.
-
-// ── Token Types ─────────────────────────────────────────────────────
-
 enum TokenKind {
     Const, Let, Func, Struct, Enum, Interface, Type, Import,
     If, Else, For, In, While, Match, Select,
@@ -32,9 +25,6 @@ struct Token {
     line: int,
     col: int,
 }
-
-// ── Keyword Lookup ──────────────────────────────────────────────────
-
 func keyword_lookup(word) {
     match word {
         "const" => TokenKind::Const, "let" => TokenKind::Let,
@@ -59,10 +49,6 @@ func keyword_lookup(word) {
         _ => null,
     }
 }
-
-// ── Tokenizer ───────────────────────────────────────────────────────
-// Implemented as pure functions operating on source string + position.
-
 func tokenize(source) {
     let pos = 0
     let line = 1
@@ -70,7 +56,6 @@ func tokenize(source) {
     let tokens = []
 
     while pos < len(source) {
-        // Skip whitespace and comments
         while pos < len(source) {
             const ch = source[pos]
             if ch == " " || ch == "\t" || ch == "\r" {
@@ -100,7 +85,6 @@ func tokenize(source) {
         const start_col = col
         const ch = source[pos]
 
-        // Numbers
         if ch >= "0" && ch <= "9" {
             let num = ""
             let is_float = false
@@ -118,14 +102,12 @@ func tokenize(source) {
             continue
         }
 
-        // Identifiers and keywords
         if (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" {
             let word = ""
             while pos < len(source) && ((source[pos] >= "a" && source[pos] <= "z") || (source[pos] >= "A" && source[pos] <= "Z") || (source[pos] >= "0" && source[pos] <= "9") || source[pos] == "_") {
                 word = word + source[pos]
                 pos = pos + 1; col = col + 1
             }
-            // Check for f-string
             if word == "f" && pos < len(source) && source[pos] == "\"" {
                 pos = pos + 1; col = col + 1
                 let s = ""
@@ -148,7 +130,6 @@ func tokenize(source) {
             continue
         }
 
-        // Strings
         if ch == "\"" {
             pos = pos + 1; col = col + 1
             let s = ""
@@ -173,7 +154,6 @@ func tokenize(source) {
             continue
         }
 
-        // Labels ('outer)
         if ch == "'" {
             pos = pos + 1; col = col + 1
             let label = ""
@@ -185,7 +165,6 @@ func tokenize(source) {
             continue
         }
 
-        // Operators and delimiters
         pos = pos + 1; col = col + 1
         const next = if pos < len(source) { source[pos] } else { null }
 
@@ -249,9 +228,6 @@ func tokenize(source) {
     tokens.push(Token { kind: TokenKind::Eof, text: "", line: line, col: col })
     tokens
 }
-
-// ── Hex/Octal/Binary number parsing ─────────────────────────────
-
 func tokenize_hex_number(source, pos, line, col) {
     let num = "0x"
     pos = pos + 2

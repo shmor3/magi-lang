@@ -1,21 +1,3 @@
-// MAGI Self-Hosted Runtime — MagiVM Execution Engine
-//
-// This VM executes .magc classfiles. It differs from self/compiler/vm.magi
-// (which runs IR instructions) in that it:
-//   1. Loads a .magc classfile (which embeds full source in stage-0)
-//   2. Re-parses the source through the interpreter (eval_source)
-//   3. Returns the result
-//
-// STAGE 0 DESIGN: .magc files embed the full source. The VM achieves 100%
-// spec conformance by delegating execution to the full interpreter rather
-// than running raw bytecode. Bytecode execution (IR opcodes) is handled
-// by self/compiler/vm.magi.
-//
-// For a future stage-1, this VM would run actual stack-machine opcodes.
-// The opcode table below is defined for documentation and forward compatibility.
-
-// ── Opcode Table (stage-1 forward reference) ──────────────────────
-
 const VM_OP_NOP         = 0x00
 const VM_OP_CONST       = 0x01
 const VM_OP_NULL        = 0x02
@@ -69,20 +51,13 @@ const VM_OP_GC_READ     = 0xA1
 const VM_OP_GC_WRITE    = 0xA2
 
 const VM_OP_HALT        = 0xFF
-
-// ── VM State (module-level mutable) ──────────────────────────────
-
 let magivm_stack   = []
 let magivm_locals  = []
 let magivm_globals = {"__init": true}
 let magivm_output  = []
 let magivm_halted  = false
 
-// Call frames: each = { "func": func_def, "ip": int, "base": int, "constants": [] }
 let magivm_frames  = []
-
-// ── Stack Helpers ─────────────────────────────────────────────────
-
 func magivm_push(v) {
     magivm_stack.push(v)
 }
@@ -99,9 +74,6 @@ func magivm_peek() {
     const n = len(magivm_stack)
     if n == 0 { null } else { magivm_stack[n - 1] }
 }
-
-// ── Value Helpers ─────────────────────────────────────────────────
-
 func magivm_truthy(v) {
     if v == null  { return false }
     if v == false { return false }
@@ -120,9 +92,6 @@ func magivm_numeric(v) {
     if typeof(v) == "float" { return v }
     0
 }
-
-// ── Frame Helpers ─────────────────────────────────────────────────
-
 func magivm_current_frame() {
     const n = len(magivm_frames)
     if n == 0 { return null }
@@ -146,25 +115,18 @@ func magivm_pop_frame() {
     magivm_frames = magivm_frames.slice(0, n - 1)
     f
 }
-
-// ── Constant Access ───────────────────────────────────────────────
-
 func magivm_read_constant(frame, idx) {
     const pool = frame["constants"]
     if idx >= len(pool) { return null }
     const c = pool[idx]
     const tag = c["tag"]
-    if tag == 0 { return null }         // CONST_NULL
-    if tag == 1 { return c["value"] }   // CONST_BOOL
-    if tag == 2 { return c["value"] }   // CONST_INT
-    if tag == 3 { return c["value"] }   // CONST_FLOAT
-    if tag == 4 { return c["value"] }   // CONST_STRING
+    if tag == 0 { return null }
+    if tag == 1 { return c["value"] }
+    if tag == 2 { return c["value"] }
+    if tag == 3 { return c["value"] }
+    if tag == 4 { return c["value"] }
     null
 }
-
-// ── Bytecode Reader ───────────────────────────────────────────────
-
-// Read one byte from current frame's code at ip, advance ip
 func magivm_read_byte() {
     let frame = magivm_current_frame()
     if frame == null { return 0 }
@@ -177,18 +139,11 @@ func magivm_read_byte() {
     b
 }
 
-// Read two bytes as big-endian u16
 func magivm_read_u16() {
     const hi = magivm_read_byte()
     const lo = magivm_read_byte()
     cf_bor(hi << 8, lo)
 }
-
-// ── Stage-0 Execution (source re-interpretation) ──────────────────
-
-// Execute a decoded classfile map (from decode_classfile).
-// Stage-0: if source is embedded, re-parse and run via eval_source.
-// Returns the result value.
 func execute_classfile_map(cf_map) {
     const source = cf_map["source"]
     if len(source) == 0 {
@@ -197,24 +152,15 @@ func execute_classfile_map(cf_map) {
     eval_source(source)
 }
 
-// Execute raw .magc bytes (decode first, then run).
 func execute_magc(bytes) {
     const cf_map = decode_classfile(bytes)
     execute_classfile_map(cf_map)
 }
 
-// Load a .magc file from path and execute it.
-// Returns the result of the program.
 func run_classfile(path) {
     const raw = file.read_bytes(path)
     execute_magc(raw)
 }
-
-// ── Stage-1 Bytecode Interpreter ─────────────────────────────────
-//
-// Runs actual stack-machine opcodes from a function's code array.
-// Used when the classfile has compiled functions (not just embedded source).
-
 func magivm_reset() {
     magivm_stack   = []
     magivm_locals  = []
@@ -225,7 +171,6 @@ func magivm_reset() {
 }
 
 func magivm_execute_function(func_def, constants, args) {
-    // Set up locals: params first, then fill to func_def["locals"] slots
     let locals = []
     let i = 0
     while i < len(args) {
@@ -261,7 +206,6 @@ func magivm_execute_function(func_def, constants, args) {
         const ip = cur["ip"]
 
         if ip >= len(code) {
-            // Implicit return null
             const result = magivm_pop()
             magivm_pop_frame()
             if len(magivm_frames) > 0 {
@@ -277,7 +221,6 @@ func magivm_execute_function(func_def, constants, args) {
         magivm_set_frame(cur)
 
         if op == VM_OP_NOP {
-            // nothing
 
         } else if op == VM_OP_HALT {
             magivm_halted = true
@@ -466,7 +409,6 @@ func magivm_execute_function(func_def, constants, args) {
                 arr.push(null)
                 ai = ai + 1
             }
-            // Fill from stack in reverse
             let bi = count - 1
             while bi >= 0 {
                 arr[bi] = magivm_pop()
@@ -505,7 +447,6 @@ func magivm_execute_function(func_def, constants, args) {
             magivm_push(magivm_to_str(val))
 
         } else if op == VM_OP_GC_ALLOC {
-            // Allocate via GC, returns object ID
             const val = magivm_pop()
             const id = gc_alloc(val)
             magivm_push(id)
@@ -526,20 +467,13 @@ func magivm_execute_function(func_def, constants, args) {
 
     magivm_pop()
 }
-
-// ── Public Entry Points ───────────────────────────────────────────
-
-// Run a classfile map that was already decoded.
-// Returns output lines array.
 func magivm_run_map(cf_map) {
     magivm_reset()
     const source = cf_map["source"]
     if len(source) > 0 {
-        // Stage-0: re-parse and interpret
         eval_source(source)
         return magivm_output
     }
-    // Stage-1: run compiled functions
     const funcs = cf_map["functions"]
     if len(funcs) == 0 {
         return magivm_output
@@ -552,7 +486,6 @@ func magivm_run_map(cf_map) {
     magivm_output
 }
 
-// Get VM output collected during execution
 func magivm_get_output() {
     magivm_output
 }

@@ -1,23 +1,5 @@
-// MAGI Self-Hosted Compiler — MCP Server (Model Context Protocol)
-//
-// Exposes 7 MAGI tools over JSON-RPC 2.0 stdio transport:
-//   magi_run, magi_check, magi_format, magi_lint,
-//   magi_parse, magi_stdlib, magi_version
-//
-// Each tool calls the corresponding pipeline function from cli.magi.
-// Protocol: MCP 2024-11-05 (same as src/mcp.rs)
-
-// ══════════════════════════════════════════════════════════════════════
-// ── MCP Protocol Constants ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 const MCP_PROTOCOL_VERSION = "2024-11-05"
 const MCP_SERVER_NAME = "magi-mcp-self"
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Tool Definitions ─────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_def(name, description, params) {
     const schema = {"type": "object"}
     if len(params) > 0 {
@@ -64,11 +46,6 @@ func mcp_tool_definitions() {
         mcp_tool_def("magi_version", "Return MAGI version info", [])
     ]
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Tool Result Helpers ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_text_result(text) {
     {
         "content": [{
@@ -87,16 +64,10 @@ func mcp_error_result(message) {
         "isError": true
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Tool Implementations ─────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_run(arguments) {
     const code = if arguments.has("code") { arguments["code"] } else { "" }
     if code == "" { return mcp_error_result("Missing 'code' argument") }
 
-    // Parse and run
     const program = parse(code)
     if program == null { return mcp_error_result("Parse error") }
 
@@ -106,7 +77,6 @@ func mcp_tool_run(arguments) {
         return mcp_error_result("Type errors:\n" + errors.join("\n"))
     }
 
-    // Interpret
     const optimized = optimize(program)
     const result = eval_program(optimized)
     mcp_text_result(to_string(result))
@@ -205,11 +175,6 @@ func mcp_tool_stdlib(arguments) {
 func mcp_tool_version() {
     mcp_text_result(f"MAGI v{VERSION} (self-hosted)")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── MCP Request Handlers ─────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_handle_initialize(id) {
     jsonrpc_result(id, {
         "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -246,11 +211,6 @@ func mcp_handle_tools_call(id, params) {
 
     jsonrpc_result(id, result)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── MCP Server Loop ──────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func run_mcp_server() {
     let running = true
     while running {
@@ -278,21 +238,11 @@ func run_mcp_server() {
         write_message(response)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── MCP Tool Count ───────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 const MCP_TOOL_COUNT = 7
 const MCP_TOOLS = [
     "magi_run", "magi_check", "magi_format", "magi_lint",
     "magi_parse", "magi_stdlib", "magi_version"
 ]
-
-// ══════════════════════════════════════════════════════════════════════
-// ── JSON-RPC 2.0 Transport ─────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func jsonrpc_result(id, result) {
     {
         "jsonrpc": "2.0",
@@ -320,19 +270,12 @@ func jsonrpc_notification(method, params) {
     }
 }
 
-// MCP error codes
 const MCP_PARSE_ERROR = -32700
 const MCP_INVALID_REQUEST = -32600
 const MCP_METHOD_NOT_FOUND = -32601
 const MCP_INVALID_PARAMS = -32602
 const MCP_INTERNAL_ERROR = -32603
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Content-Length Transport (stdio) ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func read_message() {
-    // Read Content-Length header
     const header = input()
     if header == null { return null }
     const trimmed = header.trim()
@@ -341,10 +284,8 @@ func read_message() {
     const content_length = to_int(len_str)
     if content_length <= 0 { return null }
 
-    // Read blank line
     input()
 
-    // Read body
     const body = read_bytes(content_length)
     if body == null { return null }
 
@@ -357,22 +298,15 @@ func write_message(response) {
     print(header + body)
     flush()
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_run ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_run_full(arguments) {
     const code = if arguments.has("code") { arguments["code"] } else { "" }
     if code == "" { return mcp_error_result("Missing 'code' argument") }
 
-    // Parse
     const program = parse(code)
     if program == null {
         return mcp_error_result("Parse error: could not parse source")
     }
 
-    // Type check
     const check_result = check(program)
     const errors = check_result[0]
     const warnings = check_result[1]
@@ -385,14 +319,11 @@ func mcp_tool_run_full(arguments) {
         return mcp_error_result(diag)
     }
 
-    // Optimize
     const optimized = optimize(program)
 
-    // Execute and capture output
     let output_lines = []
     let result = null
 
-    // Capture stdout
     const captured = capture_output(func() {
         result = eval_program(optimized)
     })
@@ -406,7 +337,6 @@ func mcp_tool_run_full(arguments) {
         out_str = out_str + to_string(result)
     }
 
-    // Include warnings if any
     if len(warnings) > 0 {
         out_str = out_str + "\n--- Warnings ---\n"
         for w in warnings {
@@ -416,11 +346,6 @@ func mcp_tool_run_full(arguments) {
 
     mcp_text_result(out_str)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_check ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_check_full(arguments) {
     const code = if arguments.has("code") { arguments["code"] } else { "" }
     if code == "" { return mcp_error_result("Missing 'code' argument") }
@@ -432,7 +357,6 @@ func mcp_tool_check_full(arguments) {
     const errors = check_result[0]
     const warnings = check_result[1]
 
-    // Return structured diagnostics
     let diagnostics = []
     for err in errors {
         diagnostics.push({
@@ -457,18 +381,12 @@ func mcp_tool_check_full(arguments) {
         return mcp_text_result("No issues found.")
     }
 
-    // Format as structured text
     let out_str = f"{len(errors)} errors, {len(warnings)} warnings\n"
     for d in diagnostics {
         out_str = out_str + f"  [{d[\"severity\"]}] line {d[\"line\"]}: {d[\"message\"]}\n"
     }
     mcp_text_result(out_str)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_format ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_format_full(arguments) {
     const code = if arguments.has("code") { arguments["code"] } else { "" }
     if code == "" { return mcp_error_result("Missing 'code' argument") }
@@ -478,18 +396,12 @@ func mcp_tool_format_full(arguments) {
 
     const formatted = format_program(program)
 
-    // Report if any changes were made
     if formatted == code {
         mcp_text_result(formatted)
     } else {
         mcp_text_result(formatted)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_lint ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_lint_full(arguments) {
     const code = if arguments.has("code") { arguments["code"] } else { "" }
     if code == "" { return mcp_error_result("Missing 'code' argument") }
@@ -502,7 +414,6 @@ func mcp_tool_lint_full(arguments) {
         return mcp_text_result("No warnings.")
     }
 
-    // Format with codes and positions
     let out_str = f"{len(warnings)} warnings\n"
     for w in warnings {
         const line = if w.has("line") { w["line"] } else { 0 }
@@ -511,11 +422,6 @@ func mcp_tool_lint_full(arguments) {
     }
     mcp_text_result(out_str)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_parse ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_parse_full(arguments) {
     const code = if arguments.has("code") { arguments["code"] } else { "" }
     if code == "" { return mcp_error_result("Missing 'code' argument") }
@@ -523,7 +429,6 @@ func mcp_tool_parse_full(arguments) {
     const program = parse(code)
     if program == null { return mcp_error_result("Parse error") }
 
-    // Build AST summary as JSON-like structure
     let nodes = []
     for stmt in program.statements {
         const sl = stmt.span.start_line
@@ -588,16 +493,10 @@ func mcp_tool_parse_full(arguments) {
     }
     mcp_text_result(summary)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_stdlib ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_stdlib_full(arguments) {
     const module = if arguments.has("module") { arguments["module"] } else { "" }
 
     if module == "" {
-        // Return all modules with counts
         let out_str = to_string(len(KNOWN_STDLIB_MODULES)) + " modules:\n"
         for mod_name in KNOWN_STDLIB_MODULES {
             out_str = out_str + f"  {mod_name}\n"
@@ -605,19 +504,12 @@ func mcp_tool_stdlib_full(arguments) {
         return mcp_text_result(out_str)
     }
 
-    // Check if module exists
     if !KNOWN_STDLIB_MODULES.contains(module) {
         return mcp_text_result(f"Module '{module}' not found. Available: {KNOWN_STDLIB_MODULES.join(\", \")}")
     }
 
-    // Return module documentation
     mcp_text_result(f"Module: {module}\nAvailable in the MAGI standard library.\nImport with: import std.{module}")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool: magi_version ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_tool_version_full() {
     const info = {
         "version": VERSION,
@@ -633,11 +525,6 @@ func mcp_tool_version_full() {
     out_str = out_str + f"Capabilities: {info[\"capabilities\"].join(\", \")}"
     mcp_text_result(out_str)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Tool Discovery ─────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_discover_tools() {
     const tools = mcp_tool_definitions()
     let result = []
@@ -660,11 +547,6 @@ func mcp_tool_by_name(name) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Resource Handling ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_handle_resources_list(id) {
     jsonrpc_result(id, {
         "resources": [
@@ -709,11 +591,6 @@ func mcp_handle_resources_read(id, params) {
         _ => jsonrpc_error(id, MCP_INVALID_PARAMS, f"Unknown resource: {uri}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Prompt Templates ───────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_handle_prompts_list(id) {
     jsonrpc_result(id, {
         "prompts": [
@@ -771,11 +648,6 @@ func mcp_handle_prompts_get(id, params) {
         _ => jsonrpc_error(id, MCP_INVALID_PARAMS, f"Unknown prompt: {name}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Streaming Support ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_stream_progress(token, progress, total, message) {
     write_message(jsonrpc_notification("$/progress", {
         "token": token,
@@ -786,11 +658,6 @@ func mcp_stream_progress(token, progress, total, message) {
         }
     }))
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced MCP Server Loop ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func run_mcp_server_full() {
     let running = true
     let initialized = false
@@ -810,7 +677,6 @@ func run_mcp_server_full() {
             continue
         }
 
-        // Validate JSON-RPC version
         if request.has("jsonrpc") && request["jsonrpc"] != "2.0" {
             if id != null {
                 write_message(jsonrpc_error(id, MCP_INVALID_REQUEST, "Invalid JSON-RPC version"))
@@ -852,16 +718,10 @@ func run_mcp_server_full() {
         write_message(response)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Tool Call Handler ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func mcp_handle_tools_call_full(id, params) {
     const tool_name = if params.has("name") { params["name"] } else { "" }
     const arguments = if params.has("arguments") { params["arguments"] } else { {"__s": true} }
 
-    // Validate tool exists
     if !MCP_TOOLS.contains(tool_name) {
         return jsonrpc_result(id, mcp_error_result(f"Unknown tool: {tool_name}. Available: {MCP_TOOLS.join(\", \")}"))
     }

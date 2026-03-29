@@ -1,16 +1,6 @@
-// MAGI Self-Hosted Compiler — AST Pretty-Printer / Formatter
-//
-// Converts an AST back to well-formatted MAGI source code.
-// Uses 4-space indentation. Idempotent when re-parsed and re-formatted.
-
-// ── Constants ───────────────────────────────────────────────────────
-
 const FMT_NL = "\n"
 const FMT_OPEN = "\{"
 const FMT_CLOSE = "\}"
-
-// ── Indentation ─────────────────────────────────────────────────────
-
 func fmt_indent(depth) {
     let s = ""
     let i = 0
@@ -20,9 +10,6 @@ func fmt_indent(depth) {
     }
     s
 }
-
-// ── Format Literal ──────────────────────────────────────────────────
-
 func fmt_literal(lit) {
     match lit {
         Literal::IntLit(n) => to_string(n),
@@ -52,9 +39,6 @@ func fmt_literal(lit) {
         },
     }
 }
-
-// ── Format Expression ────────────────────────────────────────────────
-
 func fmt_expr(e, depth) {
     if e == null { return "null" }
     const k = e.kind
@@ -195,9 +179,6 @@ func fmt_expr(e, depth) {
         _ => "<expr>",
     }
 }
-
-// ── Format Pattern ──────────────────────────────────────────────────
-
 func fmt_pattern(pat) {
     match pat {
         Pattern::PWildcard => "_",
@@ -237,9 +218,6 @@ func fmt_pattern(pat) {
         },
     }
 }
-
-// ── Format Block (inline) ────────────────────────────────────────────
-
 func fmt_block_inline(blk, depth) {
     if blk == null { return FMT_OPEN + FMT_CLOSE }
     if len(blk.stmts) == 0 && blk.tail_expr == null { return FMT_OPEN + FMT_CLOSE }
@@ -255,9 +233,6 @@ func fmt_block_inline(blk, depth) {
     const body = lines.join(FMT_NL)
     FMT_OPEN + FMT_NL + body + FMT_NL + ind + FMT_CLOSE
 }
-
-// ── Format Statement ─────────────────────────────────────────────────
-
 func fmt_stmt(s, depth) {
     const k = s.kind
     const ind = fmt_indent(depth)
@@ -379,9 +354,6 @@ func fmt_stmt(s, depth) {
         _ => "/* stmt: " + k.describe() + " */",
     }
 }
-
-// ── Format Function Definition ───────────────────────────────────────
-
 func fmt_funcdef(fd, depth, is_async) {
     let pstrs = []
     for p in fd.params {
@@ -398,9 +370,6 @@ func fmt_funcdef(fd, depth, is_async) {
         kw + " " + fd.name + "(" + pjoined + ") " + bs
     }
 }
-
-// ── Entry Point ──────────────────────────────────────────────────────
-
 func format_program(program) {
     let parts = []
     for s in program.statements {
@@ -408,16 +377,10 @@ func format_program(program) {
     }
     let result = parts.join(FMT_NL) + FMT_NL
 
-    // Post-processing: sort imports, ensure final newline
     result = fmt_sort_imports(result)
     result = fmt_ensure_final_newline(result)
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Expression Formatting ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_expr_full(expr, depth) {
     if expr == null { return "null" }
     const ek = expr.kind
@@ -473,7 +436,6 @@ func fmt_expr_full(expr, depth) {
             let elem_strs = []
             for e in elems { elem_strs.push(fmt_expr_full(e, depth)) }
             const inline = "[" + elem_strs.join(", ") + "]"
-            // Multi-line if too long
             if len(inline) > 80 {
                 const indent = fmt_indent(depth + 1)
                 const close_indent = fmt_indent(depth)
@@ -622,7 +584,6 @@ func fmt_expr_full(expr, depth) {
 }
 
 func fmt_match_arm(arm, depth) {
-    // Simplified: arm is [pattern, body]
     if typeof(arm) == "array" && len(arm) >= 2 {
         const ps = to_string(arm[0])
         const bs = fmt_expr_full(arm[1], depth)
@@ -681,12 +642,6 @@ func fmt_escape_string(s) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Comment Preservation ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Extract comments from source (to be re-inserted after formatting)
 func fmt_extract_comments(source) {
     let comments = []
     const lines = source.split("\n")
@@ -700,11 +655,6 @@ func fmt_extract_comments(source) {
     }
     comments
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Import Grouping and Sorting ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_sort_imports(source) {
     const lines = source.split("\n")
     let import_lines = []
@@ -725,10 +675,8 @@ func fmt_sort_imports(source) {
 
     if len(import_lines) == 0 { return source }
 
-    // Sort imports alphabetically
     import_lines = import_lines.sort()
 
-    // Group: std imports first, then others
     let std_imports = []
     let user_imports = []
     for il in import_lines {
@@ -742,20 +690,14 @@ func fmt_sort_imports(source) {
     let result = []
     for il in std_imports { result.push(il) }
     if len(std_imports) > 0 && len(user_imports) > 0 {
-        result.push("") // blank line between groups
+        result.push("")
     }
     for il in user_imports { result.push(il) }
-    if len(import_lines) > 0 { result.push("") } // blank after imports
+    if len(import_lines) > 0 { result.push("") }
     for ol in other_lines { result.push(ol) }
 
     result.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Trailing Comma Handling ─────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Add trailing commas to multi-line constructs
 func fmt_add_trailing_commas(source) {
     const lines = source.split("\n")
     let result = []
@@ -763,8 +705,6 @@ func fmt_add_trailing_commas(source) {
     while i < len(lines) {
         let ln = lines[i]
         const trimmed = ln.trim()
-        // If this line ends with a value and next line starts with ] or } or ),
-        // ensure trailing comma
         if i + 1 < len(lines) {
             const next_trimmed = lines[i + 1].trim()
             if (next_trimmed == "]" || next_trimmed == "}" || next_trimmed == ")") {
@@ -778,12 +718,6 @@ func fmt_add_trailing_commas(source) {
     }
     result.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Multi-line Expression Formatting ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Break a long function call across multiple lines
 func fmt_break_call(name, args, depth) {
     const indent = fmt_indent(depth + 1)
     const close_indent = fmt_indent(depth)
@@ -792,7 +726,6 @@ func fmt_break_call(name, args, depth) {
     name + "(\n" + arg_strs.join("\n") + "\n" + close_indent + ")"
 }
 
-// Break a long binary chain across multiple lines
 func fmt_break_chain(parts, op_str, depth) {
     const indent = fmt_indent(depth + 1)
     let result = parts[0]
@@ -803,12 +736,6 @@ func fmt_break_chain(parts, op_str, depth) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Doc Comment Formatting ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Format doc comments (/// style)
 func fmt_doc_comment(lines, depth) {
     let result = []
     const indent = fmt_indent(depth)
@@ -822,14 +749,8 @@ func fmt_doc_comment(lines, depth) {
     }
     result.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Utility ─────────────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_ensure_final_newline(source) {
     if len(source) == 0 { return "\n" }
-    // Remove extra trailing newlines
     let trimmed = source
     while len(trimmed) > 1 && trimmed[len(trimmed) - 1] == "\n" && trimmed[len(trimmed) - 2] == "\n" {
         trimmed = trimmed.substring(0, len(trimmed) - 1)
@@ -839,11 +760,6 @@ func fmt_ensure_final_newline(source) {
     }
     trimmed
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Expression Formatting (all ExprKind variants) ──────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_expr_full(expr, depth) {
     if expr == null { return "null" }
     const k = expr.kind
@@ -854,7 +770,6 @@ func fmt_expr_full(expr, depth) {
             const ls = fmt_expr_full(left, depth)
             const rs = fmt_expr_full(right, depth)
             const sym = op.symbol()
-            // Line wrapping for long binary expressions
             const single = ls + " " + sym + " " + rs
             if len(single) > 100 && depth < 10 {
                 ls + "\n" + fmt_indent(depth + 1) + sym + " " + rs
@@ -877,7 +792,6 @@ func fmt_expr_full(expr, depth) {
             const all_args = arg_strs + kw_strs
             const joined = all_args.join(", ")
             const single = name + "(" + joined + ")"
-            // Multi-line call if too long
             if len(single) > 100 && len(all_args) > 1 {
                 fmt_break_call(name, all_args, depth)
             } else {
@@ -990,7 +904,6 @@ func fmt_expr_full(expr, depth) {
                 })
                 name + " { " + parts.join(", ") + " }"
             } else {
-                // Multi-line struct
                 const ind = fmt_indent(depth)
                 const field_ind = fmt_indent(depth + 1)
                 let lines = []
@@ -1043,18 +956,12 @@ func fmt_expr_full(expr, depth) {
         _ => "<expr>"
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Pattern Formatting (all Pattern variants) ──────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_pattern_full(pat) {
     match pat {
         Pattern::PWildcard => "_",
         Pattern::PVariable(name) => name,
         Pattern::PLiteral(lit) => {
             if typeof(lit) == "map" && lit.has("kind") {
-                // AST expression node (literal wrapped in expr)
                 fmt_expr_full(lit, 0)
             } else {
                 fmt_literal(lit)
@@ -1107,7 +1014,6 @@ func fmt_pattern_full(pat) {
             fmt_pattern_full(inner) + " if " + fmt_expr_full(guard, 0)
         },
         _ => {
-            // Handle map-based pattern nodes from parser
             if typeof(pat) == "map" {
                 if pat.has("kind") {
                     if pat.kind == "wildcard" { return "_" }
@@ -1149,11 +1055,6 @@ func fmt_pattern_full(pat) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Statement Formatting (all StmtKind variants) ───────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_stmt_full(s, depth) {
     const k = s.kind
     match k {
@@ -1307,16 +1208,10 @@ func fmt_stmt_full(s, depth) {
         _ => "<stmt>"
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Block Formatting ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_block_full(blk, depth) {
     if blk == null { return "{}" }
     if len(blk.stmts) == 0 && blk.tail_expr == null { return "{}" }
 
-    // Short block: single tail expr that fits on one line
     if len(blk.stmts) == 0 && blk.tail_expr != null {
         const single = "{ " + fmt_expr_full(blk.tail_expr, depth) + " }"
         if len(single) <= 80 { return single }
@@ -1333,21 +1228,14 @@ func fmt_block_full(blk, depth) {
     }
     "{\n" + lines.join("\n") + "\n" + ind + "}"
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Function Definition Formatting ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_funcdef_full(fd, depth, is_async) {
     let prefix = if is_async { "async func " } else { "func " }
     let sig = prefix + fd.name
 
-    // Type parameters
     if fd.has("type_params") && len(fd.type_params) > 0 {
         sig = sig + "<" + fd.type_params.join(", ") + ">"
     }
 
-    // Parameters with types and defaults
     let param_strs = []
     for p in fd.params {
         let ps = p.name
@@ -1360,7 +1248,6 @@ func fmt_funcdef_full(fd, depth, is_async) {
     const params_joined = param_strs.join(", ")
     const single_line = sig + "(" + params_joined + ")"
 
-    // Wrap params if too long
     if len(single_line) > 100 && len(param_strs) > 2 {
         const p_ind = fmt_indent(depth + 1)
         let param_lines = []
@@ -1370,18 +1257,12 @@ func fmt_funcdef_full(fd, depth, is_async) {
         sig = single_line
     }
 
-    // Return type
     if fd.has("return_type") && len(fd.return_type) > 0 {
         sig = sig + " -> " + fd.return_type
     }
 
     sig + " " + fmt_block_full(fd.body, depth)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── For Pattern Formatting ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_for_pattern_full(pat) {
     match pat {
         ForPattern::Single(name) => name,
@@ -1409,11 +1290,6 @@ func fmt_for_pattern_full(pat) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Destructure Pattern Formatting ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_destructure_pattern_full(pat) {
     match pat {
         DestructurePattern::DArray(elems) => {
@@ -1454,12 +1330,6 @@ func fmt_destructure_pattern_full(pat) {
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Comment Preservation ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Extract comments from source and attach to nearest AST node by line.
 func fmt_extract_comments(source) {
     let comments = []
     const lines = source.split("\n")
@@ -1471,10 +1341,8 @@ func fmt_extract_comments(source) {
         } else if trimmed.starts_with("//") {
             comments.push({"line": line_num, "kind": "line", "text": trimmed})
         } else {
-            // Check for inline comment
             const idx = line.index_of("//")
             if idx >= 0 {
-                // Make sure it's not inside a string
                 let in_string = false
                 let i = 0
                 while i < idx {
@@ -1491,12 +1359,10 @@ func fmt_extract_comments(source) {
     comments
 }
 
-// Attach comments to the nearest AST node.
 func fmt_attach_comments(comments, stmts) {
     let attached = {}
     for comment in comments {
         const line = comment.line
-        // Find closest statement at or after this line
         let closest = null
         let closest_dist = 999999
         for stmt in stmts {
@@ -1515,11 +1381,6 @@ func fmt_attach_comments(comments, stmts) {
     }
     attached
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Import Grouping and Sorting ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_group_imports(stmts) {
     let std_imports = []
     let pkg_imports = []
@@ -1546,7 +1407,6 @@ func fmt_group_imports(stmts) {
         if !is_import { other_stmts.push(stmt) }
     }
 
-    // Sort each group alphabetically
     func import_key(stmt) {
         const sk = stmt.kind
         match sk {
@@ -1574,11 +1434,6 @@ func fmt_group_imports(stmts) {
 
     std_imports + pkg_imports + rel_imports + other_stmts
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Blank Line Management ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_is_definition(stmt) {
     const sk = stmt.kind
     match sk {
@@ -1593,12 +1448,6 @@ func fmt_is_definition(stmt) {
         _ => false
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Program Formatter ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Format a complete program AST to well-formatted source.
 func format_program(program) {
     let lines = []
     let prev_was_def = false
@@ -1607,7 +1456,6 @@ func format_program(program) {
     for stmt in program.statements {
         const is_def = fmt_is_definition(stmt)
 
-        // Blank line between definitions
         if i > 0 && (is_def || prev_was_def) {
             lines.push("")
         }
@@ -1623,20 +1471,12 @@ func format_program(program) {
     fmt_ensure_final_newline(result)
 }
 
-// Format with options (indent width, max line width).
 func format_program_with_config(program, config) {
-    // Config: {"indent_width": 4, "max_width": 100, "sort_imports": true}
     if config.has("sort_imports") && config.sort_imports {
         program.statements = fmt_group_imports(program.statements)
     }
     format_program(program)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Alignment Helpers ───────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Align struct fields to have type annotations at the same column.
 func fmt_align_fields(fields, depth) {
     if len(fields) == 0 { return "" }
     let max_name_len = 0
@@ -1659,7 +1499,6 @@ func fmt_align_fields(fields, depth) {
     lines.join("\n")
 }
 
-// Align match arms.
 func fmt_align_match_arms(arms, depth) {
     if len(arms) == 0 { return "" }
     let max_pat_len = 0
@@ -1678,7 +1517,6 @@ func fmt_align_match_arms(arms, depth) {
     lines.join("\n")
 }
 
-// Align enum variants.
 func fmt_align_enum_variants(variants, depth) {
     if len(variants) == 0 { return "" }
     const ind = fmt_indent(depth)
@@ -1692,11 +1530,6 @@ func fmt_align_enum_variants(variants, depth) {
     }
     lines.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── String Escaping for Formatter ───────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_escape_string(s) {
     let result = ""
     let i = 0
@@ -1712,12 +1545,6 @@ func fmt_escape_string(s) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Trailing Comma Management ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Add trailing comma to multi-line constructs.
 func fmt_trailing_comma(items, depth, formatter) {
     if len(items) == 0 { return "" }
     const ind = fmt_indent(depth)
@@ -1729,7 +1556,6 @@ func fmt_trailing_comma(items, depth, formatter) {
     "(\n" + lines.join("\n") + "\n" + ind + ")"
 }
 
-// Format array literal with trailing comma in multi-line mode.
 func fmt_array_multiline(elements, depth) {
     if len(elements) == 0 { return "[]" }
     const single = "[" + elements.map(e => fmt_expr_full(e, depth)).join(", ") + "]"
@@ -1743,7 +1569,6 @@ func fmt_array_multiline(elements, depth) {
     "[\n" + lines.join("\n") + "\n" + ind + "]"
 }
 
-// Format map literal with trailing comma in multi-line mode.
 func fmt_map_multiline(entries, depth) {
     if len(entries) == 0 { return "{}" }
     let parts = []
@@ -1764,21 +1589,13 @@ func fmt_map_multiline(entries, depth) {
     }
     "{\n" + lines.join("\n") + "\n" + ind + "}"
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Line Wrapping for Long Expressions ──────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Estimate the display width of an expression.
 func fmt_expr_width(expr, depth) {
     const s = fmt_expr_full(expr, depth)
     len(s)
 }
 
-// Wrap a binary chain across lines when it exceeds max width.
 func fmt_wrap_binary_chain(exprs, ops, depth, max_width) {
     if max_width == null { max_width = 100 }
-    // Try single line first
     let single = fmt_expr_full(exprs[0], depth)
     let i = 0
     while i < len(ops) {
@@ -1786,7 +1603,6 @@ func fmt_wrap_binary_chain(exprs, ops, depth, max_width) {
         i = i + 1
     }
     if len(single) <= max_width { return single }
-    // Multi-line
     const ind = fmt_indent(depth + 1)
     let result = fmt_expr_full(exprs[0], depth)
     i = 0
@@ -1797,7 +1613,6 @@ func fmt_wrap_binary_chain(exprs, ops, depth, max_width) {
     result
 }
 
-// Wrap method chain across lines.
 func fmt_wrap_method_chain(parts, depth, max_width) {
     if max_width == null { max_width = 100 }
     const single = parts.join(".")
@@ -1811,12 +1626,6 @@ func fmt_wrap_method_chain(parts, depth, max_width) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Conditional Brace Style (K&R) ───────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Format a block in K&R style: opening brace on same line.
 func fmt_block_kr(blk, depth, prefix) {
     if blk == null { return prefix + " {}" }
     if len(blk.stmts) == 0 && blk.tail_expr == null { return prefix + " {}" }
@@ -1831,11 +1640,6 @@ func fmt_block_kr(blk, depth, prefix) {
     }
     prefix + " {\n" + lines.join("\n") + "\n" + ind + "}"
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Doc Comment Formatting (Preserve /// and Reflow) ────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_doc_comments_full(comments, depth) {
     if len(comments) == 0 { return "" }
     const ind = fmt_indent(depth)
@@ -1843,7 +1647,6 @@ func fmt_doc_comments_full(comments, depth) {
     for comment in comments {
         const text = comment.trim()
         if text.starts_with("///") {
-            // Preserve doc comment
             result.push(ind + text)
         } else if text.starts_with("//") {
             result.push(ind + text)
@@ -1852,7 +1655,6 @@ func fmt_doc_comments_full(comments, depth) {
     result.join("\n") + "\n"
 }
 
-// Reflow doc comment text to fit within max width.
 func fmt_reflow_doc_comment(text, max_width, depth) {
     const ind = fmt_indent(depth)
     const prefix = ind + "/// "
@@ -1875,11 +1677,6 @@ func fmt_reflow_doc_comment(text, max_width, depth) {
     if len(current) > 0 { lines.push(prefix + current) }
     lines.join("\n") + "\n"
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Type Annotation Formatting ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_type_annotation(ty) {
     if ty == null { return "" }
     if typeof(ty) == "string" { return ty }
@@ -1910,12 +1707,6 @@ func fmt_type_annotation(ty) {
     }
     to_string(ty)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Whitespace Normalization ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Remove consecutive blank lines (keep at most one).
 func fmt_normalize_blank_lines(text) {
     const lines = text.split("\n")
     let result = []
@@ -1929,7 +1720,6 @@ func fmt_normalize_blank_lines(text) {
     result.join("\n")
 }
 
-// Remove trailing whitespace from each line.
 func fmt_strip_trailing_ws(text) {
     const lines = text.split("\n")
     let result = []
@@ -1939,15 +1729,9 @@ func fmt_strip_trailing_ws(text) {
     result.join("\n")
 }
 
-// Ensure consistent line endings (LF).
 func fmt_normalize_line_endings(text) {
     text.replace("\r\n", "\n").replace("\r", "\n")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Format Diff (Show what the formatter changed) ───────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_diff(original, formatted) {
     const orig_lines = original.split("\n")
     const fmt_lines = formatted.split("\n")
@@ -1967,7 +1751,6 @@ func fmt_diff(original, formatted) {
         j = j + 1
         line_num = line_num + 1
     }
-    // Handle different lengths
     while i < len(orig_lines) {
         changes.push({"line": line_num, "original": orig_lines[i], "formatted": ""})
         i = i + 1
@@ -1981,7 +1764,6 @@ func fmt_diff(original, formatted) {
     changes
 }
 
-// Format the diff as a readable string.
 func fmt_diff_report(changes) {
     if len(changes) == 0 { return "No changes.\n" }
     let result = f"{len(changes)} line(s) changed:\n"
@@ -1994,17 +1776,10 @@ func fmt_diff_report(changes) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Source Map for Formatted Output ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Track original line -> formatted line mapping.
 func fmt_build_source_map(original, formatted) {
     const orig_lines = original.split("\n")
     const fmt_lines = formatted.split("\n")
     let mapping = {}
-    // Simple line-by-line mapping
     let orig_idx = 0
     let fmt_idx = 0
     while orig_idx < len(orig_lines) && fmt_idx < len(fmt_lines) {
@@ -2026,28 +1801,15 @@ func fmt_build_source_map(original, formatted) {
     }
     mapping
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Format Check (Idempotency Verification) ─────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Check if source is already well-formatted.
 func fmt_is_formatted(program) {
     const formatted = format_program(program)
-    // Re-format and compare
     formatted
 }
 
-// Count the number of formatting changes needed.
 func fmt_count_changes(original, formatted) {
     const changes = fmt_diff(original, formatted)
     len(changes)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Attribute Formatting ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_attribute(attr, depth) {
     let result = fmt_indent(depth) + "#[" + attr["name"]
     if attr.has("args") && len(attr["args"]) > 0 {
@@ -2075,11 +1837,6 @@ func fmt_attributes(attrs, depth) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Generic Type Parameter Formatting ───────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_type_params(type_params) {
     if type_params == null || len(type_params) == 0 { return "" }
 
@@ -2123,11 +1880,6 @@ func fmt_return_type(ret_type) {
     if ret_type == null { return "" }
     " -> " + fmt_type(ret_type)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Where Clause Formatting ─────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_where_clause(constraints, depth) {
     if constraints == null || len(constraints) == 0 { return "" }
 
@@ -2137,7 +1889,6 @@ func fmt_where_clause(constraints, depth) {
         return " where " + c["type"] + ": " + bounds.join(" + ")
     }
 
-    // Multi-line where clause for readability
     let result = FMT_NL + fmt_indent(depth) + "where" + FMT_NL
     let first = true
     for c in constraints {
@@ -2153,11 +1904,6 @@ func fmt_where_clause(constraints, depth) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Async/Await Formatting ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_async_func(fd, depth) {
     let result = fmt_indent(depth) + "async func " + fd.name
     result = result + fmt_type_params(fd.type_params)
@@ -2219,15 +1965,9 @@ func fmt_block_body(block, depth) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Complex Match Arm Formatting with Alignment ─────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_match_expr_aligned(subject, arms, depth) {
     let result = "match " + fmt_expr(subject, depth) + " " + FMT_OPEN + FMT_NL
 
-    // Calculate max pattern width for alignment
     let max_pattern_width = 0
     let patterns = []
     for arm in arms {
@@ -2238,7 +1978,6 @@ func fmt_match_expr_aligned(subject, arms, depth) {
         }
     }
 
-    // Only align if patterns are reasonably short
     const should_align = max_pattern_width < 30 && len(arms) > 1
 
     let i = 0
@@ -2253,12 +1992,10 @@ func fmt_match_expr_aligned(subject, arms, depth) {
         const is_block = typeof(body_expr) == "map" && body_expr.has("kind") && body_expr["kind"] == "block"
 
         if is_block {
-            // Multi-line arm body
             result = result + ind + pattern_str + guard + " => " + FMT_OPEN + FMT_NL
             result = result + fmt_block_body(body_expr, depth + 2)
             result = result + fmt_indent(depth + 1) + FMT_CLOSE + "," + FMT_NL
         } else {
-            // Single-line arm
             let arrow = " => "
             if should_align {
                 const padding = max_pattern_width - len(pattern_str)
@@ -2320,11 +2057,6 @@ func fmt_pattern(pattern, depth) {
         to_string(pattern)
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Select Statement Formatting ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_select(cases, depth) {
     let result = "select " + FMT_OPEN + FMT_NL
     for c in cases {
@@ -2347,11 +2079,6 @@ func fmt_select(cases, depth) {
     result = result + fmt_indent(depth) + FMT_CLOSE
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Interface Formatting ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func fmt_interface(name, type_params, methods, operators, depth) {
     let result = fmt_indent(depth) + "interface " + name
     result = result + fmt_type_params(type_params)

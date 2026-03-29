@@ -1,24 +1,3 @@
-// MAGI Self-Hosted Compiler — TLS/Crypto Wrapper
-//
-// All TLS and cryptographic operations delegate to stage 0 builtins.
-// This module provides a clean MAGI-level API for:
-//   - TLS configuration (client and server)
-//   - Certificate generation and parsing
-//   - Symmetric encryption (AES-GCM)
-//   - Asymmetric encryption (RSA, ECDSA)
-//   - Hashing (SHA-256, SHA-384, SHA-512, BLAKE3)
-//   - HMAC computation
-//   - Key derivation (PBKDF2, HKDF)
-//   - Random number generation (CSPRNG)
-//   - Base64 encoding/decoding
-//   - Hex encoding/decoding
-//   - JWT token creation and verification
-
-// ══════════════════════════════════════════════════════════════════
-// ── TLS Configuration ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Create a TLS configuration for a server
 func tls_server_config(cert_path, key_path) {
     {
         "__tls_config": true,
@@ -37,7 +16,6 @@ func tls_server_config(cert_path, key_path) {
     }
 }
 
-// Create a TLS configuration for a client
 func tls_client_config(ca_cert_path) {
     {
         "__tls_config": true,
@@ -51,62 +29,46 @@ func tls_client_config(ca_cert_path) {
     }
 }
 
-// Set minimum TLS protocol version
 func tls_set_min_protocol(config, version) {
     config["min_protocol"] = version
     config
 }
 
-// Set maximum TLS protocol version
 func tls_set_max_protocol(config, version) {
     config["max_protocol"] = version
     config
 }
 
-// Enable or disable hostname verification
 func tls_set_verify_hostname(config, verify) {
     config["verify_hostname"] = verify
     config
 }
 
-// Set ALPN protocols
 func tls_set_alpn(config, protocols) {
     config["alpn_protocols"] = protocols
     config
 }
 
-// Set client certificate authentication mode
 func tls_set_client_auth(config, mode) {
-    // mode: "none", "optional", "required"
     config["client_auth"] = mode
     config
 }
 
-// Load a TLS configuration into the runtime
 func tls_load_config(config) {
     tls_configure(config)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Certificate Operations ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Generate a self-signed certificate
 func tls_generate_self_signed(common_name, days) {
     cert_generate(common_name, days)
 }
 
-// Parse a PEM-encoded certificate
 func tls_parse_cert(pem_data) {
     cert_parse(pem_data)
 }
 
-// Verify a certificate against a CA
 func tls_verify_cert(cert_pem, ca_pem) {
     cert_verify(cert_pem, ca_pem)
 }
 
-// Get certificate information (subject, issuer, validity, etc.)
 func tls_cert_info(cert_pem) {
     const parsed = cert_parse(cert_pem)
     if parsed == null { return null }
@@ -120,29 +82,20 @@ func tls_cert_info(cert_pem) {
     }
 }
 
-// Check if a certificate is expired
 func tls_cert_is_expired(cert_info) {
     if cert_info == null { return true }
-    // Would need time comparison; delegate to stage 0
     false
 }
 
-// Generate a certificate signing request (CSR)
 func tls_generate_csr(common_name, org, country) {
     cert_generate_csr(common_name, org, country)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Hashing ─────────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_sha256(data) { sha256(data) }
 func tls_sha384(data) { sha384(data) }
 func tls_sha512(data) { sha512(data) }
 func tls_md5(data) { md5(data) }
 func tls_blake3(data) { blake3(data) }
 
-// Hash with a specified algorithm
 func tls_hash(data, algorithm) {
     match algorithm {
         "sha256" => sha256(data),
@@ -154,22 +107,15 @@ func tls_hash(data, algorithm) {
     }
 }
 
-// Hash a file
 func tls_hash_file(path, algorithm) {
     const data = read_file(path)
     tls_hash(data, algorithm)
 }
 
-// Verify a hash
 func tls_verify_hash(data, expected_hash, algorithm) {
     const actual = tls_hash(data, algorithm)
     actual == expected_hash
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── HMAC ────────────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_hmac_sha256(key, data) { hmac(key, data, "sha256") }
 func tls_hmac_sha512(key, data) { hmac(key, data, "sha512") }
 
@@ -179,14 +125,8 @@ func tls_hmac(key, data, algorithm) {
 
 func tls_hmac_verify(key, data, expected_mac, algorithm) {
     const actual = tls_hmac(key, data, algorithm)
-    // Constant-time comparison
     tls_constant_time_eq(actual, expected_mac)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Key Derivation ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_pbkdf2(password, salt, iterations, key_length) {
     pbkdf2(password, salt, iterations, key_length)
 }
@@ -194,11 +134,6 @@ func tls_pbkdf2(password, salt, iterations, key_length) {
 func tls_hkdf(input_key, salt, info, length) {
     hkdf(input_key, salt, info, length)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Symmetric Encryption (AES-GCM) ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_aes_gcm_encrypt(key, plaintext, aad) {
     aes_gcm_encrypt(key, plaintext, aad)
 }
@@ -207,45 +142,30 @@ func tls_aes_gcm_decrypt(key, ciphertext, aad) {
     aes_gcm_decrypt(key, ciphertext, aad)
 }
 
-// Generate a random AES key (256-bit)
 func tls_generate_aes_key() {
     random_bytes(32)
 }
 
-// Generate a random nonce (96-bit for AES-GCM)
 func tls_generate_nonce() {
     random_bytes(12)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Random Number Generation (CSPRNG) ───────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_random_bytes(n) { random_bytes(n) }
 func tls_random_int(min_val, max_val) { random_int(min_val, max_val) }
 func tls_random_float() { random_float() }
 
 func tls_uuid_v4() { uuid() }
 
-// Generate a random token (hex string)
 func tls_random_token(byte_count) {
     const bytes = random_bytes(byte_count)
     tls_bytes_to_hex(bytes)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Base64 Encoding/Decoding ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_base64_encode(data) { base64_encode(data) }
 func tls_base64_decode(data) { base64_decode(data) }
 
-// URL-safe Base64
 func tls_base64url_encode(data) {
     let encoded = base64_encode(data)
     encoded = encoded.replace("+", "-")
     encoded = encoded.replace("/", "_")
-    // Remove padding
     while len(encoded) > 0 && encoded[len(encoded) - 1] == "=" {
         encoded = encoded.substring(0, len(encoded) - 1)
     }
@@ -254,15 +174,9 @@ func tls_base64url_encode(data) {
 
 func tls_base64url_decode(data) {
     let padded = data.replace("-", "+").replace("_", "/")
-    // Add padding
     while len(padded) % 4 != 0 { padded = padded + "=" }
     base64_decode(padded)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Hex Encoding/Decoding ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_bytes_to_hex(bytes) {
     const hex_chars = "0123456789abcdef"
     let result = ""
@@ -297,12 +211,6 @@ func tls_hex_char_val(c) {
     if c >= "A" && c <= "F" { return 10 + char_code(c) - char_code("A") }
     0
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── JWT Operations ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Create a JWT token
 func tls_jwt_create(payload, secret, algorithm) {
     const header = {"alg": algorithm, "typ": "JWT"}
     const header_b64 = tls_base64url_encode(to_json(header))
@@ -320,7 +228,6 @@ func tls_jwt_create(payload, secret, algorithm) {
     signing_input + "." + signature
 }
 
-// Verify and decode a JWT token
 func tls_jwt_verify(token, secret, algorithm) {
     const parts = token.split(".")
     if len(parts) != 3 { return {"valid": false, "error": "invalid token format"} }
@@ -346,18 +253,12 @@ func tls_jwt_verify(token, secret, algorithm) {
     {"valid": true, "payload": payload}
 }
 
-// Decode JWT payload without verification
 func tls_jwt_decode(token) {
     const parts = token.split(".")
     if len(parts) < 2 { return null }
     const payload_str = tls_base64url_decode(parts[1])
     parse_json(payload_str)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Constant-Time Comparison ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_constant_time_eq(a, b) {
     if len(a) != len(b) { return false }
     let diff = 0
@@ -368,12 +269,6 @@ func tls_constant_time_eq(a, b) {
     }
     diff == 0
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Password Hashing ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Hash a password with a random salt using PBKDF2
 func tls_hash_password(password) {
     const salt = tls_random_token(16)
     const hash = tls_pbkdf2(password, salt, 100000, 32)
@@ -381,7 +276,6 @@ func tls_hash_password(password) {
     f"pbkdf2:sha256:100000${salt}${hash_hex}"
 }
 
-// Verify a password against a stored hash
 func tls_verify_password(password, stored_hash) {
     const parts = stored_hash.split("$")
     if len(parts) != 3 { return false }
@@ -393,11 +287,6 @@ func tls_verify_password(password, stored_hash) {
     const actual = tls_bytes_to_hex(tls_pbkdf2(password, salt, iterations, 32))
     tls_constant_time_eq(actual, expected_hash)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Full TLS Client Configuration ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_client_config_full(options) {
     const config = tls_client_config(
         if options.has("ca_cert_path") { options["ca_cert_path"] } else { "" }
@@ -434,7 +323,6 @@ func tls_client_config_full(options) {
     config
 }
 
-// Cipher suite presets
 func tls_cipher_suites_modern() {
     [
         "TLS_AES_256_GCM_SHA384",
@@ -454,11 +342,6 @@ func tls_cipher_suites_compatible() {
         "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
     ]
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── X.509 Certificate Parsing ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_parse_cert_full(pem_data) {
     const parsed = cert_parse(pem_data)
     if parsed == null { return null }
@@ -481,11 +364,6 @@ func tls_parse_cert_full(pem_data) {
         "version": if parsed.has("version") { parsed["version"] } else { 3 }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Certificate Generation ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_generate_cert(options) {
     const common_name = if options.has("common_name") { options["common_name"] } else { "localhost" }
     const days = if options.has("days") { options["days"] } else { 365 }
@@ -521,13 +399,7 @@ func tls_generate_ca_cert(common_name, days) {
         "key_size": 4096
     })
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Key Generation ───────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_generate_rsa_key(bits) {
-    // Delegate to stage 0 builtin
     const result = rsa_keygen(bits)
     {
         "algorithm": "RSA",
@@ -573,11 +445,6 @@ func tls_generate_key(algorithm, options) {
         _ => panic(f"Unknown key algorithm: {algorithm}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── All Hash Algorithms ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_sha1(data) { sha1(data) }
 
 func tls_hash_full(data, algorithm) {
@@ -595,11 +462,6 @@ func tls_hash_full(data, algorithm) {
         _ => panic(f"Unknown hash algorithm: {algorithm}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── HMAC for All Algorithms ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_hmac_sha384(key, data) { hmac(key, data, "sha384") }
 
 func tls_hmac_full(key, data, algorithm) {
@@ -616,14 +478,8 @@ func tls_hmac_verify_full(key, data, expected_mac, algorithm) {
     const actual = tls_hmac_full(key, data, algorithm)
     tls_constant_time_eq(actual, expected_mac)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── AES-256-CBC Encrypt/Decrypt ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_aes_cbc_encrypt(key, plaintext, iv) {
     if iv == null {
-        // Auto-generate IV
         const auto_iv = random_bytes(16)
         const ciphertext = aes_cbc_encrypt(key, plaintext, auto_iv)
         {"ciphertext": ciphertext, "iv": auto_iv}
@@ -636,11 +492,6 @@ func tls_aes_cbc_encrypt(key, plaintext, iv) {
 func tls_aes_cbc_decrypt(key, ciphertext, iv) {
     aes_cbc_decrypt(key, ciphertext, iv)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── AES-256-GCM Encrypt/Decrypt (enhanced) ───────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_aes_gcm_encrypt_full(key, plaintext, aad, nonce) {
     let actual_nonce = nonce
     if actual_nonce == null {
@@ -657,11 +508,6 @@ func tls_aes_gcm_encrypt_full(key, plaintext, aad, nonce) {
 func tls_aes_gcm_decrypt_full(key, ciphertext, aad, nonce) {
     aes_gcm_decrypt(key, ciphertext, aad)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── ChaCha20-Poly1305 Encrypt/Decrypt ────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_chacha20_encrypt(key, plaintext, nonce, aad) {
     let actual_nonce = nonce
     if actual_nonce == null {
@@ -679,15 +525,9 @@ func tls_chacha20_decrypt(key, ciphertext, nonce, aad) {
     chacha20_poly1305_decrypt(key, ciphertext, nonce, aad)
 }
 
-// Generate a ChaCha20 key (256-bit)
 func tls_generate_chacha20_key() {
     random_bytes(32)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── RSA Sign/Verify ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_rsa_sign(data, private_key) {
     rsa_sign(data, private_key)
 }
@@ -705,11 +545,6 @@ func tls_rsa_verify_with_hash(data, signature, public_key, hash_algo) {
     const digest = tls_hash_full(data, hash_algo)
     rsa_verify(digest, signature, public_key)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── ECDSA Sign/Verify ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_ecdsa_sign(data, private_key) {
     ecdsa_sign(data, private_key)
 }
@@ -722,11 +557,6 @@ func tls_ecdsa_sign_with_hash(data, private_key, hash_algo) {
     const digest = tls_hash_full(data, hash_algo)
     ecdsa_sign(digest, private_key)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Ed25519 Sign/Verify ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_ed25519_sign(data, private_key) {
     ed25519_sign(data, private_key)
 }
@@ -734,11 +564,6 @@ func tls_ed25519_sign(data, private_key) {
 func tls_ed25519_verify(data, signature, public_key) {
     ed25519_verify(data, signature, public_key)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Key Derivation: bcrypt, argon2, scrypt ───────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_bcrypt_hash(password, rounds) {
     const actual_rounds = if rounds == null { 12 } else { rounds }
     bcrypt_hash(password, actual_rounds)
@@ -769,18 +594,11 @@ func tls_scrypt_hash(password, salt, options) {
 
     scrypt_hash(password, salt, n, r, p, output_len)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── HKDF Key Expansion ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_hkdf_extract(salt, input_key_material) {
-    // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
     tls_hmac_sha256(salt, input_key_material)
 }
 
 func tls_hkdf_expand(prk, info, length) {
-    // HKDF-Expand using HMAC-SHA256
     hkdf_expand(prk, info, length)
 }
 
@@ -792,11 +610,6 @@ func tls_hkdf_full(input_key, salt, info, length, hash_algo) {
         _ => hkdf(input_key, salt, info, length),
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── CSPRNG (Random Bytes) ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_secure_random(n) { random_bytes(n) }
 func tls_random_hex(byte_count) { tls_bytes_to_hex(random_bytes(byte_count)) }
 
@@ -807,19 +620,11 @@ func tls_random_base64(byte_count) {
 func tls_random_base64url(byte_count) {
     tls_base64url_encode(random_bytes(byte_count))
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── X.509 Certificate Chain Verification ─────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_verify_chain(cert_chain, root_certs) {
-    // cert_chain: array of PEM strings (leaf first, root last)
-    // root_certs: array of trusted root PEM strings
     if len(cert_chain) == 0 {
         return {"valid": false, "error": "Empty certificate chain"}
     }
 
-    // Verify each cert is signed by the next
     let i = 0
     while i < len(cert_chain) - 1 {
         const cert = cert_chain[i]
@@ -831,7 +636,6 @@ func tls_verify_chain(cert_chain, root_certs) {
         i = i + 1
     }
 
-    // Verify the last cert against root certs
     const last_cert = cert_chain[len(cert_chain) - 1]
     let root_verified = false
     for root in root_certs {
@@ -842,9 +646,7 @@ func tls_verify_chain(cert_chain, root_certs) {
     }
 
     if !root_verified {
-        // Check if the last cert is self-signed (root)
         if cert_verify(last_cert, last_cert) == true {
-            // Self-signed, check if it's in the root store
             let found = false
             for root in root_certs {
                 if root == last_cert {
@@ -862,14 +664,8 @@ func tls_verify_chain(cert_chain, root_certs) {
 
     {"valid": true}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── PEM Encoding/Decoding ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_pem_encode(der_data, label) {
     const b64 = tls_base64_encode(der_data)
-    // Wrap at 64 characters
     let lines = []
     let i = 0
     while i < len(b64) {
@@ -916,16 +712,10 @@ func tls_pem_encode_private_key(der_data) {
 func tls_pem_encode_public_key(der_data) {
     tls_pem_encode(der_data, "PUBLIC KEY")
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── DER Encoding/Decoding ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_der_encode_length(length) {
     if length < 128 {
         return [length]
     }
-    // Long form
     let bytes = []
     let remaining = length
     while remaining > 0 {
@@ -952,7 +742,6 @@ func tls_der_decode_length(data, offset) {
 }
 
 func tls_der_encode_integer(value) {
-    // Tag 0x02 for INTEGER
     let bytes = []
     let v = if value < 0 { 0 - value } else { value }
     if v == 0 {
@@ -962,7 +751,6 @@ func tls_der_encode_integer(value) {
             bytes = [v % 256] + bytes
             v = v / 256
         }
-        // Add leading zero if high bit set (positive number)
         if value >= 0 && bytes[0] >= 128 {
             bytes = [0] + bytes
         }
@@ -985,20 +773,13 @@ func tls_der_encode_utf8_string(text) {
     }
     [12] + tls_der_encode_length(len(bytes)) + bytes
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── JWT Token Creation and Verification (enhanced) ───────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_jwt_create_full(payload, key, options) {
     const algorithm = if options.has("algorithm") { options["algorithm"] } else { "HS256" }
     const header = {"alg": algorithm, "typ": "JWT"}
 
-    // Add optional header fields
     if options.has("kid") { header["kid"] = options["kid"] }
     if options.has("jku") { header["jku"] = options["jku"] }
 
-    // Add standard claims
     let full_payload = {}
     for k in keys(payload) {
         full_payload[k] = payload[k]
@@ -1041,21 +822,18 @@ func tls_jwt_verify_full(token, key, options) {
     const payload_b64 = parts[1]
     const signature_b64 = parts[2]
 
-    // Decode header to get algorithm
     const header = parse_json(tls_base64url_decode(header_b64))
     if header == null {
         return {"valid": false, "error": "Invalid header"}
     }
     const algorithm = if header.has("alg") { header["alg"] } else { "" }
 
-    // Validate algorithm matches expected
     if options.has("algorithm") && options["algorithm"] != algorithm {
         return {"valid": false, "error": f"Algorithm mismatch: expected {options[\"algorithm\"]}, got {algorithm}"}
     }
 
     const signing_input = header_b64 + "." + payload_b64
 
-    // Verify signature
     let sig_valid = false
     match algorithm {
         "HS256" => {
@@ -1091,37 +869,31 @@ func tls_jwt_verify_full(token, key, options) {
         return {"valid": false, "error": "Signature verification failed"}
     }
 
-    // Decode payload
     const payload = parse_json(tls_base64url_decode(payload_b64))
     if payload == null {
         return {"valid": false, "error": "Invalid payload"}
     }
 
-    // Validate claims
-    const now = time_now() / 1000  // seconds
+    const now = time_now() / 1000
 
-    // Check expiration
     if payload.has("exp") {
         if now > payload["exp"] {
             return {"valid": false, "error": "Token expired", "payload": payload}
         }
     }
 
-    // Check not-before
     if payload.has("nbf") {
         if now < payload["nbf"] {
             return {"valid": false, "error": "Token not yet valid", "payload": payload}
         }
     }
 
-    // Check issuer
     if options.has("issuer") && payload.has("iss") {
         if payload["iss"] != options["issuer"] {
             return {"valid": false, "error": "Issuer mismatch", "payload": payload}
         }
     }
 
-    // Check audience
     if options.has("audience") && payload.has("aud") {
         if payload["aud"] != options["audience"] {
             return {"valid": false, "error": "Audience mismatch", "payload": payload}
@@ -1130,11 +902,6 @@ func tls_jwt_verify_full(token, key, options) {
 
     {"valid": true, "header": header, "payload": payload}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── OAuth2 Helper Functions ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_oauth2_authorization_url(base_url, client_id, redirect_uri, scope, state) {
     let url = base_url + "?"
     url = url + "response_type=code"
@@ -1172,7 +939,6 @@ func tls_oauth2_refresh_request(token_url, client_id, client_secret, refresh_tok
 }
 
 func tls_oauth2_pkce_challenge() {
-    // Generate PKCE code verifier and challenge
     const verifier = tls_random_base64url(32)
     const challenge = tls_base64url_encode(sha256(verifier))
     {"verifier": verifier, "challenge": challenge, "method": "S256"}
@@ -1189,17 +955,6 @@ func tls_oauth2_client_credentials(token_url, client_id, client_secret, scope) {
         "body": "grant_type=client_credentials" + if scope != "" { "&scope=" + url_encode(scope) } else { "" }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Base64url Encoding (for JWT) ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Already defined above as tls_base64url_encode and tls_base64url_decode
-
-// ══════════════════════════════════════════════════════════════════
-// ── URL Encoding Helper ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func url_encode(s) {
     const hex_chars = "0123456789ABCDEF"
     let result = ""
@@ -1213,11 +968,6 @@ func url_encode(s) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Symmetric Encryption Convenience ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_encrypt(algorithm, key, plaintext, options) {
     const aad = if options.has("aad") { options["aad"] } else { "" }
     const nonce = if options.has("nonce") { options["nonce"] } else { null }
@@ -1243,11 +993,6 @@ func tls_decrypt(algorithm, key, ciphertext, options) {
         _ => panic(f"Unknown decryption algorithm: {algorithm}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Digital Signature Convenience ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_sign(algorithm, data, private_key) {
     match algorithm {
         "rsa" => tls_rsa_sign(data, private_key),
@@ -1273,11 +1018,6 @@ func tls_verify(algorithm, data, signature, public_key) {
         _ => panic(f"Unknown verification algorithm: {algorithm}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Key Derivation Convenience ───────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_derive_key(algorithm, password, salt, options) {
     const output_length = if options.has("output_length") { options["output_length"] } else { 32 }
 
@@ -1299,12 +1039,6 @@ func tls_derive_key(algorithm, password, salt, options) {
         _ => panic(f"Unknown key derivation algorithm: {algorithm}")
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Full TLS Connection Establishment ───────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// TLS connection state
 func tls_connection_new() {
     {
         "__tls_conn": true,
@@ -1317,16 +1051,13 @@ func tls_connection_new() {
     }
 }
 
-// Full TLS handshake state machine
 func tls_handshake(config, hostname) {
     const conn = tls_connection_new()
     conn["hostname"] = hostname
 
-    // Step 1: ClientHello
     const client_hello = tls_build_client_hello(config, hostname)
     conn["state"] = "client_hello_sent"
 
-    // Step 2: Delegate actual TLS to stage 0
     const result = tls_connect(hostname, config)
     if result.has("error") {
         conn["state"] = "error"
@@ -1334,14 +1065,12 @@ func tls_handshake(config, hostname) {
         return conn
     }
 
-    // Step 3: Record negotiated parameters
     conn["state"] = "connected"
     conn["protocol"] = if result.has("protocol") { result["protocol"] } else { "TLS1.3" }
     conn["cipher_suite"] = if result.has("cipher_suite") { result["cipher_suite"] } else { "TLS_AES_256_GCM_SHA384" }
     conn["session_id"] = if result.has("session_id") { result["session_id"] } else { tls_random_hex(32) }
     conn["alpn_selected"] = if result.has("alpn") { result["alpn"] } else { null }
 
-    // Step 4: Validate peer certificate
     if result.has("peer_cert") {
         conn["peer_cert"] = result["peer_cert"]
         const validation = tls_validate_cert_chain(result["peer_cert"], hostname, config)
@@ -1376,10 +1105,8 @@ func tls_build_client_hello(config, hostname) {
 }
 
 func tls_random_hex(bytes) {
-    // Delegate to stage 0 CSPRNG
     const rand = tls_random_bytes(bytes)
     if typeof(rand) == "string" { return rand }
-    // Fallback: not cryptographically secure
     let result = ""
     let i = 0
     while i < bytes * 2 {
@@ -1389,15 +1116,9 @@ func tls_random_hex(bytes) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Certificate Chain Validation ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_validate_cert_chain(cert, hostname, config) {
     let result = {"valid": true, "reason": null}
 
-    // Check 1: Certificate not expired
     if cert.has("not_before") && cert.has("not_after") {
         const now = time_now()
         if now < cert["not_before"] {
@@ -1408,14 +1129,12 @@ func tls_validate_cert_chain(cert, hostname, config) {
         }
     }
 
-    // Check 2: Hostname verification
     if config.has("verify_hostname") && config["verify_hostname"] {
         if !tls_verify_hostname(cert, hostname) {
             return {"valid": false, "reason": f"hostname '{hostname}' does not match certificate"}
         }
     }
 
-    // Check 3: Signature verification
     if cert.has("issuer_cert") && cert.has("signature") {
         const sig_valid = tls_verify_signature(
             cert["tbs_certificate"],
@@ -1428,7 +1147,6 @@ func tls_validate_cert_chain(cert, hostname, config) {
         }
     }
 
-    // Check 4: Key usage
     if cert.has("extensions") {
         const ku = tls_find_extension(cert["extensions"], "key_usage")
         if ku != null {
@@ -1438,11 +1156,8 @@ func tls_validate_cert_chain(cert, hostname, config) {
         }
     }
 
-    // Check 5: Basic constraints (CA cert check)
     if cert.has("is_ca") && cert["is_ca"] {
-        // CA cert should not be used as end-entity
         if !cert.has("issuer_cert") {
-            // Self-signed CA, only valid if explicitly trusted
         }
     }
 
@@ -1450,13 +1165,11 @@ func tls_validate_cert_chain(cert, hostname, config) {
 }
 
 func tls_verify_hostname(cert, hostname) {
-    // Check Subject Alternative Names (SAN)
     if cert.has("san") {
         for san in cert["san"] {
             if tls_hostname_matches(san, hostname) { return true }
         }
     }
-    // Fallback to Common Name
     if cert.has("subject") && cert["subject"].has("CN") {
         return tls_hostname_matches(cert["subject"]["CN"], hostname)
     }
@@ -1465,7 +1178,6 @@ func tls_verify_hostname(cert, hostname) {
 
 func tls_hostname_matches(pattern, hostname) {
     if pattern == hostname { return true }
-    // Wildcard matching: *.example.com matches foo.example.com
     if pattern.starts_with("*.") {
         const domain = pattern[2..len(pattern)]
         const dot_idx = hostname.index_of(".")
@@ -1484,13 +1196,7 @@ func tls_find_extension(extensions, oid) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── OCSP Stapling ───────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_ocsp_request(cert, issuer_cert) {
-    // Build OCSP request
     const serial = if cert.has("serial_number") { cert["serial_number"] } else { "" }
     const issuer_hash = tls_sha256(if issuer_cert.has("subject_der") { issuer_cert["subject_der"] } else { "" })
     const issuer_key_hash = tls_sha256(if issuer_cert.has("public_key_der") { issuer_cert["public_key_der"] } else { "" })
@@ -1506,7 +1212,6 @@ func tls_ocsp_request(cert, issuer_cert) {
 
 func tls_ocsp_check(cert, issuer_cert, ocsp_url) {
     const request = tls_ocsp_request(cert, issuer_cert)
-    // Delegate actual HTTP request to stage 0
     const response = tls_ocsp_query(ocsp_url, request)
     if response == null {
         return {"status": "unknown", "reason": "OCSP responder unreachable"}
@@ -1522,10 +1227,8 @@ func tls_ocsp_check(cert, issuer_cert, ocsp_url) {
     }
 }
 
-// Process OCSP stapled response from TLS handshake
 func tls_process_stapled_ocsp(stapled_response, cert, issuer_cert) {
     if stapled_response == null { return {"status": "not_stapled"} }
-    // Verify OCSP response signature
     if stapled_response.has("signature") && issuer_cert != null {
         const sig_valid = tls_verify_signature(
             stapled_response["tbs_response"],
@@ -1537,7 +1240,6 @@ func tls_process_stapled_ocsp(stapled_response, cert, issuer_cert) {
             return {"status": "invalid", "reason": "OCSP response signature invalid"}
         }
     }
-    // Check freshness
     if stapled_response.has("next_update") {
         const now = time_now()
         if now > stapled_response["next_update"] {
@@ -1546,13 +1248,7 @@ func tls_process_stapled_ocsp(stapled_response, cert, issuer_cert) {
     }
     {"status": stapled_response["cert_status"]}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Certificate Revocation (CRL) Checking ───────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_check_crl(cert, crl_url) {
-    // Delegate CRL download to stage 0
     const crl = tls_download_crl(crl_url)
     if crl == null {
         return {"revoked": false, "reason": "CRL unavailable"}
@@ -1560,7 +1256,6 @@ func tls_check_crl(cert, crl_url) {
 
     const serial = if cert.has("serial_number") { cert["serial_number"] } else { "" }
 
-    // Check if serial is in revoked list
     if crl.has("revoked_certificates") {
         for entry in crl["revoked_certificates"] {
             if entry["serial_number"] == serial {
@@ -1575,11 +1270,6 @@ func tls_check_crl(cert, crl_url) {
 
     {"revoked": false, "checked_at": time_now()}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Full X.509 Extension Parsing ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_parse_x509_extensions(cert_data) {
     let extensions = []
     if !cert_data.has("extensions") { return extensions }
@@ -1698,11 +1388,6 @@ func tls_parse_certificate_policies(value) {
 func tls_parse_name_constraints(value) {
     {"type": "name_constraints", "permitted": if value.has("permitted") { value["permitted"] } else { [] }, "excluded": if value.has("excluded") { value["excluded"] } else { [] }}
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Certificate Signing Request (CSR) Generation ────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_generate_csr(subject, key_pair, options) {
     const san = if options.has("san") { options["san"] } else { [] }
     const key_usage = if options.has("key_usage") { options["key_usage"] } else { ["digital_signature", "key_encipherment"] }
@@ -1718,7 +1403,6 @@ func tls_generate_csr(subject, key_pair, options) {
         "extensions": [],
     }
 
-    // Add SAN extension
     if len(san) > 0 {
         let san_entries = []
         for name in san {
@@ -1733,7 +1417,6 @@ func tls_generate_csr(subject, key_pair, options) {
         csr["extensions"].push({"oid": "2.5.29.17", "value": san_entries})
     }
 
-    // Add key usage
     if len(key_usage) > 0 {
         let ku = {}
         for usage in key_usage {
@@ -1742,14 +1425,12 @@ func tls_generate_csr(subject, key_pair, options) {
         csr["extensions"].push({"oid": "2.5.29.15", "value": ku, "critical": true})
     }
 
-    // Sign the CSR with the private key
     const tbs = csr_serialize_tbs(csr)
     csr["signature"] = tls_sign(tbs, key_pair["private_key"], signature_algorithm)
     csr
 }
 
 func csr_serialize_tbs(csr) {
-    // Simplified TBS (to-be-signed) serialization
     let tbs = f"CSR:v{csr[\"version\"]}:"
     if csr["subject"].has("CN") { tbs = tbs + f"CN={csr[\"subject\"][\"CN\"]}," }
     if csr["subject"].has("O") { tbs = tbs + f"O={csr[\"subject\"][\"O\"]}," }
@@ -1757,21 +1438,14 @@ func csr_serialize_tbs(csr) {
     tbs = tbs + f":alg={csr[\"public_key_algorithm\"]}"
     tbs
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── PKCS#12 Container Handling ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_pkcs12_create(cert, private_key, password, options) {
     const friendly_name = if options.has("friendly_name") { options["friendly_name"] } else { "" }
     const ca_certs = if options.has("ca_certs") { options["ca_certs"] } else { [] }
 
-    // Delegate actual PKCS#12 creation to stage 0
     tls_pkcs12_export(cert, private_key, password, friendly_name, ca_certs)
 }
 
 func tls_pkcs12_parse(data, password) {
-    // Delegate actual PKCS#12 parsing to stage 0
     const result = tls_pkcs12_import(data, password)
     if result == null {
         return {"error": "failed to parse PKCS#12 container"}
@@ -1782,17 +1456,10 @@ func tls_pkcs12_parse(data, password) {
         "ca_certs": if result.has("ca_certs") { result["ca_certs"] } else { [] },
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Secure Random Number Generation ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Generate cryptographically secure random bytes
 func secure_random(length) {
     tls_random_bytes(length)
 }
 
-// Generate a random integer in range [min, max)
 func secure_random_int(min_val, max_val) {
     if min_val >= max_val { return min_val }
     const range = max_val - min_val
@@ -1801,14 +1468,11 @@ func secure_random_int(min_val, max_val) {
     min_val + (abs(value) % range)
 }
 
-// Generate a random UUID v4
 func secure_random_uuid() {
     const bytes = tls_random_bytes(16)
-    // Set version (4) and variant (RFC4122)
     tls_uuid_from_random_bytes(bytes)
 }
 
-// Generate a random string of specified length from given alphabet
 func secure_random_string(length, alphabet) {
     let result = ""
     const alpha_len = len(alphabet)
@@ -1821,15 +1485,9 @@ func secure_random_string(length, alphabet) {
     result
 }
 
-// Generate random alphanumeric token
 func secure_random_token(length) {
     secure_random_string(length, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Key Agreement (ECDH, X25519) ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func tls_ecdh_generate_keypair(curve) {
     const valid_curves = ["P-256", "P-384", "P-521", "X25519"]
     let found = false
@@ -1838,12 +1496,10 @@ func tls_ecdh_generate_keypair(curve) {
     }
     if !found { panic(f"Unsupported curve: {curve}. Supported: {valid_curves.join(\", \")}") }
 
-    // Delegate key generation to stage 0
     tls_generate_key_pair("ecdh", {"curve": curve})
 }
 
 func tls_ecdh_derive_shared_secret(private_key, peer_public_key, curve) {
-    // Delegate ECDH computation to stage 0
     tls_key_agreement("ecdh", private_key, peer_public_key, {"curve": curve})
 }
 
@@ -1855,12 +1511,10 @@ func tls_x25519_derive_shared_secret(private_key, peer_public_key) {
     tls_ecdh_derive_shared_secret(private_key, peer_public_key, "X25519")
 }
 
-// Ephemeral Diffie-Hellman: generate keypair, derive shared secret, derive key
 func tls_ecdhe_exchange(curve, peer_public_key) {
     const keypair = tls_ecdh_generate_keypair(curve)
     const shared = tls_ecdh_derive_shared_secret(keypair["private_key"], peer_public_key, curve)
 
-    // Derive actual key using HKDF
     const derived = tls_hkdf(shared, "", "tls13 derived", 32)
     {
         "public_key": keypair["public_key"],
@@ -1868,11 +1522,6 @@ func tls_ecdhe_exchange(curve, peer_public_key) {
         "derived_key": derived,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Digital Signature Algorithm Negotiation ─────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 const TLS_SIGNATURE_ALGORITHMS = [
     {"id": 0x0401, "name": "rsa_pkcs1_sha256", "hash": "sha256", "sig": "rsa"},
     {"id": 0x0501, "name": "rsa_pkcs1_sha384", "hash": "sha384", "sig": "rsa"},
@@ -1893,7 +1542,6 @@ func tls_negotiate_signature_algorithm(client_algos, server_cert) {
     for algo_name in client_algos {
         for sa in TLS_SIGNATURE_ALGORITHMS {
             if sa["name"] == algo_name {
-                // Check compatibility with cert type
                 const compatible = match cert_type {
                     "rsa" => sa["sig"] == "rsa" || sa["sig"] == "rsa_pss",
                     "ecdsa" => sa["sig"] == "ecdsa",

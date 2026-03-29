@@ -1,10 +1,3 @@
-// MAGI Self-Hosted Compiler — AST Optimizer
-//
-// Performs AST-level optimizations on a parsed Program.
-// Currently implements: constant folding, dead code elimination, tail call marking.
-
-// ── Constant Folding Helpers ────────────────────────────────────────
-
 func opt_fold_int_binop(op, lv, rv) {
     match op {
         BinOp::Add => lv + rv,
@@ -36,7 +29,6 @@ func opt_fold_bool_binop(op, lv, rv) {
     }
 }
 
-// Try to fold two int literals under a binary op.
 func opt_try_fold_int_lits(op, lv, rv, span) {
     const arith = opt_fold_int_binop(op, lv, rv)
     if arith != null { return make_int_lit(arith, span) }
@@ -45,7 +37,6 @@ func opt_try_fold_int_lits(op, lv, rv, span) {
     null
 }
 
-// Try to fold two string literals under a binary op.
 func opt_try_fold_str_lits(op, ls, rs, span) {
     match op {
         BinOp::Add => make_str_lit(ls + rs, span),
@@ -53,15 +44,12 @@ func opt_try_fold_str_lits(op, ls, rs, span) {
     }
 }
 
-// Try to fold two bool literals under a binary op.
 func opt_try_fold_bool_lits(op, lv, rv, span) {
     const folded = opt_fold_bool_binop(op, lv, rv)
     if folded != null { return make_bool_lit(folded, span) }
     null
 }
 
-// Try to fold two literals under a binary op.
-// Returns a folded Expr or null if not foldable.
 func opt_try_fold_lits(op, ll, rl, span) {
     match ll {
         Literal::IntLit(lv) => {
@@ -107,9 +95,6 @@ func opt_try_fold_unary(op, lit, span) {
         UnOp::Not => opt_try_fold_not(lit, span),
     }
 }
-
-// ── Optimize Expression ─────────────────────────────────────────────
-
 func opt_expr(e) {
     if e == null { return null }
     const k = e.kind
@@ -192,9 +177,6 @@ func opt_expr(e) {
         _ => e,
     }
 }
-
-// ── Dead Code Elimination ───────────────────────────────────────────
-
 func is_terminator(stmt) {
     const k = stmt.kind
     match k {
@@ -216,9 +198,6 @@ func eliminate_dead_stmts(stmts) {
     }
     result
 }
-
-// ── Optimize Block ──────────────────────────────────────────────────
-
 func opt_block(blk) {
     if blk == null { return null }
     const ostmts = blk.stmts.map(s => opt_stmt(s))
@@ -226,9 +205,6 @@ func opt_block(blk) {
     const otail = opt_expr(blk.tail_expr)
     Block { stmts: trimmed, tail_expr: otail, span: blk.span }
 }
-
-// ── Optimize Statement ──────────────────────────────────────────────
-
 func opt_stmt(s) {
     const k = s.kind
     const span = s.span
@@ -269,18 +245,10 @@ func opt_funcdef(fd) {
         is_getter: fd.is_getter, is_setter: fd.is_setter,
     }
 }
-
-// ── Entry Point ─────────────────────────────────────────────────────
-
 func optimize(program) {
     const ostmts = program.statements.map(s => opt_stmt(s))
     Program { statements: ostmts, span: program.span }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Float Constant Folding ─────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_fold_float_binop(op, lv, rv) {
     match op {
         BinOp::Add => lv + rv,
@@ -310,11 +278,6 @@ func opt_try_fold_float_lits(op, lv, rv, span) {
     if cmp != null { return make_bool_lit(cmp, span) }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── String Constant Folding ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_fold_str_comparison(op, ls, rs, span) {
     match op {
         BinOp::Eq    => make_bool_lit(ls == rs, span),
@@ -327,11 +290,6 @@ func opt_fold_str_comparison(op, ls, rs, span) {
         _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Boolean Constant Folding ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_fold_bool_comparison(op, lv, rv, span) {
     match op {
         BinOp::Eq    => make_bool_lit(lv == rv, span),
@@ -341,11 +299,6 @@ func opt_fold_bool_comparison(op, lv, rv, span) {
         _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Literal Folding (ALL types) ───────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_try_fold_lits_full(op, ll, rl, span) {
     match ll {
         Literal::IntLit(lv) => {
@@ -377,17 +330,10 @@ func opt_try_fold_lits_full(op, ll, rl, span) {
         _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Strength Reduction ─────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_strength_reduce(op, left, right, span) {
-    // Check for x * 0 => 0, x * 1 => x, x + 0 => x, x * 2 => x + x
     const lk = left.kind
     const rk = right.kind
 
-    // Right operand is a literal
     match rk {
         ExprKind::ELiteral(rl) => {
             match rl {
@@ -420,7 +366,6 @@ func opt_strength_reduce(op, left, right, span) {
         _ => null,
     }
 
-    // Left operand is a literal
     match lk {
         ExprKind::ELiteral(ll) => {
             match ll {
@@ -445,11 +390,6 @@ func opt_strength_reduce(op, left, right, span) {
         _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Unused Variable Elimination ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func collect_used_names(expr) {
     if expr == null { return [] }
     let names = []
@@ -542,7 +482,6 @@ func collect_used_names_stmt(s) {
 }
 
 func eliminate_unused_vars(stmts) {
-    // Collect all names used in the program
     let all_used = []
     for s in stmts {
         all_used = all_used.concat(collect_used_names_stmt(s))
@@ -553,7 +492,6 @@ func eliminate_unused_vars(stmts) {
         used_set[name] = true
     }
 
-    // Filter out unused let bindings (keep assignments, returns, etc.)
     let result = []
     for s in stmts {
         const k = s.kind
@@ -571,17 +509,11 @@ func eliminate_unused_vars(stmts) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Tail Call Optimization Marking ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_mark_tail_calls(funcdef) {
     const name = funcdef.name
     const body = funcdef.body
     if body == null { return funcdef }
 
-    // Check if the last statement is a return with a recursive call
     const stmts = body.stmts
     if len(stmts) == 0 { return funcdef }
 
@@ -609,7 +541,6 @@ func opt_mark_tail_in_stmt(stmt, func_name) {
                 match ek {
                     ExprKind::ECall(name, _, _) => {
                         if name == func_name {
-                            // Mark as tail call by wrapping
                             return stmt_new(StmtKind::SReturn(
                                 expr_new(ExprKind::ETailCall(name, expr), span)
                             ), span)
@@ -638,11 +569,6 @@ func opt_mark_tail_in_block(blk, func_name) {
     new_stmts.push(marked)
     Block { stmts: new_stmts, tail_expr: blk.tail_expr, span: blk.span }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Function Inlining ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_is_pure_expr(expr) {
     if expr == null { return true }
     const k = expr.kind
@@ -660,10 +586,8 @@ func opt_is_pure_expr(expr) {
 func opt_is_small_function(funcdef) {
     const body = funcdef.body
     if body == null { return false }
-    // Small: 1-2 statements, all pure expressions
     if len(body.stmts) > 2 { return false }
     if len(funcdef.params) > 3 { return false }
-    // Check no self-recursion
     for s in body.stmts {
         if opt_stmt_contains_call(s, funcdef.name) { return false }
     }
@@ -699,7 +623,6 @@ func opt_expr_contains_call(expr, name) {
     }
 }
 
-// Collect small function definitions for potential inlining
 func opt_collect_inlinable(stmts) {
     let funcs = {"__s": true}
     for s in stmts {
@@ -715,13 +638,7 @@ func opt_collect_inlinable(stmts) {
     }
     funcs
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Constant Propagation ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_propagate_constants(stmts) {
-    // Build a map of const name -> literal value
     let constants = {"__s": true}
     for s in stmts {
         const k = s.kind
@@ -741,9 +658,8 @@ func opt_propagate_constants(stmts) {
         }
     }
 
-    if len(keys(constants)) <= 1 { return stmts }  // only __s
+    if len(keys(constants)) <= 1 { return stmts }
 
-    // Replace references to constants with their literal values
     stmts.map(s => opt_propagate_stmt(s, constants))
 }
 
@@ -816,13 +732,7 @@ func opt_propagate_block(blk, constants) {
     const ptail = opt_propagate_expr(blk.tail_expr, constants)
     Block { stmts: pstmts, tail_expr: ptail, span: blk.span }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Loop Invariant Detection ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_find_loop_invariants(loop_body, modified_vars) {
-    // Find expressions in the loop body that don't depend on modified variables
     let invariants = []
     for s in loop_body.stmts {
         const k = s.kind
@@ -865,7 +775,6 @@ func opt_expr_uses_any(expr, vars) {
             opt_expr_uses_any(left, vars) || opt_expr_uses_any(right, vars),
         ExprKind::EUnaryOp(_, operand) => opt_expr_uses_any(operand, vars),
         ExprKind::ECall(_, args, _) => {
-            // Calls may have side effects, consider as using modified vars
             true
         },
         ExprKind::EMethodCall(_, _, _, _) => true,
@@ -875,13 +784,7 @@ func opt_expr_uses_any(expr, vars) {
         _ => false,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Common Subexpression Elimination ───────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_expr_key(expr) {
-    // Generate a string key for an expression for CSE comparison
     if expr == null { return "null" }
     const k = expr.kind
     match k {
@@ -915,7 +818,6 @@ func opt_find_common_subexprs(stmts) {
         opt_count_subexprs_stmt(s, expr_counts, expr_map)
     }
 
-    // Return expressions that appear more than once
     let common = []
     for key in keys(expr_counts) {
         if key == "__s" { continue }
@@ -942,7 +844,6 @@ func opt_count_subexprs_stmt(s, counts, exprs) {
 func opt_count_subexprs(expr, counts, exprs) {
     if expr == null { return }
     const key = opt_expr_key(expr)
-    // Only track non-trivial expressions
     if key.starts_with("int:") || key.starts_with("str:") || key.starts_with("bool:") || key.starts_with("id:") {
         return
     }
@@ -953,7 +854,6 @@ func opt_count_subexprs(expr, counts, exprs) {
         exprs[key] = expr
     }
 
-    // Recurse
     const k = expr.kind
     match k {
         ExprKind::EBinaryOp(_, left, right) => {
@@ -967,11 +867,6 @@ func opt_count_subexprs(expr, counts, exprs) {
         _ => {},
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Branch Simplification ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_simplify_if(cond, then_b, else_b, span) {
     const ck = cond.kind
     match ck {
@@ -980,7 +875,6 @@ func opt_simplify_if(cond, then_b, else_b, span) {
                 Literal::BoolLit(b) => {
                     if b { return stmt_new(StmtKind::SBlock(then_b), span) }
                     if else_b != null { return stmt_new(StmtKind::SBlock(else_b), span) }
-                    // if false without else -> no-op
                     return stmt_new(StmtKind::SExprStmt(make_null_lit(span)), span)
                 },
                 _ => null,
@@ -989,13 +883,7 @@ func opt_simplify_if(cond, then_b, else_b, span) {
         _ => null,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Match Simplification ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_simplify_match(expr, arms, span) {
-    // Single-arm match with wildcard => just the body
     if len(arms) == 1 {
         const arm = arms[0]
         if arm.has("pattern") {
@@ -1007,13 +895,7 @@ func opt_simplify_match(expr, arms, span) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Expression Flattening ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_flatten_block(blk, span) {
-    // Block with a single expression statement -> that expression
     if blk == null { return null }
     if len(blk.stmts) == 0 && blk.tail_expr != null {
         return blk.tail_expr
@@ -1028,11 +910,6 @@ func opt_flatten_block(blk, span) {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Unreachable Branch Elimination ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_is_always_true(expr) {
     const k = expr.kind
     match k {
@@ -1070,18 +947,15 @@ func opt_eliminate_unreachable_branches(stmts) {
         const k = s.kind
         match k {
             StmtKind::SWhileLoop(label, cond, body) => {
-                // while false { ... } -> remove entirely
                 if opt_is_always_false(cond) { continue }
                 result.push(s)
             },
             StmtKind::SIf(cond, then_b, else_b) => {
                 if opt_is_always_true(cond) {
-                    // Inline the then block
                     for ts in then_b.stmts {
                         result.push(ts)
                     }
                 } else if opt_is_always_false(cond) {
-                    // Inline the else block if present
                     if else_b != null {
                         for es in else_b.stmts {
                             result.push(es)
@@ -1096,11 +970,6 @@ func opt_eliminate_unreachable_branches(stmts) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Optimizer Expression Pass ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_expr_full(e) {
     if e == null { return null }
     const k = e.kind
@@ -1110,7 +979,6 @@ func opt_expr_full(e) {
             const ol = opt_expr_full(left)
             const or_ = opt_expr_full(right)
 
-            // Try full constant folding (all types)
             const lk = ol.kind
             const rk = or_.kind
             match lk {
@@ -1126,7 +994,6 @@ func opt_expr_full(e) {
                 _ => null,
             }
 
-            // Try strength reduction
             const reduced = opt_strength_reduce(op, ol, or_, span)
             if reduced != null { return reduced }
 
@@ -1167,7 +1034,6 @@ func opt_expr_full(e) {
         },
         ExprKind::EBlock(blk) => {
             const ob = opt_block_full(blk)
-            // Try to flatten single-expression blocks
             const flat = opt_flatten_block(ob, span)
             if flat != null { return flat }
             expr_new(ExprKind::EBlock(ob), span)
@@ -1196,11 +1062,6 @@ func opt_expr_full(e) {
         _ => e,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Enhanced Block Optimization ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_block_full(blk) {
     if blk == null { return null }
     let ostmts = blk.stmts.map(s => opt_stmt_full(s))
@@ -1253,45 +1114,28 @@ func opt_funcdef_full(fd) {
     })
     marked
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Optimization Pipeline ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func optimize_full(program) {
-    // Pass 1: Constant propagation
     let stmts = opt_propagate_constants(program.statements)
 
-    // Pass 2: Full optimization (constant folding, strength reduction, DCE, branch simplification)
     stmts = stmts.map(s => opt_stmt_full(s))
 
-    // Pass 3: Unused variable elimination
     stmts = eliminate_unused_vars(stmts)
 
-    // Pass 4: Eliminate unreachable branches at top level
     stmts = opt_eliminate_unreachable_branches(stmts)
 
-    // Pass 5: Dead code elimination
     stmts = eliminate_dead_stmts(stmts)
 
     Program { statements: stmts, span: program.span }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Loop Unrolling for Constant Ranges ──────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-const UNROLL_THRESHOLD = 8  // Only unroll loops with this many or fewer iterations
+const UNROLL_THRESHOLD = 8
 
 func opt_try_unroll_for(var_name, collection, body) {
-    // Check if collection is a constant range: range(N) or [literal, literal, ...]
     const range_info = opt_extract_constant_range(collection)
     if range_info == null { return null }
 
     const values = range_info["values"]
     if len(values) > UNROLL_THRESHOLD { return null }
 
-    // Unroll: replace loop body with N copies, substituting var_name with value
     let unrolled = []
     for val in values {
         for stmt in body.statements {
@@ -1308,7 +1152,6 @@ func opt_extract_constant_range(expr) {
 
     match k {
         ExprKind::ECall("range", args, _) => {
-            // range(end) or range(start, end) or range(start, end, step)
             if len(args) == 1 {
                 const end_val = opt_get_int_literal(args[0])
                 if end_val != null && end_val >= 0 && end_val <= UNROLL_THRESHOLD {
@@ -1331,7 +1174,6 @@ func opt_extract_constant_range(expr) {
             null
         },
         ExprKind::ELiteral(Literal::ArrayLit(elems)) => {
-            // Check if all elements are literal
             let values = []
             for elem in elems {
                 const val = opt_get_literal_value(elem)
@@ -1369,15 +1211,8 @@ func opt_get_literal_value(expr) {
 }
 
 func opt_substitute_var(stmt, var_name, value) {
-    // Deep clone with substitution (simplified)
-    stmt  // Full substitution requires AST rewrite; placeholder for stage 0
+    stmt
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Array Literal Optimization ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Optimize array literals by pre-computing constant elements
 func opt_array_literal(elems, span) {
     let all_const = true
     let optimized = []
@@ -1392,16 +1227,13 @@ func opt_array_literal(elems, span) {
         }
     }
 
-    // If all elements are constants, mark as frozen array
     if all_const && len(optimized) > 0 {
-        // Return optimized array literal (could be interned in a future pass)
         expr_new(ExprKind::ELiteral(Literal::ArrayLit(optimized)), span)
     } else {
         expr_new(ExprKind::ELiteral(Literal::ArrayLit(optimized)), span)
     }
 }
 
-// Optimize repeated push to array: convert to array literal if possible
 func opt_array_push_chain(stmts) {
     let result = []
     let current_arr = null
@@ -1412,7 +1244,6 @@ func opt_array_push_chain(stmts) {
         const sk = stmt.kind
         match sk {
             StmtKind::SLet(name, init) | StmtKind::SConst(name, init) => {
-                // Check if initializer is empty array
                 if init != null {
                     const ik = init.kind
                     match ik {
@@ -1429,7 +1260,6 @@ func opt_array_push_chain(stmts) {
                     }
                 }
                 if current_name != null && len(collected) > 0 {
-                    // Emit collected pushes as array literal
                     opt_flush_array_pushes(result, current_name, collected)
                     current_name = null
                     collected = []
@@ -1488,9 +1318,6 @@ func opt_extract_push(expr, arr_name) {
 }
 
 func opt_flush_array_pushes(result, arr_name, elements) {
-    // Replace the last empty-array declaration with a populated one
-    // This is a hint; actual rewrite happens at a later stage
-    // For now, just leave pushes as-is
     for elem in elements {
         result.push(stmt_new(StmtKind::SExprStmt(
             expr_new(ExprKind::EMethodCall(
@@ -1502,11 +1329,6 @@ func opt_flush_array_pushes(result, arr_name, elements) {
         ), null))
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Map Literal Optimization ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func opt_map_literal(entries, span) {
     let all_const = true
     let optimized = []
@@ -1522,13 +1344,11 @@ func opt_map_literal(entries, span) {
         }
     }
 
-    // Check for duplicate keys
     let seen_keys = {"__s": true}
     let deduped = []
     for entry in optimized {
         const key = entry[0]
         if seen_keys.has(key) {
-            // Later duplicate overwrites earlier — keep last
             let i = 0
             for d in deduped {
                 if d[0] == key { deduped[i] = entry; break }
@@ -1542,20 +1362,13 @@ func opt_map_literal(entries, span) {
 
     expr_new(ExprKind::ELiteral(Literal::MapLit(deduped)), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Inline Caching Hints ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Mark function calls that are monomorphic (always same target) for inline caching
 func opt_analyze_call_sites(stmts) {
-    let call_targets = {"__s": true}  // call_site_id -> [target_names]
+    let call_targets = {"__s": true}
 
     for stmt in stmts {
         opt_collect_call_targets(stmt, call_targets)
     }
 
-    // Find monomorphic call sites
     let monomorphic = {"__s": true}
     for site in call_targets.keys() {
         if site == "__s" { continue }
@@ -1568,7 +1381,6 @@ func opt_analyze_call_sites(stmts) {
 }
 
 func opt_collect_call_targets(stmt, targets) {
-    // Walk AST collecting call site -> target function name mappings
     const sk = stmt.kind
     match sk {
         StmtKind::SExprStmt(expr) => opt_collect_expr_calls(expr, targets),
@@ -1609,7 +1421,6 @@ func opt_collect_expr_calls(expr, targets) {
     }
 }
 
-// Generate inline cache hints for monomorphic sites
 func opt_inline_cache_hints(stmts) {
     const mono = opt_analyze_call_sites(stmts)
     let hints = []

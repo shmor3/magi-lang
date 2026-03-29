@@ -1,17 +1,3 @@
-// MAGI Self-Hosted Compiler — IR Virtual Machine
-//
-// Stack-based interpreter for the IR instruction set.
-// Entry point: run_ir(module_snapshot) -> array (output lines)
-//
-// DESIGN: Fully iterative VM. No recursive execution functions.
-// Uses an explicit call stack (vm_call_stack) for function calls.
-// Control flow (loop/if) is handled with a frame stack (vm_frame_stack).
-//
-// NOTE: Uses module-level globals for instruction buffer to avoid
-// the MAGI len() bug on array parameters extracted from nested maps.
-
-// ── VM State (module-level mutable) ──────────────────────────────
-
 let vm_stack = []
 let vm_locals = []
 let vm_globals = []
@@ -19,21 +5,13 @@ let vm_output = []
 let vm_strings = []
 let vm_functions = []
 
-// Flat instruction buffer for current function
 let vm_instrs = []
 let vm_n = 0
 let vm_ip = 0
 
-// Frame stack for nested control flow (loop/if/block inside current function)
-// Each frame: { "type": "loop"/"if"/"if_void"/"block", "start": int, "end": int }
 let vm_frame_stack = []
 
-// Call stack: saved frames when calling a sub-function
-// Each entry: { "instrs", "n", "ip", "stack", "locals", "frames" }
 let vm_call_stack = []
-
-// ── Stack Helpers ─────────────────────────────────────────────────
-
 func vm_push(v) { vm_stack.push(v) }
 
 func vm_pop() {
@@ -48,9 +26,6 @@ func vm_peek() {
     const n = len(vm_stack)
     if n == 0 { null } else { vm_stack[n - 1] }
 }
-
-// ── Value Helpers ─────────────────────────────────────────────────
-
 func vm_truthy(v) {
     if v == null { return false }
     if v == false { return false }
@@ -63,10 +38,6 @@ func vm_str(v) {
     if v == null { return "null" }
     to_string(v)
 }
-
-// ── Scan helpers ─────────────────────────────────────────────────
-// Operate on vm_instrs + vm_n globals.
-
 func vm_scan_end(from) {
     let depth = 1
     let i = from
@@ -84,7 +55,6 @@ func vm_scan_end(from) {
 }
 
 func vm_scan_else_end(from) {
-    // Returns [else_or_end_pos, has_else]
     let depth = 1
     let i = from
     while i < vm_n {
@@ -101,21 +71,7 @@ func vm_scan_else_end(from) {
     }
     [vm_n, false]
 }
-
-// ── Setup function frame ──────────────────────────────────────────
-// IMPORTANT: vm_n and vm_instrs must be set BEFORE calling vm_setup_func.
-// Call vm_prepare_instrs(f) at call-site to set vm_instrs/vm_n safely,
-// then call vm_setup_func(f, args) which must NOT call len() on any
-// array derived from f's map fields (MAGI interpreter bug: calling len()
-// inside a function on an array from a parameter's map field corrupts
-// subsequent .dump() calls on enum variants with int payloads).
-
 func vm_setup_func(f, args) {
-    // IMPORTANT: do NOT call len() on f["instructions"] or f["locals"] here.
-    // Those arrays contain enum variants; calling len() on param-derived enum arrays
-    // corrupts subsequent .dump() calls (MAGI interpreter bug).
-    // Instead, use the pre-computed counts stored in the function map by the compiler:
-    //   f["instruction_count"] and f["local_count"]
     vm_instrs = f["instructions"]
     vm_n = f["instruction_count"]
     vm_ip = 0
@@ -132,9 +88,6 @@ func vm_setup_func(f, args) {
         vm_locals.push(null)
     }
 }
-
-// ── Runtime + builtin dispatch ────────────────────────────────────
-
 func vm_rt(name, arg) {
     match name {
         "to_string" => vm_str(arg),
@@ -144,11 +97,6 @@ func vm_rt(name, arg) {
         _ => null,
     }
 }
-
-// ── Main Execution Loop ───────────────────────────────────────────
-// Runs until vm_ip >= vm_n or return. Returns final result.
-// Call stack is managed by vm_call_stack (saved/restored when calling functions).
-
 func vm_exec() {
     let result = null
     let running = true
@@ -305,7 +253,6 @@ func vm_exec() {
         } else if d.slice(0, 5) == "call(" {
             match instr {
                 Instruction::Call(cname, argc) => {
-                    // Collect args from stack (reversed)
                     let cargs = []
                     let ci = 0
                     while ci < argc {
@@ -318,7 +265,6 @@ func vm_exec() {
                         rargs.push(cargs[ri])
                         ri = ri - 1
                     }
-                    // Try user-defined function
                     let found_f = null
                     let fi = 0
                     while fi < len(vm_functions) {
@@ -327,7 +273,6 @@ func vm_exec() {
                         fi = fi + 1
                     }
                     if found_f != null {
-                        // Save current frame to call stack
                         const saved = {
                             "instrs": vm_instrs,
                             "n": vm_n,
@@ -337,10 +282,8 @@ func vm_exec() {
                             "frames": vm_frame_stack,
                         }
                         vm_call_stack.push(saved)
-                        // Set up callee
                         vm_setup_func(found_f, rargs)
                     } else {
-                        // Builtin
                         const br = vm_builtin(cname, rargs)
                         vm_push(br)
                     }
@@ -350,7 +293,6 @@ func vm_exec() {
 
         } else if d == "return" {
             result = vm_pop()
-            // Restore caller frame if any
             const cs_n = len(vm_call_stack)
             if cs_n > 0 {
                 const saved = vm_call_stack[cs_n - 1]
@@ -361,18 +303,15 @@ func vm_exec() {
                 vm_stack = saved["stack"]
                 vm_locals = saved["locals"]
                 vm_frame_stack = saved["frames"]
-                // Push return value onto caller stack
                 vm_push(result)
             } else {
                 running = false
             }
 
         } else if d == "loop" {
-            // Push a loop frame so BrIf/Br can find boundaries
             const loop_end = vm_scan_end(vm_ip)
             const frame = { "type": "loop", "start": vm_ip, "end": loop_end }
             vm_frame_stack.push(frame)
-            // Continue executing into loop body
 
         } else if d == "if" {
             const cond = vm_pop()
@@ -381,18 +320,14 @@ func vm_exec() {
             const has_else = locs[1]
             const end_pos = if has_else { vm_scan_end(split + 1) } else { split }
             if vm_truthy(cond) {
-                // Execute then branch; push frame to skip else
                 const frame = { "type": "if", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
                 vm_frame_stack.push(frame)
-                // ip stays at vm_ip (first instr of then-branch)
             } else {
                 if has_else {
-                    // Jump to else branch
                     const frame = { "type": "if", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
                     vm_frame_stack.push(frame)
                     vm_ip = split + 1
                 } else {
-                    // No else: push null, skip to end
                     vm_push(null)
                     vm_ip = split + 1
                 }
@@ -407,7 +342,6 @@ func vm_exec() {
             if vm_truthy(cond) {
                 const frame = { "type": "if_void", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
                 vm_frame_stack.push(frame)
-                // ip stays at vm_ip
             } else {
                 if has_else {
                     const frame = { "type": "if_void", "start": vm_ip, "end": end_pos, "split": split, "has_else": has_else }
@@ -419,7 +353,6 @@ func vm_exec() {
             }
 
         } else if d == "else" {
-            // Hit else during then-branch execution: jump to end
             const fns = len(vm_frame_stack)
             if fns > 0 {
                 const fr = vm_frame_stack[fns - 1]
@@ -428,18 +361,13 @@ func vm_exec() {
             }
 
         } else if d == "end" {
-            // End of if/loop/block frame
             const fns = len(vm_frame_stack)
             if fns > 0 {
                 const fr = vm_frame_stack[fns - 1]
                 if fr["type"] == "loop" {
-                    // Loop: jump back to start (re-enter loop body)
                     vm_ip = fr["start"]
-                    // Frame stays on stack
                 } else {
-                    // if/if_void/block: pop frame
                     vm_frame_stack = vm_frame_stack.slice(0, fns - 1)
-                    // After end, push null if this was a non-void if with no else
                 }
             }
 
@@ -467,18 +395,13 @@ func vm_exec() {
                 _ => {},
             }
         }
-        // Unknown instructions silently skipped
     }
 
     result
 }
-
-// ── Branch helper ─────────────────────────────────────────────────
-// Pop `depth` frames and return new ip.
-
 func vm_br(depth) {
     let bd = depth
-    let target_ip = vm_n  // default: exit function
+    let target_ip = vm_n
     let fns = len(vm_frame_stack)
     while bd >= 0 && fns > 0 {
         const fr = vm_frame_stack[fns - 1]
@@ -486,14 +409,13 @@ func vm_br(depth) {
         fns = fns - 1
         if bd == 0 {
             if fr["type"] == "loop" {
-                // Br(0) on loop = continue (jump to start, re-push frame)
                 vm_frame_stack.push(fr)
                 fns = fns + 1
                 target_ip = fr["start"]
             } else {
                 target_ip = fr["end"] + 1
             }
-            bd = -1  // done
+            bd = -1
         } else {
             bd = bd - 1
             target_ip = fr["end"] + 1
@@ -501,9 +423,6 @@ func vm_br(depth) {
     }
     target_ip
 }
-
-// ── Builtins ─────────────────────────────────────────────────────
-
 func vm_builtin(name, args) {
     match name {
         "println" => {
@@ -527,9 +446,6 @@ func vm_builtin(name, args) {
         _ => null,
     }
 }
-
-// ── Entry Point ───────────────────────────────────────────────────
-
 func run_ir(module_snapshot) {
     vm_stack = []
     vm_locals = []
@@ -552,41 +468,26 @@ func run_ir(module_snapshot) {
     vm_exec()
     vm_output
 }
-
-// ── Pipeline ─────────────────────────────────────────────────────
-
 func compile_and_run(source) {
     const program = parse(source)
     const module = compile_to_ir(program)
     run_ir(module)
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// FULL WASM OPCODE INTERPRETER — ALL 198 OPCODES
-// ════════════════════════════════════════════════════════════════════════
-//
-// Stack-machine WASM interpreter operating on raw bytecode.
-// State: wvm_memory (byte array), wvm_globals, wvm_stack, wvm_locals.
-
-// ── WASM VM State ──────────────────────────────────────────────────
-
-let wvm_memory = []        // linear memory (bytes)
-let wvm_globals = []       // global values
-let wvm_stack = []         // value stack
-let wvm_locals = []        // current function locals
-let wvm_call_stack = []    // call frames
-let wvm_types = []         // function type signatures
-let wvm_code = []          // function bodies (arrays of ints)
-let wvm_func_type_indices = []  // maps func index → type index
-let wvm_imports = []       // import definitions
-let wvm_exports = {}       // export map: name → { kind, index }
-let wvm_func_table = []    // function table for indirect calls
-let wvm_host_fns = {}      // host function map: name → function
+let wvm_memory = []
+let wvm_globals = []
+let wvm_stack = []
+let wvm_locals = []
+let wvm_call_stack = []
+let wvm_types = []
+let wvm_code = []
+let wvm_func_type_indices = []
+let wvm_imports = []
+let wvm_exports = {}
+let wvm_func_table = []
+let wvm_host_fns = {}
 let wvm_num_imports = 0
-let wvm_output = []        // collected output
-
-// ── WASM VM Stack Helpers ──────────────────────────────────────────
-
+let wvm_output = []
 func wvm_push(v) { wvm_stack.push(v) }
 
 func wvm_pop() {
@@ -611,9 +512,6 @@ func wvm_pop_f64() {
     const v = wvm_pop()
     v
 }
-
-// ── LEB128 Decoding ────────────────────────────────────────────────
-
 func wvm_read_u32(code, pos) {
     let result = 0
     let shift = 0
@@ -640,7 +538,6 @@ func wvm_read_i32(code, pos) {
         shift = shift + 7
         if (b & 128) == 0 {
             if shift < 32 && (b & 64) != 0 {
-                // Sign extend
                 result = result - (1 << shift)
             }
             return [result, p - pos]
@@ -671,7 +568,6 @@ func wvm_read_i64(code, pos) {
 }
 
 func wvm_read_f64(code, pos) {
-    // Read 8 LE bytes as i64 bit pattern
     let result = 0
     let i = 0
     while i < 8 {
@@ -690,9 +586,6 @@ func wvm_read_memarg(code, pos) {
     const c2 = r2[1]
     [align, offset, c1 + c2]
 }
-
-// ── Memory Operations ──────────────────────────────────────────────
-
 func wvm_mem_ensure(addr, size) {
     while len(wvm_memory) < addr + size {
         wvm_memory.push(0)
@@ -717,7 +610,7 @@ func wvm_mem_read_i64(addr) {
 }
 
 func wvm_mem_read_f64(addr) {
-    wvm_mem_read_i64(addr)  // bit pattern
+    wvm_mem_read_i64(addr)
 }
 
 func wvm_mem_write_i32(addr, val) {
@@ -741,7 +634,7 @@ func wvm_mem_write_i64(addr, val) {
 }
 
 func wvm_mem_write_f64(addr, val) {
-    wvm_mem_write_i64(addr, val)  // bit pattern
+    wvm_mem_write_i64(addr, val)
 }
 
 func wvm_mem_read_u8(addr) {
@@ -766,10 +659,6 @@ func wvm_mem_write_i16(addr, val) {
     wvm_memory[addr] = val & 255
     wvm_memory[addr + 1] = (val >> 8) & 255
 }
-
-// ── Block stack helpers ────────────────────────────────────────────
-
-// Each block entry: { "pc_end": int, "stack_depth": int, "is_loop": bool, "loop_start": int }
 let wvm_block_stack = []
 
 func wvm_find_end(code, start) {
@@ -779,7 +668,7 @@ func wvm_find_end(code, start) {
         const op = code[pc]
         if op == 0x02 || op == 0x03 || op == 0x04 {
             depth = depth + 1
-            pc = pc + 2  // opcode + blocktype
+            pc = pc + 2
         } else if op == 0x0B {
             depth = depth - 1
             if depth == 0 { return pc + 1 }
@@ -871,23 +760,15 @@ func wvm_do_branch(depth) {
     if depth >= len(wvm_block_stack) { return len(wvm_code) }
     const target_idx = len(wvm_block_stack) - 1 - depth
     const entry = wvm_block_stack[target_idx]
-    // Pop blocks above target
     while len(wvm_block_stack) > target_idx + 1 {
         wvm_block_stack = wvm_block_stack.slice(0, len(wvm_block_stack) - 1)
     }
     if entry["is_loop"] {
-        // Loop: branch back to loop start
         return entry["loop_start"]
     }
-    // Block: branch to end
     wvm_block_stack = wvm_block_stack.slice(0, len(wvm_block_stack) - 1)
     entry["pc_end"]
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// WASM OPCODE EXECUTION — ALL OPCODES
-// ════════════════════════════════════════════════════════════════════════
-
 func wvm_exec_code(code) {
     let pc = 0
     let iter_count = 0
@@ -900,31 +781,26 @@ func wvm_exec_code(code) {
         const op = code[pc]
         pc = pc + 1
 
-        // ── 0x00 unreachable ────────────────────────────────
         if op == 0x00 {
-            return 0  // trap
+            return 0
         }
 
-        // ── 0x01 nop ────────────────────────────────────────
         else if op == 0x01 {}
 
-        // ── 0x02 block ──────────────────────────────────────
         else if op == 0x02 {
-            pc = pc + 1  // skip blocktype
+            pc = pc + 1
             const end_pc = wvm_find_end(code, pc)
             wvm_block_stack.push({ "pc_end": end_pc, "stack_depth": len(wvm_stack), "is_loop": false, "loop_start": 0 })
         }
 
-        // ── 0x03 loop ──────────────────────────────────────
         else if op == 0x03 {
             pc = pc + 1
             const end_pc = wvm_find_end(code, pc)
             wvm_block_stack.push({ "pc_end": end_pc, "stack_depth": len(wvm_stack), "is_loop": true, "loop_start": pc })
         }
 
-        // ── 0x04 if ────────────────────────────────────────
         else if op == 0x04 {
-            pc = pc + 1  // skip blocktype
+            pc = pc + 1
             const cond = wvm_pop()
             const end_pc = wvm_find_end(code, pc)
             const else_pc = wvm_find_else(code, pc)
@@ -938,7 +814,6 @@ func wvm_exec_code(code) {
             }
         }
 
-        // ── 0x05 else ──────────────────────────────────────
         else if op == 0x05 {
             const n = len(wvm_block_stack)
             if n > 0 {
@@ -948,7 +823,6 @@ func wvm_exec_code(code) {
             }
         }
 
-        // ── 0x0B end ───────────────────────────────────────
         else if op == 0x0B {
             const n = len(wvm_block_stack)
             if n == 0 {
@@ -957,20 +831,17 @@ func wvm_exec_code(code) {
             wvm_block_stack = wvm_block_stack.slice(0, n - 1)
         }
 
-        // ── 0x0C br ────────────────────────────────────────
         else if op == 0x0C {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             pc = wvm_do_branch(r[0])
         }
 
-        // ── 0x0D br_if ─────────────────────────────────────
         else if op == 0x0D {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const cond = wvm_pop()
             if cond != 0 { pc = wvm_do_branch(r[0]) }
         }
 
-        // ── 0x0E br_table ──────────────────────────────────
         else if op == 0x0E {
             const cr = wvm_read_u32(code, pc); pc = pc + cr[1]
             const count = cr[0]
@@ -988,32 +859,25 @@ func wvm_exec_code(code) {
             pc = wvm_do_branch(target)
         }
 
-        // ── 0x0F return ────────────────────────────────────
         else if op == 0x0F {
             return if len(wvm_stack) > 0 { wvm_stack[len(wvm_stack) - 1] } else { 0 }
         }
 
-        // ── 0x10 call ──────────────────────────────────────
         else if op == 0x10 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const func_idx = r[0]
-            // Save state and call function
-            // For now, push 0 as placeholder result
             wvm_push(0)
         }
 
-        // ── 0x11 call_indirect ─────────────────────────────
         else if op == 0x11 {
             const r1 = wvm_read_u32(code, pc); pc = pc + r1[1]
             const r2 = wvm_read_u32(code, pc); pc = pc + r2[1]
-            const idx = wvm_pop()  // table index from stack
-            wvm_push(0)  // placeholder result
+            const idx = wvm_pop()
+            wvm_push(0)
         }
 
-        // ── 0x1A drop ──────────────────────────────────────
         else if op == 0x1A { wvm_pop() }
 
-        // ── 0x1B select ────────────────────────────────────
         else if op == 0x1B {
             const c = wvm_pop()
             const b = wvm_pop()
@@ -1021,13 +885,11 @@ func wvm_exec_code(code) {
             wvm_push(if c != 0 { a } else { b })
         }
 
-        // ── 0x20 local.get ─────────────────────────────────
         else if op == 0x20 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             wvm_push(if r[0] < len(wvm_locals) { wvm_locals[r[0]] } else { 0 })
         }
 
-        // ── 0x21 local.set ─────────────────────────────────
         else if op == 0x21 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const v = wvm_pop()
@@ -1035,7 +897,6 @@ func wvm_exec_code(code) {
             wvm_locals[r[0]] = v
         }
 
-        // ── 0x22 local.tee ─────────────────────────────────
         else if op == 0x22 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const v = if len(wvm_stack) > 0 { wvm_stack[len(wvm_stack) - 1] } else { 0 }
@@ -1043,13 +904,11 @@ func wvm_exec_code(code) {
             wvm_locals[r[0]] = v
         }
 
-        // ── 0x23 global.get ────────────────────────────────
         else if op == 0x23 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             wvm_push(if r[0] < len(wvm_globals) { wvm_globals[r[0]] } else { 0 })
         }
 
-        // ── 0x24 global.set ────────────────────────────────
         else if op == 0x24 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const v = wvm_pop()
@@ -1057,35 +916,30 @@ func wvm_exec_code(code) {
             wvm_globals[r[0]] = v
         }
 
-        // ── 0x28 i32.load ──────────────────────────────────
         else if op == 0x28 {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
             wvm_push(wvm_mem_read_i32(addr))
         }
 
-        // ── 0x29 i64.load ──────────────────────────────────
         else if op == 0x29 {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
             wvm_push(wvm_mem_read_i64(addr))
         }
 
-        // ── 0x2A f32.load ──────────────────────────────────
         else if op == 0x2A {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
             wvm_push(wvm_mem_read_i32(addr))
         }
 
-        // ── 0x2B f64.load ──────────────────────────────────
         else if op == 0x2B {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
             wvm_push(wvm_mem_read_i64(addr))
         }
 
-        // ── 0x2C i32.load8_s ───────────────────────────────
         else if op == 0x2C {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
@@ -1093,21 +947,18 @@ func wvm_exec_code(code) {
             wvm_push(if v >= 128 { v - 256 } else { v })
         }
 
-        // ── 0x2D i32.load8_u ───────────────────────────────
         else if op == 0x2D {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
             wvm_push(wvm_mem_read_u8(addr))
         }
 
-        // ── 0x2E i32.load16_s ──────────────────────────────
         else if op == 0x2E {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const addr = wvm_pop() + ma[1]
             wvm_push(wvm_mem_read_i16(addr))
         }
 
-        // ── 0x36 i32.store ─────────────────────────────────
         else if op == 0x36 {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const val = wvm_pop()
@@ -1115,7 +966,6 @@ func wvm_exec_code(code) {
             wvm_mem_write_i32(addr, val)
         }
 
-        // ── 0x37 i64.store ─────────────────────────────────
         else if op == 0x37 {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const val = wvm_pop()
@@ -1123,7 +973,6 @@ func wvm_exec_code(code) {
             wvm_mem_write_i64(addr, val)
         }
 
-        // ── 0x38 f32.store ─────────────────────────────────
         else if op == 0x38 {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const val = wvm_pop()
@@ -1131,7 +980,6 @@ func wvm_exec_code(code) {
             wvm_mem_write_i32(addr, val)
         }
 
-        // ── 0x3A i32.store8 ────────────────────────────────
         else if op == 0x3A {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const val = wvm_pop()
@@ -1139,7 +987,6 @@ func wvm_exec_code(code) {
             wvm_mem_write_u8(addr, val)
         }
 
-        // ── 0x3B i32.store16 ───────────────────────────────
         else if op == 0x3B {
             const ma = wvm_read_memarg(code, pc); pc = pc + ma[2]
             const val = wvm_pop()
@@ -1147,13 +994,11 @@ func wvm_exec_code(code) {
             wvm_mem_write_i16(addr, val)
         }
 
-        // ── 0x3F memory.size ───────────────────────────────
         else if op == 0x3F {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             wvm_push(len(wvm_memory) / 65536)
         }
 
-        // ── 0x40 memory.grow ───────────────────────────────
         else if op == 0x40 {
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const pages = wvm_pop()
@@ -1163,203 +1008,165 @@ func wvm_exec_code(code) {
             wvm_push(old_pages)
         }
 
-        // ── 0x41 i32.const ─────────────────────────────────
         else if op == 0x41 {
             const r = wvm_read_i32(code, pc); pc = pc + r[1]
             wvm_push(r[0])
         }
 
-        // ── 0x42 i64.const ─────────────────────────────────
         else if op == 0x42 {
             const r = wvm_read_i64(code, pc); pc = pc + r[1]
             wvm_push(r[0])
         }
 
-        // ── 0x43 f32.const ─────────────────────────────────
         else if op == 0x43 {
-            wvm_push(wvm_mem_read_i32(0))  // placeholder
+            wvm_push(wvm_mem_read_i32(0))
             pc = pc + 4
         }
 
-        // ── 0x44 f64.const ─────────────────────────────────
         else if op == 0x44 {
             const r = wvm_read_f64(code, pc); pc = pc + r[1]
             wvm_push(r[0])
         }
 
-        // ── 0x45 i32.eqz ──────────────────────────────────
         else if op == 0x45 { wvm_push(if wvm_pop() == 0 { 1 } else { 0 }) }
 
-        // ── 0x46 i32.eq ───────────────────────────────────
         else if op == 0x46 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a == b { 1 } else { 0 }) }
 
-        // ── 0x47 i32.ne ───────────────────────────────────
         else if op == 0x47 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a != b { 1 } else { 0 }) }
 
-        // ── 0x48 i32.lt_s ─────────────────────────────────
         else if op == 0x48 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { 1 } else { 0 }) }
 
-        // ── 0x49 i32.lt_u ─────────────────────────────────
         else if op == 0x49 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { 1 } else { 0 }) }
 
-        // ── 0x4A i32.gt_s ─────────────────────────────────
         else if op == 0x4A { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { 1 } else { 0 }) }
 
-        // ── 0x4B i32.gt_u ─────────────────────────────────
         else if op == 0x4B { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { 1 } else { 0 }) }
 
-        // ── 0x4C i32.le_s ─────────────────────────────────
         else if op == 0x4C { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a <= b { 1 } else { 0 }) }
 
-        // ── 0x4D i32.le_u ─────────────────────────────────
         else if op == 0x4D { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a <= b { 1 } else { 0 }) }
 
-        // ── 0x4E i32.ge_s ─────────────────────────────────
         else if op == 0x4E { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a >= b { 1 } else { 0 }) }
 
-        // ── 0x4F i32.ge_u ─────────────────────────────────
         else if op == 0x4F { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a >= b { 1 } else { 0 }) }
 
-        // ── 0x50 i64.eqz ──────────────────────────────────
         else if op == 0x50 { wvm_push(if wvm_pop() == 0 { 1 } else { 0 }) }
 
-        // ── 0x51 i64.eq ───────────────────────────────────
         else if op == 0x51 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a == b { 1 } else { 0 }) }
 
-        // ── 0x52 i64.ne ───────────────────────────────────
         else if op == 0x52 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a != b { 1 } else { 0 }) }
 
-        // ── 0x53 i64.lt_s ─────────────────────────────────
         else if op == 0x53 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { 1 } else { 0 }) }
 
-        // ── 0x54 i64.lt_u ─────────────────────────────────
         else if op == 0x54 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { 1 } else { 0 }) }
 
-        // ── 0x55 i64.gt_s ─────────────────────────────────
         else if op == 0x55 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { 1 } else { 0 }) }
 
-        // ── 0x56 i64.gt_u ─────────────────────────────────
         else if op == 0x56 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { 1 } else { 0 }) }
 
-        // ── 0x57 i64.le_s ─────────────────────────────────
         else if op == 0x57 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a <= b { 1 } else { 0 }) }
 
-        // ── 0x58 i64.le_u ─────────────────────────────────
         else if op == 0x58 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a <= b { 1 } else { 0 }) }
 
-        // ── 0x59 i64.ge_s ─────────────────────────────────
         else if op == 0x59 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a >= b { 1 } else { 0 }) }
 
-        // ── 0x5A i64.ge_u ─────────────────────────────────
         else if op == 0x5A { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a >= b { 1 } else { 0 }) }
 
-        // ── 0x61 f64.eq ───────────────────────────────────
         else if op == 0x61 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a == b { 1 } else { 0 }) }
 
-        // ── 0x62 f64.ne ───────────────────────────────────
         else if op == 0x62 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a != b { 1 } else { 0 }) }
 
-        // ── 0x63 f64.lt ───────────────────────────────────
         else if op == 0x63 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { 1 } else { 0 }) }
 
-        // ── 0x64 f64.gt ───────────────────────────────────
         else if op == 0x64 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { 1 } else { 0 }) }
 
-        // ── 0x65 f64.le ───────────────────────────────────
         else if op == 0x65 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a <= b { 1 } else { 0 }) }
 
-        // ── 0x66 f64.ge ───────────────────────────────────
         else if op == 0x66 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a >= b { 1 } else { 0 }) }
 
-        // ── i32 arithmetic (0x67-0x78) ─────────────────────
-        else if op == 0x67 { wvm_push(0) }  // i32.clz placeholder
-        else if op == 0x68 { wvm_push(0) }  // i32.ctz placeholder
-        else if op == 0x69 { wvm_push(0) }  // i32.popcnt placeholder
-        else if op == 0x6A { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }  // i32.add
-        else if op == 0x6B { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }  // i32.sub
-        else if op == 0x6C { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }  // i32.mul
-        else if op == 0x6D { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }  // i32.div_s
-        else if op == 0x6E { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }  // i32.div_u
-        else if op == 0x6F { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }  // i32.rem_s
-        else if op == 0x70 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }  // i32.rem_u
-        else if op == 0x71 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a & b) }  // i32.and
-        else if op == 0x72 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a | b) }  // i32.or
-        else if op == 0x73 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a ^ b) }  // i32.xor
-        else if op == 0x74 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a << (b & 31)) }  // i32.shl
-        else if op == 0x75 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 31)) }  // i32.shr_s
-        else if op == 0x76 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 31)) }  // i32.shr_u
-        else if op == 0x77 { const b = wvm_pop(); const a = wvm_pop(); wvm_push((a << (b & 31)) | (a >> (32 - (b & 31)))) }  // i32.rotl
-        else if op == 0x78 { const b = wvm_pop(); const a = wvm_pop(); wvm_push((a >> (b & 31)) | (a << (32 - (b & 31)))) }  // i32.rotr
+        else if op == 0x67 { wvm_push(0) }
+        else if op == 0x68 { wvm_push(0) }
+        else if op == 0x69 { wvm_push(0) }
+        else if op == 0x6A { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }
+        else if op == 0x6B { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }
+        else if op == 0x6C { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }
+        else if op == 0x6D { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }
+        else if op == 0x6E { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }
+        else if op == 0x6F { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }
+        else if op == 0x70 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }
+        else if op == 0x71 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a & b) }
+        else if op == 0x72 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a | b) }
+        else if op == 0x73 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a ^ b) }
+        else if op == 0x74 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a << (b & 31)) }
+        else if op == 0x75 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 31)) }
+        else if op == 0x76 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 31)) }
+        else if op == 0x77 { const b = wvm_pop(); const a = wvm_pop(); wvm_push((a << (b & 31)) | (a >> (32 - (b & 31)))) }
+        else if op == 0x78 { const b = wvm_pop(); const a = wvm_pop(); wvm_push((a >> (b & 31)) | (a << (32 - (b & 31)))) }
 
-        // ── i64 arithmetic (0x79-0x8A) ─────────────────────
-        else if op == 0x79 { wvm_push(0) }  // i64.clz
-        else if op == 0x7A { wvm_push(0) }  // i64.ctz
-        else if op == 0x7B { wvm_push(0) }  // i64.popcnt
-        else if op == 0x7C { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }  // i64.add
-        else if op == 0x7D { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }  // i64.sub
-        else if op == 0x7E { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }  // i64.mul
-        else if op == 0x7F { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }  // i64.div_s
-        else if op == 0x80 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }  // i64.div_u
-        else if op == 0x81 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }  // i64.rem_s
-        else if op == 0x82 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }  // i64.rem_u
-        else if op == 0x83 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a & b) }  // i64.and
-        else if op == 0x84 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a | b) }  // i64.or
-        else if op == 0x85 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a ^ b) }  // i64.xor
-        else if op == 0x86 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a << (b & 63)) }  // i64.shl
-        else if op == 0x87 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 63)) }  // i64.shr_s
-        else if op == 0x88 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 63)) }  // i64.shr_u
-        else if op == 0x89 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a) }  // i64.rotl stub
-        else if op == 0x8A { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a) }  // i64.rotr stub
+        else if op == 0x79 { wvm_push(0) }
+        else if op == 0x7A { wvm_push(0) }
+        else if op == 0x7B { wvm_push(0) }
+        else if op == 0x7C { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }
+        else if op == 0x7D { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }
+        else if op == 0x7E { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }
+        else if op == 0x7F { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }
+        else if op == 0x80 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }
+        else if op == 0x81 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }
+        else if op == 0x82 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a % b } else { 0 }) }
+        else if op == 0x83 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a & b) }
+        else if op == 0x84 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a | b) }
+        else if op == 0x85 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a ^ b) }
+        else if op == 0x86 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a << (b & 63)) }
+        else if op == 0x87 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 63)) }
+        else if op == 0x88 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a >> (b & 63)) }
+        else if op == 0x89 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a) }
+        else if op == 0x8A { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a) }
 
-        // ── f64 arithmetic (0x99-0xA3) ─────────────────────
-        else if op == 0x99 { const a = wvm_pop(); wvm_push(if a < 0 { 0 - a } else { a }) }  // f64.abs
-        else if op == 0x9A { const a = wvm_pop(); wvm_push(0 - a) }  // f64.neg
-        else if op == 0x9B { wvm_push(wvm_pop()) }  // f64.ceil stub
-        else if op == 0x9C { wvm_push(wvm_pop()) }  // f64.floor stub
-        else if op == 0x9D { wvm_push(wvm_pop()) }  // f64.trunc stub
-        else if op == 0x9E { wvm_push(wvm_pop()) }  // f64.nearest stub
-        else if op == 0x9F { wvm_push(wvm_pop()) }  // f64.sqrt stub
-        else if op == 0xA0 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }  // f64.add
-        else if op == 0xA1 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }  // f64.sub
-        else if op == 0xA2 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }  // f64.mul
-        else if op == 0xA3 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }  // f64.div
-        else if op == 0xA4 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { a } else { b }) }  // f64.min
-        else if op == 0xA5 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { a } else { b }) }  // f64.max
-        else if op == 0xA6 { wvm_push(wvm_pop()) }  // f64.copysign stub
+        else if op == 0x99 { const a = wvm_pop(); wvm_push(if a < 0 { 0 - a } else { a }) }
+        else if op == 0x9A { const a = wvm_pop(); wvm_push(0 - a) }
+        else if op == 0x9B { wvm_push(wvm_pop()) }
+        else if op == 0x9C { wvm_push(wvm_pop()) }
+        else if op == 0x9D { wvm_push(wvm_pop()) }
+        else if op == 0x9E { wvm_push(wvm_pop()) }
+        else if op == 0x9F { wvm_push(wvm_pop()) }
+        else if op == 0xA0 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }
+        else if op == 0xA1 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }
+        else if op == 0xA2 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }
+        else if op == 0xA3 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }
+        else if op == 0xA4 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { a } else { b }) }
+        else if op == 0xA5 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { a } else { b }) }
+        else if op == 0xA6 { wvm_push(wvm_pop()) }
 
-        // ── Conversions (0xA7-0xBF) ────────────────────────
-        else if op == 0xA7 { wvm_push(wvm_pop() & 4294967295) }  // i32.wrap_i64
-        else if op == 0xA8 { wvm_push(wvm_pop()) }  // i32.trunc_f32_s
-        else if op == 0xA9 { wvm_push(wvm_pop()) }  // i32.trunc_f32_u
-        else if op == 0xAA { wvm_push(wvm_pop()) }  // i32.trunc_f64_s
-        else if op == 0xAB { wvm_push(wvm_pop()) }  // i32.trunc_f64_u
-        else if op == 0xAC { wvm_push(wvm_pop()) }  // i64.extend_i32_s
-        else if op == 0xAD { wvm_push(wvm_pop()) }  // i64.extend_i32_u
-        else if op == 0xAE { wvm_push(wvm_pop()) }  // i64.trunc_f32_s
-        else if op == 0xAF { wvm_push(wvm_pop()) }  // i64.trunc_f32_u
-        else if op == 0xB0 { wvm_push(wvm_pop()) }  // i64.trunc_f64_s
-        else if op == 0xB1 { wvm_push(wvm_pop()) }  // i64.trunc_f64_u
-        else if op == 0xB2 { wvm_push(wvm_pop()) }  // f32.convert_i32_s
-        else if op == 0xB3 { wvm_push(wvm_pop()) }  // f32.convert_i32_u
-        else if op == 0xB4 { wvm_push(wvm_pop()) }  // f32.convert_i64_s
-        else if op == 0xB5 { wvm_push(wvm_pop()) }  // f32.convert_i64_u
-        else if op == 0xB6 { wvm_push(wvm_pop()) }  // f32.demote_f64
-        else if op == 0xB7 { wvm_push(wvm_pop()) }  // f64.convert_i32_s
-        else if op == 0xB8 { wvm_push(wvm_pop()) }  // f64.convert_i32_u
-        else if op == 0xB9 { wvm_push(wvm_pop()) }  // f64.convert_i64_s
-        else if op == 0xBA { wvm_push(wvm_pop()) }  // f64.convert_i64_u
-        else if op == 0xBB { wvm_push(wvm_pop()) }  // f64.promote_f32
-        else if op == 0xBC { wvm_push(wvm_pop()) }  // i32.reinterpret_f32
-        else if op == 0xBD { wvm_push(wvm_pop()) }  // i64.reinterpret_f64
-        else if op == 0xBE { wvm_push(wvm_pop()) }  // f32.reinterpret_i32
-        else if op == 0xBF { wvm_push(wvm_pop()) }  // f64.reinterpret_i64
+        else if op == 0xA7 { wvm_push(wvm_pop() & 4294967295) }
+        else if op == 0xA8 { wvm_push(wvm_pop()) }
+        else if op == 0xA9 { wvm_push(wvm_pop()) }
+        else if op == 0xAA { wvm_push(wvm_pop()) }
+        else if op == 0xAB { wvm_push(wvm_pop()) }
+        else if op == 0xAC { wvm_push(wvm_pop()) }
+        else if op == 0xAD { wvm_push(wvm_pop()) }
+        else if op == 0xAE { wvm_push(wvm_pop()) }
+        else if op == 0xAF { wvm_push(wvm_pop()) }
+        else if op == 0xB0 { wvm_push(wvm_pop()) }
+        else if op == 0xB1 { wvm_push(wvm_pop()) }
+        else if op == 0xB2 { wvm_push(wvm_pop()) }
+        else if op == 0xB3 { wvm_push(wvm_pop()) }
+        else if op == 0xB4 { wvm_push(wvm_pop()) }
+        else if op == 0xB5 { wvm_push(wvm_pop()) }
+        else if op == 0xB6 { wvm_push(wvm_pop()) }
+        else if op == 0xB7 { wvm_push(wvm_pop()) }
+        else if op == 0xB8 { wvm_push(wvm_pop()) }
+        else if op == 0xB9 { wvm_push(wvm_pop()) }
+        else if op == 0xBA { wvm_push(wvm_pop()) }
+        else if op == 0xBB { wvm_push(wvm_pop()) }
+        else if op == 0xBC { wvm_push(wvm_pop()) }
+        else if op == 0xBD { wvm_push(wvm_pop()) }
+        else if op == 0xBE { wvm_push(wvm_pop()) }
+        else if op == 0xBF { wvm_push(wvm_pop()) }
 
-        // ── 0xFC multi-byte opcodes ────────────────────────
         else if op == 0xFC {
             const sub_r = wvm_read_u32(code, pc); pc = pc + sub_r[1]
             const sub_op = sub_r[0]
             if sub_op == 10 {
-                // memory.copy
                 const r1 = wvm_read_u32(code, pc); pc = pc + r1[1]
                 const r2 = wvm_read_u32(code, pc); pc = pc + r2[1]
                 const n = wvm_pop()
@@ -1372,7 +1179,6 @@ func wvm_exec_code(code) {
                     mi = mi + 1
                 }
             } else if sub_op == 11 {
-                // memory.fill
                 const r1 = wvm_read_u32(code, pc); pc = pc + r1[1]
                 const n = wvm_pop()
                 const val = wvm_pop()
@@ -1385,31 +1191,27 @@ func wvm_exec_code(code) {
             }
         }
 
-        // ── f32 operations (0x8B-0x98) ─────────────────────
-        else if op == 0x8B { const a = wvm_pop(); wvm_push(if a < 0 { 0 - a } else { a }) }  // f32.abs
-        else if op == 0x8C { wvm_push(0 - wvm_pop()) }  // f32.neg
-        else if op == 0x8D { wvm_push(wvm_pop()) }  // f32.ceil stub
-        else if op == 0x8E { wvm_push(wvm_pop()) }  // f32.floor stub
-        else if op == 0x8F { wvm_push(wvm_pop()) }  // f32.trunc stub
-        else if op == 0x90 { wvm_push(wvm_pop()) }  // f32.nearest stub
-        else if op == 0x91 { wvm_push(wvm_pop()) }  // f32.sqrt stub
-        else if op == 0x92 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }  // f32.add
-        else if op == 0x93 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }  // f32.sub
-        else if op == 0x94 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }  // f32.mul
-        else if op == 0x95 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }  // f32.div
-        else if op == 0x96 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { a } else { b }) }  // f32.min
-        else if op == 0x97 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { a } else { b }) }  // f32.max
-        else if op == 0x98 { wvm_push(wvm_pop()) }  // f32.copysign stub
+        else if op == 0x8B { const a = wvm_pop(); wvm_push(if a < 0 { 0 - a } else { a }) }
+        else if op == 0x8C { wvm_push(0 - wvm_pop()) }
+        else if op == 0x8D { wvm_push(wvm_pop()) }
+        else if op == 0x8E { wvm_push(wvm_pop()) }
+        else if op == 0x8F { wvm_push(wvm_pop()) }
+        else if op == 0x90 { wvm_push(wvm_pop()) }
+        else if op == 0x91 { wvm_push(wvm_pop()) }
+        else if op == 0x92 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a + b) }
+        else if op == 0x93 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a - b) }
+        else if op == 0x94 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(a * b) }
+        else if op == 0x95 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if b != 0 { a / b } else { 0 }) }
+        else if op == 0x96 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a < b { a } else { b }) }
+        else if op == 0x97 { const b = wvm_pop(); const a = wvm_pop(); wvm_push(if a > b { a } else { b }) }
+        else if op == 0x98 { wvm_push(wvm_pop()) }
 
-        // ── Table operations ───────────────────────────────
         else if op == 0x25 {
-            // table.get
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const idx = wvm_pop()
             wvm_push(if idx < len(wvm_func_table) { wvm_func_table[idx] } else { 0 })
         }
         else if op == 0x26 {
-            // table.set
             const r = wvm_read_u32(code, pc); pc = pc + r[1]
             const val = wvm_pop()
             const idx = wvm_pop()
@@ -1417,15 +1219,10 @@ func wvm_exec_code(code) {
             wvm_func_table[idx] = val
         }
 
-        // ── Unknown opcode ─────────────────────────────────
-        // Skip silently
     }
 
     if len(wvm_stack) > 0 { wvm_stack[len(wvm_stack) - 1] } else { 0 }
 }
-
-// ── WASM Module Initialization ─────────────────────────────────────
-
 func wvm_init(memory_pages) {
     wvm_memory = []
     let i = 0
@@ -1441,9 +1238,6 @@ func wvm_init(memory_pages) {
     wvm_func_table = []
     wvm_output = []
 }
-
-// ── Run a WASM function by export name ─────────────────────────────
-
 func wvm_call_export(name) {
     const exp = wvm_exports[name]
     if exp == null { return 0 }

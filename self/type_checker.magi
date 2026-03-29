@@ -1,39 +1,12 @@
-// MAGI Self-Hosted Compiler — Type Checker
-//
-// Walks the AST from parse() and validates correctness:
-//   - Variable resolution (undefined, immutable assignment)
-//   - Function validation (arity, duplicates)
-//   - Match exhaustiveness (enum variants, wildcard)
-//   - Import validation (known stdlib modules)
-//   - Basic type inference (literals, binary ops)
-//   - Lint warnings (unused variables, unreachable code, empty match)
-//
-// Uses module-level mutable state (same pattern as parser/interpreter).
-// Large match blocks are split into helper functions to reduce stack depth
-// (the MAGI interpreter creates deep call stacks for match with many arms).
-
-// ── Type Checker State ──────────────────────────────────────────
-
-// Each scope is a map: name -> { "mutable": bool, "used": bool, "typ": string, "line": int }
 let tc_scopes = []
-// Function signatures: name -> { "arity": int, "min_arity": int, "has_rest": bool, "line": int }
 let tc_functions = {"__s": true}
-// Enum definitions: name -> [variant_names]
 let tc_enums = {"__s": true}
-// Struct definitions: name -> [field_names]
 let tc_structs = {"__s": true}
-// Errors and warnings accumulated during checking
 let tc_errors = []
 let tc_warnings = []
-// Track if we are inside a loop (for break/continue validation)
 let tc_loop_depth = 0
-// Track if we are inside a function (for return validation)
 let tc_func_depth = 0
-// Match arm enum pattern tracking (used during exhaustiveness check)
 let tc_enum_patterns = {"__s": true}
-
-// ── Known stdlib modules ────────────────────────────────────────
-
 const KNOWN_STDLIB_MODULES = [
     "array", "array_ext", "big", "binary", "bits", "bloom", "bufio",
     "build", "bytes", "cert", "cmp", "collections", "complex", "compress",
@@ -51,9 +24,6 @@ const KNOWN_STDLIB_MODULES = [
     "tls", "trace", "tuple", "type", "unicode", "unsafe", "url",
     "uuid", "validate", "wasm", "xml", "yaml", "zip"
 ]
-
-// ── Known builtin functions ─────────────────────────────────────
-
 const KNOWN_BUILTINS = [
     "len", "push", "pop", "println", "print", "output", "assert",
     "to_string", "to_int", "to_float", "typeof", "panic", "input",
@@ -68,10 +38,6 @@ const KNOWN_BUILTINS = [
     "array_length", "hash", "clone", "freeze", "is_frozen",
     "error", "is_error", "unwrap", "some", "none", "is_some", "is_none"
 ]
-
-// ── Scope Management ────────────────────────────────────────────
-
-// Empty map {} is null in MAGI, so use a sentinel key to create a real map
 func tc_new_scope() {
     {"__s": true}
 }
@@ -140,9 +106,6 @@ func tc_is_mutable(name) {
 func tc_is_builtin(name) {
     KNOWN_BUILTINS.contains(name)
 }
-
-// ── Error/Warning Emitters ──────────────────────────────────────
-
 func tc_error_at(line, msg) {
     tc_errors.push(f"line {line}: {msg}")
 }
@@ -150,9 +113,6 @@ func tc_error_at(line, msg) {
 func tc_warn_at(line, msg) {
     tc_warnings.push(f"line {line}: {msg}")
 }
-
-// ── Pre-registration Pass ───────────────────────────────────────
-
 func tc_count_required_params(params) {
     let count = 0
     for p in params {
@@ -215,9 +175,6 @@ func tc_preregister(stmts) {
         }
     }
 }
-
-// ── Statement Checking ──────────────────────────────────────────
-
 func tc_check_stmts(stmts) {
     let had_terminal = false
     for stmt in stmts {
@@ -234,7 +191,6 @@ func tc_check_stmts(stmts) {
     }
 }
 
-// Check assignment to a variable (must be defined and mutable)
 func tc_check_assign(name, line) {
     if !tc_is_defined(name) {
         tc_error_at(line, f"undefined variable '{name}'")
@@ -245,8 +201,6 @@ func tc_check_assign(name, line) {
     }
 }
 
-// Split statement checking into groups to reduce match arm count.
-// Group 1: variable declarations and assignments
 func tc_check_stmt_vars(kind, line) {
     match kind {
         StmtKind::SConst(name, expr) => {
@@ -310,7 +264,6 @@ func tc_check_stmt_vars(kind, line) {
     }
 }
 
-// Group 2: control flow
 func tc_check_stmt_flow(kind, line) {
     match kind {
         StmtKind::SReturn(expr) => {
@@ -372,14 +325,12 @@ func tc_check_stmt_flow(kind, line) {
     }
 }
 
-// Group 3: for loops (separate to keep match small)
 func tc_check_stmt_for(kind, line) {
     match kind {
         StmtKind::SForLoop(_label, pattern, iterable, body) => {
             tc_check_expr(iterable)
             tc_push_scope()
             tc_loop_depth = tc_loop_depth + 1
-            // The parser may pass a plain string or a ForPattern
             if typeof(pattern) == "string" {
                 tc_define_var(pattern, false, "unknown", line)
             } else {
@@ -425,7 +376,6 @@ func tc_define_destr_elem(e, line) {
     }
 }
 
-// Group 4: definitions and other statements
 func tc_check_stmt_defs(kind, line) {
     match kind {
         StmtKind::SFuncDef(fdef) => {
@@ -464,7 +414,6 @@ func tc_check_stmt_defs(kind, line) {
     }
 }
 
-// Group 5: misc statements
 func tc_check_stmt_misc(kind, line) {
     match kind {
         StmtKind::SImportModule(path_parts, _alias, _items) => {
@@ -526,16 +475,12 @@ func tc_check_stmt_misc(kind, line) {
 func tc_check_stmt(stmt) {
     const kind = stmt.kind
     const line = stmt.span.start_line
-    // Try each group; each returns null (no-op) if it doesn't handle the kind
     tc_check_stmt_vars(kind, line)
     tc_check_stmt_flow(kind, line)
     tc_check_stmt_for(kind, line)
     tc_check_stmt_defs(kind, line)
     tc_check_stmt_misc(kind, line)
 }
-
-// ── Function Definition Checking ────────────────────────────────
-
 func tc_check_funcdef(fdef, line) {
     tc_push_scope()
     tc_func_depth = tc_func_depth + 1
@@ -548,9 +493,6 @@ func tc_check_funcdef(fdef, line) {
     tc_func_depth = tc_func_depth - 1
     tc_pop_scope()
 }
-
-// ── Block Checking ──────────────────────────────────────────────
-
 func tc_check_block(block) {
     if block == null { return null }
     tc_check_stmts(block.stmts)
@@ -558,9 +500,6 @@ func tc_check_block(block) {
         tc_check_expr(block.tail_expr)
     }
 }
-
-// ── Destructure Variable Definitions ────────────────────────────
-
 func tc_define_destructure_vars(pattern, is_mutable, line) {
     match pattern {
         DestructurePattern::DArray(elems) => {
@@ -587,21 +526,15 @@ func tc_define_destr_elem_mut(e, is_mutable, line) {
         _ => {}
     }
 }
-
-// ── Expression Checking ─────────────────────────────────────────
-// Split into groups to reduce match arm count per function.
-
 func tc_check_expr(expr) {
     if expr == null { return null }
     const kind = expr.kind
     const line = expr.span.start_line
-    // Try each group
     tc_check_expr_basic(kind, line)
     tc_check_expr_compound(kind, line)
     tc_check_expr_advanced(kind, line)
 }
 
-// Group 1: literals, variables, basic ops
 func tc_check_expr_basic(kind, line) {
     match kind {
         ExprKind::ELiteral(lit) => {
@@ -678,7 +611,6 @@ func tc_validate_call(name, args, line) {
     }
 }
 
-// Group 2: compound expressions (control flow, blocks, pipes)
 func tc_check_expr_compound(kind, line) {
     match kind {
         ExprKind::EPipe(left, right) => {
@@ -728,7 +660,6 @@ func tc_check_expr_compound(kind, line) {
     }
 }
 
-// Group 3: advanced expressions (lambda, match, comprehensions, constructs)
 func tc_check_expr_advanced(kind, line) {
     match kind {
         ExprKind::ELambda(params, body) => {
@@ -827,9 +758,6 @@ func tc_check_interp_parts(parts) {
         }
     }
 }
-
-// ── Match Arm Checking ──────────────────────────────────────────
-
 func tc_check_match_arms(arms, line) {
     if len(arms) == 0 {
         tc_warn_at(line, "empty match expression")
@@ -852,7 +780,6 @@ func tc_check_match_arms(arms, line) {
         }
     }
 
-    // Check exhaustiveness for enum matches
     if !has_wildcard {
         for enum_name in tc_enum_patterns.keys() {
             if enum_name == "__s" { continue }
@@ -933,9 +860,6 @@ func tc_define_pattern_vars(pattern, line) {
         _ => {}
     }
 }
-
-// ── Basic Type Inference ────────────────────────────────────────
-
 func tc_infer_expr_type(expr) {
     if expr == null { return "unknown" }
     const kind = expr.kind
@@ -985,7 +909,6 @@ func tc_infer_literal_type(lit) {
 }
 
 func tc_infer_binop_type(op, left, right) {
-    // Comparison and logical ops always return bool
     match op {
         BinOp::Eq => { return "bool" },
         BinOp::NotEq => { return "bool" },
@@ -998,7 +921,6 @@ func tc_infer_binop_type(op, left, right) {
         BinOp::In => { return "bool" },
         _ => {}
     }
-    // Arithmetic ops: infer from operand types
     const lt = tc_infer_expr_type(left)
     const rt = tc_infer_expr_type(right)
     match op {
@@ -1041,11 +963,7 @@ func tc_infer_unop_type(op, operand) {
         _ => "unknown"
     }
 }
-
-// ── Entry Point ─────────────────────────────────────────────────
-
 func check(program) {
-    // Reset state
     tc_scopes = []
     tc_functions = {"__s": true}
     tc_enums = {"__s": true}
@@ -1055,33 +973,21 @@ func check(program) {
     tc_loop_depth = 0
     tc_func_depth = 0
 
-    // Initialize global scope
     tc_push_scope()
 
-    // Pass 1: pre-register functions, enums, structs
     tc_preregister(program.statements)
 
-    // Pass 2: check all statements
     tc_check_stmts(program.statements)
 
-    // Pop global scope (emits unused variable warnings)
     tc_pop_scope()
 
-    // Return (errors, warnings) as a two-element array
     let result = []
     result.push(tc_errors)
     result.push(tc_warnings)
     result
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Generic Type Parameter Tracking and Validation
-// ═══════════════════════════════════════════════════════════════════
-
-// Generic type parameters in scope: name -> { "constraints": [...], "bound": type_str|null }
 let tc_type_params = {"__s": true}
 
-// Register generic type parameters for a function or struct
 func tc_register_type_params(type_params) {
     for tp in type_params {
         const name = if typeof(tp) == "string" { tp } else { tp[0] }
@@ -1093,21 +999,16 @@ func tc_register_type_params(type_params) {
     }
 }
 
-// Clear generic type parameters
 func tc_clear_type_params() {
     tc_type_params = {"__s": true}
 }
 
-// Check if a name is a known type parameter
 func tc_is_type_param(name) {
     tc_type_params.has(name) && name != "__s"
 }
 
-// Validate that a generic constraint is satisfiable
 func tc_check_generic_constraint(param_name, constraint_name, line) {
-    // Check the constraint refers to a known interface/trait
     if !tc_structs.has(constraint_name) && !KNOWN_STDLIB_MODULES.contains(constraint_name) {
-        // It could be an interface
         let found = false
         for k in tc_type_params.keys() {
             if k == constraint_name { found = true }
@@ -1117,18 +1018,6 @@ func tc_check_generic_constraint(param_name, constraint_name, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Full Type Inference Engine (Bidirectional)
-// ═══════════════════════════════════════════════════════════════════
-
-// Type representation: strings for simple types, maps for complex types
-// Simple: "int", "float", "string", "bool", "null", "unknown", "void"
-// Array: {"kind": "array", "element": type}
-// Map: {"kind": "map", "key": type, "value": type}
-// Function: {"kind": "function", "params": [types], "return": type}
-// Generic: {"kind": "generic", "name": string, "args": [types]}
-// Optional: {"kind": "optional", "inner": type}
 
 func tc_type_to_string(typ) {
     if typeof(typ) == "string" { return typ }
@@ -1164,27 +1053,21 @@ func tc_type_to_string(typ) {
     }
 }
 
-// Check if two types are compatible
 func tc_types_compatible(expected, actual) {
     if expected == "unknown" || actual == "unknown" { return true }
     if expected == actual { return true }
-    // Numeric widening
     if expected == "float" && actual == "int" { return true }
     if expected == "float64" && actual == "int64" { return true }
-    // null is compatible with optional types
     if actual == "null" { return true }
-    // Type parameter is always compatible
     if tc_is_type_param(expected) || tc_is_type_param(actual) { return true }
-    // Complex type compatibility
     if typeof(expected) == "map" && typeof(actual) == "map" {
         if expected.has("kind") && actual.has("kind") && expected["kind"] == actual["kind"] {
-            return true // Simplified: check sub-components in full version
+            return true
         }
     }
     false
 }
 
-// Infer the type of an expression
 func tc_infer_expr_type_full(expr) {
     if expr == null { return "unknown" }
     const ek = expr.kind
@@ -1238,9 +1121,8 @@ func tc_infer_expr_type_full(expr) {
         },
         ExprKind::ERange(_, _, _) => {"kind": "array", "element": "int"},
         ExprKind::EMatch(_, arms) => {
-            // Return type is the type of the first arm's body
             if len(arms) > 0 {
-                "unknown" // Would need to check arm bodies
+                "unknown"
             } else { "unknown" }
         },
         ExprKind::ENullCoalesce(left, _right) => tc_infer_expr_type_full(left),
@@ -1294,7 +1176,6 @@ func tc_infer_binop_type_full(op, left, right) {
     }
 }
 
-// Lookup variable type in scope
 func tc_lookup_var_type(name) {
     let idx = len(tc_scopes) - 1
     while idx >= 0 {
@@ -1308,9 +1189,7 @@ func tc_lookup_var_type(name) {
     "unknown"
 }
 
-// Infer return type of a function call
 func tc_infer_call_return_type(name) {
-    // Check builtin return types
     if name == "len" { return "int" }
     if name == "typeof" { return "string" }
     if name == "to_string" { return "string" }
@@ -1335,14 +1214,12 @@ func tc_infer_call_return_type(name) {
     "unknown"
 }
 
-// Infer return type of a method call
 func tc_infer_method_return_type(obj_expr, method) {
     const obj_type = tc_infer_expr_type_full(obj_expr)
     const obj_type_str = if typeof(obj_type) == "string" { obj_type } else {
         if typeof(obj_type) == "map" && obj_type.has("kind") { obj_type["kind"] } else { "unknown" }
     }
 
-    // String methods
     if obj_type_str == "string" {
         if method == "len" || method == "length" || method == "index_of" || method == "count" || method == "char_code" { return "int" }
         if method == "split" || method == "lines" || method == "words" || method == "chars" { return {"kind": "array", "element": "string"} }
@@ -1352,7 +1229,6 @@ func tc_infer_method_return_type(obj_expr, method) {
         return "string"
     }
 
-    // Array methods
     if obj_type_str == "array" {
         if method == "len" || method == "length" || method == "index_of" || method == "find_index" { return "int" }
         if method == "contains" || method == "includes" || method == "every" || method == "some" || method == "is_empty" { return "bool" }
@@ -1367,7 +1243,6 @@ func tc_infer_method_return_type(obj_expr, method) {
         return {"kind": "array", "element": "unknown"}
     }
 
-    // Map methods
     if obj_type_str == "map" {
         if method == "len" { return "int" }
         if method == "has" || method == "contains_key" || method == "contains_value" || method == "is_empty" || method == "every" || method == "some" { return "bool" }
@@ -1379,15 +1254,8 @@ func tc_infer_method_return_type(obj_expr, method) {
 
     "unknown"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Interface Satisfaction Checking
-// ═══════════════════════════════════════════════════════════════════
-
-// Interface definitions: name -> { "methods": [method_sigs] }
 let tc_interfaces = {"__s": true}
 
-// Register an interface
 func tc_register_interface(name, methods) {
     let method_sigs = []
     for m in methods {
@@ -1396,7 +1264,6 @@ func tc_register_interface(name, methods) {
     tc_interfaces[name] = {"methods": method_sigs}
 }
 
-// Check if a type satisfies an interface
 func tc_check_interface_satisfaction(type_name, interface_name, line) {
     if !tc_interfaces.has(interface_name) || interface_name == "__s" { return true }
     const iface = tc_interfaces[interface_name]
@@ -1404,9 +1271,7 @@ func tc_check_interface_satisfaction(type_name, interface_name, line) {
 
     for req in required_methods {
         const method_name = req["name"]
-        // Check if type_name has an impl with this method
         let found = false
-        // Look through registered functions for TypeName.method
         if tc_functions.has(f"{type_name}.{method_name}") {
             found = true
         }
@@ -1415,32 +1280,22 @@ func tc_check_interface_satisfaction(type_name, interface_name, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Null Safety Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Track which variables are known to be non-null after checks
 let tc_non_null_vars = {"__s": true}
 
-// Enter a null-checked scope (e.g., inside `if x != null`)
 func tc_enter_null_checked(var_name) {
     tc_non_null_vars[var_name] = true
 }
 
-// Exit null-checked scope
 func tc_exit_null_checked(var_name) {
     if tc_non_null_vars.has(var_name) {
         tc_non_null_vars = tc_non_null_vars.delete(var_name)
     }
 }
 
-// Check if a variable is known non-null
 func tc_is_known_non_null(var_name) {
     tc_non_null_vars.has(var_name) && var_name != "__s"
 }
 
-// Analyze an if-condition for null checks
 func tc_analyze_null_check(cond) {
     if cond == null { return null }
     const ek = cond.kind
@@ -1448,7 +1303,6 @@ func tc_analyze_null_check(cond) {
         ExprKind::EBinaryOp(op, left, right) => {
             match op {
                 BinOp::Ne => {
-                    // Check for: x != null
                     match left.kind {
                         ExprKind::EVariable(name) => {
                             match right.kind {
@@ -1466,15 +1320,9 @@ func tc_analyze_null_check(cond) {
     }
     null
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Pattern Type Checking
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_pattern(pattern, subject_type, line) {
     if pattern == null { return null }
     if typeof(pattern) == "string" {
-        // Wildcard or variable binding
         if pattern == "_" { return null }
         tc_define_var(pattern, false, subject_type, line)
         return null
@@ -1483,7 +1331,6 @@ func tc_check_pattern(pattern, subject_type, line) {
         const pk = pattern["kind"]
         match pk {
             "literal" => {
-                // Check literal pattern type matches subject
                 const lit_type = tc_infer_literal_type(pattern["value"])
                 if !tc_types_compatible(subject_type, lit_type) {
                     tc_warn_at(line, f"pattern type '{lit_type}' may not match subject type '{subject_type}'")
@@ -1543,7 +1390,6 @@ func tc_check_pattern(pattern, subject_type, line) {
                 }
             },
             "range" => {
-                // Range patterns: start..end
             },
             _ => {}
         }
@@ -1559,17 +1405,10 @@ func tc_infer_literal_type(val) {
     if t == "bool" { return "bool" }
     "unknown"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Closure Capture Type Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Analyze which variables a closure captures
 func tc_analyze_captures(lambda_body) {
     let captured = []
     if lambda_body == null { return captured }
 
-    // Walk the body and find free variables
     if typeof(lambda_body) == "map" && lambda_body.has("stmts") {
         for s in lambda_body.stmts {
             tc_collect_free_vars(s, captured)
@@ -1595,7 +1434,6 @@ func tc_collect_free_vars_expr(expr, captured) {
     const ek = expr.kind
     match ek {
         ExprKind::EVariable(name) => {
-            // Check if this variable is from an outer scope
             let in_current = false
             if len(tc_scopes) > 0 {
                 const current = tc_scopes[len(tc_scopes) - 1]
@@ -1634,18 +1472,10 @@ func tc_collect_free_vars_expr(expr, captured) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Lint Warning Rules (Integrated)
-// ═══════════════════════════════════════════════════════════════════
-
-// W100: Unused variables (already implemented via tc_pop_scope)
-
-// W101: Unused imports
 func tc_check_unused_imports(statements) {
     let imported_names = {"__s": true}
     let used_names = {"__s": true}
 
-    // Collect imported names
     for stmt in statements {
         const sk = stmt.kind
         match sk {
@@ -1661,12 +1491,10 @@ func tc_check_unused_imports(statements) {
         }
     }
 
-    // Collect used names (simplified: check all identifiers)
     for stmt in statements {
         tc_collect_used_names_stmt(stmt, used_names)
     }
 
-    // Check for unused imports
     for name in imported_names.keys() {
         if name == "__s" { continue }
         if !used_names.has(name) {
@@ -1715,15 +1543,12 @@ func tc_collect_used_names_expr(expr, names) {
     }
 }
 
-// W200: Naming convention checks
 func tc_check_naming_convention(name, kind, line) {
     if len(name) == 0 { return null }
-    if starts_with(name, "_") { return null } // Skip private/unused
+    if starts_with(name, "_") { return null }
 
     if kind == "function" || kind == "variable" || kind == "parameter" {
-        // Should be snake_case
         if name != to_lower(name) && !name.contains("_") {
-            // Might be camelCase
             let has_upper = false
             let i = 1
             while i < len(name) {
@@ -1737,23 +1562,19 @@ func tc_check_naming_convention(name, kind, line) {
     }
 
     if kind == "struct" || kind == "enum" || kind == "interface" {
-        // Should be PascalCase (start with uppercase)
         if name[0] >= "a" && name[0] <= "z" {
             tc_warn_at(line, f"type '{name}' should use PascalCase naming (W201)")
         }
     }
 
     if kind == "constant" {
-        // Should be UPPER_SNAKE_CASE
         let all_upper = true
         for c in name.chars() {
             if (c >= "a" && c <= "z") { all_upper = false }
         }
-        // Don't warn if it's just a normal const (too noisy)
     }
 }
 
-// W210: Unreachable code detection
 func tc_check_unreachable(statements, line) {
     let found_terminal = false
     for stmt in statements {
@@ -1772,14 +1593,12 @@ func tc_check_unreachable(statements, line) {
     }
 }
 
-// W211: Empty match arms
 func tc_check_empty_match(arms, line) {
     if len(arms) == 0 {
         tc_warn_at(line, "match expression has no arms (W211)")
     }
 }
 
-// W220: Self-comparison detection
 func tc_check_self_comparison(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -1803,7 +1622,6 @@ func tc_check_self_comparison(expr, line) {
     }
 }
 
-// Check if two expressions are syntactically identical
 func tc_exprs_identical(a, b) {
     if a == null || b == null { return false }
     const ak = a.kind
@@ -1819,14 +1637,12 @@ func tc_exprs_identical(a, b) {
     }
 }
 
-// W230: Deep nesting detection
 func tc_check_nesting_depth(depth, max_depth, line) {
     if depth > max_depth {
         tc_warn_at(line, f"nesting depth ({depth}) exceeds recommended maximum ({max_depth}) (W230)")
     }
 }
 
-// W240: Long function detection
 func tc_check_function_length(fdef, line) {
     if fdef.body == null { return null }
     const body_length = len(fdef.body.stmts)
@@ -1835,7 +1651,6 @@ func tc_check_function_length(fdef, line) {
     }
 }
 
-// W250: Magic number detection
 func tc_check_magic_numbers(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -1843,7 +1658,6 @@ func tc_check_magic_numbers(expr, line) {
         ExprKind::ELiteral(lit) => {
             match lit {
                 Literal::LInt(n) => {
-                    // Allow common values: 0, 1, 2, -1, 10, 100
                     if n != 0 && n != 1 && n != 2 && n != -1 && n != 10 && n != 100 {
                         tc_warn_at(line, f"magic number {n}: consider using a named constant (W250)")
                     }
@@ -1855,23 +1669,16 @@ func tc_check_magic_numbers(expr, line) {
     }
 }
 
-// W251: TODO comment detection (would need source text access)
 func tc_check_todo_comments(source, line) {
     if source.contains("TODO") || source.contains("FIXME") || source.contains("HACK") {
         tc_warn_at(line, "TODO/FIXME/HACK comment found (W251)")
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Recursive Type Handling
-// ═══════════════════════════════════════════════════════════════════
-
-// Track which types are currently being resolved (for cycle detection)
 let tc_resolving_types = {"__s": true}
 
 func tc_begin_resolve_type(name) {
     if tc_resolving_types.has(name) && name != "__s" {
-        return true // Cycle detected
+        return true
     }
     tc_resolving_types[name] = true
     false
@@ -1882,12 +1689,6 @@ func tc_end_resolve_type(name) {
         tc_resolving_types = tc_resolving_types.delete(name)
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Module Type Tracking
-// ═══════════════════════════════════════════════════════════════════
-
-// Map module_name -> { "exports": { name -> type } }
 let tc_modules = {"__s": true}
 
 func tc_register_module(name, exports) {
@@ -1901,12 +1702,6 @@ func tc_lookup_module_export(module_name, export_name) {
     if exports.has(export_name) { return exports[export_name] }
     "unknown"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Operator Overload Resolution
-// ═══════════════════════════════════════════════════════════════════
-
-// Map type_name -> { op_name -> { "params": [types], "return": type } }
 let tc_operator_overloads = {"__s": true}
 
 func tc_register_operator_overload(type_name, op_name, param_types, return_type) {
@@ -1924,27 +1719,18 @@ func tc_resolve_operator_overload(type_name, op_name) {
     if type_ops.has(op_name) { return type_ops[op_name] }
     null
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Generic Type System — Instantiation & Monomorphization
-// ═══════════════════════════════════════════════════════════════════
-
-// Track monomorphized function instances: "name<T1,T2>" -> true
 let tc_mono_instances = {"__s": true}
 
-// Instantiate a generic function with concrete type arguments
 func tc_instantiate_generic(func_name, type_args, line) {
     if !tc_functions.has(func_name) { return null }
     const sig = tc_functions[func_name]
 
-    // Build the monomorphized key
     let arg_strs = []
     for ta in type_args { arg_strs.push(tc_type_to_string(ta)) }
     const mono_key = f"{func_name}<{arg_strs.join(', ')}>"
 
     if tc_mono_instances.has(mono_key) { return mono_key }
 
-    // Validate that type arguments satisfy constraints
     if sig.has("type_params") {
         const tps = sig["type_params"]
         if len(type_args) != len(tps) {
@@ -1967,18 +1753,15 @@ func tc_instantiate_generic(func_name, type_args, line) {
     mono_key
 }
 
-// Check that a concrete type satisfies a generic constraint
 func tc_check_constraint_satisfaction(concrete_type, constraint, line) {
     const ct_str = tc_type_to_string(concrete_type)
     if typeof(constraint) == "string" {
-        // Named constraint: check interface satisfaction
         if tc_interfaces.has(constraint) && constraint != "__s" {
             tc_check_interface_satisfaction(ct_str, constraint, line)
         }
     }
 }
 
-// Resolve a generic type by substituting type parameters with concrete types
 func tc_substitute_type(typ, substitutions) {
     if typ == null { return "unknown" }
     if typeof(typ) == "string" {
@@ -2027,7 +1810,6 @@ func tc_substitute_type(typ, substitutions) {
     }
 }
 
-// Build substitution map from type parameter names to concrete types
 func tc_build_substitution_map(type_param_names, type_args) {
     let subs = {"__s": true}
     let i = 0
@@ -2038,12 +1820,6 @@ func tc_build_substitution_map(type_param_names, type_args) {
     }
     subs
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Full Bidirectional Type Inference
-// ═══════════════════════════════════════════════════════════════════
-
-// Infer type from assignment context (propagate expected type)
 func tc_check_with_expected(expr, expected_type, line) {
     if expr == null { return null }
     const actual = tc_infer_expr_type_full(expr)
@@ -2056,7 +1832,6 @@ func tc_check_with_expected(expr, expected_type, line) {
     }
 }
 
-// Infer type of a block (last statement or tail expression)
 func tc_infer_block_type(block) {
     if block == null { return "void" }
     if block.tail_expr != null {
@@ -2074,13 +1849,11 @@ func tc_infer_block_type(block) {
     }
 }
 
-// Infer return type of a function body
 func tc_infer_function_return_type(fdef) {
     if fdef.return_type != null && fdef.return_type != "" { return fdef.return_type }
     tc_infer_block_type(fdef.body)
 }
 
-// Propagate types through variable assignment
 func tc_propagate_assignment_type(name, expr, line) {
     const info = tc_lookup_var(name)
     if info == null { return null }
@@ -2095,7 +1868,6 @@ func tc_propagate_assignment_type(name, expr, line) {
     }
 }
 
-// Propagate types through return statements
 func tc_check_return_type(expr, expected_return, line) {
     if expr == null || expected_return == null || expected_return == "unknown" { return null }
     const actual = tc_infer_expr_type_full(expr)
@@ -2106,7 +1878,6 @@ func tc_check_return_type(expr, expected_return, line) {
     }
 }
 
-// Infer element type from array operations
 func tc_infer_array_element_type(arr_expr) {
     const arr_type = tc_infer_expr_type_full(arr_expr)
     if typeof(arr_type) == "map" && arr_type.has("kind") && arr_type["kind"] == "array" {
@@ -2115,7 +1886,6 @@ func tc_infer_array_element_type(arr_expr) {
     "unknown"
 }
 
-// Infer value type from map operations
 func tc_infer_map_value_type(map_expr) {
     const map_type = tc_infer_expr_type_full(map_expr)
     if typeof(map_type) == "map" && map_type.has("kind") && map_type["kind"] == "map" {
@@ -2123,15 +1893,8 @@ func tc_infer_map_value_type(map_expr) {
     }
     "unknown"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complete Interface Satisfaction Checking
-// ═══════════════════════════════════════════════════════════════════
-
-// Method registry: type_name -> [{ "name": string, "params": [types], "return": type }]
 let tc_type_methods = {"__s": true}
 
-// Register a method implementation for a type
 func tc_register_method(type_name, method_name, param_types, return_type) {
     if !tc_type_methods.has(type_name) {
         tc_type_methods[type_name] = []
@@ -2141,14 +1904,11 @@ func tc_register_method(type_name, method_name, param_types, return_type) {
     tc_type_methods[type_name] = methods
 }
 
-// Collect all methods for a type (including from impl blocks)
 func tc_collect_type_methods(type_name) {
     let methods = []
-    // Direct methods from tc_type_methods
     if tc_type_methods.has(type_name) && type_name != "__s" {
         methods = methods.concat(tc_type_methods[type_name])
     }
-    // Methods registered as "TypeName.method" in tc_functions
     for fn_name in tc_functions.keys() {
         if fn_name == "__s" { continue }
         if starts_with(fn_name, f"{type_name}.") {
@@ -2160,7 +1920,6 @@ func tc_collect_type_methods(type_name) {
     methods
 }
 
-// Full interface satisfaction check with embedded interfaces
 func tc_check_interface_satisfaction_full(type_name, interface_name, line) {
     if !tc_interfaces.has(interface_name) || interface_name == "__s" { return true }
     const iface = tc_interfaces[interface_name]
@@ -2177,7 +1936,6 @@ func tc_check_interface_satisfaction_full(type_name, interface_name, line) {
         if !found { missing.push(req_name) }
     }
 
-    // Check embedded interfaces
     if iface.has("embeds") {
         for embedded_name in iface["embeds"] {
             if tc_interfaces.has(embedded_name) && embedded_name != "__s" {
@@ -2201,7 +1959,6 @@ func tc_check_interface_satisfaction_full(type_name, interface_name, line) {
     true
 }
 
-// Register an interface with embedded interfaces support
 func tc_register_interface_full(name, methods, embeds) {
     let method_sigs = []
     for m in methods {
@@ -2213,25 +1970,16 @@ func tc_register_interface_full(name, methods, embeds) {
     }
     tc_interfaces[name] = {"methods": method_sigs, "embeds": embeds}
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enhanced Null Safety Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Nullable type tracking: var_name -> bool (true = definitely nullable)
 let tc_nullable_vars = {"__s": true}
 
-// Mark a variable as potentially nullable
 func tc_mark_nullable(var_name) {
     tc_nullable_vars[var_name] = true
 }
 
-// Check if a variable is known to be nullable
 func tc_is_nullable(var_name) {
     tc_nullable_vars.has(var_name) && var_name != "__s"
 }
 
-// Warn on unchecked null access
 func tc_check_null_access(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -2270,7 +2018,6 @@ func tc_check_null_access(expr, line) {
     }
 }
 
-// Track nullability through assignments
 func tc_track_nullability(name, expr) {
     if expr == null { tc_mark_nullable(name); return null }
     const ek = expr.kind
@@ -2282,19 +2029,16 @@ func tc_track_nullability(name, expr) {
             }
         },
         ExprKind::ECall(fn_name, _args, _ta) => {
-            // Functions that may return null
             if fn_name == "find" || fn_name == "get" || fn_name == "first" || fn_name == "last" || fn_name == "pop" {
                 tc_mark_nullable(name)
             }
         },
         ExprKind::ENullCoalesce(_, _) => {
-            // Result of ?? is non-null
         },
         _ => {}
     }
 }
 
-// Analyze control flow for null narrowing in if/else
 func tc_analyze_null_narrowing_stmt(stmt) {
     if stmt == null { return null }
     const sk = stmt.kind
@@ -2302,24 +2046,15 @@ func tc_analyze_null_narrowing_stmt(stmt) {
         StmtKind::SIf(cond, then_block, else_block) => {
             const checked_var = tc_analyze_null_check(cond)
             if checked_var != null {
-                // Inside then-block, var is non-null
                 tc_enter_null_checked(checked_var)
-                // then-block processing happens after
             }
         },
         _ => {}
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: All 49 Lint Rules — Full AST Walking
-// ═══════════════════════════════════════════════════════════════════
-
-// Lint context for stateful analysis
 let lint_enabled_rules = {"__s": true}
 let lint_suppress_next = false
 
-// Initialize all lint rules as enabled
 func lint_init_rules() {
     const rules = [
         "W100", "W101", "W102", "W103", "W104", "W105", "W106", "W107", "W108", "W109",
@@ -2338,7 +2073,6 @@ func lint_is_enabled(code) {
     lint_enabled_rules.has(code) && code != "__s"
 }
 
-// W102: Variable declared but only assigned, never read
 func tc_lint_w102_write_only(scope) {
     for name in scope.keys() {
         if name == "__s" { continue }
@@ -2350,19 +2084,16 @@ func tc_lint_w102_write_only(scope) {
     }
 }
 
-// W103: Mutable variable never mutated
 func tc_lint_w103_unnecessary_mut(scope) {
     for name in scope.keys() {
         if name == "__s" { continue }
         if starts_with(name, "_") { continue }
         const info = scope[name]
         if info.mutable && info.used {
-            // Would need tracking reassignment; simplified: skip
         }
     }
 }
 
-// W104: Empty block body
 func tc_lint_w104_empty_block(block, kind, line) {
     if block == null { return null }
     if len(block.stmts) == 0 && block.tail_expr == null {
@@ -2370,7 +2101,6 @@ func tc_lint_w104_empty_block(block, kind, line) {
     }
 }
 
-// W105: While true without break
 func tc_lint_w105_while_true(cond, body, line) {
     if cond == null { return null }
     const ek = cond.kind
@@ -2378,7 +2108,6 @@ func tc_lint_w105_while_true(cond, body, line) {
         ExprKind::ELiteral(lit) => {
             match lit {
                 Literal::BoolLit(true) => {
-                    // Check if body contains a break
                     let has_break = false
                     if body != null {
                         for s in body.stmts {
@@ -2399,7 +2128,6 @@ func tc_lint_w105_while_true(cond, body, line) {
     }
 }
 
-// W106: Boolean literal comparison (e.g., x == true)
 func tc_lint_w106_bool_comparison(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -2438,7 +2166,6 @@ func tc_is_bool_literal(expr) {
     }
 }
 
-// W107: Suspicious arithmetic (x * 0, x % 1, x / x)
 func tc_lint_w107_suspicious_arith(expr, line) {
     if expr == null { return null }
     const ek = expr.kind
@@ -2483,7 +2210,6 @@ func tc_is_int_literal(expr, val) {
     }
 }
 
-// W108: Unnecessary return in tail position
 func tc_lint_w108_unnecessary_return(stmts, line) {
     if len(stmts) == 0 { return null }
     const last = stmts[len(stmts) - 1]
@@ -2497,7 +2223,6 @@ func tc_lint_w108_unnecessary_return(stmts, line) {
     }
 }
 
-// W109: Shadowing in same scope
 func tc_lint_w109_shadowing(name, line) {
     if len(tc_scopes) == 0 { return null }
     const current = tc_scopes[len(tc_scopes) - 1]
@@ -2506,13 +2231,10 @@ func tc_lint_w109_shadowing(name, line) {
     }
 }
 
-// W110: Unused function
 func tc_lint_w110_unused_function(func_name, line) {
-    // Tracked via tc_functions used flag (would require extra tracking)
     null
 }
 
-// W111: Redundant else after return
 func tc_lint_w111_redundant_else(then_block, else_block, line) {
     if then_block == null || else_block == null { return null }
     const then_stmts = then_block.stmts
@@ -2530,7 +2252,6 @@ func tc_lint_w111_redundant_else(then_block, else_block, line) {
     }
 }
 
-// W112: Unreachable pattern in match
 func tc_lint_w112_unreachable_pattern(arms, line) {
     let had_wildcard = false
     for arm in arms {
@@ -2544,7 +2265,6 @@ func tc_lint_w112_unreachable_pattern(arms, line) {
     }
 }
 
-// W113: Redundant type annotation
 func tc_lint_w113_redundant_annotation(annotation, inferred, line) {
     if annotation == null || annotation == "" || annotation == "unknown" { return null }
     if inferred == null || inferred == "" || inferred == "unknown" { return null }
@@ -2553,27 +2273,22 @@ func tc_lint_w113_redundant_annotation(annotation, inferred, line) {
     }
 }
 
-// W114: Deprecated function usage
 func tc_lint_w114_deprecated(func_name, line) {
-    // Check if function has deprecated marker (would need metadata tracking)
     null
 }
 
-// W202: Function too many parameters
 func tc_lint_w202_too_many_params(fdef, line) {
     if len(fdef.params) > 7 {
         tc_warn_at(line, f"function '{fdef.name}' has {len(fdef.params)} parameters — consider using a config object (W202)")
     }
 }
 
-// W203: Deeply nested code
 func tc_lint_w203_deep_nesting(depth, line) {
     if depth > 5 {
         tc_warn_at(line, f"code is nested {depth} levels deep — consider extracting functions (W203)")
     }
 }
 
-// W204: While-true loop
 func tc_lint_w204_while_true(cond, line) {
     if cond == null { return null }
     match cond.kind {
@@ -2589,7 +2304,6 @@ func tc_lint_w204_while_true(cond, line) {
     }
 }
 
-// W205: Self-comparison
 func tc_lint_w205_self_comparison(left, right, op, line) {
     if tc_exprs_identical(left, right) {
         match op {
@@ -2604,7 +2318,6 @@ func tc_lint_w205_self_comparison(left, right, op, line) {
     }
 }
 
-// W206: Empty block
 func tc_lint_w206_empty_block(block, context, line) {
     if block == null { return null }
     if len(block.stmts) == 0 && block.tail_expr == null {
@@ -2612,7 +2325,6 @@ func tc_lint_w206_empty_block(block, context, line) {
     }
 }
 
-// W207: String comparison for type checking
 func tc_lint_w207_string_type_check(expr, line) {
     if expr == null { return null }
     match expr.kind {
@@ -2651,7 +2363,6 @@ func tc_is_string_literal(expr) {
     }
 }
 
-// W208: Duplicate imports
 func tc_lint_w208_duplicate_imports(statements) {
     let seen_imports = {"__s": true}
     for stmt in statements {
@@ -2668,10 +2379,8 @@ func tc_lint_w208_duplicate_imports(statements) {
     }
 }
 
-// W209: Variable shadows outer scope
 func tc_lint_w209_outer_shadow(name, line) {
     if starts_with(name, "_") { return null }
-    // Check outer scopes (skip innermost)
     if len(tc_scopes) < 2 { return null }
     let i = len(tc_scopes) - 2
     while i >= 0 {
@@ -2684,7 +2393,6 @@ func tc_lint_w209_outer_shadow(name, line) {
     }
 }
 
-// W212: Unused match result
 func tc_lint_w212_unused_match_result(stmt) {
     if stmt == null { return null }
     match stmt.kind {
@@ -2700,7 +2408,6 @@ func tc_lint_w212_unused_match_result(stmt) {
     }
 }
 
-// W213: Missing else branch in expression position
 func tc_lint_w213_missing_else(expr, line) {
     match expr.kind {
         ExprKind::EIfElse(_, _, else_expr) => {
@@ -2712,12 +2419,10 @@ func tc_lint_w213_missing_else(expr, line) {
     }
 }
 
-// W214: Comparison chain simplification
 func tc_lint_w214_comparison_chain(expr, line) {
     if expr == null { return null }
     match expr.kind {
         ExprKind::EBinaryOp(BinOp::Or, left, right) => {
-            // Check for x == a || x == b pattern
             if tc_is_equality_check(left) && tc_is_equality_check(right) {
                 if tc_same_lhs(left, right) {
                     tc_warn_at(line, "consider using match or `in` instead of chained equality checks (W214)")
@@ -2748,19 +2453,14 @@ func tc_same_lhs(a, b) {
     }
 }
 
-// W221: Unnecessary semicolons
 func tc_lint_w221_extra_semicolons(source) {
-    // Would need token-level analysis
     null
 }
 
-// W222: Unnecessary parentheses
 func tc_lint_w222_extra_parens(expr, line) {
-    // Would need paren tracking in AST
     null
 }
 
-// W223: Collapsible if
 func tc_lint_w223_collapsible_if(stmt, line) {
     match stmt.kind {
         StmtKind::SIf(_, then_block, else_block) => {
@@ -2780,7 +2480,6 @@ func tc_lint_w223_collapsible_if(stmt, line) {
     }
 }
 
-// W224: Loop that runs at most once
 func tc_lint_w224_single_iteration_loop(body, line) {
     if body == null { return null }
     if len(body.stmts) > 0 {
@@ -2797,7 +2496,6 @@ func tc_lint_w224_single_iteration_loop(body, line) {
     }
 }
 
-// W225: Constant condition in if
 func tc_lint_w225_constant_condition(cond, line) {
     if cond == null { return null }
     match cond.kind {
@@ -2814,14 +2512,12 @@ func tc_lint_w225_constant_condition(cond, line) {
     }
 }
 
-// W231: Too many match arms
 func tc_lint_w231_too_many_arms(arms, line) {
     if len(arms) > 20 {
         tc_warn_at(line, f"match has {len(arms)} arms — consider refactoring (W231)")
     }
 }
 
-// W232: Too many imports
 func tc_lint_w232_too_many_imports(statements) {
     let import_count = 0
     for stmt in statements {
@@ -2835,10 +2531,8 @@ func tc_lint_w232_too_many_imports(statements) {
     }
 }
 
-// W233: Catch block that ignores error
 func tc_lint_w233_ignored_error(catch_var, catch_block, line) {
-    if catch_var == "_" { return null } // Explicitly ignored
-    // Check if catch_var is used in catch_block
+    if catch_var == "_" { return null }
     let used = false
     if catch_block != null {
         for s in catch_block.stmts {
@@ -2888,7 +2582,6 @@ func tc_expr_references_var(expr, var_name) {
     }
 }
 
-// W234: Duplicate struct field names
 func tc_lint_w234_duplicate_struct_fields(fields, line) {
     let seen = {"__s": true}
     for f in fields {
@@ -2900,7 +2593,6 @@ func tc_lint_w234_duplicate_struct_fields(fields, line) {
     }
 }
 
-// W235: Duplicate enum variant names
 func tc_lint_w235_duplicate_enum_variants(variants, line) {
     let seen = {"__s": true}
     for v in variants {
@@ -2912,12 +2604,10 @@ func tc_lint_w235_duplicate_enum_variants(variants, line) {
     }
 }
 
-// W241: Function with multiple return types
 func tc_lint_w241_mixed_returns(fdef, line) {
     if fdef.body == null { return null }
     let return_types = []
     tc_collect_return_types(fdef.body, return_types)
-    // Check if all return types are compatible
     if len(return_types) > 1 {
         let first = return_types[0]
         for rt in return_types {
@@ -2949,7 +2639,6 @@ func tc_collect_return_types(block, types) {
     }
 }
 
-// W242: Function with no explicit return type and complex body
 func tc_lint_w242_infer_warning(fdef, line) {
     if fdef.return_type != null && fdef.return_type != "" { return null }
     if fdef.body == null { return null }
@@ -2958,7 +2647,6 @@ func tc_lint_w242_infer_warning(fdef, line) {
     }
 }
 
-// W243: Recursive function without base case
 func tc_lint_w243_missing_base_case(fdef, line) {
     if fdef.body == null { return null }
     const name = fdef.name
@@ -2998,12 +2686,6 @@ func tc_expr_calls_func(expr, func_name) {
         _ => false
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Pattern Exhaustiveness for Complex Nested Patterns
-// ═══════════════════════════════════════════════════════════════════
-
-// Check exhaustiveness of nested patterns
 func tc_check_exhaustiveness_full(subject_expr, arms, line) {
     if len(arms) == 0 {
         tc_warn_at(line, "empty match expression")
@@ -3018,9 +2700,8 @@ func tc_check_exhaustiveness_full(subject_expr, arms, line) {
         covered_patterns.push(tc_pattern_to_coverage(arm.pattern))
     }
 
-    if has_wildcard { return null } // Wildcard covers everything
+    if has_wildcard { return null }
 
-    // Check enum exhaustiveness
     const subject_type = tc_infer_expr_type_full(subject_expr)
     const type_str = tc_type_to_string(subject_type)
 
@@ -3041,7 +2722,6 @@ func tc_check_exhaustiveness_full(subject_expr, arms, line) {
         }
     }
 
-    // Check boolean exhaustiveness
     if type_str == "bool" {
         let has_true = false
         let has_false = false
@@ -3055,7 +2735,6 @@ func tc_check_exhaustiveness_full(subject_expr, arms, line) {
         }
     }
 
-    // Check null exhaustiveness for optional types
     if type_str == "optional" || tc_is_nullable(type_str) {
         let has_null = false
         let has_value = false
@@ -3071,7 +2750,6 @@ func tc_check_exhaustiveness_full(subject_expr, arms, line) {
     }
 }
 
-// Convert a pattern to a coverage descriptor
 func tc_pattern_to_coverage(pattern) {
     match pattern {
         Pattern::PVariable(_) => {"wildcard": true},
@@ -3105,23 +2783,15 @@ func tc_pattern_to_coverage(pattern) {
         _ => {"unknown": true}
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enhanced Closure Capture Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Track captured variables with their types
 func tc_analyze_captures_typed(lambda_params, lambda_body) {
     let captured = []
     if lambda_body == null { return captured }
 
-    // Build set of param names (these are not captures)
     let param_names = {"__s": true}
     for p in lambda_params {
         param_names[p.name] = true
     }
 
-    // Walk the body and find references to outer-scope variables
     tc_collect_captures_from_block(lambda_body, param_names, captured)
     captured
 }
@@ -3136,7 +2806,6 @@ func tc_collect_captures_from_block(block, local_names, captured) {
             tc_collect_captures_from_expr(block.tail_expr, local_names, captured)
         }
     } else {
-        // block might be an expression (arrow lambda)
         tc_collect_captures_from_expr(block, local_names, captured)
     }
 }
@@ -3225,7 +2894,6 @@ func tc_collect_captures_from_expr(expr, local_names, captured) {
             if else_e != null { tc_collect_captures_from_expr(else_e, local_names, captured) }
         },
         ExprKind::ELambda(inner_params, inner_body) => {
-            // Nested lambda: add its params to local_names, recurse
             let inner_locals = {}
             for k in local_names.keys() { inner_locals[k] = true }
             for p in inner_params { inner_locals[p.name] = true }
@@ -3256,12 +2924,6 @@ func tc_collect_captures_from_expr(expr, local_names, captured) {
         _ => {}
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Import Validation
-// ═══════════════════════════════════════════════════════════════════
-
-// Validate all import statements
 func tc_validate_imports(statements) {
     for stmt in statements {
         match stmt.kind {
@@ -3271,7 +2933,6 @@ func tc_validate_imports(statements) {
 
                 const root = path_parts[0]
                 if root == "std" {
-                    // Validate stdlib module exists
                     if len(path_parts) >= 2 {
                         const mod_name = path_parts[1]
                         if !KNOWN_STDLIB_MODULES.contains(mod_name) {
@@ -3279,15 +2940,10 @@ func tc_validate_imports(statements) {
                         }
                     }
                 } else if root == "self" || root == "super" || root == "pkg" {
-                    // Relative imports: valid path structure
                 } else {
-                    // External package import: check if package is available
-                    // This would require package resolution context
                 }
 
-                // Validate specific imported items if any
                 if items != null && len(items) > 0 {
-                    // Check for duplicate items
                     let seen_items = {"__s": true}
                     for item in items {
                         const item_name = if typeof(item) == "string" { item } else { item.name }
@@ -3302,14 +2958,7 @@ func tc_validate_imports(statements) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Recursive Type Cycle Detection
-// ═══════════════════════════════════════════════════════════════════
-
-// Detect cycles in type definitions (struct A contains B, B contains A)
 func tc_detect_type_cycles(statements) {
-    // Build dependency graph: type_name -> [referenced_type_names]
     let type_deps = {"__s": true}
 
     for stmt in statements {
@@ -3328,7 +2977,6 @@ func tc_detect_type_cycles(statements) {
         }
     }
 
-    // DFS cycle detection
     for type_name in type_deps.keys() {
         if type_name == "__s" { continue }
         let visited = {"__s": true}
@@ -3354,12 +3002,6 @@ func tc_has_type_cycle(current, deps, visited, path) {
     path.pop()
     false
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enhanced Error Reporting with Span Information
-// ═══════════════════════════════════════════════════════════════════
-
-// Structured diagnostic
 func tc_diagnostic(line, col, msg, severity, code, help) {
     {
         "line": line,
@@ -3372,19 +3014,16 @@ func tc_diagnostic(line, col, msg, severity, code, help) {
     }
 }
 
-// Add structured error
 func tc_add_error(line, msg, code, help) {
     const diag = tc_diagnostic(line, 0, msg, "error", code, help)
     tc_errors.push(diag)
 }
 
-// Add structured warning
 func tc_add_warning(line, msg, code, help) {
     const diag = tc_diagnostic(line, 0, msg, "warning", code, help)
     tc_warnings.push(diag)
 }
 
-// Format a diagnostic for display
 func tc_format_diagnostic(diag) {
     if typeof(diag) == "string" { return diag }
     let result = ""
@@ -3400,30 +3039,20 @@ func tc_format_diagnostic(diag) {
     }
     result
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Full Lint Entry Point
-// ═══════════════════════════════════════════════════════════════════
-
-// Run all lint rules on a program
 func lint(program) {
     let warnings = []
     const stmts = program.statements
 
-    // Initialize lint rules
     lint_init_rules()
 
-    // Import-level checks
     tc_lint_w208_duplicate_imports(stmts)
     tc_lint_w232_too_many_imports(stmts)
     tc_check_unused_imports(stmts)
 
-    // Per-statement lint checks
     for stmt in stmts {
         const line = stmt.span.start_line
         const sk = stmt.kind
 
-        // Function-level checks
         match sk {
             StmtKind::SFuncDef(fdef) => {
                 tc_lint_w202_too_many_params(fdef, line)
@@ -3489,20 +3118,12 @@ func lint(program) {
         }
     }
 
-    // Collect warnings from tc_warnings into result
     for w in tc_warnings {
         warnings.push(if typeof(w) == "string" { w } else { tc_format_diagnostic(w) })
     }
     warnings
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enhanced Check Entry Point with Full Passes
-// ═══════════════════════════════════════════════════════════════════
-
-// Full type checking with all passes enabled
 func check_full(program) {
-    // Reset all state
     tc_scopes = []
     tc_functions = {"__s": true}
     tc_enums = {"__s": true}
@@ -3523,59 +3144,41 @@ func check_full(program) {
 
     const stmts = program.statements
 
-    // Initialize global scope
     tc_push_scope()
 
-    // Pass 1: Pre-register all declarations
     tc_preregister(stmts)
 
-    // Pass 2: Validate imports
     tc_validate_imports(stmts)
 
-    // Pass 3: Detect type cycles
     tc_detect_type_cycles(stmts)
 
-    // Pass 4: Check all statements
     tc_check_stmts(stmts)
 
-    // Pass 5: Post-analysis warnings
     tc_check_unused_imports(stmts)
 
-    // Pop global scope (emits unused variable warnings)
     tc_pop_scope()
 
-    // Return structured result
     let result = []
     result.push(tc_errors)
     result.push(tc_warnings)
     result
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Compatibility — Structural Subtyping
-// ═══════════════════════════════════════════════════════════════════
-
-// Deep type compatibility check (structural)
 func tc_types_compatible_deep(expected, actual) {
     if expected == "unknown" || actual == "unknown" { return true }
     if expected == actual { return true }
 
-    // Numeric widening
     if expected == "float" && actual == "int" { return true }
     if expected == "float64" && actual == "int64" { return true }
 
-    // Null is compatible with optional
     if actual == "null" {
         if typeof(expected) == "map" && expected.has("kind") && expected["kind"] == "optional" {
             return true
         }
-        return true // MAGI allows null anywhere
+        return true
     }
 
-    // Type parameter always compatible
     if tc_is_type_param(expected) || tc_is_type_param(actual) { return true }
 
-    // Complex types
     if typeof(expected) == "map" && typeof(actual) == "map" {
         if !expected.has("kind") || !actual.has("kind") { return true }
         const ek = expected["kind"]
@@ -3592,17 +3195,14 @@ func tc_types_compatible_deep(expected, actual) {
                        tc_types_compatible_deep(expected["value"], actual["value"])
             },
             "function" => {
-                // Check parameter count
                 const ep = if expected.has("params") { expected["params"] } else { [] }
                 const ap = if actual.has("params") { actual["params"] } else { [] }
                 if len(ep) != len(ap) { return false }
-                // Params are contravariant
                 let i = 0
                 while i < len(ep) {
                     if !tc_types_compatible_deep(ap[i], ep[i]) { return false }
                     i = i + 1
                 }
-                // Return type is covariant
                 const er = if expected.has("return") { expected["return"] } else { "void" }
                 const ar = if actual.has("return") { actual["return"] } else { "void" }
                 return tc_types_compatible_deep(er, ar)
@@ -3639,27 +3239,18 @@ func tc_types_compatible_deep(expected, actual) {
 
     false
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Unification (for generic inference)
-// ═══════════════════════════════════════════════════════════════════
-
-// Unify two types, producing substitutions for type parameters
 func tc_unify(expected, actual, substitutions) {
     if expected == actual { return true }
     if expected == "unknown" || actual == "unknown" { return true }
 
-    // If expected is a type parameter, bind it
     if typeof(expected) == "string" && tc_is_type_param(expected) {
         if substitutions.has(expected) {
-            // Already bound: check consistency
             return tc_types_compatible_deep(substitutions[expected], actual)
         }
         substitutions[expected] = actual
         return true
     }
 
-    // If actual is a type parameter, bind it
     if typeof(actual) == "string" && tc_is_type_param(actual) {
         if substitutions.has(actual) {
             return tc_types_compatible_deep(expected, substitutions[actual])
@@ -3668,7 +3259,6 @@ func tc_unify(expected, actual, substitutions) {
         return true
     }
 
-    // Unify complex types
     if typeof(expected) == "map" && typeof(actual) == "map" {
         if !expected.has("kind") || !actual.has("kind") { return true }
         if expected["kind"] != actual["kind"] { return false }
@@ -3710,19 +3300,12 @@ func tc_unify(expected, actual, substitutions) {
         false
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Generic Function Call Type Inference
-// ═══════════════════════════════════════════════════════════════════
-
-// Infer type arguments for a generic function call from argument types
 func tc_infer_type_args(func_name, arg_exprs, line) {
     if !tc_functions.has(func_name) { return [] }
     const sig = tc_functions[func_name]
     if !sig.has("type_params") || sig["type_params"] == null { return [] }
     const type_params = sig["type_params"]
 
-    // Build substitution map by unifying parameter types with argument types
     let substitutions = {"__s": true}
     let i = 0
     const param_limit = if len(sig.params) < len(arg_exprs) { len(sig.params) } else { len(arg_exprs) }
@@ -3735,7 +3318,6 @@ func tc_infer_type_args(func_name, arg_exprs, line) {
         i = i + 1
     }
 
-    // Extract type arguments in order
     let type_args = []
     for tp in type_params {
         const name = if typeof(tp) == "string" { tp } else { tp[0] }
@@ -3747,12 +3329,6 @@ func tc_infer_type_args(func_name, arg_exprs, line) {
     }
     type_args
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Const Expression Evaluation (Constant Folding)
-// ═══════════════════════════════════════════════════════════════════
-
-// Evaluate a constant expression at compile time
 func tc_eval_const_expr(expr) {
     if expr == null { return null }
     match expr.kind {
@@ -3803,25 +3379,17 @@ func tc_eval_const_expr(expr) {
             }
         },
         ExprKind::EVariable(name) => {
-            // Check if variable is a known constant
             const info = tc_lookup_var(name)
             if info != null && !info.mutable {
-                return info.const_val // Would need const_val tracking
+                return info.const_val
             }
             null
         },
         _ => null
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Dead Code Detection
-// ═══════════════════════════════════════════════════════════════════
-
-// Track called functions
 let tc_called_functions = {"__s": true}
 
-// Collect all function calls in the program
 func tc_collect_called_functions(stmts) {
     for stmt in stmts {
         tc_collect_calls_stmt(stmt)
@@ -3927,26 +3495,19 @@ func tc_collect_calls_expr(expr) {
     }
 }
 
-// Report unused functions (dead code)
 func tc_report_dead_code(line) {
     for fn_name in tc_functions.keys() {
         if fn_name == "__s" { continue }
-        if fn_name == "main" { continue } // main is always entry point
-        if starts_with(fn_name, "_") { continue } // Private functions
-        if starts_with(fn_name, "test_") { continue } // Test functions
-        if starts_with(fn_name, "bench_") { continue } // Bench functions
+        if fn_name == "main" { continue }
+        if starts_with(fn_name, "_") { continue }
+        if starts_with(fn_name, "test_") { continue }
+        if starts_with(fn_name, "bench_") { continue }
         if !tc_called_functions.has(fn_name) {
             const sig = tc_functions[fn_name]
             tc_warn_at(sig.line, f"function '{fn_name}' is never called (W110)")
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Scope Chain Type Narrowing
-// ═══════════════════════════════════════════════════════════════════
-
-// Track type narrowings through control flow
 let tc_narrowings = {"__s": true}
 
 func tc_narrow_type(var_name, narrowed_type) {
@@ -3970,14 +3531,12 @@ func tc_clear_all_narrowings() {
     tc_narrowings = {"__s": true}
 }
 
-// Narrow types based on typeof checks
 func tc_analyze_typeof_narrowing(cond) {
     if cond == null { return null }
     match cond.kind {
         ExprKind::EBinaryOp(op, left, right) => {
             match op {
                 BinOp::Eq => {
-                    // typeof(x) == "string"
                     if tc_is_typeof_call(left) && tc_is_string_literal(right) {
                         match left.kind {
                             ExprKind::ECall(_, args, _) => {
@@ -4011,12 +3570,6 @@ func tc_analyze_typeof_narrowing(cond) {
     }
     null
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Impl Block Method Registration
-// ═══════════════════════════════════════════════════════════════════
-
-// Pre-register methods from impl blocks
 func tc_preregister_impl_methods(stmts) {
     for stmt in stmts {
         match stmt.kind {
@@ -4033,11 +3586,9 @@ func tc_preregister_impl_methods(stmts) {
                     tc_register_func(m, stmt.span.start_line)
                     tc_register_method(type_name, m.name, [], "unknown")
                 }
-                // Check interface satisfaction
                 tc_check_interface_satisfaction_full(type_name, trait_name, stmt.span.start_line)
             },
             StmtKind::SFuncDef(fdef) => {
-                // Handle dot-receiver syntax: func TypeName.method(self)
                 if fdef.name.contains(".") {
                     const dot_idx = fdef.name.index_of(".")
                     const recv_type = fdef.name.slice(0, dot_idx)
@@ -4049,12 +3600,6 @@ func tc_preregister_impl_methods(stmts) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enum Variant Type Tracking
-// ═══════════════════════════════════════════════════════════════════
-
-// Track enum variant payloads: enum_name -> variant_name -> [types]
 let tc_enum_variant_types = {"__s": true}
 
 func tc_register_enum_variant_types(enum_name, variants) {
@@ -4081,12 +3626,6 @@ func tc_get_enum_variant_types(enum_name, variant_name) {
     if vt.has(variant_name) && variant_name != "__s" { return vt[variant_name] }
     []
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Struct Field Type Tracking
-// ═══════════════════════════════════════════════════════════════════
-
-// Track struct field types: struct_name -> field_name -> type
 let tc_struct_field_types = {"__s": true}
 
 func tc_register_struct_field_types(struct_name, fields) {
@@ -4106,17 +3645,14 @@ func tc_get_struct_field_type(struct_name, field_name) {
     "unknown"
 }
 
-// Enhanced field access type inference
 func tc_infer_field_access_type(obj_expr, field_name) {
     const obj_type = tc_infer_expr_type_full(obj_expr)
     const type_str = tc_type_to_string(obj_type)
 
-    // Check struct field types
     if tc_struct_field_types.has(type_str) && type_str != "__s" {
         return tc_get_struct_field_type(type_str, field_name)
     }
 
-    // Built-in field access
     if type_str == "string" {
         if field_name == "length" { return "int" }
     }
@@ -4126,12 +3662,6 @@ func tc_infer_field_access_type(obj_expr, field_name) {
 
     "unknown"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Alias Resolution
-// ═══════════════════════════════════════════════════════════════════
-
-// Type aliases: alias_name -> resolved_type
 let tc_type_aliases = {"__s": true}
 
 func tc_register_type_alias(alias_name, resolved_type) {
@@ -4141,29 +3671,20 @@ func tc_register_type_alias(alias_name, resolved_type) {
 func tc_resolve_type_alias(type_name) {
     if tc_type_aliases.has(type_name) && type_name != "__s" {
         const resolved = tc_type_aliases[type_name]
-        // Recursive resolution (with cycle check)
         if resolved != type_name {
             return tc_resolve_type_alias(resolved)
         }
     }
     type_name
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Expression Type Checking Helpers
-// ═══════════════════════════════════════════════════════════════════
-
-// Check that an expression produces a boolean value
 func tc_check_boolean_context(expr, line) {
     if expr == null { return null }
     const typ = tc_infer_expr_type_full(expr)
-    // In MAGI, all values are truthy/falsy, so this is a soft warning
     if typ == "void" {
         tc_warn_at(line, "void expression used in boolean context")
     }
 }
 
-// Check array index expression
 func tc_check_index_expr(obj_expr, idx_expr, line) {
     const idx_type = tc_infer_expr_type_full(idx_expr)
     const obj_type = tc_infer_expr_type_full(obj_expr)
@@ -4173,14 +3694,12 @@ func tc_check_index_expr(obj_expr, idx_expr, line) {
         tc_warn_at(line, f"array index should be int, got '{tc_type_to_string(idx_type)}'")
     }
     if obj_kind == "map" && idx_type != "unknown" && idx_type != "string" {
-        // Maps accept any key
     }
     if obj_kind == "string" && idx_type != "unknown" && idx_type != "int" {
         tc_warn_at(line, f"string index should be int, got '{tc_type_to_string(idx_type)}'")
     }
 }
 
-// Check that a value is callable
 func tc_check_callable(expr, line) {
     const typ = tc_infer_expr_type_full(expr)
     if typeof(typ) == "map" && typ.has("kind") && typ["kind"] == "function" {
@@ -4190,11 +3709,9 @@ func tc_check_callable(expr, line) {
         if tc_functions.has(typ) { return true }
         if tc_is_builtin(typ) { return true }
     }
-    // Not definitively callable, but don't error (dynamic dispatch)
     true
 }
 
-// Check spread expression in proper context
 func tc_check_spread_context(expr, line) {
     const typ = tc_infer_expr_type_full(expr)
     const type_str = tc_type_to_string(typ)
@@ -4204,12 +3721,6 @@ func tc_check_spread_context(expr, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Async/Await Type Checking
-// ═══════════════════════════════════════════════════════════════════
-
-// Track async function contexts
 let tc_async_depth = 0
 
 func tc_check_await_context(line) {
@@ -4224,40 +3735,24 @@ func tc_check_yield_context(line) {
     }
 }
 
-// Infer the inner type of a Promise/Future
 func tc_infer_await_type(expr) {
     const typ = tc_infer_expr_type_full(expr)
     if typeof(typ) == "map" && typ.has("kind") && typ["kind"] == "promise" {
         return typ["inner"]
     }
-    // If not a promise, await returns the value directly
     typ
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Exhaustive Check Entry Point with Dead Code Analysis
-// ═══════════════════════════════════════════════════════════════════
-
 func check_exhaustive(program) {
-    // Run full type checking
     const result = check_full(program)
 
-    // Additional: dead code analysis
     tc_called_functions = {"__s": true}
     tc_collect_called_functions(program.statements)
     tc_report_dead_code(0)
 
-    // Additional: impl method registration
     tc_preregister_impl_methods(program.statements)
 
     result
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Graph — Dependency Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Build a type dependency graph for ordering compilation
 let tc_type_graph = {"__s": true}
 
 func tc_build_type_graph(stmts) {
@@ -4296,7 +3791,6 @@ func tc_build_type_graph(stmts) {
     }
 }
 
-// Topological sort of type definitions
 func tc_topological_sort_types() {
     let in_degree = {}
     for name in tc_type_graph.keys() {
@@ -4327,12 +3821,6 @@ func tc_topological_sort_types() {
     }
     order
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Trait Coherence Checking
-// ═══════════════════════════════════════════════════════════════════
-
-// Track trait implementations: trait_name -> [type_names]
 let tc_trait_impls = {"__s": true}
 
 func tc_register_trait_impl(trait_name, type_name) {
@@ -4341,7 +3829,6 @@ func tc_register_trait_impl(trait_name, type_name) {
     }
     let impls = tc_trait_impls[trait_name]
     if impls.contains(type_name) {
-        // Duplicate implementation
         return false
     }
     impls.push(type_name)
@@ -4349,15 +3836,12 @@ func tc_register_trait_impl(trait_name, type_name) {
     true
 }
 
-// Check for orphan implementations
 func tc_check_orphan_rules(trait_name, type_name, line) {
-    // In MAGI, orphan rules are relaxed — just warn about duplicates
     if !tc_register_trait_impl(trait_name, type_name) {
         tc_error_at(line, f"duplicate implementation of '{trait_name}' for type '{type_name}'")
     }
 }
 
-// Check that all required trait methods are implemented
 func tc_check_trait_completeness(trait_name, type_name, implemented_methods, line) {
     if !tc_interfaces.has(trait_name) || trait_name == "__s" { return null }
     const iface = tc_interfaces[trait_name]
@@ -4374,15 +3858,8 @@ func tc_check_trait_completeness(trait_name, type_name, implemented_methods, lin
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Where-Clause Constraint Validation
-// ═══════════════════════════════════════════════════════════════════
-
-// Parse and validate where clauses on generic functions
 func tc_validate_where_clause(where_clause, line) {
     if where_clause == null { return null }
-    // where_clause is a list of: [type_param, constraint]
     for constraint in where_clause {
         if typeof(constraint) != "array" || len(constraint) < 2 { continue }
         const param_name = constraint[0]
@@ -4394,12 +3871,6 @@ func tc_validate_where_clause(where_clause, line) {
         tc_check_generic_constraint(param_name, bound, line)
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Variance Tracking
-// ═══════════════════════════════════════════════════════════════════
-
-// Track variance of type parameters: "covariant", "contravariant", "invariant"
 let tc_param_variance = {"__s": true}
 
 func tc_set_variance(type_name, param_name, variance) {
@@ -4417,14 +3888,8 @@ func tc_set_variance(type_name, param_name, variance) {
 func tc_get_variance(type_name, param_name) {
     const key = type_name + "." + param_name
     if tc_param_variance.has(key) { return tc_param_variance[key] }
-    "covariant" // Default
+    "covariant"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Accessibility Checking (pub/priv)
-// ═══════════════════════════════════════════════════════════════════
-
-// Track visibility: name -> "public" | "private" | "internal"
 let tc_visibility = {"__s": true}
 
 func tc_set_visibility(name, vis) {
@@ -4433,7 +3898,7 @@ func tc_set_visibility(name, vis) {
 
 func tc_get_visibility(name) {
     if tc_visibility.has(name) && name != "__s" { return tc_visibility[name] }
-    "public" // Default
+    "public"
 }
 
 func tc_check_visibility(name, from_module, line) {
@@ -4442,12 +3907,6 @@ func tc_check_visibility(name, from_module, line) {
         tc_error_at(line, f"cannot access private member '{name}' from module '{from_module}'")
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Comprehensive Flow Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Track definite assignment: ensure variables are assigned before use
 let tc_definitely_assigned = {"__s": true}
 
 func tc_mark_assigned(name) {
@@ -4458,13 +3917,10 @@ func tc_is_assigned(name) {
     tc_definitely_assigned.has(name) && name != "__s"
 }
 
-// Analyze definite assignment for an if-else
 func tc_analyze_definite_assignment_if(var_name, then_assigns, else_assigns) {
-    // Variable is definitely assigned if both branches assign it
     then_assigns && else_assigns
 }
 
-// Check for use before assignment
 func tc_check_use_before_assign(name, line) {
     if !tc_is_assigned(name) && tc_is_defined(name) {
         const info = tc_lookup_var(name)
@@ -4473,12 +3929,6 @@ func tc_check_use_before_assign(name, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Annotation Processing
-// ═══════════════════════════════════════════════════════════════════
-
-// Known annotations
 const KNOWN_ANNOTATIONS = [
     "test", "bench", "deprecated", "inline", "cold", "hot",
     "no_mangle", "export", "wasm_export", "derive",
@@ -4491,33 +3941,25 @@ func tc_validate_annotation(name, line) {
     }
 }
 
-// Process annotation effects
 func tc_process_annotation(name, args, target_name, line) {
     match name {
         "deprecated" => {
-            // Mark target as deprecated
             if tc_functions.has(target_name) {
                 let sig = tc_functions[target_name]
-                // Would mark deprecated flag
             }
         },
         "allow" => {
-            // Suppress a specific lint rule
             if len(args) > 0 {
                 lint_enabled_rules.delete(args[0])
             }
         },
         "deny" => {
-            // Elevate a warning to an error
             if len(args) > 0 {
-                // Would need severity escalation
             }
         },
         "test" => {
-            // Mark as test function — validated elsewhere
         },
         "derive" => {
-            // Auto-derive trait implementations
             for trait_name in args {
                 tc_auto_derive_trait(target_name, trait_name, line)
             }
@@ -4526,7 +3968,6 @@ func tc_process_annotation(name, args, target_name, line) {
     }
 }
 
-// Auto-derive common traits
 func tc_auto_derive_trait(type_name, trait_name, line) {
     match trait_name {
         "Debug" => {
@@ -4552,18 +3993,11 @@ func tc_auto_derive_trait(type_name, trait_name, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Suspicious Pattern Detection
-// ═══════════════════════════════════════════════════════════════════
-
-// Detect common bug patterns
 func tc_detect_suspicious_patterns(stmts) {
     for stmt in stmts {
         const line = stmt.span.start_line
         match stmt.kind {
             StmtKind::SAssignment(name, expr) => {
-                // Self-assignment: x = x
                 if expr != null {
                     match expr.kind {
                         ExprKind::EVariable(var_name) => {
@@ -4576,13 +4010,11 @@ func tc_detect_suspicious_patterns(stmts) {
                 }
             },
             StmtKind::SExprStmt(expr) => {
-                // Effectless expression (pure expression as statement)
                 if tc_is_pure_expr(expr) {
                     tc_warn_at(line, "expression result is unused and has no side effects")
                 }
             },
             StmtKind::SIf(cond, then_b, else_b) => {
-                // if(x) return true else return false => return x
                 if then_b != null && else_b != null {
                     if tc_is_trivial_bool_return(then_b, true) && tc_is_trivial_bool_return(else_b, false) {
                         tc_warn_at(line, "if/else returning true/false — simplify to return condition directly")
@@ -4624,12 +4056,6 @@ func tc_is_trivial_bool_return(block, expected_value) {
         _ => false
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complexity Analysis
-// ═══════════════════════════════════════════════════════════════════
-
-// Compute cyclomatic complexity of a function
 func tc_cyclomatic_complexity(fdef) {
     if fdef.body == null { return 1 }
     let complexity = 1
@@ -4661,7 +4087,6 @@ func tc_count_decision_points_stmt(stmt) {
         StmtKind::SMatch(_, arms) => {
             let count = len(arms)
             for arm in arms {
-                // Each arm with a guard adds complexity
                 if arm.guard != null { count = count + 1 }
             }
             count
@@ -4677,33 +4102,23 @@ func tc_count_decision_points_stmt(stmt) {
     }
 }
 
-// Warn on high complexity
 func tc_check_complexity(fdef, line) {
     const complexity = tc_cyclomatic_complexity(fdef)
     if complexity > 15 {
         tc_warn_at(line, f"function '{fdef.name}' has high cyclomatic complexity ({complexity}) — consider splitting")
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Widening and Narrowing Rules
-// ═══════════════════════════════════════════════════════════════════
-
-// Widen a type to its most general form (for join points)
 func tc_widen_type(a, b) {
     if a == "unknown" { return b }
     if b == "unknown" { return a }
     if a == b { return a }
 
-    // Numeric widening
     if (a == "int" && b == "float") || (a == "float" && b == "int") { return "float" }
     if (a == "int64" && b == "float64") || (a == "float64" && b == "int64") { return "float64" }
 
-    // Null widening: T | null = optional T
     if a == "null" { return {"kind": "optional", "inner": b} }
     if b == "null" { return {"kind": "optional", "inner": a} }
 
-    // Array element widening
     if typeof(a) == "map" && typeof(b) == "map" {
         if a.has("kind") && b.has("kind") && a["kind"] == b["kind"] {
             match a["kind"] {
@@ -4725,18 +4140,15 @@ func tc_widen_type(a, b) {
         }
     }
 
-    // Union type
     "unknown"
 }
 
-// Narrow a type based on a condition
 func tc_narrow_from_condition(var_name, cond, narrowing_positive) {
     if cond == null { return null }
     match cond.kind {
         ExprKind::EBinaryOp(op, left, right) => {
             match op {
                 BinOp::Ne => {
-                    // x != null narrows x to non-null
                     match left.kind {
                         ExprKind::EVariable(name) => {
                             if name == var_name {
@@ -4759,7 +4171,6 @@ func tc_narrow_from_condition(var_name, cond, narrowing_positive) {
                     }
                 },
                 BinOp::Eq => {
-                    // x == null makes x definitely null in then-branch
                     match left.kind {
                         ExprKind::EVariable(name) => {
                             if name == var_name {
@@ -4785,7 +4196,6 @@ func tc_narrow_from_condition(var_name, cond, narrowing_positive) {
             }
         },
         ExprKind::ECall(name, args, _) => {
-            // is_string(x), is_int(x), etc. narrow the type
             if len(args) > 0 {
                 match args[0].kind {
                     ExprKind::EVariable(arg_name) => {
@@ -4812,18 +4222,11 @@ func tc_narrow_from_condition(var_name, cond, narrowing_positive) {
             }
         },
         ExprKind::EUnaryOp(UnOp::Not, inner) => {
-            // !cond inverts the narrowing
             tc_narrow_from_condition(var_name, inner, !narrowing_positive)
         },
         _ => {}
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Error Code Registry
-// ═══════════════════════════════════════════════════════════════════
-
-// Map error codes to descriptions
 func tc_error_description(code) {
     match code {
         "E100" => "Undefined variable",
@@ -4899,7 +4302,6 @@ func tc_error_description(code) {
     }
 }
 
-// Get help text for an error code
 func tc_error_help(code) {
     match code {
         "E100" => "Make sure the variable is defined before use. Check spelling and scope.",
@@ -4915,14 +4317,9 @@ func tc_error_help(code) {
         _ => null
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Did-You-Mean Suggestions for Type Errors
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_suggest_similar_name(name, candidates) {
     let best = null
-    let best_dist = 4 // Max distance threshold
+    let best_dist = 4
     for c in candidates {
         if c == "__s" { continue }
         const dist = tc_levenshtein(name, c)
@@ -4963,9 +4360,7 @@ func tc_levenshtein(a, b) {
     prev[n]
 }
 
-// Enhanced undefined variable error with suggestion
 func tc_error_undefined_var(name, line) {
-    // Collect all defined variable names
     let candidates = []
     let idx = len(tc_scopes) - 1
     while idx >= 0 {
@@ -4974,7 +4369,6 @@ func tc_error_undefined_var(name, line) {
         }
         idx = idx - 1
     }
-    // Add function names and builtins
     for k in tc_functions.keys() { if k != "__s" { candidates.push(k) } }
     for k in tc_enums.keys() { if k != "__s" { candidates.push(k) } }
     for k in tc_structs.keys() { if k != "__s" { candidates.push(k) } }
@@ -4987,7 +4381,6 @@ func tc_error_undefined_var(name, line) {
     }
 }
 
-// Enhanced undefined function error with suggestion
 func tc_error_undefined_func(name, line) {
     let candidates = []
     for k in tc_functions.keys() { if k != "__s" { candidates.push(k) } }
@@ -5002,12 +4395,6 @@ func tc_error_undefined_func(name, line) {
         tc_error_at(line, f"undefined function '{name}'")
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complete Type Inference for ALL Expression Types
-// ═══════════════════════════════════════════════════════════════════
-
-// Type representation constants
 const TYPE_NULL = "null"
 const TYPE_INT = "int64"
 const TYPE_FLOAT = "float64"
@@ -5021,7 +4408,6 @@ const TYPE_TUPLE = "tuple"
 const TYPE_FUNCTION = "function"
 const TYPE_FUTURE = "future"
 
-// Infer the type of any expression
 func tc_infer_expr(expr) {
     if expr == null { return TYPE_NULL }
     match expr.kind {
@@ -5084,7 +4470,6 @@ func tc_infer_literal(lit) {
 func tc_infer_variable(name, expr) {
     if name == "None" || name == "null" { return TYPE_NULL }
     if name == "true" || name == "false" { return TYPE_BOOL }
-    // Look up variable in scope stack
     let idx = len(tc_scopes) - 1
     while idx >= 0 {
         if tc_scopes[idx].has(name) {
@@ -5095,11 +4480,8 @@ func tc_infer_variable(name, expr) {
         }
         idx = idx - 1
     }
-    // Check functions
     if tc_functions.has(name) { return TYPE_FUNCTION }
-    // Check enums
     if tc_enums.has(name) { return TYPE_MAP }
-    // Check structs
     if tc_structs.has(name) { return TYPE_MAP }
     TYPE_NULL
 }
@@ -5108,37 +4490,27 @@ func tc_infer_binop(op, left, right) {
     const lt = tc_infer_expr(left)
     const rt = tc_infer_expr(right)
     match op {
-        // Comparison operators always return bool
         BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt |
         BinOp::LtEq | BinOp::GtEq | BinOp::In => TYPE_BOOL,
-        // Logical operators return the type of the first truthy/falsy value
         BinOp::And | BinOp::Or => tc_unify_types(lt, rt),
-        // Arithmetic with type promotion
         BinOp::Add => tc_infer_add(lt, rt),
         BinOp::Sub | BinOp::Div | BinOp::Mod => tc_infer_arithmetic(lt, rt),
         BinOp::Mul => tc_infer_mul(lt, rt),
-        // Bitwise operations return int
         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor |
         BinOp::Shl | BinOp::Shr | BinOp::AndNot => TYPE_INT,
     }
 }
 
 func tc_infer_add(lt, rt) {
-    // String + anything = string
     if lt == TYPE_STRING || rt == TYPE_STRING { return TYPE_STRING }
-    // Array + array = array
     if lt == TYPE_ARRAY && rt == TYPE_ARRAY { return TYPE_ARRAY }
-    // Map + map = map
     if lt == TYPE_MAP && rt == TYPE_MAP { return TYPE_MAP }
-    // Numeric promotion
     tc_infer_arithmetic(lt, rt)
 }
 
 func tc_infer_mul(lt, rt) {
-    // String * int = string repetition
     if lt == TYPE_STRING && rt == TYPE_INT { return TYPE_STRING }
     if lt == TYPE_INT && rt == TYPE_STRING { return TYPE_STRING }
-    // Numeric
     tc_infer_arithmetic(lt, rt)
 }
 
@@ -5162,10 +4534,8 @@ func tc_infer_unaryop(op, operand) {
 }
 
 func tc_infer_call(name, args, expr) {
-    // User-defined function
     if tc_functions.has(name) {
         const fn_info = tc_functions[name]
-        // Check arity
         const n_args = len(args)
         if fn_info.has("arity") {
             const expected = fn_info["arity"]
@@ -5178,7 +4548,6 @@ func tc_infer_call(name, args, expr) {
         if fn_info.has("return_type") { return fn_info["return_type"] }
         return TYPE_NULL
     }
-    // Built-in functions
     tc_infer_builtin_call(name, args)
 }
 
@@ -5227,7 +4596,6 @@ func tc_infer_builtin_call(name, args) {
         "input" | "stdin_read" => TYPE_STRING,
         "channel" => TYPE_ARRAY,
         "spawn" => TYPE_FUTURE,
-        // Known stdlib operations
         "json_parse" | "yaml_parse" | "toml_parse" => TYPE_MAP,
         "json_stringify" | "yaml_stringify" | "toml_stringify" => TYPE_STRING,
         "regex_match" | "regex_test" => TYPE_BOOL,
@@ -5259,7 +4627,6 @@ func tc_infer_method_call(obj, method, args) {
 }
 
 func tc_infer_method_return(obj_type, method, args) {
-    // String methods
     if obj_type == TYPE_STRING {
         return match method {
             "len" | "length" | "index_of" | "last_index_of" | "count" => TYPE_INT,
@@ -5280,7 +4647,6 @@ func tc_infer_method_return(obj_type, method, args) {
             _ => TYPE_NULL,
         }
     }
-    // Array methods
     if obj_type == TYPE_ARRAY {
         return match method {
             "len" | "length" | "index_of" | "last_index_of" | "count" => TYPE_INT,
@@ -5298,7 +4664,6 @@ func tc_infer_method_return(obj_type, method, args) {
             _ => TYPE_NULL,
         }
     }
-    // Map methods
     if obj_type == TYPE_MAP {
         return match method {
             "len" | "size" | "count" => TYPE_INT,
@@ -5311,7 +4676,6 @@ func tc_infer_method_return(obj_type, method, args) {
             _ => TYPE_NULL,
         }
     }
-    // Numeric methods
     if obj_type == TYPE_INT || obj_type == TYPE_FLOAT {
         return match method {
             "to_string" => TYPE_STRING,
@@ -5324,7 +4688,6 @@ func tc_infer_method_return(obj_type, method, args) {
             _ => TYPE_NULL,
         }
     }
-    // Bool methods
     if obj_type == TYPE_BOOL {
         return match method {
             "to_string" => TYPE_STRING,
@@ -5336,7 +4699,6 @@ func tc_infer_method_return(obj_type, method, args) {
 }
 
 func tc_infer_if_else(cond, then_block, else_block) {
-    // Check condition type
     tc_check_expr(cond)
     const then_type = tc_infer_block_type(then_block)
     if else_block == null { return TYPE_NULL }
@@ -5368,9 +4730,7 @@ func tc_infer_block_type(block) {
 func tc_infer_index(obj, idx) {
     const obj_type = tc_infer_expr(obj)
     const idx_type = tc_infer_expr(idx)
-    // Check array index should be int
     if obj_type == TYPE_ARRAY && idx_type != TYPE_INT && idx_type != TYPE_NULL {
-        // Warn about non-integer index
     }
     if obj_type == TYPE_ARRAY { return TYPE_NULL }
     if obj_type == TYPE_MAP { return TYPE_NULL }
@@ -5380,15 +4740,12 @@ func tc_infer_index(obj, idx) {
 
 func tc_infer_field_access(obj, field) {
     const obj_type = tc_infer_expr(obj)
-    // String properties
     if obj_type == TYPE_STRING {
         if field == "length" { return TYPE_INT }
     }
-    // Array properties
     if obj_type == TYPE_ARRAY {
         if field == "length" { return TYPE_INT }
     }
-    // Map field access is always unknown type
     TYPE_NULL
 }
 
@@ -5401,7 +4758,6 @@ func tc_infer_match(subject, arms) {
         }
     }
     if len(arm_types) == 0 { return TYPE_NULL }
-    // Unify all arm types
     let result = arm_types[0]
     let i = 1
     while i < len(arm_types) {
@@ -5417,23 +4773,15 @@ func tc_infer_null_coalesce(left, right) {
     tc_unify_types(lt, rt)
 }
 
-// Type unification: given two types, produce a common supertype
 func tc_unify_types(a, b) {
     if a == b { return a }
     if a == TYPE_NULL { return b }
     if b == TYPE_NULL { return a }
-    // Numeric promotion: int + float = float
     if (a == TYPE_INT && b == TYPE_FLOAT) || (a == TYPE_FLOAT && b == TYPE_INT) {
         return TYPE_FLOAT
     }
-    // If types are incompatible, return null (unknown)
     TYPE_NULL
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Generic Constraint Propagation Through Call Chains
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_generic_params = {}
 let tc_generic_constraints = {}
 
@@ -5450,7 +4798,6 @@ func tc_is_generic_param(name) {
 
 func tc_resolve_generic(name) {
     if tc_generic_params.has(name) {
-        // Check if we have a concrete binding
         if tc_generic_constraints.has(name) {
             const constraints = tc_generic_constraints[name]
             if len(constraints) > 0 { return constraints[0] }
@@ -5465,14 +4812,12 @@ func tc_propagate_generics(fn_name, type_args, arg_types) {
     const fn_info = tc_functions[fn_name]
     if !fn_info.has("type_params") { return null }
     const type_params = fn_info["type_params"]
-    // Bind type params to actual types from arguments
     let bindings = {}
     let i = 0
     while i < len(type_params) && i < len(arg_types) {
         bindings[type_params[i]] = arg_types[i]
         i = i + 1
     }
-    // Override with explicit type args
     i = 0
     while i < len(type_args) && i < len(type_params) {
         bindings[type_params[i]] = type_args[i]
@@ -5480,11 +4825,6 @@ func tc_propagate_generics(fn_name, type_args, arg_types) {
     }
     bindings
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Interface Method Resolution with This-Type Substitution
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_traits = {}
 let tc_trait_impls = {}
 
@@ -5503,7 +4843,6 @@ func tc_check_trait_implementation(type_name, trait_name) {
     const impl_key = f"{type_name}::{trait_name}"
     if !tc_trait_impls.has(impl_key) { return false }
     const impl_methods = tc_trait_impls[impl_key]
-    // Check that all trait methods are implemented
     for method in trait_methods {
         const method_name = if typeof(method) == "map" { method["name"] } else { method }
         let found = false
@@ -5517,7 +4856,6 @@ func tc_check_trait_implementation(type_name, trait_name) {
 }
 
 func tc_resolve_method_for_trait(type_name, method_name) {
-    // Check if any trait impl for this type provides this method
     for key in tc_trait_impls.keys() {
         if key.starts_with(f"{type_name}::") {
             const impl_methods = tc_trait_impls[key]
@@ -5529,16 +4867,9 @@ func tc_resolve_method_for_trait(type_name, method_name) {
     }
     null
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Null Flow Analysis Through If/Else/Match Branches
-// ═══════════════════════════════════════════════════════════════════
-
-// Track which variables are known to be non-null in a given branch
 let tc_non_null_vars = {}
 
 func tc_push_null_state() {
-    // Save current null state
     let saved = {}
     for k in tc_non_null_vars.keys() {
         saved[k] = tc_non_null_vars[k]
@@ -5558,15 +4889,12 @@ func tc_is_known_non_null(name) {
     tc_non_null_vars.has(name)
 }
 
-// Analyze null checks in conditions to narrow types
 func tc_analyze_null_check(cond) {
     if typeof(cond) != "map" || !cond.has("kind") { return null }
     match cond.kind {
-        // x != null narrowing
         ExprKind::EBinaryOp(op, left, right) => {
             match op {
                 BinOp::NotEq => {
-                    // x != null
                     if typeof(right) == "map" {
                         match right.kind {
                             ExprKind::ELiteral(Literal::NullLit) => {
@@ -5578,7 +4906,6 @@ func tc_analyze_null_check(cond) {
                             _ => {},
                         }
                     }
-                    // null != x
                     if typeof(left) == "map" {
                         match left.kind {
                             ExprKind::ELiteral(Literal::NullLit) => {
@@ -5592,7 +4919,6 @@ func tc_analyze_null_check(cond) {
                     }
                 },
                 BinOp::Eq => {
-                    // x == null (in else branch, x is non-null)
                     if typeof(right) == "map" {
                         match right.kind {
                             ExprKind::ELiteral(Literal::NullLit) => {
@@ -5612,51 +4938,27 @@ func tc_analyze_null_check(cond) {
     }
     null
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Pattern Type Narrowing in Match Arms
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_narrow_type_from_pattern(pattern, subject_type) {
     if typeof(pattern) != "map" || !pattern.has("kind") { return subject_type }
-    // Literal patterns narrow to the literal type
     match pattern {
-        // Integer literal pattern
         Pattern::Literal(Literal::IntLit(_)) => TYPE_INT,
         Pattern::Literal(Literal::FloatLit(_)) => TYPE_FLOAT,
         Pattern::Literal(Literal::StringLit(_)) => TYPE_STRING,
         Pattern::Literal(Literal::BoolLit(_)) => TYPE_BOOL,
         Pattern::Literal(Literal::NullLit) => TYPE_NULL,
-        // Enum variant pattern narrows to the enum type
         Pattern::EnumVariant(_, _, _) => TYPE_MAP,
-        // Struct pattern narrows to struct type
         Pattern::Struct(_, _) => TYPE_MAP,
-        // Wildcard and variable patterns don't narrow
         _ => subject_type,
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Widening for Union-Like Assignments
-// ═══════════════════════════════════════════════════════════════════
-
-// When a variable is assigned different types in different branches,
-// widen to a union-like type
 func tc_widen_type(current, new_type) {
     if current == TYPE_NULL { return new_type }
     if new_type == TYPE_NULL { return current }
     if current == new_type { return current }
-    // Numeric widening: int -> float
     if current == TYPE_INT && new_type == TYPE_FLOAT { return TYPE_FLOAT }
     if current == TYPE_FLOAT && new_type == TYPE_INT { return TYPE_FLOAT }
-    // Incompatible types: return null (any)
     TYPE_NULL
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complete Error Code Mapping (E100-E409)
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_error_code_message(code) {
     match code {
         "E100" => "type error",
@@ -5735,11 +5037,6 @@ func tc_emit_warning_code(code, line, msg) {
         "help": help,
     })
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Circular Dependency Detection in Type Aliases
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_type_alias_map = {}
 
 func tc_register_type_alias(alias, target) {
@@ -5771,40 +5068,34 @@ func tc_resolve_type_alias(name) {
     }
     current
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Lint Rule Integration with Configurable Severity
-// ═══════════════════════════════════════════════════════════════════
-
 const LINT_WARN = "warn"
 const LINT_ERROR = "error"
 const LINT_OFF = "off"
 
-// Default lint configuration
 let tc_lint_config = {
-    "W100": LINT_WARN,   // unused variable
-    "W101": LINT_WARN,   // unused import
-    "W102": LINT_WARN,   // unused function
-    "W103": LINT_WARN,   // dead code after return
-    "W104": LINT_WARN,   // empty block
-    "W105": LINT_WARN,   // while true without break
-    "W106": LINT_WARN,   // double negation
-    "W107": LINT_WARN,   // empty range
-    "W108": LINT_WARN,   // unnecessary return
-    "W109": LINT_WARN,   // unused parameter
-    "W110": LINT_WARN,   // mutable but never reassigned
-    "W111": LINT_WARN,   // implicit return
-    "W112": LINT_WARN,   // default param type mismatch
-    "W113": LINT_WARN,   // redundant type annotation
-    "W114": LINT_WARN,   // deprecated item
-    "W200": LINT_WARN,   // comparison to self
-    "W201": LINT_WARN,   // assignment to same value
-    "W202": LINT_WARN,   // unreachable pattern
-    "W203": LINT_WARN,   // non-exhaustive match
-    "W204": LINT_WARN,   // infinite loop without break
-    "W205": LINT_WARN,   // self-comparison
-    "W206": LINT_WARN,   // empty match/block
-    "W260": LINT_WARN,   // null dereference
+    "W100": LINT_WARN,
+    "W101": LINT_WARN,
+    "W102": LINT_WARN,
+    "W103": LINT_WARN,
+    "W104": LINT_WARN,
+    "W105": LINT_WARN,
+    "W106": LINT_WARN,
+    "W107": LINT_WARN,
+    "W108": LINT_WARN,
+    "W109": LINT_WARN,
+    "W110": LINT_WARN,
+    "W111": LINT_WARN,
+    "W112": LINT_WARN,
+    "W113": LINT_WARN,
+    "W114": LINT_WARN,
+    "W200": LINT_WARN,
+    "W201": LINT_WARN,
+    "W202": LINT_WARN,
+    "W203": LINT_WARN,
+    "W204": LINT_WARN,
+    "W205": LINT_WARN,
+    "W206": LINT_WARN,
+    "W260": LINT_WARN,
     "__s": true,
 }
 
@@ -5829,11 +5120,6 @@ func tc_lint_emit(code, line, msg) {
         tc_emit_warning_code(code, line, msg)
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complete Statement Checking
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_statement(stmt) {
     if typeof(stmt) != "map" || !stmt.has("kind") { return null }
     const line = if stmt.has("line") { stmt["line"] } else { 0 }
@@ -5980,7 +5266,6 @@ func tc_check_statement(stmt) {
 }
 
 func tc_check_assignment(name, typ, line) {
-    // Check existence
     let found = false
     let is_mutable = false
     let idx = len(tc_scopes) - 1
@@ -5989,7 +5274,6 @@ func tc_check_assignment(name, typ, line) {
             found = true
             const info = tc_scopes[idx][name]
             is_mutable = info["mutable"]
-            // Update type and mark used/mutated
             info["typ"] = typ
             info["used"] = true
             tc_scopes[idx][name] = info
@@ -6040,7 +5324,6 @@ func tc_register_function(fdef) {
     const name = fdef["name"]
     const params = if fdef.has("params") { fdef["params"] } else { [] }
     const n_params = len(params)
-    // Count required params (no default value, not rest)
     let min_arity = 0
     let has_rest = false
     for p in params {
@@ -6065,13 +5348,11 @@ func tc_check_function_body(fdef) {
     tc_func_depth = tc_func_depth + 1
     const saved_loop = tc_loop_depth
     tc_loop_depth = 0
-    // Define params
     const params = if fdef.has("params") { fdef["params"] } else { [] }
     for p in params {
         const pname = if typeof(p) == "map" { p["name"] } else { to_string(p) }
         tc_define_var(pname, false, TYPE_NULL, 0)
     }
-    // Check body
     if fdef.has("body") {
         tc_check_block(fdef["body"])
     }
@@ -6123,13 +5404,7 @@ func tc_check_enum_variants(name, variants, line) {
         seen.push(vname)
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complete Type Check Entry Point
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_program(prog) {
-    // Reset state
     tc_scopes = [tc_new_scope()]
     tc_errors = []
     tc_warnings = []
@@ -6145,21 +5420,18 @@ func tc_check_program(prog) {
     tc_trait_impls = {"__s": true}
     tc_non_null_vars = {"__s": true}
 
-    // First pass: collect all function definitions and type declarations
     if prog.has("statements") {
         for stmt in prog["statements"] {
             tc_collect_declarations(stmt)
         }
     }
 
-    // Second pass: check all statements
     if prog.has("statements") {
         for stmt in prog["statements"] {
             tc_check_statement(stmt)
         }
     }
 
-    // Pop global scope to generate unused variable warnings
     tc_pop_scope()
 
     {
@@ -6180,11 +5452,6 @@ func tc_collect_declarations(stmt) {
         _ => {},
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Dead Code Detection
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_dead_code(stmts) {
     let found_terminator = false
     let terminator_line = 0
@@ -6217,11 +5484,6 @@ func tc_check_dead_code(stmts) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Constant Folding / Propagation
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_const_values = {}
 
 func tc_register_const(name, value) {
@@ -6279,20 +5541,12 @@ func tc_fold_binop(op, lv, rv) {
         _ => null,
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Binary Operation Literal Checks
-// Warning on self-comparison, division by zero, etc.
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_binop_literals(op, left, right, line) {
-    // W205: comparing a value to itself
     if (op == BinOp::Eq || op == BinOp::NotEq || op == BinOp::Lt || op == BinOp::Gt) {
         if tc_exprs_identical(left, right) {
             tc_lint_emit("W205", line, "comparing a value to itself is always true (==) or false (!=)")
         }
     }
-    // E104: division by zero literal
     if op == BinOp::Div || op == BinOp::Mod {
         if typeof(right) == "map" && right.has("kind") {
             match right.kind {
@@ -6309,7 +5563,6 @@ func tc_check_binop_literals(op, left, right, line) {
 }
 
 func tc_exprs_identical(a, b) {
-    // Simple identity check: both are the same variable
     if typeof(a) == "map" && typeof(b) == "map" && a.has("kind") && b.has("kind") {
         match a.kind {
             ExprKind::EVariable(name_a) => {
@@ -6323,16 +5576,10 @@ func tc_exprs_identical(a, b) {
     }
     false
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Struct Field Validation
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_struct_construct(name, fields, line) {
     if !tc_structs.has(name) { return null }
     const def_fields = tc_structs[name]
     if typeof(def_fields) != "array" { return null }
-    // Check for missing required fields
     let provided = []
     for f in fields {
         const fname = if typeof(f) == "array" { f[0] } else { to_string(f) }
@@ -6345,7 +5592,6 @@ func tc_check_struct_construct(name, fields, line) {
             tc_emit_error("E406", line, f"missing required field '{dname}' in struct '{name}'")
         }
     }
-    // Check for extra fields
     let def_names = []
     for df in def_fields {
         const dname = if typeof(df) == "map" && df.has("name") { df["name"] } else { to_string(df) }
@@ -6357,15 +5603,8 @@ func tc_check_struct_construct(name, fields, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enum Exhaustiveness Checking
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_match_exhaustive(subject_type, arms) {
-    // Check if all enum variants are covered
     if typeof(subject_type) != "string" { return true }
-    // Look for the enum name from the subject type
     if !tc_enums.has(subject_type) { return true }
     const variants = tc_enums[subject_type]
     if typeof(variants) != "array" { return true }
@@ -6382,7 +5621,6 @@ func tc_check_match_exhaustive(subject_type, arms) {
         }
     }
     if has_wildcard { return true }
-    // Check if all variants are covered
     for v in variants {
         const vname = if typeof(v) == "map" && v.has("name") { v["name"] } else { to_string(v) }
         if !covered.contains(vname) { return false }
@@ -6410,16 +5648,10 @@ func tc_check_bool_exhaustive(arms) {
     }
     has_wildcard || (has_true && has_false)
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Import Validation
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_used_imports = {}
 let tc_import_locations = {}
 
 func tc_register_import(module_name, line) {
-    // Check if it's a known stdlib module
     if !KNOWN_STDLIB_MODULES.contains(module_name) {
         tc_lint_emit("W101", line, f"unknown stdlib module '{module_name}'")
     }
@@ -6439,11 +5671,6 @@ func tc_check_unused_imports() {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Unused Function Detection
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_used_functions = {}
 
 func tc_mark_function_used(name) {
@@ -6463,15 +5690,9 @@ func tc_check_unused_functions() {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Type Annotation Resolution
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_resolve_type_annotation(annotation) {
     if annotation == null { return TYPE_NULL }
     const s = to_string(annotation)
-    // Check aliases first
     const resolved = tc_resolve_type_alias(s)
     match resolved {
         "int" | "Int" | "int64" | "Int64" | "i64" => TYPE_INT,
@@ -6485,22 +5706,14 @@ func tc_resolve_type_annotation(annotation) {
         "bytes" | "Bytes" => TYPE_BYTES,
         "tuple" | "Tuple" => TYPE_TUPLE,
         _ => {
-            // Check if it's a known struct or enum
             if tc_structs.has(resolved) { return TYPE_MAP }
             if tc_enums.has(resolved) { return TYPE_MAP }
-            // Check generic params
             if tc_is_generic_param(resolved) { return tc_resolve_generic(resolved) }
             TYPE_NULL
         },
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Redundant Code Detection
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_redundant_if(cond, line) {
-    // Check for `if true` or `if false`
     if typeof(cond) == "map" && cond.has("kind") {
         match cond.kind {
             ExprKind::ELiteral(Literal::BoolLit(true)) => {
@@ -6515,7 +5728,6 @@ func tc_check_redundant_if(cond, line) {
 }
 
 func tc_check_redundant_assignment(name, expr, line) {
-    // Check for `x = x` (self-assignment)
     if typeof(expr) == "map" && expr.has("kind") {
         match expr.kind {
             ExprKind::EVariable(rhs_name) => {
@@ -6527,19 +5739,12 @@ func tc_check_redundant_assignment(name, expr, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Shadowing Detection
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_shadowing(name, line) {
-    // Check if this variable shadows one in an outer scope
-    let depth = len(tc_scopes) - 2  // Skip current scope
+    let depth = len(tc_scopes) - 2
     while depth >= 0 {
         if tc_scopes[depth].has(name) {
             const outer = tc_scopes[depth][name]
             const outer_line = outer["line"]
-            // Don't warn for variables starting with _
             if !starts_with(name, "_") {
                 tc_lint_emit("W113", line, f"variable '{name}' shadows outer variable declared at line {outer_line}")
             }
@@ -6549,11 +5754,6 @@ func tc_check_shadowing(name, line) {
     }
     false
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Unreachable Pattern Detection in Match
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_unreachable_patterns(arms) {
     let seen_patterns = []
     let wildcard_idx = -1
@@ -6567,11 +5767,9 @@ func tc_check_unreachable_patterns(arms) {
             }
             wildcard_idx = idx
         }
-        // Check if subsequent arms after wildcard are unreachable
         if wildcard_idx >= 0 && idx > wildcard_idx {
             tc_lint_emit("W202", 0, f"unreachable pattern in match arm {idx + 1} (wildcard at arm {wildcard_idx + 1})")
         }
-        // Check for duplicate literal patterns
         const p_str = to_string(p)
         if seen_patterns.contains(p_str) && p != "_" && p != "wildcard" {
             tc_lint_emit("W202", 0, f"duplicate pattern in match arm {idx + 1}")
@@ -6580,12 +5778,6 @@ func tc_check_unreachable_patterns(arms) {
         idx = idx + 1
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Method Resolution Lookup Table
-// Maps (receiver_type, method_name) -> operation name for type checking
-// ═══════════════════════════════════════════════════════════════════
-
 const MUTATING_METHODS = [
     "push", "pop", "set", "remove", "insert",
     "delete", "merge", "sort", "reverse",
@@ -6617,11 +5809,6 @@ func tc_check_method_receiver_mutability(obj_expr, method, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Complete Finalize — check unused items
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_finalize() {
     tc_check_unused_imports()
     tc_check_unused_functions()
@@ -6630,28 +5817,19 @@ func tc_finalize() {
         "warnings": tc_warnings,
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Return Type Inference from Function Bodies
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_infer_function_return_type(fdef) {
     if fdef == null { return TYPE_NULL }
-    // If explicit return type is declared, use it
     if typeof(fdef) == "map" && fdef.has("return_type") && fdef["return_type"] != null {
         return tc_resolve_type_annotation(fdef["return_type"])
     }
-    // Collect all return statement types and body tail type
     let return_types = []
     if fdef.has("body") {
         const body = fdef["body"]
         const body_type = tc_infer_block_type(body)
         if body_type != TYPE_NULL { return_types.push(body_type) }
-        // Scan for return statements
         tc_collect_return_types(body, return_types)
     }
     if len(return_types) == 0 { return TYPE_NULL }
-    // Unify all return types
     let result = return_types[0]
     let i = 1
     while i < len(return_types) {
@@ -6691,11 +5869,6 @@ func tc_collect_return_types(block, types) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Param-Argument Type Compatibility Checking
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_arg_types(fn_name, params, args, line) {
     let i = 0
     while i < len(params) && i < len(args) {
@@ -6718,18 +5891,11 @@ func tc_check_arg_types(fn_name, params, args, line) {
 func tc_types_compatible(actual, expected) {
     if actual == expected { return true }
     if actual == TYPE_NULL || expected == TYPE_NULL { return true }
-    // int is compatible with float
     if actual == TYPE_INT && expected == TYPE_FLOAT { return true }
-    // array/tuple compatibility
     if actual == TYPE_TUPLE && expected == TYPE_ARRAY { return true }
     if actual == TYPE_ARRAY && expected == TYPE_TUPLE { return true }
     false
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Struct Method Resolution
-// ═══════════════════════════════════════════════════════════════════
-
 let tc_struct_methods = {}
 
 func tc_register_struct_method(struct_name, method_name, params, return_type) {
@@ -6751,11 +5917,6 @@ func tc_infer_struct_method_return(struct_name, method_name) {
     if m != null && m.has("return_type") { return m["return_type"] }
     TYPE_NULL
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Enum Variant Type Inference
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_infer_enum_variant_type(enum_name, variant_name) {
     if !tc_enums.has(enum_name) { return TYPE_NULL }
     const variants = tc_enums[enum_name]
@@ -6763,11 +5924,9 @@ func tc_infer_enum_variant_type(enum_name, variant_name) {
     for v in variants {
         const vname = if typeof(v) == "map" && v.has("name") { v["name"] } else { to_string(v) }
         if vname == variant_name {
-            // Enum variant with fields returns a map
             if typeof(v) == "map" && v.has("fields") && len(v["fields"]) > 0 {
                 return TYPE_MAP
             }
-            // Enum variant without fields returns a map with metadata
             return TYPE_MAP
         }
     }
@@ -6800,14 +5959,8 @@ func tc_check_enum_construct(enum_name, variant_name, args, line) {
     if len(args) != expected_fields {
         tc_emit_error("E405", line, f"enum variant '{enum_name}::{variant_name}' expects {expected_fields} fields, got {len(args)}")
     }
-    // Infer all arg types for side effects
     for a in args { tc_infer_expr(a) }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Integer Overflow Detection
-// ═══════════════════════════════════════════════════════════════════
-
 const MAX_SAFE_INT = 9007199254740991
 const MIN_SAFE_INT = -9007199254740991
 
@@ -6818,16 +5971,10 @@ func tc_check_integer_overflow(val, line) {
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Recursive Type Detection
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_recursive_struct(name) {
     if !tc_structs.has(name) { return false }
     const fields = tc_structs[name]
     if typeof(fields) != "array" { return false }
-    // Check if any field directly references this struct
     for f in fields {
         const ftype = if typeof(f) == "map" && f.has("type") { f["type"] } else { null }
         if ftype != null && to_string(ftype) == name {
@@ -6836,11 +5983,6 @@ func tc_check_recursive_struct(name) {
     }
     false
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Utility — diagnostic formatting
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_format_diagnostic(diag) {
     const severity = if diag.has("code") && diag["code"].starts_with("W") { "warning" } else { "error" }
     const code = if diag.has("code") { f"[{diag[\"code\"]}] " } else { "" }
@@ -6880,22 +6022,11 @@ func tc_total_diagnostic_count(result) {
     tc_error_count(result) + tc_warning_count(result)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Numeric Type Promotion Rules
-// ═══════════════════════════════════════════════════════════════════
-
-// Full numeric type lattice for promotion:
-// int32 < int64 < float64
-// uint32 < uint64 < float64
-// float32 < float64
-
 func tc_promote_numeric(a, b) {
     if a == b { return a }
     if a == TYPE_NULL || b == TYPE_NULL { return TYPE_NULL }
-    // Float always wins
     if a == TYPE_FLOAT || b == TYPE_FLOAT { return TYPE_FLOAT }
     if a == "float32" || b == "float32" { return TYPE_FLOAT }
-    // Int64 wins over smaller ints
     if a == TYPE_INT || b == TYPE_INT { return TYPE_INT }
     if a == "int32" || b == "int32" { return TYPE_INT }
     if a == "uint64" || b == "uint64" { return TYPE_INT }
@@ -6918,11 +6049,6 @@ func tc_is_integer_type(t) {
 func tc_is_float_type(t) {
     t == TYPE_FLOAT || t == "float32" || t == "f32" || t == "f64"
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Comprehensive Expression Checking with Side Effects
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_check_all_exprs_in_block(block) {
     if block == null { return null }
     if typeof(block) != "map" || !block.has("statements") { return null }
@@ -6931,7 +6057,6 @@ func tc_check_all_exprs_in_block(block) {
         const line = if stmt.has("line") { stmt["line"] } else { 0 }
         match stmt.kind {
             StmtKind::SExprStmt(expr) => {
-                // Check for pure expressions used as statements (no side effects)
                 const is_pure = tc_is_pure_expr(expr)
                 if is_pure {
                     tc_lint_emit("W111", line, "expression result is unused")
@@ -6952,27 +6077,19 @@ func tc_is_pure_expr(expr) {
         ExprKind::EUnaryOp(_, _) => true,
         ExprKind::EFieldAccess(_, _) => true,
         ExprKind::EIndex(_, _) => true,
-        // Calls, method calls, assignments have side effects
         ExprKind::ECall(_, _, _) => false,
         ExprKind::EMethodCall(_, _, _, _) => false,
-        // Blocks, ifs, matches may have side effects
         ExprKind::EBlock(_) => false,
         ExprKind::EIfElse(_, _, _) => false,
         _ => false,
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: For-Loop Variable Type Inference
-// Infer the iteration variable type from the iterable
-// ═══════════════════════════════════════════════════════════════════
-
 func tc_infer_iteration_var_type(iterable_type) {
     match iterable_type {
-        "array" => TYPE_NULL,      // Element type unknown
-        "string" => TYPE_STRING,   // Characters are strings
-        "map" => TYPE_MAP,         // Map entries are {key, value} maps
-        "set" => TYPE_NULL,        // Element type unknown
+        "array" => TYPE_NULL,
+        "string" => TYPE_STRING,
+        "map" => TYPE_MAP,
+        "set" => TYPE_NULL,
         _ => TYPE_NULL,
     }
 }
@@ -6982,11 +6099,6 @@ func tc_infer_range_element_type(start_type, end_type) {
     if tc_is_numeric_type(start_type) || tc_is_numeric_type(end_type) { return TYPE_INT }
     TYPE_INT
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: API — check a source string end-to-end
-// ═══════════════════════════════════════════════════════════════════
-
 func type_check_source(code) {
     const prog = parse(code)
     tc_check_program(prog)
@@ -6996,11 +6108,6 @@ func type_check_and_format(code) {
     const result = type_check_source(code)
     tc_format_all_diagnostics(result)
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SECTION: Quick-check entry point — returns bool
-// ═══════════════════════════════════════════════════════════════════
-
 func type_check_ok(code) {
     const result = type_check_source(code)
     !tc_has_errors(result)

@@ -1,21 +1,9 @@
-// MAGI Self-Hosted Compiler — AST → IR Compiler
-//
-// Walks the AST (from parser.magi) and emits IR instructions.
-// Uses module-level state (ir_strings, ir_functions, ir_globals from ir.magi).
-// Entry point: compile_to_ir(program) -> snapshot map
-
-// ── Current Function State (module-level mutable) ─────────────────
-
-let cc_instrs = []       // current function's instruction list
-let cc_locals = []       // current function's local variables (array of name strings)
-let cc_param_count = 0   // current function's param count
+let cc_instrs = []
+let cc_locals = []
+let cc_param_count = 0
 let cc_func_name = "__main"
 
-// Saved function stacks (for nested function defs)
 let cc_saved_stack = []
-
-// ── Helpers ───────────────────────────────────────────────────────
-
 func cc_emit(instr) {
     cc_instrs.push(instr)
 }
@@ -31,7 +19,6 @@ func cc_define_local(name) {
 }
 
 func cc_resolve_local(name) {
-    // Search from end (innermost scope first)
     let i = len(cc_locals) - 1
     while i >= 0 {
         if cc_locals[i] == name {
@@ -75,10 +62,6 @@ func cc_restore_func() {
 }
 
 func cc_finish_func() {
-    // Build the function map and add it to the module.
-    // Pre-compute counts here (at compile time) so the VM never needs to
-    // call len() on instructions/locals arrays inside a function
-    // (MAGI interpreter bug: len() on param-derived enum arrays corrupts dispatch).
     const f = {
         "name": cc_func_name,
         "param_count": cc_param_count,
@@ -89,9 +72,6 @@ func cc_finish_func() {
     }
     ir_add_function(f)
 }
-
-// ── Compile Expression ────────────────────────────────────────────
-
 func cc_compile_expr(expr) {
     const kind = expr.kind
     match kind {
@@ -141,7 +121,6 @@ func cc_compile_variable(name) {
         if gi >= 0 {
             cc_emit(Instruction::GlobalGet(gi))
         } else {
-            // Unknown — null (function calls use Call, not variable lookup)
             cc_emit(Instruction::PushNull)
         }
     }
@@ -163,12 +142,10 @@ func cc_compile_binop(op, left, right) {
         BinOp::LtEq => cc_emit(Instruction::I64Le),
         BinOp::GtEq => cc_emit(Instruction::I64Ge),
         BinOp::And => {
-            // Redo: pop right, then and with left already on stack
-            // Actually just use the two values already pushed
-            cc_emit(Instruction::I64Mul)  // truthy && truthy — works for 0/1
+            cc_emit(Instruction::I64Mul)
         },
         BinOp::Or => {
-            cc_emit(Instruction::I64Add)  // truthy || truthy — any nonzero
+            cc_emit(Instruction::I64Add)
         },
         _ => cc_emit(Instruction::PushNull),
     }
@@ -254,9 +231,6 @@ func cc_compile_string_interp(parts) {
         i = i + 1
     }
 }
-
-// ── Compile Statement ─────────────────────────────────────────────
-
 func cc_compile_stmt(stmt) {
     const kind = stmt.kind
     match kind {
@@ -346,13 +320,11 @@ func cc_compile_stmt(stmt) {
             cc_emit(Instruction::PushNull)
             cc_emit(Instruction::LocalSet(var_idx))
             cc_emit(Instruction::Loop)
-            // Condition: __i >= len(arr) => break
             cc_emit(Instruction::LocalGet(i_idx))
             cc_emit(Instruction::LocalGet(iter_idx))
             cc_emit(Instruction::RuntimeCall("array_len"))
             cc_emit(Instruction::I64Ge)
             cc_emit(Instruction::BrIf(1))
-            // var = arr[i]
             cc_emit(Instruction::LocalGet(iter_idx))
             cc_emit(Instruction::LocalGet(i_idx))
             cc_emit(Instruction::ArrayGet)
@@ -367,7 +339,6 @@ func cc_compile_stmt(stmt) {
                 cc_compile_expr(body.tail_expr)
                 cc_emit(Instruction::Drop)
             }
-            // i++
             cc_emit(Instruction::LocalGet(i_idx))
             cc_emit(Instruction::PushI64(1))
             cc_emit(Instruction::I64Add)
@@ -409,14 +380,12 @@ func cc_compile_stmt(stmt) {
             cc_locals = []
             cc_param_count = len(fdef.params)
             cc_func_name = fdef.name
-            // Register params as locals
             let pi = 0
             while pi < len(fdef.params) {
                 const param = fdef.params[pi]
                 cc_define_local(param.name)
                 pi = pi + 1
             }
-            // Compile body
             const body = fdef.body
             const bstmts = body.stmts
             let bi = 0
@@ -428,7 +397,6 @@ func cc_compile_stmt(stmt) {
                 cc_compile_expr(body.tail_expr)
                 cc_emit(Instruction::Return)
             } else {
-                // Check if last instruction is already a return
                 const n_instrs = len(cc_instrs)
                 const last_is_ret = n_instrs > 0 &&
                     cc_instrs[n_instrs - 1].dump() == "return"
@@ -463,15 +431,10 @@ func cc_compile_stmt(stmt) {
             }
         },
         _ => {
-            // Declarations and unsupported — emit nothing
         },
     }
 }
-
-// ── Entry Point ───────────────────────────────────────────────────
-
 func compile_to_ir(program) {
-    // Reset all compiler state
     ir_module_reset()
     cc_instrs = []
     cc_locals = []
@@ -483,10 +446,8 @@ func compile_to_ir(program) {
     cc_lambda_counter = 0
     cc_deferred = []
 
-    // First pass: register all function definitions
     cc_register_functions(program)
 
-    // Second pass: compile top-level code into __main
     const stmts = program.statements
     let i = 0
     while i < len(stmts) {
@@ -496,10 +457,8 @@ func compile_to_ir(program) {
     cc_emit(Instruction::PushNull)
     cc_emit(Instruction::Return)
 
-    // Finalize __main
     cc_finish_func()
 
-    // Third pass: compile function bodies
     let fi = 0
     while fi < len(stmts) {
         const stmt = stmts[fi]
@@ -515,22 +474,12 @@ func compile_to_ir(program) {
 
     ir_snapshot()
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// EXTENDED COMPILER STATE
-// ════════════════════════════════════════════════════════════════════════
-
-// Loop context stack for break/continue
 let cc_loop_stack = []    // each: { "break_depth", "continue_depth" }
-let cc_block_depth = 0    // WASM structured block nesting depth
-let cc_lambda_counter = 0 // counter for generating unique lambda names
-let cc_deferred = []      // deferred expressions (from defer statements)
+let cc_block_depth = 0
+let cc_lambda_counter = 0
+let cc_deferred = []
 
-// Function index map (name -> index)
 let cc_fn_index = {}
-
-// ── Block depth tracking ────────────────────────────────────────────
-
 func cc_emit_tracked(instr) {
     const d = instr.dump()
     if d == "block" || d == "loop" || d == "if" || d == "if_void" {
@@ -542,15 +491,10 @@ func cc_emit_tracked(instr) {
     }
     cc_emit(instr)
 }
-
-// ── Function Registration (Pass 1) ─────────────────────────────────
-
 func cc_register_functions(program) {
-    // Reserve index 0 for __main
     cc_fn_index["__main"] = 0
     let next_idx = 1
 
-    // Register builtins
     const builtins = ["println", "print", "len", "typeof", "assert",
                       "assert_eq", "to_string", "parse_int", "parse_float",
                       "push", "array_push", "pop", "range", "debug_log",
@@ -565,7 +509,6 @@ func cc_register_functions(program) {
         bi = bi + 1
     }
 
-    // Register user-defined functions
     const stmts = program.statements
     let i = 0
     while i < len(stmts) {
@@ -583,9 +526,6 @@ func cc_register_functions(program) {
         i = i + 1
     }
 }
-
-// ── Compile full function definition ────────────────────────────────
-
 func cc_compile_function_def(fdef) {
     cc_save_func()
     cc_instrs = []
@@ -595,7 +535,6 @@ func cc_compile_function_def(fdef) {
     cc_block_depth = 0
     cc_loop_stack = []
 
-    // Register params as locals
     let pi = 0
     while pi < len(fdef.params) {
         const param = fdef.params[pi]
@@ -603,11 +542,9 @@ func cc_compile_function_def(fdef) {
         pi = pi + 1
     }
 
-    // Compile body
     const body = fdef.body
     cc_compile_block(body)
 
-    // Emit deferred before implicit return
     if len(cc_deferred) > 0 {
         cc_emit_deferred()
     }
@@ -616,11 +553,6 @@ func cc_compile_function_def(fdef) {
     cc_finish_func()
     cc_restore_func()
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// COMPILE BLOCK
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_block(block) {
     const stmts = block.stmts
     let i = 0
@@ -634,11 +566,6 @@ func cc_compile_block(block) {
         cc_emit(Instruction::PushNull)
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// FULL EXPRESSION COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_expr_full(expr) {
     const kind = expr.kind
     match kind {
@@ -689,15 +616,11 @@ func cc_compile_expr_full(expr) {
         _ => cc_emit(Instruction::PushNull),
     }
 }
-
-// ── Variable with function resolution ───────────────────────────────
-
 func cc_compile_variable_full(name) {
     const local_idx = cc_resolve_local(name)
     if local_idx >= 0 {
         cc_emit(Instruction::LocalGet(local_idx))
     } else if cc_fn_index[name] != null {
-        // Function reference — push index for indirect calls
         cc_emit(Instruction::PushI64(cc_fn_index[name]))
     } else {
         const gi = cc_resolve_global(name)
@@ -708,13 +631,9 @@ func cc_compile_variable_full(name) {
         }
     }
 }
-
-// ── Binary operation with short-circuit ─────────────────────────────
-
 func cc_compile_binop_full(op, left, right) {
     match op {
         BinOp::And => {
-            // Short-circuit &&: evaluate left; if falsy, use left; else evaluate right
             cc_compile_expr(left)
             const temp = cc_define_local("__and_temp")
             cc_emit(Instruction::LocalSet(temp))
@@ -730,7 +649,6 @@ func cc_compile_binop_full(op, left, right) {
             cc_emit(Instruction::LocalGet(temp))
         },
         BinOp::Or => {
-            // Short-circuit ||: evaluate left; if truthy, use left; else evaluate right
             cc_compile_expr(left)
             const temp = cc_define_local("__or_temp")
             cc_emit(Instruction::LocalSet(temp))
@@ -751,9 +669,6 @@ func cc_compile_binop_full(op, left, right) {
         },
     }
 }
-
-// ── Call with function index resolution ─────────────────────────────
-
 func cc_compile_call_full(name, args) {
     let i = 0
     while i < len(args) {
@@ -767,9 +682,6 @@ func cc_compile_call_full(name, args) {
         cc_emit(Instruction::Call(name, len(args)))
     }
 }
-
-// ── Method call compilation ─────────────────────────────────────────
-
 func cc_compile_method_call_full(obj, method, args) {
     cc_compile_expr(obj)
     let i = 0
@@ -779,26 +691,17 @@ func cc_compile_method_call_full(obj, method, args) {
     }
     cc_emit(Instruction::Call(method, len(args) + 1))
 }
-
-// ── Index access ────────────────────────────────────────────────────
-
 func cc_compile_index(obj, idx) {
     cc_compile_expr(obj)
     cc_compile_expr(idx)
     cc_emit(Instruction::ArrayGet)
 }
-
-// ── Field access → map get ──────────────────────────────────────────
-
 func cc_compile_field_access(obj, field) {
     cc_compile_expr(obj)
     const key = cc_intern(field)
     cc_emit(Instruction::PushString(key))
     cc_emit(Instruction::Call("map_get", 2))
 }
-
-// ── Range expression ────────────────────────────────────────────────
-
 func cc_compile_range(start, end_val, inclusive) {
     cc_compile_expr(start)
     cc_compile_expr(end_val)
@@ -809,16 +712,10 @@ func cc_compile_range(start, end_val, inclusive) {
     }
     cc_emit(Instruction::Call("__range", 3))
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// CLOSURE / LAMBDA COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_lambda(params, body) {
     const lambda_name = "__lambda_" + to_string(cc_lambda_counter)
     cc_lambda_counter = cc_lambda_counter + 1
 
-    // Save current context
     cc_save_func()
     cc_instrs = []
     cc_locals = []
@@ -826,33 +723,19 @@ func cc_compile_lambda(params, body) {
     cc_func_name = lambda_name
     cc_block_depth = 0
 
-    // Register params
     let pi = 0
     while pi < len(params) {
         cc_define_local(params[pi].name)
         pi = pi + 1
     }
 
-    // Compile lambda body
     cc_compile_expr(body)
     cc_emit(Instruction::Return)
     cc_finish_func()
     cc_restore_func()
 
-    // Push function reference
     cc_emit(Instruction::PushI64(cc_fn_index[lambda_name]))
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// STRING INTERPOLATION COMPILATION (concat segments)
-// ════════════════════════════════════════════════════════════════════════
-
-// (Already implemented above, keeping the existing cc_compile_string_interp)
-
-// ════════════════════════════════════════════════════════════════════════
-// MATCH EXPRESSION COMPILATION (decision tree)
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_match(value, arms) {
     cc_compile_expr(value)
     const val_local = cc_define_local("__match_val")
@@ -903,7 +786,6 @@ func cc_compile_match(value, arms) {
                 }
             },
             _ => {
-                // Complex pattern: runtime matching fallback
                 cc_emit(Instruction::LocalGet(val_local))
                 cc_emit(Instruction::Call("__match_pattern", 1))
                 cc_emit(Instruction::If)
@@ -916,20 +798,13 @@ func cc_compile_match(value, arms) {
         ai = ai + 1
     }
 
-    // Close all open if blocks
     let ci = 0
     while ci < if_count {
         cc_emit(Instruction::End)
         ci = ci + 1
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// STRUCT / ENUM CONSTRUCTION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_enum_construct(enum_name, variant, args) {
-    // Build map: {"__enum": name, "__variant": variant, "__data": [args]}
     const enum_key = cc_intern("__enum")
     const variant_key = cc_intern("__variant")
     const data_key = cc_intern("__data")
@@ -948,12 +823,10 @@ func cc_compile_enum_construct(enum_name, variant, args) {
         i = i + 1
     }
     cc_emit(Instruction::ArrayNew(len(args)))
-    // MapNew expects 3 pairs already on stack
     cc_emit(Instruction::Call("__map_new", 3))
 }
 
 func cc_compile_struct_construct(name, fields) {
-    // Build map: {"__struct": name, field1: val1, ...}
     const struct_key = cc_intern("__struct")
     const struct_val = cc_intern(name)
     cc_emit(Instruction::PushString(struct_key))
@@ -970,11 +843,6 @@ func cc_compile_struct_construct(name, fields) {
 
     cc_emit(Instruction::Call("__map_new", len(fields) + 1))
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// PIPE OPERATOR COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_pipe(left, right) {
     cc_compile_expr(left)
     const pipe_local = cc_define_local("__pipe")
@@ -983,7 +851,6 @@ func cc_compile_pipe(left, right) {
     const rk = right.kind
     match rk {
         ExprKind::ECall(name, args, _) => {
-            // Check for placeholder
             let has_placeholder = false
             let ai = 0
             while ai < len(args) {
@@ -1011,7 +878,6 @@ func cc_compile_pipe(left, right) {
                 }
                 cc_emit(Instruction::Call(name, len(args)))
             } else {
-                // No placeholder: pipe value is first argument
                 cc_emit(Instruction::LocalGet(pipe_local))
                 ai = 0
                 while ai < len(args) {
@@ -1022,20 +888,13 @@ func cc_compile_pipe(left, right) {
             }
         },
         _ => {
-            // General case: compile right as function, call with left as arg
             cc_emit(Instruction::LocalGet(pipe_local))
             cc_compile_expr(right)
             cc_emit(Instruction::Call("__call_indirect", 2))
         },
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// SPREAD OPERATOR COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_spread_array(elems) {
-    // Check if any element has spread
     let has_spread = false
     let ei = 0
     while ei < len(elems) {
@@ -1048,7 +907,6 @@ func cc_compile_spread_array(elems) {
     }
 
     if has_spread {
-        // Build incrementally: start empty, append each
         cc_emit(Instruction::ArrayNew(0))
         const arr_local = cc_define_local("__spread_arr")
         cc_emit(Instruction::LocalSet(arr_local))
@@ -1074,7 +932,6 @@ func cc_compile_spread_array(elems) {
         }
         cc_emit(Instruction::LocalGet(arr_local))
     } else {
-        // No spread: compile normally
         ei = 0
         while ei < len(elems) {
             cc_compile_expr(elems[ei])
@@ -1083,40 +940,28 @@ func cc_compile_spread_array(elems) {
         cc_emit(Instruction::ArrayNew(len(elems)))
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// COMPREHENSION COMPILATION (desugar to loop + push)
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_list_comprehension(expr_inner, pattern, iterable, condition) {
-    // Desugar: [expr for pattern in iterable if condition]
-    // → result = []; for pattern in iterable { if condition { result.push(expr) } }; result
 
     cc_emit(Instruction::ArrayNew(0))
     const result_local = cc_define_local("__comp_result")
     cc_emit(Instruction::LocalSet(result_local))
 
-    // Evaluate iterable
     cc_compile_expr(iterable)
     const iter_local = cc_define_local("__comp_iter")
     cc_emit(Instruction::LocalSet(iter_local))
 
-    // Counter
     cc_emit(Instruction::PushI64(0))
     const counter_local = cc_define_local("__comp_i")
     cc_emit(Instruction::LocalSet(counter_local))
 
-    // Loop
     cc_emit_tracked(Instruction::Loop)
 
-    // Check: counter >= len(iter)
     cc_emit(Instruction::LocalGet(counter_local))
     cc_emit(Instruction::LocalGet(iter_local))
     cc_emit(Instruction::RuntimeCall("array_len"))
     cc_emit(Instruction::I64Ge)
     cc_emit(Instruction::BrIf(1))
 
-    // Bind pattern variable
     cc_emit(Instruction::LocalGet(iter_local))
     cc_emit(Instruction::LocalGet(counter_local))
     cc_emit(Instruction::ArrayGet)
@@ -1132,13 +977,11 @@ func cc_compile_list_comprehension(expr_inner, pattern, iterable, condition) {
         },
     }
 
-    // Apply condition if present
     if condition != null {
         cc_compile_expr(condition)
         cc_emit_tracked(Instruction::IfVoid)
     }
 
-    // Compile expression and push to result
     cc_emit(Instruction::LocalGet(result_local))
     cc_compile_expr(expr_inner)
     cc_emit(Instruction::Call("array_push", 2))
@@ -1148,29 +991,21 @@ func cc_compile_list_comprehension(expr_inner, pattern, iterable, condition) {
         cc_emit_tracked(Instruction::End)
     }
 
-    // Increment counter
     cc_emit(Instruction::LocalGet(counter_local))
     cc_emit(Instruction::PushI64(1))
     cc_emit(Instruction::I64Add)
     cc_emit(Instruction::LocalSet(counter_local))
 
-    // Loop back
     cc_emit(Instruction::Br(0))
     cc_emit_tracked(Instruction::End)
 
     cc_emit(Instruction::LocalGet(result_local))
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// NULL COALESCE COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_null_coalesce(left, right) {
     cc_compile_expr(left)
     const temp = cc_define_local("__coalesce_temp")
     cc_emit(Instruction::LocalSet(temp))
     cc_emit(Instruction::LocalGet(temp))
-    // Check if null: compare with null tag
     cc_emit(Instruction::PushNull)
     cc_emit(Instruction::I64Eq)
     cc_emit(Instruction::If)
@@ -1179,11 +1014,6 @@ func cc_compile_null_coalesce(left, right) {
     cc_emit(Instruction::LocalGet(temp))
     cc_emit(Instruction::End)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// OPTIONAL CHAINING COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_optional_chain(obj, field) {
     cc_compile_expr(obj)
     const temp = cc_define_local("__chain_temp")
@@ -1200,18 +1030,11 @@ func cc_compile_optional_chain(obj, field) {
     cc_emit(Instruction::Call("map_get", 2))
     cc_emit(Instruction::End)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// TRY-CATCH EXPRESSION COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_try_catch_expr(try_block, catch_var, catch_block, finally_block) {
-    // WASM has no exception handling — compile try as primary path
     cc_compile_block(try_block)
     const result_local = cc_define_local("__try_result")
     cc_emit(Instruction::LocalSet(result_local))
 
-    // Dead code branch for catch
     cc_emit(Instruction::PushBool(false))
     cc_emit_tracked(Instruction::IfVoid)
     if catch_var != null {
@@ -1223,7 +1046,6 @@ func cc_compile_try_catch_expr(try_block, catch_var, catch_block, finally_block)
     cc_emit(Instruction::LocalSet(result_local))
     cc_emit_tracked(Instruction::End)
 
-    // Finally block if present
     if finally_block != null {
         cc_compile_block(finally_block)
         cc_emit(Instruction::Drop)
@@ -1231,11 +1053,6 @@ func cc_compile_try_catch_expr(try_block, catch_var, catch_block, finally_block)
 
     cc_emit(Instruction::LocalGet(result_local))
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// INFINITE LOOP COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_infinite_loop(body) {
     cc_emit_tracked(Instruction::Block)
     const break_depth = cc_block_depth
@@ -1255,11 +1072,6 @@ func cc_compile_infinite_loop(body) {
     cc_loop_stack = cc_loop_stack.slice(0, len(cc_loop_stack) - 1)
     cc_emit(Instruction::PushNull)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// DEFER COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_emit_deferred() {
     let i = len(cc_deferred) - 1
     while i >= 0 {
@@ -1269,11 +1081,6 @@ func cc_emit_deferred() {
     }
     cc_deferred = []
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// FULL STATEMENT COMPILATION (all statement types)
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_stmt_full(stmt) {
     const kind = stmt.kind
     match kind {
@@ -1332,7 +1139,6 @@ func cc_compile_stmt_full(stmt) {
             } else {
                 cc_emit(Instruction::PushNull)
             }
-            // Emit deferred before return
             if len(cc_deferred) > 0 {
                 cc_emit_deferred()
             }
@@ -1438,7 +1244,6 @@ func cc_compile_stmt_full(stmt) {
             cc_emit_tracked(Instruction::End)
         },
         StmtKind::SFuncDef(fdef) => {
-            // Already compiled in third pass
         },
         StmtKind::SExprStmt(expr) => {
             cc_compile_expr(expr)
@@ -1488,7 +1293,7 @@ func cc_compile_stmt_full(stmt) {
         StmtKind::SThrow(expr) => {
             cc_compile_expr(expr)
             cc_emit(Instruction::Drop)
-            cc_emit(Instruction::PushNull)  // Unreachable placeholder
+            cc_emit(Instruction::PushNull)
         },
         StmtKind::STryCatch(try_b, var, catch_b, finally_b) => {
             cc_compile_block(try_b)
@@ -1605,7 +1410,6 @@ func cc_compile_stmt_full(stmt) {
             cc_emit(Instruction::Drop)
         },
         StmtKind::STestDef(name, body) => {
-            // Compile test as separate function
             const test_name = "__test_" + name
             cc_save_func()
             cc_instrs = []
@@ -1620,7 +1424,6 @@ func cc_compile_stmt_full(stmt) {
             cc_restore_func()
         },
         StmtKind::SEnumDef(name, variants, _) => {
-            // Intern variant names for runtime
             let vi = 0
             while vi < len(variants) {
                 cc_intern(name + "::" + variants[vi].name)
@@ -1635,17 +1438,9 @@ func cc_compile_stmt_full(stmt) {
             }
         },
         _ => {
-            // Declarations and unsupported — emit nothing
         },
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// MULTIPLE RETURN VALUE HANDLING
-// ════════════════════════════════════════════════════════════════════════
-// Multi-return is handled by returning an array:
-// let a, b = func() → func returns [a, b] as array
-
 func cc_compile_multi_return(exprs) {
     let i = 0
     while i < len(exprs) {
@@ -1655,13 +1450,6 @@ func cc_compile_multi_return(exprs) {
     cc_emit(Instruction::ArrayNew(len(exprs)))
     cc_emit(Instruction::Return)
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// GENERIC FUNCTION INSTANTIATION
-// ════════════════════════════════════════════════════════════════════════
-// Generics are monomorphized at compile time. Each instantiation creates
-// a new function with a mangled name.
-
 func cc_mangle_generic(base_name, type_args) {
     let name = base_name
     let i = 0
@@ -1671,23 +1459,12 @@ func cc_mangle_generic(base_name, type_args) {
     }
     name
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// LOOP LABEL TRACKING FOR BREAK/CONTINUE
-// ════════════════════════════════════════════════════════════════════════
-// Labels are tracked in cc_loop_stack. Each entry has:
-//   break_depth: absolute block depth for break target
-//   continue_depth: absolute block depth for continue target
-// Break/continue resolve label by searching cc_loop_stack by name.
-
 func cc_find_loop_context(label) {
     if label == null {
-        // No label: use innermost loop
         const n = len(cc_loop_stack)
         if n > 0 { return cc_loop_stack[n - 1] }
         return null
     }
-    // Named label: search from innermost out
     let i = len(cc_loop_stack) - 1
     while i >= 0 {
         const ctx = cc_loop_stack[i]
@@ -1698,13 +1475,7 @@ func cc_find_loop_context(label) {
     }
     null
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// DESTRUCTURING PATTERNS
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_destructure(pattern, is_mutable) {
-    // Value is on top of stack. Destructure into locals.
     match pattern {
         DestructurePattern::ArrayDestructure(elements) => {
             const temp = cc_define_local("__destr_arr")
@@ -1759,27 +1530,14 @@ func cc_compile_destructure(pattern, is_mutable) {
         },
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// FIELD ASSIGNMENT COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_field_assign(obj_expr, field_chain, value) {
-    // For simple var.field = value:
-    //   get var, set field, store back
-
-    // For nested var.a.b.c = value:
-    //   get var, get a, get b, set c on b, set b on a, set a on var
-
     if len(field_chain) == 1 {
-        // Simple case
         cc_compile_expr(obj_expr)
         const key = cc_intern(field_chain[0])
         cc_emit(Instruction::PushString(key))
         cc_compile_expr(value)
         cc_emit(Instruction::Call("map_set", 3))
     } else {
-        // Nested case: collect intermediate values
         cc_compile_expr(obj_expr)
         const temps = []
         let i = 0
@@ -1794,13 +1552,11 @@ func cc_compile_field_assign(obj_expr, field_chain, value) {
             i = i + 1
         }
 
-        // Set the leaf field
         const leaf_key = cc_intern(field_chain[len(field_chain) - 1])
         cc_emit(Instruction::PushString(leaf_key))
         cc_compile_expr(value)
         cc_emit(Instruction::Call("map_set", 3))
 
-        // Store back up the chain
         i = len(field_chain) - 2
         while i >= 0 {
             const upd_temp = cc_define_local("__nest_upd_" + to_string(i))
@@ -1818,14 +1574,7 @@ func cc_compile_field_assign(obj_expr, field_chain, value) {
         }
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// MAP COMPREHENSION COMPILATION
-// ════════════════════════════════════════════════════════════════════════
-
 func cc_compile_map_comprehension(key_expr, value_expr, pattern, iterable, condition) {
-    // Desugar: {k: v for pattern in iterable if condition}
-    // → result = {}; for pattern in iterable { if condition { result[k] = v } }; result
 
     cc_emit(Instruction::Call("__map_new", 0))
     const result_local = cc_define_local("__mcomp_result")
@@ -1847,7 +1596,6 @@ func cc_compile_map_comprehension(key_expr, value_expr, pattern, iterable, condi
     cc_emit(Instruction::I64Ge)
     cc_emit(Instruction::BrIf(1))
 
-    // Bind pattern
     cc_emit(Instruction::LocalGet(iter_local))
     cc_emit(Instruction::LocalGet(counter_local))
     cc_emit(Instruction::ArrayGet)
@@ -1868,7 +1616,6 @@ func cc_compile_map_comprehension(key_expr, value_expr, pattern, iterable, condi
         cc_emit_tracked(Instruction::IfVoid)
     }
 
-    // Set key/value in result map
     cc_emit(Instruction::LocalGet(result_local))
     cc_compile_expr(key_expr)
     cc_compile_expr(value_expr)
@@ -1888,12 +1635,7 @@ func cc_compile_map_comprehension(key_expr, value_expr, pattern, iterable, condi
 
     cc_emit(Instruction::LocalGet(result_local))
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// SCOPE MANAGEMENT
-// ════════════════════════════════════════════════════════════════════════
-
-let cc_scope_depths = []  // stack of scope boundary indices
+let cc_scope_depths = []
 
 func cc_push_scope() {
     cc_scope_depths.push(len(cc_locals))
@@ -1905,11 +1647,6 @@ func cc_pop_scope() {
         cc_scope_depths = cc_scope_depths.slice(0, n - 1)
     }
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// TEMP LOCAL MANAGEMENT
-// ════════════════════════════════════════════════════════════════════════
-
 let cc_temp_local_idx = -1
 
 func cc_ensure_temp_local() {
@@ -1918,11 +1655,6 @@ func cc_ensure_temp_local() {
     }
     cc_temp_local_idx
 }
-
-// ════════════════════════════════════════════════════════════════════════
-// SOURCE MAP GENERATION
-// ════════════════════════════════════════════════════════════════════════
-
 let cc_source_map = []  // each: { "func", "offset", "line", "col" }
 
 func cc_record_source_mapping(line, col) {

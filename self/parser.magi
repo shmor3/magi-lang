@@ -1,18 +1,5 @@
-// MAGI Self-Hosted Compiler — Recursive Descent Parser
-//
-// Takes tokens from tokenize() and produces an AST (Program).
-// Uses Pratt parsing (precedence climbing) for expressions.
-//
-// Parser state is module-level mutable variables because MAGI
-// uses value semantics — struct methods cannot mutate the caller.
-
-// ── Parser State (module-level mutable) ───────────────────────────
-
 let p_tokens = []
 let p_pos = 0
-
-// ── Token helpers ─────────────────────────────────────────────────
-
 func p_peek() {
     if p_pos < len(p_tokens) {
         p_tokens[p_pos]
@@ -63,11 +50,7 @@ func p_skip_semis() {
         p_advance()
     }
 }
-
-// ── Entry Point ───────────────────────────────────────────────────
-
 func parse(source) {
-    // Save and restore state for re-entrant parsing (f-strings)
     const save_tokens = p_tokens
     const save_pos = p_pos
 
@@ -92,9 +75,6 @@ func parse_program() {
     }
     program_new(stmts, span)
 }
-
-// ── Statement Parsing ─────────────────────────────────────────────
-
 func parse_statement() {
     const kind = p_peek_kind()
 
@@ -125,31 +105,24 @@ func parse_statement() {
     if kind == TokenKind::Test { return parse_test_stmt() }
     if kind == TokenKind::Label { return parse_labeled_stmt() }
 
-    // Expression statement (including assignments)
     parse_expr_or_assign_stmt()
 }
-
-// ── const name = expr ─────────────────────────────────────────────
-
 func parse_const_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Const)
 
-    // Destructuring: const [a, b] = expr
     if p_at(TokenKind::LBracket) {
         const pat = parse_destructure_array()
         p_expect(TokenKind::Eq)
         const value = parse_expression(0)
         return stmt_new(StmtKind::SLetDestructure(pat, false, value), span)
     }
-    // Destructuring: const {x, y} = expr
     if p_at(TokenKind::LBrace) {
         const pat = parse_destructure_map()
         p_expect(TokenKind::Eq)
         const value = parse_expression(0)
         return stmt_new(StmtKind::SLetDestructure(pat, false, value), span)
     }
-    // Destructuring: const (a, b) = expr
     if p_at(TokenKind::LParen) {
         const pat = parse_destructure_tuple_paren()
         p_expect(TokenKind::Eq)
@@ -159,7 +132,6 @@ func parse_const_stmt() {
 
     const name = p_expect_ident()
 
-    // Bare tuple destructuring: const a, b = expr
     if p_at(TokenKind::Comma) {
         let elems = [DestructureElement::DName(name)]
         while p_at(TokenKind::Comma) {
@@ -172,7 +144,6 @@ func parse_const_stmt() {
         return stmt_new(StmtKind::SLetDestructure(DestructurePattern::DTuple(elems), false, value), span)
     }
 
-    // Optional type annotation
     if p_at(TokenKind::Colon) {
         p_advance()
         parse_type_annotation()
@@ -182,28 +153,22 @@ func parse_const_stmt() {
     const value = parse_expression(0)
     make_const(name, value, span)
 }
-
-// ── let name = expr ───────────────────────────────────────────────
-
 func parse_let_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Let)
 
-    // Destructuring: let [a, b] = expr
     if p_at(TokenKind::LBracket) {
         const pat = parse_destructure_array()
         p_expect(TokenKind::Eq)
         const value = parse_expression(0)
         return stmt_new(StmtKind::SLetDestructure(pat, true, value), span)
     }
-    // Destructuring: let {x, y} = expr
     if p_at(TokenKind::LBrace) {
         const pat = parse_destructure_map()
         p_expect(TokenKind::Eq)
         const value = parse_expression(0)
         return stmt_new(StmtKind::SLetDestructure(pat, true, value), span)
     }
-    // Destructuring: let (a, b) = expr
     if p_at(TokenKind::LParen) {
         const pat = parse_destructure_tuple_paren()
         p_expect(TokenKind::Eq)
@@ -213,7 +178,6 @@ func parse_let_stmt() {
 
     const name = p_expect_ident()
 
-    // Bare tuple destructuring: let a, b = expr
     if p_at(TokenKind::Comma) {
         let elems = [DestructureElement::DName(name)]
         while p_at(TokenKind::Comma) {
@@ -226,7 +190,6 @@ func parse_let_stmt() {
         return stmt_new(StmtKind::SLetDestructure(DestructurePattern::DTuple(elems), true, value), span)
     }
 
-    // Optional type annotation
     if p_at(TokenKind::Colon) {
         p_advance()
         parse_type_annotation()
@@ -236,9 +199,6 @@ func parse_let_stmt() {
     const value = parse_expression(0)
     stmt_new(StmtKind::SLetMut(name, value), span)
 }
-
-// ── Destructure Helpers ──────────────────────────────────────────
-
 func parse_destructure_array() {
     p_expect(TokenKind::LBracket)
     let elems = []
@@ -280,15 +240,11 @@ func parse_destructure_tuple_paren() {
     p_expect(TokenKind::RParen)
     DestructurePattern::DTuple(elems)
 }
-
-// ── func name(params) { body } ────────────────────────────────────
-
 func parse_func_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Func)
     let name = p_expect_ident()
 
-    // Check for Type.method syntax
     if p_at(TokenKind::Dot) {
         const type_name = name
         p_advance()
@@ -296,13 +252,11 @@ func parse_func_stmt() {
         name = f"{type_name}.{method_name}"
     }
 
-    // Generic type parameters: func max<T: Compare>(...)
     let type_params = []
     if p_at(TokenKind::Lt) {
         p_advance()
         while !p_at(TokenKind::Gt) && !p_at_eof() {
             const tp_name = p_expect_ident()
-            // Optional bound: T: Bound
             if p_at(TokenKind::Colon) {
                 p_advance()
                 parse_type_annotation()
@@ -350,7 +304,6 @@ func parse_func_params() {
     }
     p_expect(TokenKind::RParen)
 
-    // Optional return type annotation
     if p_at(TokenKind::Arrow) {
         p_advance()
         parse_type_annotation()
@@ -360,12 +313,10 @@ func parse_func_params() {
 }
 
 func parse_type_annotation() {
-    // Simple type: ident (or keyword used as type name)
     const tok = p_peek()
     let name = tok.text
     p_advance()
     if p_at(TokenKind::Lt) {
-        // Generic: Type<Param>
         p_advance()
         let depth = 1
         while depth > 0 && !p_at_eof() {
@@ -377,9 +328,6 @@ func parse_type_annotation() {
     }
     name
 }
-
-// ── struct Name { fields } ────────────────────────────────────────
-
 func parse_struct_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Struct)
@@ -402,9 +350,6 @@ func parse_struct_stmt() {
     p_expect(TokenKind::RBrace)
     stmt_new(StmtKind::SStructDef(name, fields, []), span)
 }
-
-// ── enum Name { variants } ────────────────────────────────────────
-
 func parse_enum_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Enum)
@@ -425,10 +370,8 @@ func parse_enum_stmt() {
             }
             p_expect(TokenKind::RParen)
         }
-        // Iota value: Variant = 0
         if p_at(TokenKind::Eq) {
             p_advance()
-            // Skip the value expression (used for iota)
             parse_expression(0)
         }
         variants.push(EnumVariantDef { name: vname, fields: vfields, span: vspan })
@@ -437,9 +380,6 @@ func parse_enum_stmt() {
     p_expect(TokenKind::RBrace)
     stmt_new(StmtKind::SEnumDef(name, variants, []), span)
 }
-
-// ── interface Name { methods } ────────────────────────────────────
-
 func parse_interface_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Interface)
@@ -458,9 +398,6 @@ func parse_interface_stmt() {
     p_expect(TokenKind::RBrace)
     stmt_new(StmtKind::SInterfaceDef(name, [], methods), span)
 }
-
-// ── if cond { } else { } ─────────────────────────────────────────
-
 func parse_if_stmt() {
     const span = p_current_span()
     const expr = parse_if_expr()
@@ -471,14 +408,10 @@ func parse_if_stmt() {
         _ => make_expr_stmt(expr, span),
     }
 }
-
-// ── for pattern in expr { body } ──────────────────────────────────
-
 func parse_for_stmt_with_label(label) {
     const span = p_current_span()
     p_expect(TokenKind::For)
 
-    // Array destructuring: for [k, v] in ...
     if p_at(TokenKind::LBracket) {
         p_advance()
         let elems = []
@@ -510,9 +443,6 @@ func parse_for_stmt_with_label(label) {
 func parse_for_stmt() {
     parse_for_stmt_with_label("")
 }
-
-// ── while cond { body } ──────────────────────────────────────────
-
 func parse_while_stmt_with_label(label) {
     const span = p_current_span()
     p_expect(TokenKind::While)
@@ -524,9 +454,6 @@ func parse_while_stmt_with_label(label) {
 func parse_while_stmt() {
     parse_while_stmt_with_label("")
 }
-
-// ── match expr { arms } ──────────────────────────────────────────
-
 func parse_match_stmt() {
     const span = p_current_span()
     const expr = parse_match_expr()
@@ -537,16 +464,12 @@ func parse_match_stmt() {
         _ => make_expr_stmt(expr, span),
     }
 }
-
-// ── return expr ──────────────────────────────────────────────────
-
 func parse_return_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Return)
     let value = null
     if !p_at(TokenKind::RBrace) && !p_at(TokenKind::Semicolon) && !p_at_eof() {
         const first = parse_expression(0)
-        // Multi-return: return a, b => TupleLiteral
         if p_at(TokenKind::Comma) {
             let exprs = [first]
             while p_at(TokenKind::Comma) {
@@ -560,9 +483,6 @@ func parse_return_stmt() {
     }
     make_return(value, span)
 }
-
-// ── break / continue ─────────────────────────────────────────────
-
 func parse_break_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Break)
@@ -586,14 +506,10 @@ func parse_continue_stmt() {
     }
     stmt_new(StmtKind::SContinue(label), span)
 }
-
-// ── import std.module ────────────────────────────────────────────
-
 func parse_import_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Import)
 
-    // String literal import: import "plugin-id"
     if p_at(TokenKind::StringLit) {
         const tok = p_advance()
         return stmt_new(StmtKind::SImport(tok.text), span)
@@ -604,7 +520,6 @@ func parse_import_stmt() {
 
     while p_at(TokenKind::Dot) {
         p_advance()
-        // Multi-import: import std.{fs, json}
         if p_at(TokenKind::LBrace) {
             p_advance()
             while !p_at(TokenKind::RBrace) && !p_at_eof() {
@@ -617,7 +532,6 @@ func parse_import_stmt() {
         path_parts.push(p_expect_ident())
     }
 
-    // Alias: import std.math as m
     let alias = ""
     if p_at(TokenKind::As) {
         p_advance()
@@ -631,9 +545,6 @@ func parse_import_stmt() {
         stmt_new(StmtKind::SImport(path), span)
     }
 }
-
-// ── async func name(params) { body } ─────────────────────────────
-
 func parse_async_func_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Async)
@@ -644,15 +555,11 @@ func parse_async_func_stmt() {
     const fdef = funcdef_new(name, params, body, span)
     stmt_new(StmtKind::SAsyncFuncDef(fdef), span)
 }
-
-// ── impl Type { methods } ────────────────────────────────────────
-
 func parse_impl_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Impl)
     const type_name = p_expect_ident()
 
-    // impl Trait for Type { ... }
     if p_at(TokenKind::For) {
         p_advance()
         const target_type = p_expect_ident()
@@ -681,9 +588,6 @@ func parse_impl_stmt() {
     p_expect(TokenKind::RBrace)
     stmt_new(StmtKind::SImplBlock(type_name, methods), span)
 }
-
-// ── type Name = TargetType ───────────────────────────────────────
-
 func parse_type_alias_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Type)
@@ -692,9 +596,6 @@ func parse_type_alias_stmt() {
     const target = parse_type_annotation()
     stmt_new(StmtKind::STypeAlias(name, target), span)
 }
-
-// ── do { body } while cond ───────────────────────────────────────
-
 func parse_do_while_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Do)
@@ -703,9 +604,6 @@ func parse_do_while_stmt() {
     const cond = parse_expression(0)
     stmt_new(StmtKind::SDoWhile("", cond, body), span)
 }
-
-// ── loop { body } ────────────────────────────────────────────────
-
 func parse_loop_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Loop)
@@ -713,9 +611,6 @@ func parse_loop_stmt() {
     const loop_expr = expr_new(ExprKind::ELoop(body), span)
     make_expr_stmt(loop_expr, span)
 }
-
-// ── select { arms } ─────────────────────────────────────────────
-
 func parse_select_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Select)
@@ -728,13 +623,9 @@ func parse_select_stmt() {
         p_skip_semis()
     }
     p_expect(TokenKind::RBrace)
-    // Represent select as a match with null subject
     const subject = make_null_lit(span)
     stmt_new(StmtKind::SMatch(subject, arms), span)
 }
-
-// ── defer expr ───────────────────────────────────────────────────
-
 func parse_defer_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Defer)
@@ -747,18 +638,12 @@ func parse_defer_stmt() {
     }
     stmt_new(StmtKind::SDefer(expr), span)
 }
-
-// ── throw expr ───────────────────────────────────────────────────
-
 func parse_throw_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Throw)
     const expr = parse_expression(0)
     stmt_new(StmtKind::SThrow(expr), span)
 }
-
-// ── try { body } catch e { handler } ─────────────────────────────
-
 func parse_try_catch_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Try)
@@ -786,9 +671,6 @@ func parse_try_catch_stmt() {
 
     stmt_new(StmtKind::STryCatch(try_expr, catch_var, catch_body, finally_body), span)
 }
-
-// ── test "name" { body } ─────────────────────────────────────────
-
 func parse_test_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Test)
@@ -796,9 +678,6 @@ func parse_test_stmt() {
     const body = parse_block()
     stmt_new(StmtKind::STestDef(name, body), span)
 }
-
-// ── 'label: for/while/loop ──────────────────────────────────────
-
 func parse_labeled_stmt() {
     const span = p_current_span()
     const label_tok = p_advance()
@@ -826,15 +705,11 @@ func parse_labeled_stmt() {
     }
     panic(f"expected 'for', 'while', 'loop', or 'do' after label at {label_tok.line}:{label_tok.col}")
 }
-
-// ── #[attr] def ─────────────────────────────────────────────────
-
 func parse_attribute_stmt() {
     const span = p_current_span()
     p_expect(TokenKind::Hash)
     p_expect(TokenKind::LBracket)
     const attr_name = p_expect_ident()
-    // Optional args: #[deprecated("msg")] or #[cfg(condition)]
     if p_at(TokenKind::LParen) {
         p_advance()
         let depth = 1
@@ -846,17 +721,12 @@ func parse_attribute_stmt() {
         p_expect(TokenKind::RParen)
     }
     p_expect(TokenKind::RBracket)
-    // Parse the definition that follows the attribute
     parse_statement()
 }
-
-// ── Expression statement or assignment ───────────────────────────
-
 func parse_expr_or_assign_stmt() {
     const span = p_current_span()
     const expr = parse_expression(0)
 
-    // Check for assignment: name = expr
     if p_at(TokenKind::Eq) {
         p_advance()
         const value = parse_expression(0)
@@ -876,7 +746,6 @@ func parse_expr_or_assign_stmt() {
         }
     }
 
-    // Compound assignments: += -= *= /= %=
     if p_at(TokenKind::PlusEq) {
         p_advance()
         const value = parse_expression(0)
@@ -930,9 +799,6 @@ func parse_expr_or_assign_stmt() {
 
     make_expr_stmt(expr, span)
 }
-
-// ── Block Parsing ─────────────────────────────────────────────────
-
 func parse_block() {
     const span = p_current_span()
     p_expect(TokenKind::LBrace)
@@ -948,7 +814,6 @@ func parse_block() {
         p_skip_semis()
     }
 
-    // Check if last statement is an expression that can be a tail expr
     if len(stmts) > 0 {
         const last = stmts[len(stmts) - 1]
         match last.kind {
@@ -963,9 +828,6 @@ func parse_block() {
     p_expect(TokenKind::RBrace)
     block_new(stmts, tail_expr, span)
 }
-
-// ── Expression Parsing (Pratt / Precedence Climbing) ──────────────
-
 func parse_expression(min_prec) {
     let left = parse_unary()
 
@@ -982,7 +844,6 @@ func parse_expression(min_prec) {
         left = make_binop(op, left, right, span)
     }
 
-    // Pipe operator |>
     while p_at(TokenKind::Pipe) {
         p_advance()
         const span = left.span
@@ -990,7 +851,6 @@ func parse_expression(min_prec) {
         left = expr_new(ExprKind::EPipe(left, right), span)
     }
 
-    // Range operator ..
     if p_at(TokenKind::DotDot) {
         p_advance()
         const span = left.span
@@ -1004,7 +864,6 @@ func parse_expression(min_prec) {
         left = expr_new(ExprKind::ERange(left, end_expr, true), span)
     }
 
-    // Null coalescing ??
     if p_at(TokenKind::QuestionQuestion) {
         p_advance()
         const span = left.span
@@ -1036,9 +895,6 @@ func token_to_binop(kind) {
     if kind == TokenKind::Shr { return BinOp::Shr }
     null
 }
-
-// ── Unary Expressions ─────────────────────────────────────────────
-
 func parse_unary() {
     const span = p_current_span()
 
@@ -1054,14 +910,12 @@ func parse_unary() {
         return make_unaryop(UnOp::Not, operand, span)
     }
 
-    // await expr
     if p_at(TokenKind::Await) {
         p_advance()
         const operand = parse_unary()
         return expr_new(ExprKind::EAwait(operand), span)
     }
 
-    // spawn expr / spawn { block }
     if p_at(TokenKind::Spawn) {
         p_advance()
         let operand = null
@@ -1074,7 +928,6 @@ func parse_unary() {
         return expr_new(ExprKind::ESpawn(operand), span)
     }
 
-    // yield expr
     if p_at(TokenKind::Yield) {
         p_advance()
         const operand = parse_unary()
@@ -1083,15 +936,11 @@ func parse_unary() {
 
     parse_postfix()
 }
-
-// ── Postfix: calls, field access, indexing ─────────────────────────
-
 func parse_postfix() {
     let expr = parse_primary()
 
     while true {
         if p_at(TokenKind::LParen) {
-            // Function call or method call
             const span = expr.span
             match expr.kind {
                 ExprKind::EVariable(name) => {
@@ -1124,7 +973,6 @@ func parse_postfix() {
             const field = p_expect_ident()
             expr = expr_new(ExprKind::EOptionalChain(expr, field), span)
         } else if p_at(TokenKind::ColonColon) {
-            // Enum::Variant or Enum::Variant(args)
             p_advance()
             const span = expr.span
             match expr.kind {
@@ -1141,7 +989,6 @@ func parse_postfix() {
                 },
             }
         } else if p_at(TokenKind::Question) {
-            // Try-propagate: expr?
             p_advance()
             const span = expr.span
             expr = expr_new(ExprKind::ETryPropagate(expr), span)
@@ -1164,38 +1011,30 @@ func parse_call_args() {
     p_expect(TokenKind::RParen)
     args
 }
-
-// ── Primary Expressions ───────────────────────────────────────────
-
 func parse_primary() {
     const tok = p_peek()
     const span = p_current_span()
     const kind = tok.kind
 
-    // Integer literal
     if kind == TokenKind::IntLit {
         p_advance()
         return make_int_lit(parse_int(tok.text), span)
     }
 
-    // Float literal
     if kind == TokenKind::FloatLit {
         p_advance()
         return make_float_lit(parse_float(tok.text), span)
     }
 
-    // String literal
     if kind == TokenKind::StringLit {
         p_advance()
         return make_str_lit(tok.text, span)
     }
 
-    // F-string interpolation
     if kind == TokenKind::FStringStart {
         return parse_fstring()
     }
 
-    // Boolean literals
     if kind == TokenKind::True {
         p_advance()
         return make_bool_lit(true, span)
@@ -1205,30 +1044,25 @@ func parse_primary() {
         return make_bool_lit(false, span)
     }
 
-    // Null literal
     if kind == TokenKind::Null {
         p_advance()
         return make_null_lit(span)
     }
 
-    // If expression
     if kind == TokenKind::If {
         return parse_if_expr()
     }
 
-    // Match expression
     if kind == TokenKind::Match {
         return parse_match_expr()
     }
 
-    // Loop expression
     if kind == TokenKind::Loop {
         p_advance()
         const body = parse_block()
         return expr_new(ExprKind::ELoop(body), span)
     }
 
-    // Try expression: try { body } catch e { handler }
     if kind == TokenKind::Try {
         p_advance()
         const try_block = parse_block()
@@ -1246,34 +1080,28 @@ func parse_primary() {
         return expr_new(ExprKind::ETryCatch(try_e, catch_var, catch_body), span)
     }
 
-    // Array literal or list comprehension
     if kind == TokenKind::LBracket {
         return parse_array_literal()
     }
 
-    // Parenthesized expression, tuple, or arrow function params
     if kind == TokenKind::LParen {
         return parse_paren_or_lambda()
     }
 
-    // Block expression
     if kind == TokenKind::LBrace {
         const blk = parse_block()
         return expr_new(ExprKind::EBlock(blk), span)
     }
 
-    // Underscore (placeholder)
     if kind == TokenKind::Underscore {
         p_advance()
         return expr_new(ExprKind::EPlaceholder, span)
     }
 
-    // Identifier — could be variable, arrow function, or struct construct
     if kind == TokenKind::Ident {
         p_advance()
         const name = tok.text
 
-        // Arrow function: name => body
         if p_at(TokenKind::FatArrow) {
             p_advance()
             const body_expr = parse_expression(0)
@@ -1282,7 +1110,6 @@ func parse_primary() {
             return make_lambda(params, body, span)
         }
 
-        // Struct construction: Name { field: val, ... }
         if p_at(TokenKind::LBrace) && len(name) > 0 && name[0] >= "A" && name[0] <= "Z" {
             return parse_struct_construct(name, span)
         }
@@ -1290,7 +1117,6 @@ func parse_primary() {
         return make_var(name, span)
     }
 
-    // Spread operator
     if kind == TokenKind::DotDotDot {
         p_advance()
         const inner = parse_expression(0)
@@ -1299,9 +1125,6 @@ func parse_primary() {
 
     panic(f"unexpected token '{tok.text}' at {tok.line}:{tok.col}")
 }
-
-// ── F-string Interpolation ────────────────────────────────────────
-
 func parse_fstring() {
     const span = p_current_span()
     const tok = p_advance()
@@ -1327,7 +1150,6 @@ func parse_fstring() {
                 }
                 i = i + 1
             }
-            // Parse the inner expression via re-entrant parse()
             const inner_prog = parse(expr_str)
             if len(inner_prog.statements) > 0 {
                 match inner_prog.statements[0].kind {
@@ -1350,9 +1172,6 @@ func parse_fstring() {
 
     expr_new(ExprKind::EStringInterp(parts), span)
 }
-
-// ── If Expression ─────────────────────────────────────────────────
-
 func parse_if_expr() {
     const span = p_current_span()
     p_expect(TokenKind::If)
@@ -1362,7 +1181,6 @@ func parse_if_expr() {
     if p_at(TokenKind::Else) {
         p_advance()
         if p_at(TokenKind::If) {
-            // else if chain
             const else_if = parse_if_expr()
             const else_span = else_if.span
             else_block = block_new([], else_if, else_span)
@@ -1372,9 +1190,6 @@ func parse_if_expr() {
     }
     make_if(cond, then_block, else_block, span)
 }
-
-// ── Match Expression ──────────────────────────────────────────────
-
 func parse_match_expr() {
     const span = p_current_span()
     p_expect(TokenKind::Match)
@@ -1411,13 +1226,11 @@ func parse_pattern() {
     const tok = p_peek()
     const kind = tok.kind
 
-    // Wildcard
     if kind == TokenKind::Underscore {
         p_advance()
         return Pattern::PWildcard
     }
 
-    // Boolean literals
     if kind == TokenKind::True {
         p_advance()
         return Pattern::PLiteral(make_bool_lit(true, p_current_span()))
@@ -1427,13 +1240,11 @@ func parse_pattern() {
         return Pattern::PLiteral(make_bool_lit(false, p_current_span()))
     }
 
-    // Null
     if kind == TokenKind::Null {
         p_advance()
         return Pattern::PLiteral(make_null_lit(p_current_span()))
     }
 
-    // Numeric literals
     if kind == TokenKind::IntLit {
         p_advance()
         return Pattern::PLiteral(make_int_lit(parse_int(tok.text), p_current_span()))
@@ -1443,13 +1254,11 @@ func parse_pattern() {
         return Pattern::PLiteral(make_float_lit(parse_float(tok.text), p_current_span()))
     }
 
-    // String literal
     if kind == TokenKind::StringLit {
         p_advance()
         return Pattern::PLiteral(make_str_lit(tok.text, p_current_span()))
     }
 
-    // Negative numeric literal
     if kind == TokenKind::Minus {
         p_advance()
         const num_tok = p_peek()
@@ -1464,7 +1273,6 @@ func parse_pattern() {
         panic("expected number after - in pattern")
     }
 
-    // Array pattern
     if kind == TokenKind::LBracket {
         p_advance()
         let pats = []
@@ -1483,7 +1291,6 @@ func parse_pattern() {
         return Pattern::PArray(pats)
     }
 
-    // Rest pattern
     if kind == TokenKind::DotDotDot {
         p_advance()
         let rest_name = "_"
@@ -1491,12 +1298,10 @@ func parse_pattern() {
         return Pattern::PRest(rest_name)
     }
 
-    // Identifier — variable, enum pattern, or or-pattern
     if kind == TokenKind::Ident {
         p_advance()
         const name = tok.text
 
-        // Enum pattern: Name::Variant or Name::Variant(bindings)
         if p_at(TokenKind::ColonColon) {
             p_advance()
             const variant = p_expect_ident()
@@ -1516,7 +1321,6 @@ func parse_pattern() {
             return pat
         }
 
-        // Type pattern: name: Type
         if p_at(TokenKind::Colon) {
             p_advance()
             const type_name = p_expect_ident()
@@ -1541,14 +1345,10 @@ func parse_or_pattern(first) {
     }
     Pattern::POr(pats)
 }
-
-// ── Array Literal ─────────────────────────────────────────────────
-
 func parse_array_literal() {
     const span = p_current_span()
     p_expect(TokenKind::LBracket)
 
-    // Empty array
     if p_at(TokenKind::RBracket) {
         p_expect(TokenKind::RBracket)
         return expr_new(ExprKind::ELiteral(Literal::ArrayLit([])), span)
@@ -1556,7 +1356,6 @@ func parse_array_literal() {
 
     const first = parse_expression(0)
 
-    // List comprehension: [expr for var in iterable]
     if p_at(TokenKind::For) {
         p_advance()
         const var_pattern = parse_comprehension_pattern()
@@ -1582,7 +1381,6 @@ func parse_array_literal() {
 }
 
 func parse_comprehension_pattern() {
-    // Simple: x or destructured: [a, b]
     if p_at(TokenKind::LBracket) {
         p_advance()
         let names = []
@@ -1595,14 +1393,10 @@ func parse_comprehension_pattern() {
     }
     make_var(p_expect_ident(), p_current_span())
 }
-
-// ── Paren Expression or Lambda ────────────────────────────────────
-
 func parse_paren_or_lambda() {
     const span = p_current_span()
     p_expect(TokenKind::LParen)
 
-    // Empty parens: () => body
     if p_at(TokenKind::RParen) {
         p_advance()
         if p_at(TokenKind::FatArrow) {
@@ -1614,7 +1408,6 @@ func parse_paren_or_lambda() {
         return make_null_lit(span)
     }
 
-    // Lookahead to detect lambda: (a, b) => ...
     let is_lambda = false
     let look_pos = p_pos
     let depth = 1
@@ -1656,10 +1449,8 @@ func parse_paren_or_lambda() {
         return make_lambda(params, body, span)
     }
 
-    // Regular parenthesized expression or tuple literal
     const expr = parse_expression(0)
 
-    // Tuple literal: (a, b, c)
     if p_at(TokenKind::Comma) {
         let elements = [expr]
         while p_at(TokenKind::Comma) {
@@ -1674,14 +1465,10 @@ func parse_paren_or_lambda() {
     p_expect(TokenKind::RParen)
     expr
 }
-
-// ── Struct Construction ───────────────────────────────────────────
-
 func parse_struct_construct(name, span) {
     p_expect(TokenKind::LBrace)
     let fields = []
     while !p_at(TokenKind::RBrace) && !p_at_eof() {
-        // Spread: ...expr
         if p_at(TokenKind::DotDotDot) {
             p_advance()
             const spread_expr = parse_expression(0)
@@ -1698,22 +1485,15 @@ func parse_struct_construct(name, span) {
     p_expect(TokenKind::RBrace)
     expr_new(ExprKind::EStructConstruct(name, fields), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Generic Parsing with Bounds and Where Clauses ───────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse generic type parameters: <T, U: Trait, V: A + B>
 func parse_type_params() {
     let params = []
     if !p_at(TokenKind::Less) { return params }
-    p_advance() // skip <
+    p_advance()
 
     while !p_at(TokenKind::Greater) && !p_at_eof() {
         const name = p_expect_ident()
         let constraints = []
 
-        // Check for bounds: T: Trait or T: A + B
         if p_at(TokenKind::Colon) {
             p_advance()
             constraints.push(p_expect_ident())
@@ -1736,7 +1516,6 @@ func parse_type_params() {
     params
 }
 
-// Parse where clause: where T: Trait, U: OtherTrait
 func parse_where_clause() {
     let clauses = []
     if !p_at_keyword("where") { return clauses }
@@ -1756,27 +1535,18 @@ func parse_where_clause() {
     clauses
 }
 
-// Check if current token is a specific keyword
 func p_at_keyword(keyword) {
     const tok = p_peek()
     tok.kind == TokenKind::Ident && tok.text == keyword
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Type Annotation Parsing ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse a type annotation: int, string, Array<T>, Map<K, V>, (A, B) -> C, T?
 func parse_type_annotation() {
     let base_type = parse_base_type()
 
-    // Optional: T?
     if p_at(TokenKind::Question) {
         p_advance()
         base_type = {"kind": "optional", "inner": base_type}
     }
 
-    // Function type: (A, B) -> C
     if p_at(TokenKind::Arrow) {
         p_advance()
         const return_type = parse_type_annotation()
@@ -1787,7 +1557,6 @@ func parse_type_annotation() {
 }
 
 func parse_base_type() {
-    // Tuple type: (A, B, C)
     if p_at(TokenKind::LParen) {
         p_advance()
         let types = []
@@ -1799,7 +1568,6 @@ func parse_base_type() {
         return {"kind": "tuple", "elements": types}
     }
 
-    // Array shorthand: [T]
     if p_at(TokenKind::LBracket) {
         p_advance()
         const elem_type = parse_type_annotation()
@@ -1807,10 +1575,8 @@ func parse_base_type() {
         return {"kind": "array", "element": elem_type}
     }
 
-    // Named type, possibly generic: Name<T, U>
     const name = p_expect_ident()
 
-    // Check for generic arguments: Name<T, U>
     if p_at(TokenKind::Less) {
         p_advance()
         let args = []
@@ -1825,7 +1591,6 @@ func parse_base_type() {
     name
 }
 
-// Parse return type annotation: -> Type
 func parse_return_type() {
     if p_at(TokenKind::Arrow) {
         p_advance()
@@ -1833,19 +1598,11 @@ func parse_return_type() {
     }
     null
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Attribute Parsing ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse #[attr] or #[attr(args)]
 func parse_attribute() {
-    // Assumes we just saw '#'
     p_expect(TokenKind::LBracket)
     const name = p_expect_ident()
     let args = []
 
-    // Check for arguments: #[attr(arg1, arg2)]
     if p_at(TokenKind::LParen) {
         p_advance()
         while !p_at(TokenKind::RParen) && !p_at_eof() {
@@ -1857,7 +1614,7 @@ func parse_attribute() {
             } else if tok.kind == TokenKind::IntLit {
                 args.push(p_advance().text)
             } else {
-                p_advance() // skip unknown
+                p_advance()
             }
             if p_at(TokenKind::Comma) { p_advance() }
         }
@@ -1868,34 +1625,24 @@ func parse_attribute() {
     {"name": name, "args": args}
 }
 
-// Parse multiple attributes before a declaration
 func parse_attributes() {
     let attrs = []
     while p_at(TokenKind::Hash) {
-        p_advance() // skip #
+        p_advance()
         attrs.push(parse_attribute())
     }
     attrs
 }
 
-// Known attributes
 const KNOWN_ATTRIBUTES = [
     "test", "deprecated", "ignore", "inline", "cold", "hot",
     "allow", "deny", "warn", "cfg", "feature", "doc",
     "derive", "repr", "no_mangle", "export", "wasm_bindgen"
 ]
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Async Function Parsing ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse: async func name(params) { body }
 func parse_async_func(span) {
-    // 'async' already consumed
     p_expect(TokenKind::Func)
     const name = p_expect_ident()
 
-    // Optional generic params
     let type_params = parse_type_params()
 
     p_expect(TokenKind::LParen)
@@ -1915,7 +1662,6 @@ func parse_async_func(span) {
     stmt_new(StmtKind::SAsyncFuncDef(fdef), span)
 }
 
-// Parse parameter list with default values and rest params
 func parse_param_list() {
     let params = []
     while !p_at(TokenKind::RParen) && !p_at_eof() {
@@ -1929,13 +1675,11 @@ func parse_param_list() {
         let type_ann = ""
         let default_val = null
 
-        // Type annotation: param: Type
         if p_at(TokenKind::Colon) {
             p_advance()
             type_ann = to_string(parse_type_annotation())
         }
 
-        // Default value: param = expr
         if p_at(TokenKind::Eq) {
             p_advance()
             default_val = parse_expression(0)
@@ -1952,14 +1696,7 @@ func parse_param_list() {
     }
     params
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Destructuring in All Positions ─────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse destructuring pattern: [a, b, ...rest] or {x, y} or (a, b)
 func parse_destructure_pattern() {
-    // Array destructuring: [a, b, ...rest]
     if p_at(TokenKind::LBracket) {
         p_advance()
         let elements = []
@@ -1978,7 +1715,6 @@ func parse_destructure_pattern() {
         return {"kind": "array", "elements": elements}
     }
 
-    // Map/object destructuring: {x, y, z: alias}
     if p_at(TokenKind::LBrace) {
         p_advance()
         let fields = []
@@ -2002,7 +1738,6 @@ func parse_destructure_pattern() {
         return {"kind": "map", "fields": fields}
     }
 
-    // Tuple destructuring: (a, b, c)
     if p_at(TokenKind::LParen) {
         p_advance()
         let elements = []
@@ -2015,20 +1750,12 @@ func parse_destructure_pattern() {
         return {"kind": "tuple", "elements": elements}
     }
 
-    // Simple name
     const name = p_expect_ident()
     {"kind": "simple", "name": name}
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Error Recovery (Synchronize on Statement Boundaries) ────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Synchronize parser state after an error by skipping to the next statement
 func p_synchronize() {
     while !p_at_eof() {
         const tok = p_peek()
-        // Statement boundary tokens
         if tok.kind == TokenKind::Func { return }
         if tok.kind == TokenKind::Let { return }
         if tok.kind == TokenKind::Const { return }
@@ -2044,7 +1771,6 @@ func p_synchronize() {
         if tok.kind == TokenKind::Import { return }
         if tok.kind == TokenKind::Break { return }
         if tok.kind == TokenKind::Continue { return }
-        // Skip past semicolons and closing braces
         if tok.kind == TokenKind::Semicolon || tok.kind == TokenKind::RBrace {
             p_advance()
             return
@@ -2053,7 +1779,6 @@ func p_synchronize() {
     }
 }
 
-// Accumulated parse errors for recovery mode
 let p_errors = []
 
 func p_error(msg) {
@@ -2065,20 +1790,12 @@ func p_recover_error(msg) {
     p_error(msg)
     p_synchronize()
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Pattern Parsing (All Pattern Types) ────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse a match arm pattern
 func parse_pattern() {
-    // Wildcard: _
     if p_at(TokenKind::Ident) && p_peek().text == "_" {
         p_advance()
         return {"kind": "wildcard"}
     }
 
-    // Literal patterns
     if p_at(TokenKind::IntLit) {
         const tok = p_advance()
         let value = to_int(tok.text)
@@ -2105,7 +1822,6 @@ func parse_pattern() {
         return {"kind": "literal", "value": null}
     }
 
-    // Array pattern: [a, b, ...rest]
     if p_at(TokenKind::LBracket) {
         p_advance()
         let elements = []
@@ -2123,7 +1839,6 @@ func parse_pattern() {
         return {"kind": "array", "elements": elements}
     }
 
-    // Tuple pattern: (a, b)
     if p_at(TokenKind::LParen) {
         p_advance()
         let elements = []
@@ -2135,11 +1850,9 @@ func parse_pattern() {
         return {"kind": "tuple", "elements": elements}
     }
 
-    // Named pattern (variable binding, enum variant, or struct pattern)
     if p_at(TokenKind::Ident) {
         const name = p_advance().text
 
-        // Enum variant: Name::Variant or Name::Variant(a, b)
         if p_at(TokenKind::ColonColon) {
             p_advance()
             const variant = p_expect_ident()
@@ -2157,7 +1870,6 @@ func parse_pattern() {
             let pat = {"kind": "enum", "enum": name, "variant": variant}
             if len(bindings) > 0 { pat["bindings"] = bindings }
 
-            // Guard: if condition
             if p_at_keyword("if") {
                 p_advance()
                 const guard_expr = parse_expression(0)
@@ -2167,7 +1879,6 @@ func parse_pattern() {
             return pat
         }
 
-        // Struct pattern: Name { field: pattern, ... }
         if p_at(TokenKind::LBrace) {
             p_advance()
             let fields = []
@@ -2190,7 +1901,6 @@ func parse_pattern() {
             return {"kind": "struct", "struct": name, "fields": fields}
         }
 
-        // Or pattern: A | B
         let pat = {"kind": "binding", "name": name}
         if p_at(TokenKind::Pipe) {
             p_advance()
@@ -2198,7 +1908,6 @@ func parse_pattern() {
             pat = {"kind": "or", "left": pat, "right": right}
         }
 
-        // Guard: if condition
         if p_at_keyword("if") {
             p_advance()
             const guard_expr = parse_expression(0)
@@ -2207,59 +1916,40 @@ func parse_pattern() {
 
         return pat
     }
-
-    // Range pattern: 1..10 or 1..=10
-    // (Would need to handle after parsing the literal)
-
     {"kind": "wildcard"}
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── String Interpolation Parsing with Nested Expressions ────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse a string interpolation f"text {expr} text"
-// The lexer has already tokenized the parts; here we handle nested expressions
 func parse_string_interp_parts(parts) {
     let result = []
     for part in parts {
         match part {
             StringPart::LiteralPart(s) => result.push(part),
             StringPart::ExprPart(expr) => {
-                // The expr is already parsed by the lexer/parser combo
                 result.push(part)
             },
         }
     }
     result
 }
+const PREC_ASSIGNMENT = 1
+const PREC_PIPE = 2
+const PREC_NULL_COALESCE = 3
+const PREC_OR = 4
+const PREC_AND = 5
+const PREC_BIT_OR = 6
+const PREC_BIT_XOR = 7
+const PREC_BIT_AND = 8
+const PREC_EQUALITY = 9
+const PREC_COMPARISON = 10
+const PREC_IN = 11
+const PREC_RANGE = 12
+const PREC_SHIFT = 13
+const PREC_ADD = 14
+const PREC_MUL = 15
+const PREC_POWER = 16
+const PREC_UNARY = 17
+const PREC_CALL = 18
+const PREC_PRIMARY = 19
 
-// ══════════════════════════════════════════════════════════════════════
-// ── Operator Precedence for All Operators ───────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Full precedence table (matches src/syntax/parser.rs)
-const PREC_ASSIGNMENT = 1     // =, +=, -=, etc.
-const PREC_PIPE = 2           // |>
-const PREC_NULL_COALESCE = 3  // ??
-const PREC_OR = 4             // ||
-const PREC_AND = 5            // &&
-const PREC_BIT_OR = 6         // |
-const PREC_BIT_XOR = 7        // ^
-const PREC_BIT_AND = 8        // &
-const PREC_EQUALITY = 9       // ==, !=
-const PREC_COMPARISON = 10    // <, >, <=, >=
-const PREC_IN = 11            // in
-const PREC_RANGE = 12         // .., ..=
-const PREC_SHIFT = 13         // <<, >>
-const PREC_ADD = 14           // +, -
-const PREC_MUL = 15           // *, /, %
-const PREC_POWER = 16         // **
-const PREC_UNARY = 17         // !, -, ~
-const PREC_CALL = 18          // (), [], .
-const PREC_PRIMARY = 19       // literals, identifiers
-
-// Get infix operator precedence
 func get_infix_precedence(tok_kind) {
     match tok_kind {
         TokenKind::PipeArrow => PREC_PIPE,
@@ -2290,7 +1980,6 @@ func get_infix_precedence(tok_kind) {
     }
 }
 
-// Check if an operator is right-associative
 func is_right_associative(tok_kind) {
     match tok_kind {
         TokenKind::StarStar => true,
@@ -2298,13 +1987,6 @@ func is_right_associative(tok_kind) {
         _ => false
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Precedence-Based Expression Parser ─────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Pratt parser using full precedence table (17 levels).
-// Replaces the simpler parse_expression when full operator coverage is needed.
 func parse_expression_pratt(min_prec) {
     let left = parse_prefix_expr()
 
@@ -2317,10 +1999,8 @@ func parse_expression_pratt(min_prec) {
         p_advance()
         const span = left.span
 
-        // Right-associative operators use min_prec = prec, left-associative use prec + 1
         const next_prec = if is_right_associative(op_kind) { prec } else { prec + 1 }
 
-        // Special handling for different operator types
         match op_kind {
             TokenKind::PipeArrow => {
                 const right = parse_prefix_expr()
@@ -2354,7 +2034,6 @@ func parse_expression_pratt(min_prec) {
     left
 }
 
-// Map token kinds to binary operators (complete mapping).
 func token_kind_to_binop(kind) {
     match kind {
         TokenKind::PipePipe => BinOp::Or,
@@ -2379,44 +2058,33 @@ func token_kind_to_binop(kind) {
         _ => null
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Prefix Expression Parser ───────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse prefix expressions: unary ops, await, spawn, yield, typeof
 func parse_prefix_expr() {
     const span = p_current_span()
 
-    // Unary minus
     if p_at(TokenKind::Minus) {
         p_advance()
         const operand = parse_prefix_expr()
         return make_unaryop(UnOp::Neg, operand, span)
     }
 
-    // Logical not
     if p_at(TokenKind::Bang) {
         p_advance()
         const operand = parse_prefix_expr()
         return make_unaryop(UnOp::Not, operand, span)
     }
 
-    // Bitwise not
     if p_at(TokenKind::Tilde) {
         p_advance()
         const operand = parse_prefix_expr()
         return make_unaryop(UnOp::BitNot, operand, span)
     }
 
-    // await expr
     if p_at(TokenKind::Await) {
         p_advance()
         const operand = parse_prefix_expr()
         return expr_new(ExprKind::EAwait(operand), span)
     }
 
-    // spawn expr
     if p_at(TokenKind::Spawn) {
         p_advance()
         let operand = null
@@ -2429,14 +2097,12 @@ func parse_prefix_expr() {
         return expr_new(ExprKind::ESpawn(operand), span)
     }
 
-    // yield expr
     if p_at(TokenKind::Yield) {
         p_advance()
         const operand = parse_prefix_expr()
         return expr_new(ExprKind::EYield(operand), span)
     }
 
-    // typeof expr (soft keyword)
     if p_at(TokenKind::Ident) && p_peek().text == "typeof" {
         const saved = p_pos
         p_advance()
@@ -2451,17 +2117,10 @@ func parse_prefix_expr() {
 
     parse_postfix_expr()
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Postfix Expression Parser ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse postfix: calls, field access, indexing, optional chaining, try-propagate
 func parse_postfix_expr() {
     let expr = parse_primary_expr()
 
     while true {
-        // Function call: expr(args)
         if p_at(TokenKind::LParen) {
             const span = expr.span
             match expr.kind {
@@ -2479,14 +2138,12 @@ func parse_postfix_expr() {
                 }
             }
         }
-        // Field access: expr.field
         else if p_at(TokenKind::Dot) {
             p_advance()
             const span = expr.span
             const field = p_expect_ident()
             expr = make_field_access(expr, field, span)
         }
-        // Index: expr[index]
         else if p_at(TokenKind::LBracket) {
             p_advance()
             const span = expr.span
@@ -2494,14 +2151,12 @@ func parse_postfix_expr() {
             p_expect(TokenKind::RBracket)
             expr = make_index(expr, idx, span)
         }
-        // Optional chaining: expr?.field
         else if p_at(TokenKind::QuestionDot) {
             p_advance()
             const span = expr.span
             const field = p_expect_ident()
             expr = expr_new(ExprKind::EOptionalChain(expr, field), span)
         }
-        // Enum construct: Name::Variant
         else if p_at(TokenKind::ColonColon) {
             p_advance()
             const span = expr.span
@@ -2518,7 +2173,6 @@ func parse_postfix_expr() {
                 _ => { panic("expected enum name before ::") }
             }
         }
-        // Try propagate: expr?
         else if p_at(TokenKind::Question) {
             p_advance()
             const span = expr.span
@@ -2531,31 +2185,26 @@ func parse_postfix_expr() {
     expr
 }
 
-// Parse call arguments with both positional and keyword args.
 func parse_call_args_full() {
     p_expect(TokenKind::LParen)
     let args = []
     let kwargs = []
 
     while !p_at(TokenKind::RParen) && !p_at_eof() {
-        // Check for keyword argument: name: value
         if p_at(TokenKind::Ident) {
             const saved = p_pos
             const name = p_peek().text
             p_advance()
             if p_at(TokenKind::Colon) {
-                // Keyword argument
                 p_advance()
                 const value = parse_expression_pratt(0)
                 kwargs.push([name, value])
                 if p_at(TokenKind::Comma) { p_advance() }
                 continue
             }
-            // Not a keyword arg, restore position
             p_pos = saved
         }
 
-        // Spread argument: ...expr
         if p_at(TokenKind::DotDotDot) {
             p_advance()
             const inner = parse_expression_pratt(0)
@@ -2570,40 +2219,30 @@ func parse_call_args_full() {
     p_expect(TokenKind::RParen)
     {"args": args, "kwargs": kwargs}
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Primary Expression Parser ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_primary_expr() {
     const tok = p_peek()
     const span = p_current_span()
     const kind = tok.kind
 
-    // Integer literal
     if kind == TokenKind::IntLit {
         p_advance()
         return make_int_lit(parse_int(tok.text), span)
     }
 
-    // Float literal
     if kind == TokenKind::FloatLit {
         p_advance()
         return make_float_lit(parse_float(tok.text), span)
     }
 
-    // String literal
     if kind == TokenKind::StringLit {
         p_advance()
         return make_str_lit(tok.text, span)
     }
 
-    // F-string interpolation
     if kind == TokenKind::FStringStart {
         return parse_fstring()
     }
 
-    // Boolean literals
     if kind == TokenKind::True {
         p_advance()
         return make_bool_lit(true, span)
@@ -2613,26 +2252,21 @@ func parse_primary_expr() {
         return make_bool_lit(false, span)
     }
 
-    // Null literal
     if kind == TokenKind::Null {
         p_advance()
         return make_null_lit(span)
     }
 
-    // If expression
     if kind == TokenKind::If { return parse_if_expr() }
 
-    // Match expression
     if kind == TokenKind::Match { return parse_match_expr() }
 
-    // Loop expression
     if kind == TokenKind::Loop {
         p_advance()
         const body = parse_block()
         return expr_new(ExprKind::ELoop(body), span)
     }
 
-    // Try expression
     if kind == TokenKind::Try {
         p_advance()
         const try_block = parse_block()
@@ -2656,13 +2290,9 @@ func parse_primary_expr() {
         return expr_new(ExprKind::ETryCatch(try_e, catch_var, catch_body), span)
     }
 
-    // Array literal or list comprehension
     if kind == TokenKind::LBracket { return parse_array_literal_full() }
 
-    // Map literal: { key: value, ... }
     if kind == TokenKind::LBrace {
-        // Disambiguate between block and map literal
-        // If next is ident/string followed by ':', it's a map
         if p_is_map_literal() {
             return parse_map_literal()
         }
@@ -2670,21 +2300,17 @@ func parse_primary_expr() {
         return expr_new(ExprKind::EBlock(blk), span)
     }
 
-    // Parenthesized expression, tuple, or arrow function
     if kind == TokenKind::LParen { return parse_paren_or_lambda_full() }
 
-    // Underscore (placeholder)
     if kind == TokenKind::Underscore {
         p_advance()
         return expr_new(ExprKind::EPlaceholder, span)
     }
 
-    // Identifier
     if kind == TokenKind::Ident {
         p_advance()
         const name = tok.text
 
-        // Arrow function: name => body
         if p_at(TokenKind::FatArrow) {
             p_advance()
             let body_block = null
@@ -2698,7 +2324,6 @@ func parse_primary_expr() {
             return make_lambda(params, body_block, span)
         }
 
-        // Struct construction: Name { field: val, ... }
         if p_at(TokenKind::LBrace) && len(name) > 0 && name[0] >= "A" && name[0] <= "Z" {
             return parse_struct_construct(name, span)
         }
@@ -2706,37 +2331,26 @@ func parse_primary_expr() {
         return make_var(name, span)
     }
 
-    // Spread operator
     if kind == TokenKind::DotDotDot {
         p_advance()
         const inner = parse_expression_pratt(0)
         return expr_new(ExprKind::ESpread(inner), span)
     }
 
-    // Hash set literal: #{...}
     if kind == TokenKind::Hash {
         p_advance()
         if p_at(TokenKind::LBrace) {
             return parse_set_literal(span)
         }
-        // Could be attribute context, fall through
     }
 
     panic(f"unexpected token '{tok.text}' at {tok.line}:{tok.col}")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Map Literal Detection and Parsing ───────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func p_is_map_literal() {
-    // Peek ahead: { ident/string : ... } or { }
     if !p_at(TokenKind::LBrace) { return false }
     const saved = p_pos
-    p_advance() // skip {
-    // Empty map
+    p_advance()
     if p_at(TokenKind::RBrace) { p_pos = saved; return true }
-    // Check first token
     const first = p_peek()
     if first.kind == TokenKind::Ident || first.kind == TokenKind::StringLit || first.kind == TokenKind::IntLit {
         p_advance()
@@ -2753,7 +2367,6 @@ func parse_map_literal() {
     p_expect(TokenKind::LBrace)
     let entries = []
     while !p_at(TokenKind::RBrace) && !p_at_eof() {
-        // Key: string or identifier
         let key = ""
         if p_at(TokenKind::StringLit) {
             key = "\"" + p_advance().text + "\""
@@ -2779,16 +2392,10 @@ func parse_set_literal(span) {
     p_expect(TokenKind::RBrace)
     expr_new(ExprKind::ELiteral(Literal::SetLit(elements)), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Array Literal / Comprehension Parser ───────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_array_literal_full() {
     const span = p_current_span()
     p_expect(TokenKind::LBracket)
 
-    // Empty array
     if p_at(TokenKind::RBracket) {
         p_expect(TokenKind::RBracket)
         return expr_new(ExprKind::ELiteral(Literal::ArrayLit([])), span)
@@ -2796,7 +2403,6 @@ func parse_array_literal_full() {
 
     const first = parse_expression_pratt(0)
 
-    // List comprehension: [expr for var in iterable if cond]
     if p_at(TokenKind::For) {
         p_advance()
         const pattern = parse_comprehension_pattern_full()
@@ -2811,12 +2417,10 @@ func parse_array_literal_full() {
         return expr_new(ExprKind::EListComp(first, pattern, iterable, condition), span)
     }
 
-    // Regular array literal
     let elements = [first]
     while p_at(TokenKind::Comma) {
         p_advance()
-        if p_at(TokenKind::RBracket) { break } // trailing comma
-        // Spread element
+        if p_at(TokenKind::RBracket) { break }
         if p_at(TokenKind::DotDotDot) {
             p_advance()
             const inner = parse_expression_pratt(0)
@@ -2830,7 +2434,6 @@ func parse_array_literal_full() {
 }
 
 func parse_comprehension_pattern_full() {
-    // Destructured: [a, b]
     if p_at(TokenKind::LBracket) {
         p_advance()
         let names = []
@@ -2841,7 +2444,6 @@ func parse_comprehension_pattern_full() {
         p_expect(TokenKind::RBracket)
         return expr_new(ExprKind::ELiteral(Literal::ArrayLit(names)), p_current_span())
     }
-    // Destructured: (a, b)
     if p_at(TokenKind::LParen) {
         p_advance()
         let names = []
@@ -2852,19 +2454,12 @@ func parse_comprehension_pattern_full() {
         p_expect(TokenKind::RParen)
         return expr_new(ExprKind::ETupleLiteral(names), p_current_span())
     }
-    // Simple variable
     make_var(p_expect_ident(), p_current_span())
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Paren/Lambda Parser ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_paren_or_lambda_full() {
     const span = p_current_span()
     p_expect(TokenKind::LParen)
 
-    // Empty parens: () or () =>
     if p_at(TokenKind::RParen) {
         p_advance()
         if p_at(TokenKind::FatArrow) {
@@ -2878,11 +2473,9 @@ func parse_paren_or_lambda_full() {
             }
             return make_lambda([], body, span)
         }
-        // Unit value (empty tuple)
         return expr_new(ExprKind::ETupleLiteral([]), span)
     }
 
-    // Lookahead for lambda: (params) => body
     let is_lambda = false
     let look_pos = p_pos
     let depth = 1
@@ -2934,10 +2527,8 @@ func parse_paren_or_lambda_full() {
         return make_lambda(params, body, span)
     }
 
-    // Regular parenthesized expression or tuple
     const first = parse_expression_pratt(0)
 
-    // Tuple literal: (a, b, c)
     if p_at(TokenKind::Comma) {
         let elements = [first]
         while p_at(TokenKind::Comma) {
@@ -2952,16 +2543,9 @@ func parse_paren_or_lambda_full() {
     p_expect(TokenKind::RParen)
     first
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Match Pattern Parser ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse a full match pattern with nested patterns, binding, guards, or-patterns.
 func parse_full_pattern() {
     let pat = parse_single_pattern()
 
-    // Or-patterns: pattern1 | pattern2 | ...
     if p_at(TokenKind::Bar) {
         let alternatives = [pat]
         while p_at(TokenKind::Bar) {
@@ -2971,14 +2555,12 @@ func parse_full_pattern() {
         pat = Pattern::POr(alternatives)
     }
 
-    // Guard: pattern if condition
     if p_at_keyword("if") {
         p_advance()
         const guard = parse_expression_pratt(0)
         pat = {"kind": "guard", "inner": pat, "guard": guard}
     }
 
-    // Binding: pattern @ name
     if p_at(TokenKind::At) {
         p_advance()
         const binding_name = p_expect_ident()
@@ -2992,23 +2574,19 @@ func parse_single_pattern() {
     const tok = p_peek()
     const kind = tok.kind
 
-    // Wildcard: _
     if kind == TokenKind::Underscore {
         p_advance()
         return Pattern::PWildcard
     }
 
-    // Boolean literals
     if kind == TokenKind::True { p_advance(); return Pattern::PLiteral(make_bool_lit(true, p_current_span())) }
     if kind == TokenKind::False { p_advance(); return Pattern::PLiteral(make_bool_lit(false, p_current_span())) }
     if kind == TokenKind::Null { p_advance(); return Pattern::PLiteral(make_null_lit(p_current_span())) }
 
-    // Numeric literals
     if kind == TokenKind::IntLit {
         p_advance()
         const value = parse_int(tok.text)
         const lit = make_int_lit(value, p_current_span())
-        // Range pattern: 1..10 or 1..=10
         if p_at(TokenKind::DotDot) {
             p_advance()
             const hi_tok = p_peek()
@@ -3032,11 +2610,9 @@ func parse_single_pattern() {
         return Pattern::PLiteral(make_float_lit(parse_float(tok.text), p_current_span()))
     }
 
-    // String literal
     if kind == TokenKind::StringLit {
         p_advance()
         const lit = make_str_lit(tok.text, p_current_span())
-        // Range pattern for strings
         if p_at(TokenKind::DotDot) {
             p_advance()
             const hi_tok = p_peek()
@@ -3048,7 +2624,6 @@ func parse_single_pattern() {
         return Pattern::PLiteral(lit)
     }
 
-    // Negative numeric literal
     if kind == TokenKind::Minus {
         p_advance()
         const num_tok = p_peek()
@@ -3063,7 +2638,6 @@ func parse_single_pattern() {
         panic("expected number after - in pattern")
     }
 
-    // Array pattern
     if kind == TokenKind::LBracket {
         p_advance()
         let pats = []
@@ -3082,7 +2656,6 @@ func parse_single_pattern() {
         return Pattern::PArray(pats)
     }
 
-    // Tuple pattern
     if kind == TokenKind::LParen {
         p_advance()
         let pats = []
@@ -3094,7 +2667,6 @@ func parse_single_pattern() {
         return Pattern::PTuple(pats)
     }
 
-    // Map pattern
     if kind == TokenKind::LBrace {
         p_advance()
         let entries = []
@@ -3117,7 +2689,6 @@ func parse_single_pattern() {
         return Pattern::PMap(entries)
     }
 
-    // Rest pattern
     if kind == TokenKind::DotDotDot {
         p_advance()
         let rest_name = "_"
@@ -3125,12 +2696,10 @@ func parse_single_pattern() {
         return Pattern::PRest(rest_name)
     }
 
-    // Identifier: variable, enum variant, type, struct
     if kind == TokenKind::Ident {
         p_advance()
         const name = tok.text
 
-        // Enum pattern: Name::Variant(bindings)
         if p_at(TokenKind::ColonColon) {
             p_advance()
             const variant = p_expect_ident()
@@ -3146,7 +2715,6 @@ func parse_single_pattern() {
             return Pattern::PEnum(name, variant, bindings)
         }
 
-        // Struct pattern: Name { field: pat, ... }
         if p_at(TokenKind::LBrace) && len(name) > 0 && name[0] >= "A" && name[0] <= "Z" {
             p_advance()
             let fields = []
@@ -3169,7 +2737,6 @@ func parse_single_pattern() {
             return Pattern::PStruct(name, fields)
         }
 
-        // Type pattern: name: Type
         if p_at(TokenKind::Colon) {
             p_advance()
             const type_name = p_expect_ident()
@@ -3181,16 +2748,10 @@ func parse_single_pattern() {
 
     Pattern::PWildcard
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Match Arm Parser ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_match_arm_full() {
     const span = p_current_span()
     const pattern = parse_full_pattern()
 
-    // Optional guard: if cond
     let guard = null
     if p_at_keyword("if") {
         p_advance()
@@ -3211,12 +2772,6 @@ func parse_match_arm_full() {
     arm.guard = guard
     arm
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Error Recovery Parser ──────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Statement boundary tokens for error recovery.
 const SYNC_TOKENS = [
     TokenKind::Func, TokenKind::Let, TokenKind::Const,
     TokenKind::If, TokenKind::While, TokenKind::For,
@@ -3229,17 +2784,13 @@ const SYNC_TOKENS = [
     TokenKind::Interface, TokenKind::Output
 ]
 
-// Skip tokens until we hit a statement boundary.
 func p_synchronize_full() {
-    // Skip past the problematic token
     p_advance()
     while !p_at_eof() {
-        // After a semicolon or closing brace, we're at a boundary
         const prev = p_tokens[p_pos - 1]
         if prev.kind == TokenKind::Semicolon || prev.kind == TokenKind::RBrace {
             return null
         }
-        // If current token starts a new statement, stop
         const current = p_peek_kind()
         for sync_tok in SYNC_TOKENS {
             if current == sync_tok { return null }
@@ -3248,7 +2799,6 @@ func p_synchronize_full() {
     }
 }
 
-// Parse a full program with error recovery.
 func parse_program_recovering() {
     const span = p_current_span()
     let stmts = []
@@ -3258,10 +2808,8 @@ func parse_program_recovering() {
         p_skip_semis()
         if p_at_eof() { break }
 
-        // Try to parse a statement
         let success = true
         let stmt = null
-        // In MAGI we use try/catch for error recovery
         try {
             stmt = parse_statement()
         } catch e {
@@ -3279,12 +2827,6 @@ func parse_program_recovering() {
     const program = program_new(stmts, span)
     {"program": program, "errors": errors}
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Async/Spawn/Await/Select/Defer Parsing ──────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse select expression: select { pattern => body, ... }
 func parse_select_expr() {
     const span = p_current_span()
     p_expect(TokenKind::Select)
@@ -3297,11 +2839,9 @@ func parse_select_expr() {
         p_skip_semis()
     }
     p_expect(TokenKind::RBrace)
-    // Model select as match on null (channels resolved at runtime)
     expr_new(ExprKind::EMatch(make_null_lit(span), arms), span)
 }
 
-// Parse defer statement with block or expression.
 func parse_defer_full() {
     const span = p_current_span()
     p_expect(TokenKind::Defer)
@@ -3314,12 +2854,6 @@ func parse_defer_full() {
     }
     stmt_new(StmtKind::SDefer(expr), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Union Type Parsing ─────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse union types: A | B | C
 func parse_union_type() {
     let base = parse_type_annotation()
     if p_at(TokenKind::Bar) {
@@ -3333,7 +2867,6 @@ func parse_union_type() {
     base
 }
 
-// Parse map type: Map<K, V> or {string: int}
 func parse_map_type() {
     if p_at(TokenKind::LBrace) {
         p_advance()
@@ -3345,15 +2878,9 @@ func parse_map_type() {
     }
     parse_type_annotation()
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Complete Statement Parser with All Statement Kinds ──────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse use statement: use path::to::module or use path::to::* or use path as alias
 func parse_use_stmt() {
     const span = p_current_span()
-    p_expect(TokenKind::Ident) // 'use' is a soft keyword
+    p_expect(TokenKind::Ident)
     let path = [p_expect_ident()]
     while p_at(TokenKind::ColonColon) {
         p_advance()
@@ -3362,7 +2889,6 @@ func parse_use_stmt() {
             return stmt_new(StmtKind::SUse(path, "", true, false), span)
         }
         if p_at(TokenKind::LBrace) {
-            // Multi-use: use path::{A, B, C}
             p_advance()
             let names = []
             while !p_at(TokenKind::RBrace) && !p_at_eof() {
@@ -3370,7 +2896,6 @@ func parse_use_stmt() {
                 if p_at(TokenKind::Comma) { p_advance() }
             }
             p_expect(TokenKind::RBrace)
-            // Emit multiple use statements
             return stmt_new(StmtKind::SUse(path, "", false, false), span)
         }
         path.push(p_expect_ident())
@@ -3383,19 +2908,17 @@ func parse_use_stmt() {
     stmt_new(StmtKind::SUse(path, alias, false, false), span)
 }
 
-// Parse module definition: mod name { body }
 func parse_mod_stmt() {
     const span = p_current_span()
-    p_expect(TokenKind::Ident) // 'mod'
+    p_expect(TokenKind::Ident)
     const name = p_expect_ident()
     const body = parse_block()
     stmt_new(StmtKind::SModDef(name, body), span)
 }
 
-// Parse static definition: static name: Type = value
 func parse_static_stmt() {
     const span = p_current_span()
-    p_expect(TokenKind::Ident) // 'static'
+    p_expect(TokenKind::Ident)
     let mutable = false
     if p_at_keyword("mut") {
         p_advance()
@@ -3412,26 +2935,24 @@ func parse_static_stmt() {
     stmt_new(StmtKind::SStaticDef(name, type_ann, value, mutable), span)
 }
 
-// Parse unsafe block: unsafe { body }
 func parse_unsafe_stmt() {
     const span = p_current_span()
-    p_expect(TokenKind::Ident) // 'unsafe'
+    p_expect(TokenKind::Ident)
     const body = parse_block()
     const block_expr = expr_new(ExprKind::EBlock(body), span)
     make_expr_stmt(block_expr, span)
 }
 
-// Parse inline assembly: asm { ... }
 func parse_asm_stmt() {
     const span = p_current_span()
-    p_expect(TokenKind::Ident) // 'asm'
+    p_expect(TokenKind::Ident)
     p_expect(TokenKind::LBrace)
     let instructions = []
     while !p_at(TokenKind::RBrace) && !p_at_eof() {
         if p_at(TokenKind::StringLit) {
             instructions.push(p_advance().text)
         } else {
-            p_advance() // skip non-string tokens
+            p_advance()
         }
         if p_at(TokenKind::Comma) || p_at(TokenKind::Semicolon) { p_advance() }
     }
@@ -3439,18 +2960,11 @@ func parse_asm_stmt() {
     const asm_expr = expr_new(ExprKind::ELiteral(Literal::StringLit(instructions.join("\n"))), span)
     make_expr_stmt(asm_expr, span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Trait Definition Parsing ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse trait/interface with supertraits and default method bodies.
 func parse_trait_def_full() {
     const span = p_current_span()
-    const keyword = p_advance().text // 'trait' or 'interface'
+    const keyword = p_advance().text
     const name = p_expect_ident()
 
-    // Optional supertraits: trait Name: Super1 + Super2
     let supertraits = []
     if p_at(TokenKind::Colon) {
         p_advance()
@@ -3472,7 +2986,6 @@ func parse_trait_def_full() {
         const mparams = parse_func_params()
         const mspan = p_current_span()
 
-        // Optional default body
         let mbody = null
         if p_at(TokenKind::LBrace) {
             mbody = parse_block()
@@ -3486,12 +2999,6 @@ func parse_trait_def_full() {
     p_expect(TokenKind::RBrace)
     stmt_new(StmtKind::SInterfaceDef(name, supertraits, methods), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── C-Style For Loop Parsing ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse: for (init; cond; update) { body }
 func parse_cstyle_for(span) {
     p_expect(TokenKind::LParen)
     const init = parse_statement()
@@ -3503,12 +3010,6 @@ func parse_cstyle_for(span) {
     const body = parse_block()
     stmt_new(StmtKind::SCStyleFor(init, cond, update, body), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Map Comprehension Parsing ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse: {key: value for pattern in iterable if condition}
 func parse_map_comprehension(key_expr, span) {
     p_expect(TokenKind::Colon)
     const value_expr = parse_expression_pratt(0)
@@ -3524,12 +3025,6 @@ func parse_map_comprehension(key_expr, span) {
     p_expect(TokenKind::RBrace)
     expr_new(ExprKind::EMapComp(key_expr, value_expr, pattern, iterable, condition), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Multiple Return Value Parsing ───────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse multiple return: let a, b = func()
 func parse_multi_return_let(span, mutable) {
     let names = []
     names.push(p_expect_ident())
@@ -3539,45 +3034,31 @@ func parse_multi_return_let(span, mutable) {
     }
     p_expect(TokenKind::Eq)
     const value = parse_expression_pratt(0)
-    // Convert to tuple destructuring
     let elems = []
     for name in names {
         elems.push(DestructureElement::DName(name))
     }
     stmt_new(StmtKind::SLetDestructure(DestructurePattern::DTuple(elems), mutable, value), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Increment/Decrement Statement Parsing ───────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_increment_stmt(name, span) {
-    // name++ already consumed name, peek at ++
-    p_advance() // skip ++
+    p_advance()
     stmt_new(StmtKind::SCompoundAssign(name, BinOp::Add, make_int_lit(1, span)), span)
 }
 
 func parse_decrement_stmt(name, span) {
-    p_advance() // skip --
+    p_advance()
     stmt_new(StmtKind::SCompoundAssign(name, BinOp::Sub, make_int_lit(1, span)), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Pub Modifier Parsing ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_pub_stmt() {
     const span = p_current_span()
-    p_advance() // skip 'pub'
+    p_advance()
 
-    // Accept pub(crate) / pub(super) syntax
     if p_at(TokenKind::LParen) {
         p_advance()
-        p_advance() // skip crate/super
+        p_advance()
         p_expect(TokenKind::RParen)
     }
 
-    // Parse the inner definition
     const kind = p_peek_kind()
     if kind == TokenKind::Func { return parse_func_stmt() }
     if kind == TokenKind::Async { return parse_async_func_stmt() }
@@ -3590,30 +3071,17 @@ func parse_pub_stmt() {
 
     panic(f"'pub' can only be applied to fn, enum, struct, const, type, interface, or impl at line {span.start_line}")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── String Template Literal Parsing ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse raw string literal: r"..."
 func parse_raw_string() {
     const span = p_current_span()
     const tok = p_advance()
-    // Raw string: no escape processing
     make_str_lit(tok.text, span)
 }
 
-// Parse multi-line string literal: """..."""
 func parse_multiline_string() {
     const span = p_current_span()
     const tok = p_advance()
     make_str_lit(tok.text, span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Expression List Parsing (for tuples, args, etc.) ────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_expression_list(terminator) {
     let exprs = []
     while !p_at(terminator) && !p_at_eof() {
@@ -3637,12 +3105,6 @@ func parse_expression_list_with_spread(terminator) {
     }
     exprs
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Pattern Guard Parsing ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse match arm with guard: pattern if condition => body
 func parse_guarded_match_arm() {
     const span = p_current_span()
     const pattern = parse_full_pattern()
@@ -3665,23 +3127,15 @@ func parse_guarded_match_arm() {
 
     {"pattern": pattern, "guard": guard, "body": body, "span": span}
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Range Expression Parsing ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse range: start..end or start..=end
 func parse_range_expr(start) {
     const span = start.span
 
-    // Exclusive range: ..
     if p_at(TokenKind::DotDot) {
         p_advance()
         const end_expr = parse_expression_pratt(PREC_RANGE + 1)
         return expr_new(ExprKind::ERange(start, end_expr, false), span)
     }
 
-    // Inclusive range: ..=
     if p_at(TokenKind::DotDotEq) {
         p_advance()
         const end_expr = parse_expression_pratt(PREC_RANGE + 1)
@@ -3690,12 +3144,6 @@ func parse_range_expr(start) {
 
     start
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Spread Operator in All Positions ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse spread in function call: f(...args)
 func parse_spread_arg() {
     const span = p_current_span()
     p_expect(TokenKind::DotDotDot)
@@ -3703,7 +3151,6 @@ func parse_spread_arg() {
     expr_new(ExprKind::ESpread(inner), span)
 }
 
-// Parse spread in array: [...a, ...b]
 func parse_spread_element() {
     const span = p_current_span()
     p_expect(TokenKind::DotDotDot)
@@ -3711,19 +3158,12 @@ func parse_spread_element() {
     expr_new(ExprKind::ESpread(inner), span)
 }
 
-// Parse spread in struct: MyStruct { ...base, field: value }
 func parse_spread_field() {
     const span = p_current_span()
     p_expect(TokenKind::DotDotDot)
     const inner = parse_expression_pratt(0)
     ["__spread", inner]
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Nested Match Pattern with Range ────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Check if a pattern is irrefutable (always matches).
 func pattern_is_irrefutable(pat) {
     match pat {
         Pattern::PWildcard => true,
@@ -3744,7 +3184,6 @@ func pattern_is_irrefutable(pat) {
     }
 }
 
-// Check if a pattern set is exhaustive for a given type.
 func patterns_are_exhaustive(patterns, enum_defs) {
     for pat in patterns {
         match pat {
@@ -3753,7 +3192,6 @@ func patterns_are_exhaustive(patterns, enum_defs) {
             _ => {}
         }
     }
-    // Check if enum variants are fully covered
     let enum_name = ""
     let covered = {}
     for pat in patterns {
@@ -3777,18 +3215,11 @@ func patterns_are_exhaustive(patterns, enum_defs) {
     }
     false
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Parser Utilities ────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Peek N tokens ahead (for complex lookahead).
 func p_peek_at(offset) {
     const idx = p_pos + offset
     if idx < len(p_tokens) { p_tokens[idx] } else { Token { kind: TokenKind::Eof, text: "", line: 0, col: 0 } }
 }
 
-// Check if the next N tokens match a pattern.
 func p_check_sequence(kinds) {
     let i = 0
     while i < len(kinds) {
@@ -3799,30 +3230,23 @@ func p_check_sequence(kinds) {
     true
 }
 
-// Save and restore parser position (for backtracking).
 func p_save() { p_pos }
 func p_restore(saved) { p_pos = saved }
 
-// Count remaining tokens.
 func p_remaining() { len(p_tokens) - p_pos }
 
-// Get current token text.
 func p_current_text() { p_peek().text }
 
-// Get current token line.
 func p_current_line() { p_peek().line }
 
-// Check if at end of block (RBrace or EOF).
 func p_at_block_end() { p_at(TokenKind::RBrace) || p_at_eof() }
 
-// Skip optional semicolons and newlines.
 func p_skip_terminators() {
     while p_at(TokenKind::Semicolon) || p_at(TokenKind::Newline) {
         p_advance()
     }
 }
 
-// Expect one of several token kinds.
 func p_expect_one_of(kinds) {
     for kind in kinds {
         if p_at(kind) { return p_advance() }
@@ -3831,12 +3255,6 @@ func p_expect_one_of(kinds) {
     const expected = kinds.map(k => to_string(k)).join(", ")
     panic(f"expected one of [{expected}] but got '{tok.text}' at {tok.line}:{tok.col}")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── AST Validation Helpers ──────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Validate that a parsed program has no obvious structural issues.
 func validate_program(program) {
     let errors = []
     for stmt in program.statements {
@@ -3849,7 +3267,6 @@ func validate_stmt(stmt, errors) {
     const sk = stmt.kind
     match sk {
         StmtKind::SFuncDef(fd) => {
-            // Check for duplicate parameter names
             let param_names = {}
             for p in fd.params {
                 if param_names.has(p.name) {
@@ -3857,13 +3274,11 @@ func validate_stmt(stmt, errors) {
                 }
                 param_names[p.name] = true
             }
-            // Validate body
             if fd.body != null {
                 for s in fd.body.stmts { validate_stmt(s, errors) }
             }
         },
         StmtKind::SEnumDef(name, variants, _) => {
-            // Check for duplicate variant names
             let variant_names = {}
             for v in variants {
                 if variant_names.has(v.name) {
@@ -3873,7 +3288,6 @@ func validate_stmt(stmt, errors) {
             }
         },
         StmtKind::SStructDef(name, fields, _) => {
-            // Check for duplicate field names
             let field_names = {}
             for f in fields {
                 if field_names.has(f.name) {
@@ -3895,12 +3309,6 @@ func validate_stmt(stmt, errors) {
         _ => {}
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── AST Pretty-Print (Debug) ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Pretty-print an AST node for debugging.
 func ast_debug_expr(expr, depth) {
     if expr == null { return "null" }
     const ind = "  ".repeat(depth)
@@ -3962,11 +3370,6 @@ func ast_debug_program(program) {
     }
     lines.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Error Recovery with Synchronization Points ──────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 let p_errors = []
 let p_recovering = false
 
@@ -3982,17 +3385,14 @@ func p_error(msg) {
     p_recovering = true
 }
 
-// Synchronization points: statement boundaries
 func p_synchronize() {
     p_recovering = false
     while !p_at_eof() {
         const kind = p_peek_kind()
-        // Stop at statement-starting tokens
         if kind == TokenKind::Semicolon {
             p_advance()
             return null
         }
-        // Check for tokens that begin a new statement
         const text = p_peek().text
         if text == "func" || text == "let" || text == "const" || text == "if" ||
            text == "for" || text == "while" || text == "loop" || text == "match" ||
@@ -4002,7 +3402,6 @@ func p_synchronize() {
            text == "async" || text == "spawn" || text == "pub" || text == "type" {
             return null
         }
-        // Check for closing delimiters (might be end of block)
         if kind == TokenKind::RBrace || kind == TokenKind::RParen || kind == TokenKind::RBracket {
             return null
         }
@@ -4010,7 +3409,6 @@ func p_synchronize() {
     }
 }
 
-// Error-recovering parse: collects errors instead of panicking
 func parse_recovering(source) {
     const save_tokens = p_tokens
     const save_pos = p_pos
@@ -4047,26 +3445,21 @@ func parse_recovering(source) {
 }
 
 func parse_statement_safe() {
-    // Try to parse a statement; on error, synchronize
     const kind = p_peek_kind()
     const text = p_peek().text
 
-    // If we're in recovery mode and hit a sync point, recover
     if p_recovering {
         p_synchronize()
         if p_at_eof() { return null }
     }
 
-    // Attempt parse with error catching
     const start_pos = p_pos
     const result = try_parse_statement()
     if result != null {
         return result
     }
 
-    // Parse failed: emit error and synchronize
     if p_pos == start_pos {
-        // Didn't advance — force advance to avoid infinite loop
         const tok = p_advance()
         p_error(f"unexpected token '{tok.text}'")
     }
@@ -4075,9 +3468,6 @@ func parse_statement_safe() {
 }
 
 func try_parse_statement() {
-    // Delegates to parse_statement but catches panics
-    // In the self-hosted compiler, we can't truly catch panics,
-    // so we check for known valid statement starters
     const kind = p_peek_kind()
     const text = p_peek().text
 
@@ -4093,7 +3483,6 @@ func try_parse_statement() {
         return parse_statement()
     }
 
-    // Try as expression statement
     if kind == TokenKind::Ident || kind == TokenKind::IntLit || kind == TokenKind::FloatLit ||
        kind == TokenKind::StringLit || kind == TokenKind::LParen || kind == TokenKind::LBracket ||
        kind == TokenKind::LBrace || text == "!" || text == "-" || text == "true" ||
@@ -4103,16 +3492,9 @@ func try_parse_statement() {
 
     null
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Type Annotation Parser for All Type Forms ──────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse a full type annotation: T, [T], {K: V}, (T, T) -> R, T?, T | U
 func parse_type_annotation() {
     let ty = parse_type_primary()
 
-    // Handle postfix type operators
     while !p_at_eof() {
         if p_at(TokenKind::Question) {
             p_advance()
@@ -4130,7 +3512,6 @@ func parse_type_annotation() {
         }
     }
 
-    // Check for function type: (T, U) -> R
     if p_peek().text == "->" {
         p_advance()
         const return_type = parse_type_annotation()
@@ -4144,7 +3525,6 @@ func parse_type_primary() {
     const kind = p_peek_kind()
     const text = p_peek().text
 
-    // Parenthesized type or tuple type
     if kind == TokenKind::LParen {
         p_advance()
         if p_at(TokenKind::RParen) {
@@ -4158,12 +3538,11 @@ func parse_type_primary() {
         }
         p_expect(TokenKind::RParen)
         if len(types) == 1 {
-            return types[0]  // Just parenthesized
+            return types[0]
         }
         return type_tuple(types)
     }
 
-    // Array type: [T]
     if kind == TokenKind::LBracket {
         p_advance()
         const elem_type = parse_type_annotation()
@@ -4171,7 +3550,6 @@ func parse_type_primary() {
         return type_array(elem_type)
     }
 
-    // Map type: {K: V}
     if kind == TokenKind::LBrace {
         p_advance()
         const key_type = parse_type_annotation()
@@ -4181,10 +3559,8 @@ func parse_type_primary() {
         return type_map(key_type, val_type)
     }
 
-    // Named type with optional generic parameters
     if kind == TokenKind::Ident {
         const name = p_expect_ident()
-        // Check for generic parameters: Name<T, U>
         if p_at(TokenKind::Lt) {
             p_advance()
             let type_args = [parse_type_annotation()]
@@ -4195,7 +3571,6 @@ func parse_type_primary() {
             p_expect(TokenKind::Gt)
             return type_generic(name, type_args)
         }
-        // Check for qualified name: module.Type
         if p_at(TokenKind::Dot) {
             p_advance()
             const member = p_expect_ident()
@@ -4204,17 +3579,15 @@ func parse_type_primary() {
         return type_named(name)
     }
 
-    // Primitive types as keywords
     if text == "int" || text == "float" || text == "string" || text == "bool" || text == "null" || text == "any" || text == "void" || text == "never" {
         p_advance()
         return type_named(text)
     }
 
     p_error(f"expected type annotation, got '{text}'")
-    type_named("any")  // Error recovery: return 'any'
+    type_named("any")
 }
 
-// Type constructors
 func type_named(name) { {"kind": "named", "name": name} }
 func type_array(elem) { {"kind": "array", "element": elem} }
 func type_map(key, val) { {"kind": "map", "key": key, "value": val} }
@@ -4227,7 +3600,6 @@ func type_generic(name, args) { {"kind": "generic", "name": name, "args": args} 
 func type_qualified(module, name) { {"kind": "qualified", "module": module, "name": name} }
 func type_unit() { {"kind": "unit"} }
 
-// Format a type annotation back to string
 func type_to_string(ty) {
     if ty == null { return "any" }
     match ty["kind"] {
@@ -4245,12 +3617,6 @@ func type_to_string(ty) {
         _ => "any",
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Generic Bounds with Where Clauses ──────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse generic parameters: <T, U: Comparable, V: Hash + Eq>
 func parse_generic_params() {
     if !p_at(TokenKind::Lt) { return [] }
     p_advance()
@@ -4260,7 +3626,6 @@ func parse_generic_params() {
         const name = p_expect_ident()
         let bounds = []
 
-        // Check for bounds: T: Bound1 + Bound2
         if p_at(TokenKind::Colon) {
             p_advance()
             bounds.push(parse_type_annotation())
@@ -4283,7 +3648,6 @@ func parse_generic_params() {
     params
 }
 
-// Parse where clause: where T: Hash + Eq, U: Display
 func parse_where_clause() {
     if p_peek().text != "where" { return [] }
     p_advance()
@@ -4309,21 +3673,14 @@ func parse_where_clause() {
 
     constraints
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Async/Await Expression Parsing ──────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_async_expr() {
     const span = p_current_span()
-    p_advance()  // consume 'async'
+    p_advance()
 
     if p_peek().text == "func" {
-        // async func definition
         return parse_async_func_def(span)
     }
 
-    // async block: async { ... }
     if p_at(TokenKind::LBrace) {
         const body = parse_block()
         return expr_new(ExprKind::EAsync(body), span)
@@ -4335,13 +3692,13 @@ func parse_async_expr() {
 
 func parse_await_expr() {
     const span = p_current_span()
-    p_advance()  // consume 'await'
+    p_advance()
     const operand = parse_unary()
     expr_new(ExprKind::EAwait(operand), span)
 }
 
 func parse_async_func_def(span) {
-    p_advance()  // consume 'func'
+    p_advance()
     const name = p_expect_ident()
     const type_params = parse_generic_params()
     p_expect(TokenKind::LParen)
@@ -4371,14 +3728,9 @@ func parse_async_func_def(span) {
     }
     stmt_new(StmtKind::SFuncDef(fd), span)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Select Statement Parsing ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
 func parse_select_stmt() {
     const span = p_current_span()
-    p_advance()  // consume 'select'
+    p_advance()
     p_expect(TokenKind::LBrace)
 
     let cases = []
@@ -4403,7 +3755,6 @@ func parse_select_case() {
         return {"kind": "default", "body": body, "span": span}
     }
 
-    // Channel operation: ch <- val  or  val = <- ch
     const op = parse_expression()
     p_expect(TokenKind::FatArrow)
     const body = parse_expr_or_block()
@@ -4418,15 +3769,9 @@ func parse_expr_or_block() {
         parse_expression()
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Attribute Argument Parsing ─────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse: #[attr_name(arg1, arg2, key = value)]
 func parse_attribute() {
     const span = p_current_span()
-    p_advance()  // consume '#'
+    p_advance()
     p_expect(TokenKind::LBracket)
 
     const name = p_expect_ident()
@@ -4436,7 +3781,6 @@ func parse_attribute() {
     if p_at(TokenKind::LParen) {
         p_advance()
         while !p_at(TokenKind::RParen) && !p_at_eof() {
-            // Check for key = value
             if p_at(TokenKind::Ident) {
                 const save = p_pos
                 const maybe_key = p_advance()
@@ -4445,7 +3789,6 @@ func parse_attribute() {
                     const value = parse_expression()
                     kwargs[maybe_key.text] = value
                 } else {
-                    // Not a kwarg, rewind and parse as positional
                     p_pos = save
                     const val = parse_expression()
                     args.push(val)
@@ -4462,12 +3805,6 @@ func parse_attribute() {
     p_expect(TokenKind::RBracket)
     {"name": name, "args": args, "kwargs": kwargs, "span": span}
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full String Interpolation with Nested Complex Expressions ───────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse f-string: f"text {expr} text {expr:format} text"
 func parse_fstring_interpolation(text) {
     let parts = []
     let i = 0
@@ -4483,13 +3820,11 @@ func parse_fstring_interpolation(text) {
         }
 
         if c == "{" {
-            // Start of interpolation
             if len(current) > 0 {
                 parts.push({"kind": "text", "value": current})
                 current = ""
             }
             i = i + 1
-            // Parse the expression inside { }
             let expr_text = ""
             let format_spec = ""
             let brace_depth = 1
@@ -4498,7 +3833,6 @@ func parse_fstring_interpolation(text) {
                 if ic == "{" { brace_depth = brace_depth + 1 }
                 if ic == "}" { brace_depth = brace_depth - 1; if brace_depth == 0 { break } }
                 if ic == ":" && brace_depth == 1 {
-                    // Format specifier
                     i = i + 1
                     while i < len(text) && text[i] != "}" {
                         format_spec = format_spec + text[i]
@@ -4509,7 +3843,7 @@ func parse_fstring_interpolation(text) {
                 expr_text = expr_text + ic
                 i = i + 1
             }
-            i = i + 1  // skip closing }
+            i = i + 1
 
             parts.push({
                 "kind": "expr",
@@ -4529,21 +3863,10 @@ func parse_fstring_interpolation(text) {
 
     parts
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Operator Overloading Syntax in Interface Declarations ───────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Parse operator declarations in interfaces:
-// interface Addable {
-//     operator +(self, other: Self) -> Self
-//     operator ==(self, other: Self) -> bool
-// }
 func parse_interface_operator() {
     const span = p_current_span()
-    p_advance()  // consume 'operator'
+    p_advance()
 
-    // Read the operator symbol
     const op_tok = p_advance()
     const op = op_tok.text
 
@@ -4565,27 +3888,18 @@ func parse_interface_operator() {
         "span": span,
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Complete Postfix Parsing ────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Full postfix chain: obj.field.method(a).items[0]?.name
 func parse_postfix(expr) {
     let result = expr
 
     while !p_at_eof() {
-        // Field access: .field
         if p_at(TokenKind::Dot) {
             p_advance()
             const field = p_expect_ident()
-            // Check for method call: .method(args)
             if p_at(TokenKind::LParen) {
                 p_advance()
                 let args = []
                 let kwargs = {"__s": true}
                 while !p_at(TokenKind::RParen) && !p_at_eof() {
-                    // Check for named argument
                     if p_at(TokenKind::Ident) {
                         const save = p_pos
                         const maybe_name = p_advance()
@@ -4612,10 +3926,8 @@ func parse_postfix(expr) {
             continue
         }
 
-        // Index: [expr]
         if p_at(TokenKind::LBracket) {
             p_advance()
-            // Check for slice: [start..end]
             if p_at(TokenKind::DotDot) {
                 p_advance()
                 const end_expr = parse_expression()
@@ -4642,10 +3954,9 @@ func parse_postfix(expr) {
             continue
         }
 
-        // Optional chaining: ?.field
         if p_peek().text == "?" && p_pos + 1 < len(p_tokens) && p_tokens[p_pos + 1].kind == TokenKind::Dot {
-            p_advance()  // skip ?
-            p_advance()  // skip .
+            p_advance()
+            p_advance()
             const field = p_expect_ident()
             if p_at(TokenKind::LParen) {
                 p_advance()
@@ -4664,9 +3975,7 @@ func parse_postfix(expr) {
             continue
         }
 
-        // Function call: expr(args) — only if no space before (
         if p_at(TokenKind::LParen) {
-            // Only chain call if previous token was an ident or closing bracket
             const prev_kind = result.kind
             const is_callable = match prev_kind {
                 ExprKind::EVariable(_) => true,
@@ -4693,12 +4002,6 @@ func parse_postfix(expr) {
     }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Full Error Message Generation with Suggestions ──────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Generate a detailed error message with fix suggestions
 func p_error_with_suggestion(msg, suggestion) {
     const tok = p_peek()
     const base = f"parse error at {tok.line}:{tok.col}: {msg}"
@@ -4706,14 +4009,12 @@ func p_error_with_suggestion(msg, suggestion) {
     p_errors.push(full)
 }
 
-// Error for unexpected token
 func p_error_unexpected(expected) {
     const tok = p_peek()
     const got = if tok.text != "" { f"'{tok.text}'" } else { token_kind_name(tok.kind) }
     const msg = f"expected {expected}, got {got}"
 
     let suggestion = null
-    // Common mistake suggestions
     if expected == "';'" && tok.kind == TokenKind::LBrace {
         suggestion = "did you forget a semicolon before this block?"
     }
@@ -4739,14 +4040,12 @@ func p_error_unexpected(expected) {
     p_error_with_suggestion(msg, suggestion)
 }
 
-// Error for mismatched delimiters
 func p_error_mismatched(open, close, open_line, open_col) {
     const tok = p_peek()
     const msg = f"expected closing '{close}' to match '{open}' opened at {open_line}:{open_col}"
     p_error_with_suggestion(msg, f"add '{close}' to close the {open}...{close} pair")
 }
 
-// Error for invalid expression
 func p_error_invalid_expr(context) {
     const tok = p_peek()
     const got = if tok.text != "" { f"'{tok.text}'" } else { token_kind_name(tok.kind) }
@@ -4766,7 +4065,6 @@ func p_error_invalid_expr(context) {
     p_error_with_suggestion(f"invalid expression in {context}: unexpected {got}", suggestion)
 }
 
-// Error for duplicate declaration
 func p_error_duplicate(name, kind) {
     p_error_with_suggestion(
         f"duplicate {kind} '{name}' in this scope",
@@ -4774,7 +4072,6 @@ func p_error_duplicate(name, kind) {
     )
 }
 
-// Error for invalid pattern in match arm
 func p_error_invalid_pattern() {
     const tok = p_peek()
     const got = if tok.text != "" { f"'{tok.text}'" } else { token_kind_name(tok.kind) }
@@ -4784,7 +4081,6 @@ func p_error_invalid_pattern() {
     )
 }
 
-// Get human-readable name for token kind
 func token_kind_name(kind) {
     match kind {
         TokenKind::Eof => "end of file",
@@ -4826,12 +4122,6 @@ func token_kind_name(kind) {
         _ => "token",
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── AST Pretty Printer for Debugging ────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Pretty print an AST node for debugging
 func ast_pretty_print(node) {
     ast_pp(node, 0)
 }
@@ -4984,27 +4274,18 @@ func ast_pp_expr(expr, indent) {
         _ => prefix + f"Expr({kind})",
     }
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Parser Combinators ──────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Combinator: try to parse, backtrack on failure
 func p_try(parser_fn) {
     const saved_pos = p_pos
     const saved_errors = len(p_errors)
     const result = parser_fn()
     if result == null {
-        // Backtrack
         p_pos = saved_pos
-        // Remove errors added during the failed attempt
         while len(p_errors) > saved_errors { p_errors.pop() }
         return null
     }
     result
 }
 
-// Combinator: sequence of parsers (all must succeed)
 func p_sequence(parsers) {
     const saved_pos = p_pos
     let results = []
@@ -5019,7 +4300,6 @@ func p_sequence(parsers) {
     results
 }
 
-// Combinator: choice (try each alternative)
 func p_choice(parsers) {
     for parser in parsers {
         const result = p_try(parser)
@@ -5028,13 +4308,11 @@ func p_choice(parsers) {
     null
 }
 
-// Combinator: optional (returns null if no match, no error)
 func p_optional(parser_fn) {
     const result = p_try(parser_fn)
-    result // null is fine
+    result
 }
 
-// Combinator: many (zero or more matches)
 func p_many(parser_fn) {
     let results = []
     while true {
@@ -5045,7 +4323,6 @@ func p_many(parser_fn) {
     results
 }
 
-// Combinator: many1 (one or more matches)
 func p_many1(parser_fn) {
     const first = parser_fn()
     if first == null { return null }
@@ -5058,7 +4335,6 @@ func p_many1(parser_fn) {
     results
 }
 
-// Combinator: separated_by (items separated by delimiter)
 func p_separated_by(item_fn, sep_kind) {
     let results = []
     const first = p_try(item_fn)
@@ -5074,7 +4350,6 @@ func p_separated_by(item_fn, sep_kind) {
     results
 }
 
-// Combinator: separated_by with trailing separator allowed
 func p_separated_by_trailing(item_fn, sep_kind) {
     let results = []
     const first = p_try(item_fn)
@@ -5090,7 +4365,6 @@ func p_separated_by_trailing(item_fn, sep_kind) {
     results
 }
 
-// Combinator: delimited (open + content + close)
 func p_delimited(open_kind, content_fn, close_kind) {
     if !p_at(open_kind) { return null }
     p_advance()
@@ -5099,16 +4373,9 @@ func p_delimited(open_kind, content_fn, close_kind) {
     content
 }
 
-// Combinator: between (wrapper for delimited with better error messages)
 func p_between(open_kind, close_kind, content_fn) {
     p_delimited(open_kind, content_fn, close_kind)
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// ── Source Map Generation ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════════
-
-// Generate a source map from parsed AST
 func generate_source_map(ast, source_file) {
     let mappings = []
     let sources = [source_file]
@@ -5126,7 +4393,6 @@ func generate_source_map(ast, source_file) {
     }
 }
 
-// Collect source position mappings from AST
 func collect_source_mappings(node, mappings, names) {
     if node == null { return }
     if typeof(node) != "map" { return }
@@ -5162,7 +4428,6 @@ func collect_source_mappings(node, mappings, names) {
         })
     }
 
-    // Recurse
     if node.has("stmts") {
         for stmt in node["stmts"] { collect_source_mappings(stmt, mappings, names) }
     }
@@ -5182,11 +4447,9 @@ func collect_source_mappings(node, mappings, names) {
     }
 }
 
-// Encode VLQ mappings string (simplified)
 func encode_vlq_mappings(mappings) {
     if len(mappings) == 0 { return "" }
 
-    // Sort by generated line then col
     mappings.sort((a, b) => {
         if a["generated_line"] != b["generated_line"] {
             a["generated_line"] - b["generated_line"]
@@ -5204,7 +4467,6 @@ func encode_vlq_mappings(mappings) {
 
     let current_line = 0
     for m in mappings {
-        // Add semicolons for line gaps
         while current_line < m["generated_line"] {
             result = result + ";"
             current_line = current_line + 1
@@ -5212,12 +4474,10 @@ func encode_vlq_mappings(mappings) {
         }
 
         if result.ends_with(";") || len(result) == 0 {
-            // First segment on this line
         } else {
             result = result + ","
         }
 
-        // Encode: generated_col, source_idx, source_line, source_col, [name_idx]
         result = result + vlq_encode(m["generated_col"] - prev_col)
         result = result + vlq_encode(m["source_idx"])
         result = result + vlq_encode(m["source_line"] - prev_src_line)
@@ -5236,7 +4496,6 @@ func encode_vlq_mappings(mappings) {
     result
 }
 
-// VLQ (Variable Length Quantity) encoding for source maps
 const VLQ_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 func vlq_encode(value) {
@@ -5245,7 +4504,7 @@ func vlq_encode(value) {
     while true {
         let digit = vlq % 32
         vlq = vlq / 32
-        if vlq > 0 { digit = digit + 32 } // continuation bit
+        if vlq > 0 { digit = digit + 32 }
         result = result + VLQ_CHARS[digit]
         if vlq == 0 { break }
     }

@@ -1,30 +1,6 @@
-// MAGI Self-Hosted Compiler — Utility Module
-//
-// Mirrors src/util.rs. Pure-computation utilities implemented in MAGI,
-// OS-dependent operations delegate to stage 0 builtins.
-//
-// Sections:
-//   1. Encoding (hex, base64, base32, URL, HTML)
-//   2. String algorithms (Levenshtein, slug, case conversion, padding, wrap)
-//   3. JSON (recursive descent parser, emitter, path queries, merge/patch)
-//   4. Regular expressions (NFA-based engine)
-//   5. YAML (indentation-based parser, emitter)
-//   6. UUID (v4 generation, parsing, validation)
-//   7. Compression (gzip, LZ4, zstd — delegates to stage 0)
-//   8. HTTP (request/response parsing, URL parser, query strings)
-//   9. Crypto helpers (SHA-256, HMAC, PBKDF2 — delegates to stage 0)
-//  10. Date/Time (formatting, parsing, durations)
-//  11. Math extras (GCD, LCM, primes, statistics)
-//  12. Collections (OrderedMap, Set ops, Counter, BinaryHeap, Deque)
-
-// ════════════════════════════════════════════════════════════════════
-// 1. Encoding
-// ════════════════════════════════════════════════════════════════════
-
 const HEX_LOWER = "0123456789abcdef"
 const HEX_UPPER = "0123456789ABCDEF"
 
-// Encode a string to lowercase hex.
 func hex_encode(s) {
     let result = ""
     let i = 0
@@ -36,7 +12,6 @@ func hex_encode(s) {
     result
 }
 
-// Encode a string to uppercase hex.
 func hex_encode_upper(s) {
     let result = ""
     let i = 0
@@ -48,7 +23,6 @@ func hex_encode_upper(s) {
     result
 }
 
-// Decode a hex value character to integer (0-15).
 func hex_val(c) {
     if c >= "0" && c <= "9" { return char_code_at(c, 0) - char_code_at("0", 0) }
     if c >= "a" && c <= "f" { return char_code_at(c, 0) - char_code_at("a", 0) + 10 }
@@ -56,7 +30,6 @@ func hex_val(c) {
     return -1
 }
 
-// Decode a hex string to a plain string.
 func hex_decode(s) {
     if len(s) % 2 != 0 { return {"error": "odd length hex string"} }
     let result = ""
@@ -70,12 +43,8 @@ func hex_decode(s) {
     }
     result
 }
-
-// ── Base64 ─────────────────────────────────────────────────────────
-
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-// Encode a string to base64 with padding.
 func base64_encode(data) {
     let result = ""
     let i = 0
@@ -102,7 +71,6 @@ func base64_encode(data) {
     result
 }
 
-// Get base64 character value.
 func base64_val(c) {
     if c >= "A" && c <= "Z" { return char_code_at(c, 0) - char_code_at("A", 0) }
     if c >= "a" && c <= "z" { return char_code_at(c, 0) - char_code_at("a", 0) + 26 }
@@ -112,9 +80,7 @@ func base64_val(c) {
     return -1
 }
 
-// Decode a base64 string.
 func base64_decode(s) {
-    // Strip whitespace and padding
     let clean = ""
     let i = 0
     while i < len(s) {
@@ -143,12 +109,8 @@ func base64_decode(s) {
     }
     result
 }
-
-// ── Base32 ─────────────────────────────────────────────────────────
-
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
-// Encode a string to base32 (RFC 4648).
 func base32_encode(data) {
     if len(data) == 0 { return "" }
     let result = ""
@@ -161,7 +123,6 @@ func base32_encode(data) {
             buf[j] = char_code_at(data, i + j)
             j = j + 1
         }
-        // Always emit at least 2 characters
         result = result + BASE32_ALPHABET[int(buf[0] / 8)]
         result = result + BASE32_ALPHABET[(buf[0] % 8) * 4 + int(buf[1] / 64)]
         if chunk_len >= 2 {
@@ -191,7 +152,6 @@ func base32_encode(data) {
     result
 }
 
-// Get base32 character value.
 func base32_val(c) {
     if c >= "A" && c <= "Z" { return char_code_at(c, 0) - char_code_at("A", 0) }
     if c >= "a" && c <= "z" { return char_code_at(c, 0) - char_code_at("a", 0) }
@@ -199,9 +159,7 @@ func base32_val(c) {
     return -1
 }
 
-// Decode a base32 string (RFC 4648).
 func base32_decode(s) {
-    // Strip padding
     let clean = ""
     let i = 0
     while i < len(s) {
@@ -227,10 +185,6 @@ func base32_decode(s) {
     }
     result
 }
-
-// ── URL Encoding ───────────────────────────────────────────────────
-
-// Percent-encode a string (all non-alphanumeric except -._~).
 func url_encode(s) {
     let result = ""
     let i = 0
@@ -247,7 +201,6 @@ func url_encode(s) {
     result
 }
 
-// Percent-decode a string.
 func url_decode(s) {
     let result = ""
     let i = 0
@@ -272,10 +225,6 @@ func url_decode(s) {
     }
     result
 }
-
-// ── HTML Escape ────────────────────────────────────────────────────
-
-// Escape HTML entities in text.
 func html_escape(s) {
     let result = ""
     let i = 0
@@ -292,7 +241,6 @@ func html_escape(s) {
     result
 }
 
-// Unescape HTML entities.
 func html_unescape(s) {
     let result = s
     result = result.replace("&amp;", "&")
@@ -306,18 +254,11 @@ func html_unescape(s) {
     result = result.replace("&#47;", "/")
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 2. String Algorithms
-// ════════════════════════════════════════════════════════════════════
-
-// Compute Levenshtein edit distance between two strings.
 func levenshtein(a, b) {
     const a_len = len(a)
     const b_len = len(b)
     if a_len == 0 { return b_len }
     if b_len == 0 { return a_len }
-    // Single-row DP
     let prev_row = []
     let j = 0
     while j <= b_len {
@@ -345,7 +286,6 @@ func levenshtein(a, b) {
             curr_row[j + 1] = min_val
             j = j + 1
         }
-        // Swap rows
         let tmp = prev_row
         prev_row = curr_row
         curr_row = tmp
@@ -354,7 +294,6 @@ func levenshtein(a, b) {
     prev_row[b_len]
 }
 
-// Convert a string to a URL-safe slug.
 func slugify(s) {
     let result = ""
     let last_was_dash = true
@@ -378,9 +317,6 @@ func slugify(s) {
     }
     result
 }
-
-// ── Case Conversion Helpers ────────────────────────────────────────
-
 func is_upper(c) { c >= "A" && c <= "Z" }
 func is_lower(c) { c >= "a" && c <= "z" }
 func is_alpha(c) { is_upper(c) || is_lower(c) }
@@ -395,7 +331,6 @@ func to_upper_char(c) {
     if is_lower(c) { char_from_code(char_code_at(c, 0) - 32) } else { c }
 }
 
-// Split a string into words (on _ - space or camelCase boundaries).
 func split_words(s) {
     let words = []
     let start = 0
@@ -421,7 +356,6 @@ func split_words(s) {
     words
 }
 
-// Convert to snake_case.
 func to_snake_case(s) {
     const words = split_words(s)
     let parts = []
@@ -437,7 +371,6 @@ func to_snake_case(s) {
     parts.join("_")
 }
 
-// Convert to lowerCamelCase.
 func to_camel_case(s) {
     const words = split_words(s)
     let result = ""
@@ -463,7 +396,6 @@ func to_camel_case(s) {
     result
 }
 
-// Convert to PascalCase (UpperCamelCase).
 func to_pascal_case(s) {
     const words = split_words(s)
     let result = ""
@@ -479,7 +411,6 @@ func to_pascal_case(s) {
     result
 }
 
-// Convert to kebab-case.
 func to_kebab_case(s) {
     const words = split_words(s)
     let parts = []
@@ -495,7 +426,6 @@ func to_kebab_case(s) {
     parts.join("-")
 }
 
-// Convert to SCREAMING_SNAKE_CASE.
 func to_screaming_snake_case(s) {
     const words = split_words(s)
     let parts = []
@@ -511,7 +441,6 @@ func to_screaming_snake_case(s) {
     parts.join("_")
 }
 
-// Convert to Title Case.
 func to_title_case(s) {
     const words = split_words(s)
     let parts = []
@@ -527,10 +456,6 @@ func to_title_case(s) {
     }
     parts.join(" ")
 }
-
-// ── String Padding ─────────────────────────────────────────────────
-
-// Pad a string on the left to reach `width`.
 func pad_left(s, width, ch) {
     let result = s
     while len(result) < width {
@@ -539,7 +464,6 @@ func pad_left(s, width, ch) {
     result
 }
 
-// Pad a string on the right to reach `width`.
 func pad_right(s, width, ch) {
     let result = s
     while len(result) < width {
@@ -548,7 +472,6 @@ func pad_right(s, width, ch) {
     result
 }
 
-// Pad a string on both sides to center it.
 func pad_center(s, width, ch) {
     if len(s) >= width { return s }
     const total = width - len(s)
@@ -562,10 +485,6 @@ func pad_center(s, width, ch) {
     while i < right_pad { result = result + ch; i = i + 1 }
     result
 }
-
-// ── Word Wrap ──────────────────────────────────────────────────────
-
-// Wrap text to the given width, breaking on word boundaries.
 func word_wrap(text, width) {
     const lines = text.split("\n")
     let result_parts = []
@@ -592,19 +511,11 @@ func word_wrap(text, width) {
     }
     result_parts.join("\n")
 }
-
-// ── Truncate ───────────────────────────────────────────────────────
-
-// Truncate a string to `max_len` characters, appending "..." if truncated.
 func truncate(s, max_len) {
     if len(s) <= max_len { return s }
     if max_len <= 3 { return "..." .slice(0, max_len) }
     s.slice(0, max_len - 3) + "..."
 }
-
-// ── Indent / Dedent ────────────────────────────────────────────────
-
-// Prepend `prefix` to every non-empty line in the text.
 func indent(text, prefix) {
     const lines = text.split("\n")
     let result_parts = []
@@ -618,7 +529,6 @@ func indent(text, prefix) {
     result_parts.join("\n")
 }
 
-// Remove common leading whitespace from all non-empty lines.
 func dedent(text) {
     const lines = text.split("\n")
     let min_indent = 999999
@@ -648,18 +558,6 @@ func dedent(text) {
     result_parts.join("\n")
 }
 
-// ════════════════════════════════════════════════════════════════════
-// 3. JSON
-// ════════════════════════════════════════════════════════════════════
-
-// JSON value types using maps with a "__type" discriminant:
-//   {"__type": "null"}
-//   {"__type": "bool", "value": true/false}
-//   {"__type": "number", "value": 42}
-//   {"__type": "string", "value": "hello"}
-//   {"__type": "array", "value": [...]}
-//   {"__type": "object", "keys": [...], "values": [...]}
-
 func json_null() { {"__type": "null"} }
 func json_bool(b) { {"__type": "bool", "value": b} }
 func json_number(n) { {"__type": "number", "value": n} }
@@ -677,10 +575,6 @@ func json_is_object(v) { typeof(v) == "map" && v.has("__type") && v["__type"] ==
 func json_get_value(v) {
     if typeof(v) == "map" && v.has("value") { v["value"] } else { null }
 }
-
-// ── JSON Parser (recursive descent) ───────────────────────────────
-
-// Parser state: we pass source string and position as a map.
 func json_skip_ws(src, pos) {
     let p = pos
     while p < len(src) && (src[p] == " " || src[p] == "\n" || src[p] == "\r" || src[p] == "\t") {
@@ -757,7 +651,6 @@ func json_parse_string(src, pos) {
             else if esc == "b" { result = result + "\b" }
             else if esc == "f" { result = result + "\f" }
             else if esc == "u" {
-                // Unicode escape \uXXXX
                 if p + 4 < len(src) {
                     const hex_str = src.slice(p + 1, p + 5)
                     let code = 0
@@ -828,7 +721,7 @@ func json_parse_number(src, pos) {
 }
 
 func json_parse_array(src, pos) {
-    let p = pos + 1  // skip [
+    let p = pos + 1
     p = json_skip_ws(src, p)
     let items = []
     if p < len(src) && src[p] == "]" {
@@ -852,7 +745,7 @@ func json_parse_array(src, pos) {
 }
 
 func json_parse_object(src, pos) {
-    let p = pos + 1  // skip {
+    let p = pos + 1
     p = json_skip_ws(src, p)
     let keys = []
     let values = []
@@ -860,7 +753,6 @@ func json_parse_object(src, pos) {
         return {"value": json_object(keys, values), "pos": p + 1}
     }
     while p < len(src) {
-        // Parse key (must be string)
         p = json_skip_ws(src, p)
         const key_result = json_parse_string(src, p)
         if typeof(key_result) == "map" && key_result.has("error") { return key_result }
@@ -870,7 +762,6 @@ func json_parse_object(src, pos) {
             return {"error": f"expected ':' at position {p}"}
         }
         p = p + 1
-        // Parse value
         const val_result = json_parse_value(src, p)
         if typeof(val_result) == "map" && val_result.has("error") { return val_result }
         keys.push(key)
@@ -886,10 +777,6 @@ func json_parse_object(src, pos) {
     }
     {"error": "unterminated object"}
 }
-
-// ── JSON Emitter ───────────────────────────────────────────────────
-
-// Compact JSON serialization.
 func json_stringify(val) {
     if json_is_null(val) { return "null" }
     if json_is_bool(val) { return to_string(val["value"]) }
@@ -917,7 +804,6 @@ func json_stringify(val) {
     "null"
 }
 
-// Pretty JSON serialization.
 func json_stringify_pretty(val) {
     json_emit_pretty(val, 0)
 }
@@ -957,7 +843,6 @@ func json_emit_pretty(val, indent_level) {
     "null"
 }
 
-// Escape a string for JSON output.
 func json_escape_string(s) {
     let result = "\""
     let i = 0
@@ -973,10 +858,6 @@ func json_escape_string(s) {
     }
     result + "\""
 }
-
-// ── JSON Path Queries ──────────────────────────────────────────────
-
-// Query a JSON value with a dotted path (e.g. "users.0.name").
 func json_path(val, path) {
     const parts = path.split(".")
     let current = val
@@ -1010,10 +891,6 @@ func json_path(val, path) {
     }
     current
 }
-
-// ── JSON Merge/Patch ───────────────────────────────────────────────
-
-// Merge two JSON objects (RFC 7386). Patch values overwrite base values.
 func json_merge_patch(base, patch) {
     if !json_is_object(patch) { return patch }
     if !json_is_object(base) {
@@ -1021,7 +898,6 @@ func json_merge_patch(base, patch) {
     }
     let keys = []
     let values = []
-    // Copy base entries
     let i = 0
     const base_keys = base["keys"]
     const base_values = base["values"]
@@ -1030,14 +906,12 @@ func json_merge_patch(base, patch) {
         values.push(base_values[i])
         i = i + 1
     }
-    // Apply patch
     const patch_keys = patch["keys"]
     const patch_values = patch["values"]
     i = 0
     while i < len(patch_keys) {
         const pk = patch_keys[i]
         const pv = patch_values[i]
-        // Find existing key
         let found_idx = -1
         let j = 0
         while j < len(keys) {
@@ -1045,7 +919,6 @@ func json_merge_patch(base, patch) {
             j = j + 1
         }
         if json_is_null(pv) {
-            // Remove key
             if found_idx >= 0 {
                 keys.remove(found_idx)
                 values.remove(found_idx)
@@ -1061,31 +934,11 @@ func json_merge_patch(base, patch) {
     json_object(keys, values)
 }
 
-// ════════════════════════════════════════════════════════════════════
-// 4. Regular Expressions (NFA-based engine)
-// ════════════════════════════════════════════════════════════════════
-
-// Regex node types (stored as maps for MAGI):
-//   {"type": "literal", "char": "a"}
-//   {"type": "any"}           — matches any char except \n
-//   {"type": "class", "ranges": [[lo, hi], ...], "negated": false}
-//   {"type": "anchor_start"}  — ^
-//   {"type": "anchor_end"}    — $
-
-// NFA state types:
-//   {"type": "match", "node": <node>, "next": idx}
-//   {"type": "split", "a": idx, "b": idx}
-//   {"type": "accept"}
-
-// ── Regex Compiler ─────────────────────────────────────────────────
-
-// Compile a regex pattern to an NFA (array of states).
 func regex_compile(pattern) {
     const chars = pattern.split("")
     let pos = {"val": 0}
     let states = []
     regex_compile_seq(chars, pos, states)
-    // Ensure accept state exists
     if len(states) == 0 || states[len(states) - 1]["type"] != "accept" {
         states.push({"type": "accept"})
     }
@@ -1093,7 +946,6 @@ func regex_compile(pattern) {
 }
 
 func regex_compile_seq(chars, pos, states) {
-    // Check for alternation
     let has_alt = false
     let depth = 0
     let scan = pos["val"]
@@ -1107,7 +959,6 @@ func regex_compile_seq(chars, pos, states) {
         regex_compile_alt(chars, pos, states)
         return len(states)
     }
-    // Alternation: compile each alternative
     let alt_ranges = []
     while true {
         const alt_start = len(states)
@@ -1121,14 +972,10 @@ func regex_compile_seq(chars, pos, states) {
         }
     }
     if len(alt_ranges) <= 1 { return len(states) }
-    // Build split chain for alternations
     const after_idx = len(states)
-    // Insert a split at front that branches to each alternative
-    // For simplicity with 2 alternatives:
     if len(alt_ranges) == 2 {
         const a_start = alt_ranges[0][0]
         const b_start = alt_ranges[1][0]
-        // Prepend a split state
         states.push({"type": "split", "a": a_start, "b": b_start})
     }
     return len(states)
@@ -1158,7 +1005,6 @@ func regex_compile_alt(chars, pos, states) {
             regex_apply_quantifier(chars, pos, states)
         } else if c == "(" {
             pos["val"] = pos["val"] + 1
-            // Check for non-capturing (?:...)
             if pos["val"] < len(chars) && chars[pos["val"]] == "?" {
                 pos["val"] = pos["val"] + 1
                 if pos["val"] < len(chars) && chars[pos["val"]] == ":" {
@@ -1193,22 +1039,18 @@ func regex_apply_quantifier(chars, pos, states) {
     const c = chars[pos["val"]]
     if c == "*" {
         pos["val"] = pos["val"] + 1
-        // Zero or more: Split -> (match, after)
         const last_idx = len(states) - 1
         const last_state = states[last_idx]
         const split_idx = last_idx
         const match_idx = last_idx + 1
         const after_idx = last_idx + 2
         states[last_idx] = {"type": "split", "a": match_idx, "b": after_idx}
-        // Re-insert match, looping back to split
         let patched = last_state
         patched["next"] = split_idx
         states.push(patched)
-        // Consume non-greedy ?
         if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
     } else if c == "+" {
         pos["val"] = pos["val"] + 1
-        // One or more: match -> Split(match, after)
         const match_idx = len(states) - 1
         const split_idx = len(states)
         states[match_idx]["next"] = split_idx
@@ -1216,7 +1058,6 @@ func regex_apply_quantifier(chars, pos, states) {
         if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
     } else if c == "?" {
         pos["val"] = pos["val"] + 1
-        // Zero or one: Split -> (match, after)
         const last_idx = len(states) - 1
         const last_state = states[last_idx]
         const split_idx = last_idx
@@ -1228,7 +1069,6 @@ func regex_apply_quantifier(chars, pos, states) {
         states.push(patched)
         if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
     } else if c == "{" {
-        // {n} or {n,m} quantifier
         pos["val"] = pos["val"] + 1
         let min_str = ""
         while pos["val"] < len(chars) && chars[pos["val"]] >= "0" && chars[pos["val"]] <= "9" {
@@ -1243,13 +1083,11 @@ func regex_apply_quantifier(chars, pos, states) {
                 max_str = max_str + chars[pos["val"]]
                 pos["val"] = pos["val"] + 1
             }
-            if len(max_str) == 0 { max_str = "999" }  // unbounded
+            if len(max_str) == 0 { max_str = "999" }
         }
         if pos["val"] < len(chars) && chars[pos["val"]] == "}" {
             pos["val"] = pos["val"] + 1
         }
-        // For simplicity, {n,m} just uses the pattern as-is.
-        // The NFA approach handles this via the already-compiled states.
         if pos["val"] < len(chars) && chars[pos["val"]] == "?" { pos["val"] = pos["val"] + 1 }
     }
 }
@@ -1304,9 +1142,6 @@ func regex_parse_escape(c) {
     if c == "r" { return {"type": "literal", "char": "\r"} }
     {"type": "literal", "char": c}
 }
-
-// ── Regex NFA Simulation ───────────────────────────────────────────
-
 func regex_match_node(node, ch) {
     if node["type"] == "literal" {
         return ch == node["char"]
@@ -1325,7 +1160,7 @@ func regex_match_node(node, ch) {
         return if node["negated"] { !in_class } else { in_class }
     }
     if node["type"] == "anchor_start" || node["type"] == "anchor_end" {
-        return false  // zero-width, handled elsewhere
+        return false
     }
     false
 }
@@ -1348,7 +1183,6 @@ func regex_add_state(states, active, state_idx, pos, text) {
     }
 }
 
-// Try to match NFA at a given start position. Returns end position or -1.
 func regex_match_at(states, text, start) {
     const n = len(states)
     let current = []
@@ -1356,7 +1190,6 @@ func regex_match_at(states, text, start) {
     while i < n { current.push(false); i = i + 1 }
     regex_add_state(states, current, 0, start, text)
     let last_match = -1
-    // Check immediate accept
     i = 0
     while i < n {
         if current[i] && states[i]["type"] == "accept" { last_match = start }
@@ -1385,14 +1218,12 @@ func regex_match_at(states, text, start) {
         }
         current = next
         pos = pos + 1
-        // Check for accept
         i = 0
         while i < n {
             if current[i] && states[i]["type"] == "accept" { last_match = pos }
             i = i + 1
         }
     }
-    // Check $ anchor at end
     i = 0
     while i < n {
         if current[i] {
@@ -1410,10 +1241,6 @@ func regex_match_at(states, text, start) {
     }
     last_match
 }
-
-// ── Regex Public API ───────────────────────────────────────────────
-
-// Test if a pattern matches anywhere in text.
 func regex_test(pattern, text) {
     const nfa = regex_compile(pattern)
     let start = 0
@@ -1424,7 +1251,6 @@ func regex_test(pattern, text) {
     false
 }
 
-// Find the first match of pattern in text. Returns [start, end] or null.
 func regex_match(pattern, text) {
     const nfa = regex_compile(pattern)
     let start = 0
@@ -1436,7 +1262,6 @@ func regex_match(pattern, text) {
     null
 }
 
-// Find all non-overlapping matches. Returns array of [start, end].
 func regex_find_all(pattern, text) {
     const nfa = regex_compile(pattern)
     let results = []
@@ -1453,7 +1278,6 @@ func regex_find_all(pattern, text) {
     results
 }
 
-// Replace all matches of pattern with replacement.
 func regex_replace(pattern, text, replacement) {
     const nfa = regex_compile(pattern)
     let result = ""
@@ -1474,7 +1298,6 @@ func regex_replace(pattern, text, replacement) {
     result
 }
 
-// Split text by regex pattern.
 func regex_split(pattern, text) {
     const matches = regex_find_all(pattern, text)
     if len(matches) == 0 { return [text] }
@@ -1488,7 +1311,6 @@ func regex_split(pattern, text) {
     parts
 }
 
-// Escape special regex metacharacters.
 func regex_escape(s) {
     const meta = "\\.*+?()[]{}|^$"
     let result = ""
@@ -1504,19 +1326,6 @@ func regex_escape(s) {
     result
 }
 
-// ════════════════════════════════════════════════════════════════════
-// 5. YAML Parser
-// ════════════════════════════════════════════════════════════════════
-
-// YAML value types (same map-with-discriminant pattern as JSON):
-//   {"__type": "yaml_null"}
-//   {"__type": "yaml_bool", "value": true}
-//   {"__type": "yaml_int", "value": 42}
-//   {"__type": "yaml_float", "value": 3.14}
-//   {"__type": "yaml_string", "value": "hello"}
-//   {"__type": "yaml_sequence", "value": [...]}
-//   {"__type": "yaml_mapping", "keys": [...], "values": [...]}
-
 func yaml_null() { {"__type": "yaml_null"} }
 func yaml_bool(b) { {"__type": "yaml_bool", "value": b} }
 func yaml_int(n) { {"__type": "yaml_int", "value": n} }
@@ -1525,7 +1334,6 @@ func yaml_string(s) { {"__type": "yaml_string", "value": s} }
 func yaml_sequence(items) { {"__type": "yaml_sequence", "value": items} }
 func yaml_mapping(keys, values) { {"__type": "yaml_mapping", "keys": keys, "values": values} }
 
-// Parse a YAML scalar value (string, number, bool, null).
 func yaml_parse_scalar(s) {
     const trimmed = s.trim()
     if len(trimmed) == 0 || trimmed == "~" || trimmed == "null" || trimmed == "Null" || trimmed == "NULL" {
@@ -1537,19 +1345,15 @@ func yaml_parse_scalar(s) {
     if trimmed == "false" || trimmed == "False" || trimmed == "FALSE" || trimmed == "no" || trimmed == "No" {
         return yaml_bool(false)
     }
-    // Quoted strings
     if (trimmed[0] == "\"" && trimmed[len(trimmed) - 1] == "\"") || (trimmed[0] == "'" && trimmed[len(trimmed) - 1] == "'") {
         return yaml_string(trimmed.slice(1, len(trimmed) - 1))
     }
-    // Try integer
     const as_int = to_int(trimmed)
     if to_string(as_int) == trimmed { return yaml_int(as_int) }
-    // Try float
     if trimmed.contains(".") || trimmed.contains("e") || trimmed.contains("E") {
         const as_float = to_float(trimmed)
         if to_string(as_float) != "NaN" { return yaml_float(as_float) }
     }
-    // Flow sequence [a, b]
     if trimmed[0] == "[" && trimmed[len(trimmed) - 1] == "]" {
         const inner = trimmed.slice(1, len(trimmed) - 1)
         const parts = yaml_split_flow(inner)
@@ -1559,7 +1363,6 @@ func yaml_parse_scalar(s) {
         }
         return yaml_sequence(items)
     }
-    // Flow mapping {a: b}
     if trimmed[0] == "{" && trimmed[len(trimmed) - 1] == "}" {
         const inner = trimmed.slice(1, len(trimmed) - 1)
         const parts = yaml_split_flow(inner)
@@ -1577,7 +1380,6 @@ func yaml_parse_scalar(s) {
     yaml_string(trimmed)
 }
 
-// Split comma-separated flow elements respecting nesting.
 func yaml_split_flow(s) {
     let parts = []
     let current = ""
@@ -1614,7 +1416,6 @@ func yaml_split_flow(s) {
     parts
 }
 
-// Get line indentation.
 func yaml_line_indent(line) {
     let i = 0
     while i < len(line) && (line[i] == " " || line[i] == "\t") {
@@ -1623,7 +1424,6 @@ func yaml_line_indent(line) {
     i
 }
 
-// Find colon position in YAML line (outside quotes).
 func yaml_find_colon(s) {
     let in_quote = false
     let quote_char = ""
@@ -1645,13 +1445,11 @@ func yaml_find_colon(s) {
     -1
 }
 
-// Parse a YAML document.
 func yaml_parse(input) {
     const trimmed = input.trim()
     if len(trimmed) == 0 { return yaml_null() }
     const lines = input.split("\n")
     let pos = {"val": 0}
-    // Skip leading --- and comments
     while pos["val"] < len(lines) {
         const l = lines[pos["val"]].trim()
         if l == "" || l == "---" || l[0] == "#" {
@@ -1669,11 +1467,9 @@ func yaml_parse_value(lines, pos) {
     const line = lines[pos["val"]]
     const trimmed = line.trim()
     const ind = yaml_line_indent(line)
-    // Sequence
     if trimmed.starts_with("- ") || trimmed == "-" {
         return yaml_parse_sequence(lines, pos, ind)
     }
-    // Mapping
     const colon_pos = yaml_find_colon(trimmed)
     if colon_pos > 0 {
         return yaml_parse_mapping(lines, pos, ind)
@@ -1763,7 +1559,6 @@ func yaml_parse_mapping(lines, pos, base_indent) {
     yaml_mapping(keys, values)
 }
 
-// Serialize YAML value to string.
 func yaml_stringify(val) {
     yaml_emit(val, 0, false) + "\n"
 }
@@ -1804,21 +1599,12 @@ func yaml_emit(val, ind, inline) {
     }
     "null"
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 6. UUID
-// ════════════════════════════════════════════════════════════════════
-
-// Generate a UUID v4 (random). Delegates to stage 0 random_bytes.
 func uuid_v4() {
     const bytes = random_bytes(16)
-    // Set version 4 in byte 6
     let b6 = char_code_at(bytes, 6)
-    b6 = (b6 % 16) + 64  // clear high nibble, set 0x40
-    // Set variant 1 in byte 8
+    b6 = (b6 % 16) + 64
     let b8 = char_code_at(bytes, 8)
-    b8 = (b8 % 64) + 128  // clear high 2 bits, set 10xxxxxx
-    // Format as hex with hyphens
+    b8 = (b8 % 64) + 128
     let result = ""
     let i = 0
     while i < 16 {
@@ -1834,7 +1620,6 @@ func uuid_v4() {
     result
 }
 
-// Parse a UUID string. Returns a map with "bytes" and "version" or "error".
 func uuid_parse(s) {
     const trimmed = s.trim()
     if len(trimmed) != 36 { return {"error": "invalid UUID length"} }
@@ -1848,58 +1633,36 @@ func uuid_parse(s) {
         i = i + 1
     }
     if len(hex_str) != 32 { return {"error": "invalid UUID hex length"} }
-    // Validate all hex characters
     i = 0
     while i < len(hex_str) {
         if hex_val(hex_str[i]) < 0 { return {"error": f"invalid hex char in UUID at {i}"} }
         i = i + 1
     }
-    const version = hex_val(hex_str[12])  // high nibble of byte 6
+    const version = hex_val(hex_str[12])
     {"version": version, "hex": hex_str}
 }
 
-// Check if a string is a valid UUID.
 func uuid_is_valid(s) {
     const result = uuid_parse(s)
     typeof(result) == "map" && !result.has("error")
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 7. Compression (delegate to stage 0 builtins)
-// ════════════════════════════════════════════════════════════════════
-
-// Gzip compress data. Delegates to stage 0 builtin.
 func gzip_compress(data) { compress_gzip(data) }
 
-// Gzip decompress data. Delegates to stage 0 builtin.
 func gzip_decompress(data) { decompress_gzip(data) }
 
-// LZ4 compress data. Delegates to stage 0 builtin.
 func lz4_compress(data) { compress_lz4(data) }
 
-// LZ4 decompress data. Delegates to stage 0 builtin.
 func lz4_decompress(data) { decompress_lz4(data) }
 
-// Zstd compress data. Delegates to stage 0 builtin.
 func zstd_compress(data) { compress_zstd(data) }
 
-// Zstd decompress data. Delegates to stage 0 builtin.
 func zstd_decompress(data) { decompress_zstd(data) }
 
-// ════════════════════════════════════════════════════════════════════
-// 8. HTTP
-// ════════════════════════════════════════════════════════════════════
-
-// ── URL Parser ─────────────────────────────────────────────────────
-
-// Parse a URL into its components. Returns a map with scheme, host, port, path, query, fragment.
 func url_parse(url) {
     let rest = url
-    // 1. Parse scheme
     const scheme_end = rest.indexOf("://")
     if scheme_end < 0 { return {"error": "missing scheme"} }
     let scheme = rest.slice(0, scheme_end)
-    // Lowercase the scheme
     let scheme_lower = ""
     let si = 0
     while si < len(scheme) {
@@ -1908,21 +1671,18 @@ func url_parse(url) {
     }
     scheme = scheme_lower
     rest = rest.slice(scheme_end + 3, len(rest))
-    // 2. Split off fragment
     let fragment = null
     const frag_pos = rest.lastIndexOf("#")
     if frag_pos >= 0 {
         fragment = rest.slice(frag_pos + 1, len(rest))
         rest = rest.slice(0, frag_pos)
     }
-    // 3. Split off query
     let query = null
     const query_pos = rest.indexOf("?")
     if query_pos >= 0 {
         query = rest.slice(query_pos + 1, len(rest))
         rest = rest.slice(0, query_pos)
     }
-    // 4. Split authority from path
     const path_pos = rest.indexOf("/")
     let authority = rest
     let path = "/"
@@ -1930,7 +1690,6 @@ func url_parse(url) {
         authority = rest.slice(0, path_pos)
         path = rest.slice(path_pos, len(rest))
     }
-    // 5. Parse host:port from authority
     let host = authority
     let port = null
     const colon_pos = authority.lastIndexOf(":")
@@ -1947,7 +1706,6 @@ func url_parse(url) {
             port = to_int(maybe_port)
         }
     }
-    // Default port
     if port == null {
         if scheme == "http" || scheme == "ws" { port = 80 }
         else if scheme == "https" || scheme == "wss" { port = 443 }
@@ -1963,7 +1721,6 @@ func url_parse(url) {
     }
 }
 
-// Reconstruct a URL from parsed components.
 func url_to_string(parts) {
     let result = parts["scheme"] + "://" + parts["host"]
     if parts["port"] != null {
@@ -1979,10 +1736,6 @@ func url_to_string(parts) {
     if parts["fragment"] != null { result = result + "#" + parts["fragment"] }
     result
 }
-
-// ── Query String ───────────────────────────────────────────────────
-
-// Parse a query string into a map of key-value pairs.
 func query_parse(qs) {
     let result = {}
     if len(qs) == 0 { return result }
@@ -2000,7 +1753,6 @@ func query_parse(qs) {
     result
 }
 
-// Stringify a map of key-value pairs into a query string.
 func query_stringify(params) {
     let parts = []
     for key in keys(params) {
@@ -2008,10 +1760,6 @@ func query_stringify(params) {
     }
     parts.join("&")
 }
-
-// ── HTTP Request Parser ────────────────────────────────────────────
-
-// Parse an HTTP request string into its components.
 func http_parse_request(raw) {
     const header_end = raw.indexOf("\r\n\r\n")
     if header_end < 0 { return {"error": "incomplete request"} }
@@ -2019,14 +1767,12 @@ func http_parse_request(raw) {
     const body = raw.slice(header_end + 4, len(raw))
     const lines = header_section.split("\r\n")
     if len(lines) == 0 { return {"error": "empty request"} }
-    // Parse request line
     const request_line = lines[0]
     const parts = request_line.split(" ")
     if len(parts) < 2 { return {"error": "malformed request line"} }
     const method = parts[0]
     const path = parts[1]
     const version = if len(parts) >= 3 { parts[2] } else { "HTTP/1.1" }
-    // Parse headers
     let headers = {}
     let i = 1
     while i < len(lines) {
@@ -2047,10 +1793,6 @@ func http_parse_request(raw) {
         "body": body,
     }
 }
-
-// ── HTTP Response Parser ───────────────────────────────────────────
-
-// Parse an HTTP response string into its components.
 func http_parse_response(raw) {
     const header_end = raw.indexOf("\r\n\r\n")
     if header_end < 0 { return {"error": "incomplete response"} }
@@ -2058,7 +1800,6 @@ func http_parse_response(raw) {
     const body = raw.slice(header_end + 4, len(raw))
     const lines = header_section.split("\r\n")
     if len(lines) == 0 { return {"error": "empty response"} }
-    // Parse status line
     const status_line = lines[0]
     const parts = status_line.split(" ")
     if len(parts) < 2 { return {"error": "malformed status line"} }
@@ -2071,7 +1812,6 @@ func http_parse_response(raw) {
         while ri < len(parts) { rparts.push(parts[ri]); ri = ri + 1 }
         reason = rparts.join(" ")
     }
-    // Parse headers
     let headers = {}
     let i = 1
     while i < len(lines) {
@@ -2092,9 +1832,6 @@ func http_parse_response(raw) {
         "body": body,
     }
 }
-
-// ── HTTP Status Codes ──────────────────────────────────────────────
-
 func http_status_reason(code) {
     if code == 200 { return "OK" }
     if code == 201 { return "Created" }
@@ -2116,29 +1853,18 @@ func http_status_reason(code) {
     if code == 504 { return "Gateway Timeout" }
     "Unknown"
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 9. Crypto Helpers (delegate to stage 0 builtins)
-// ════════════════════════════════════════════════════════════════════
-
-// SHA-256 hash. Delegates to stage 0 builtin.
 func sha256(data) { hash_sha256(data) }
 
-// SHA-512 hash. Delegates to stage 0 builtin.
 func sha512(data) { hash_sha512(data) }
 
-// HMAC-SHA256. Delegates to stage 0 builtin.
 func hmac_sha256(key, data) { hmac_sha256_builtin(key, data) }
 
-// PBKDF2-SHA256. Delegates to stage 0 builtin.
 func pbkdf2(password, salt, iterations, key_len) {
     pbkdf2_sha256_builtin(password, salt, iterations, key_len)
 }
 
-// Generate random bytes. Delegates to stage 0 builtin.
 func random_bytes(n) { random_bytes_builtin(n) }
 
-// Constant-time comparison of two strings.
 func constant_time_eq(a, b) {
     if len(a) != len(b) { return false }
     let diff = 0
@@ -2146,18 +1872,11 @@ func constant_time_eq(a, b) {
     while i < len(a) {
         const ca = char_code_at(a, i)
         const cb = char_code_at(b, i)
-        // XOR — bitwise using integers
         diff = diff + (if ca != cb { 1 } else { 0 })
         i = i + 1
     }
     diff == 0
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 10. Date/Time
-// ════════════════════════════════════════════════════════════════════
-
-// Convert days since Unix epoch to (year, month, day) using Hinnant's algorithm.
 func civil_from_days(z) {
     let z2 = z + 719468
     const era = int(if z2 >= 0 { z2 } else { z2 - 146096 } / 146097)
@@ -2172,7 +1891,6 @@ func civil_from_days(z) {
     [y_adj, m, d]
 }
 
-// Convert (year, month, day) to days since Unix epoch.
 func days_from_civil(y, m, d) {
     const y_adj = if m <= 2 { y - 1 } else { y }
     const era = int(if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400)
@@ -2183,7 +1901,6 @@ func days_from_civil(y, m, d) {
     era * 146097 + doe - 719468
 }
 
-// Convert Unix timestamp in milliseconds to DateTime components.
 func datetime_from_millis(ms) {
     const total_secs = int(ms / 1000)
     const millis_part = ms % 1000
@@ -2201,7 +1918,6 @@ func datetime_from_millis(ms) {
     }
 }
 
-// Format a Unix timestamp (millis) as ISO 8601 string.
 func format_timestamp(ms) {
     const dt = datetime_from_millis(ms)
     const y = pad_left(to_string(dt["year"]), 4, "0")
@@ -2214,29 +1930,24 @@ func format_timestamp(ms) {
     f"{y}-{mo}-{d}T{h}:{mi}:{s}.{ms_str}Z"
 }
 
-// Parse an ISO 8601 date string to Unix millis.
 func parse_timestamp(s) {
     const trimmed = s.trim()
-    // Date only: YYYY-MM-DD
     if len(trimmed) == 10 && trimmed[4] == "-" && trimmed[7] == "-" {
         const y = to_int(trimmed.slice(0, 4))
         const m = to_int(trimmed.slice(5, 7))
         const d = to_int(trimmed.slice(8, 10))
         return days_from_civil(y, m, d) * 86400 * 1000
     }
-    // Full datetime — split on T or space
     let sep_pos = trimmed.indexOf("T")
     if sep_pos < 0 { sep_pos = trimmed.indexOf(" ") }
     if sep_pos < 0 { return {"error": "unrecognized datetime format"} }
     const date_part = trimmed.slice(0, sep_pos)
     let time_part = trimmed.slice(sep_pos + 1, len(trimmed))
-    // Parse date
     const date_parts = date_part.split("-")
     if len(date_parts) != 3 { return {"error": "invalid date format"} }
     const y = to_int(date_parts[0])
     const m = to_int(date_parts[1])
     const d = to_int(date_parts[2])
-    // Parse timezone
     let tz_offset_secs = 0
     if time_part.ends_with("Z") {
         time_part = time_part.slice(0, len(time_part) - 1)
@@ -2250,7 +1961,6 @@ func parse_timestamp(s) {
             time_part = time_part.slice(0, len(time_part) - 6)
         }
     }
-    // Parse time HH:MM:SS[.fff]
     const time_parts = time_part.split(":")
     const hour = to_int(time_parts[0])
     const minute = if len(time_parts) >= 2 { to_int(time_parts[1]) } else { 0 }
@@ -2273,7 +1983,6 @@ func parse_timestamp(s) {
     total_secs * 1000 + millis
 }
 
-// Format a duration in milliseconds as a human-readable string.
 func format_duration(ms) {
     let remaining = int(ms / 1000)
     const days = int(remaining / 86400)
@@ -2289,12 +1998,6 @@ func format_duration(ms) {
     if seconds > 0 || len(parts) == 0 { parts.push(f"{seconds}s") }
     parts.join(" ")
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 11. Math Extras
-// ════════════════════════════════════════════════════════════════════
-
-// Greatest common divisor.
 func gcd(a, b) {
     let x = abs(a)
     let y = abs(b)
@@ -2306,13 +2009,11 @@ func gcd(a, b) {
     x
 }
 
-// Least common multiple.
 func lcm(a, b) {
     if a == 0 || b == 0 { return 0 }
     abs(a) * abs(b) / gcd(a, b)
 }
 
-// Factorial.
 func factorial(n) {
     if n < 0 { return 0 }
     if n <= 1 { return 1 }
@@ -2325,7 +2026,6 @@ func factorial(n) {
     result
 }
 
-// Fibonacci number (iterative).
 func fibonacci(n) {
     if n <= 0 { return 0 }
     if n == 1 { return 1 }
@@ -2341,7 +2041,6 @@ func fibonacci(n) {
     b
 }
 
-// Check if a number is prime.
 func is_prime(n) {
     if n < 2 { return false }
     if n < 4 { return true }
@@ -2354,7 +2053,6 @@ func is_prime(n) {
     true
 }
 
-// Find the next prime >= n.
 func next_prime(n) {
     let candidate = if n < 2 { 2 } else { n }
     while !is_prime(candidate) {
@@ -2362,10 +2060,6 @@ func next_prime(n) {
     }
     candidate
 }
-
-// ── Statistics ─────────────────────────────────────────────────────
-
-// Arithmetic mean.
 func math_mean(nums) {
     if len(nums) == 0 { return 0.0 }
     let sum = 0.0
@@ -2373,7 +2067,6 @@ func math_mean(nums) {
     sum / len(nums)
 }
 
-// Median.
 func math_median(nums) {
     if len(nums) == 0 { return 0.0 }
     let sorted = nums.slice(0, len(nums))
@@ -2386,7 +2079,6 @@ func math_median(nums) {
     }
 }
 
-// Mode (most frequent value). Returns the first mode if ties.
 func math_mode(nums) {
     if len(nums) == 0 { return null }
     let counts = {}
@@ -2409,7 +2101,6 @@ func math_mode(nums) {
     to_float(best_key)
 }
 
-// Variance (population).
 func math_variance(nums) {
     if len(nums) == 0 { return 0.0 }
     const avg = math_mean(nums)
@@ -2421,18 +2112,10 @@ func math_variance(nums) {
     sum_sq / len(nums)
 }
 
-// Standard deviation (population).
 func math_stddev(nums) {
     sqrt(math_variance(nums))
 }
 
-// ════════════════════════════════════════════════════════════════════
-// 12. Collections
-// ════════════════════════════════════════════════════════════════════
-
-// ── Set Operations ─────────────────────────────────────────────────
-
-// Set union of two arrays.
 func set_union(a, b) {
     let result = []
     let seen = {}
@@ -2453,7 +2136,6 @@ func set_union(a, b) {
     result
 }
 
-// Set intersection of two arrays.
 func set_intersection(a, b) {
     let b_set = {}
     for item in b {
@@ -2471,7 +2153,6 @@ func set_intersection(a, b) {
     result
 }
 
-// Set difference (a - b).
 func set_difference(a, b) {
     let b_set = {}
     for item in b {
@@ -2487,14 +2168,9 @@ func set_difference(a, b) {
     result
 }
 
-// Set symmetric difference.
 func set_symmetric_difference(a, b) {
     set_union(set_difference(a, b), set_difference(b, a))
 }
-
-// ── Counter (frequency counting) ──────────────────────────────────
-
-// Count occurrences of each element.
 func counter(items) {
     let counts = {}
     for item in items {
@@ -2508,13 +2184,11 @@ func counter(items) {
     counts
 }
 
-// Get the N most common elements from a counter.
 func counter_most_common(counts, n) {
     let entries = []
     for key in keys(counts) {
         entries.push([key, counts[key]])
     }
-    // Sort by count descending
     let i = 0
     while i < len(entries) - 1 {
         let j = i + 1
@@ -2531,14 +2205,10 @@ func counter_most_common(counts, n) {
     if n >= len(entries) { return entries }
     entries.slice(0, n)
 }
-
-// ── Binary Heap (min-heap) ────────────────────────────────────────
-
 func heap_new() { [] }
 
 func heap_push(heap, val) {
     heap.push(val)
-    // Sift up
     let idx = len(heap) - 1
     while idx > 0 {
         const parent = int((idx - 1) / 2)
@@ -2559,7 +2229,6 @@ func heap_pop(heap) {
     const last = heap.pop()
     if len(heap) > 0 {
         heap[0] = last
-        // Sift down
         let idx = 0
         while true {
             const left = 2 * idx + 1
@@ -2582,9 +2251,6 @@ func heap_peek(heap) {
 }
 
 func heap_size(heap) { len(heap) }
-
-// ── Deque (double-ended queue) ────────────────────────────────────
-
 func deque_new() { {"items": []} }
 
 func deque_push_back(dq, val) {
@@ -2617,10 +2283,6 @@ func deque_back(dq) {
 func deque_size(dq) { len(dq["items"]) }
 
 func deque_is_empty(dq) { len(dq["items"]) == 0 }
-
-// ── OrderedMap (insertion-order preserving) ────────────────────────
-
-// An OrderedMap is represented as {"__keys": [...], "__values": [...]}
 func ordered_map_new() { {"__keys": [], "__values": []} }
 
 func ordered_map_set(om, key, value) {
@@ -2687,7 +2349,6 @@ func ordered_map_entries(om) {
     result
 }
 
-// Iterate over ordered map calling fn(key, value) for each entry.
 func ordered_map_each(om, cb) {
     let i = 0
     while i < len(om["__keys"]) {
@@ -2696,7 +2357,6 @@ func ordered_map_each(om, cb) {
     }
 }
 
-// Map over ordered map values, returning a new ordered map.
 func ordered_map_map_values(om, cb) {
     let result = ordered_map_new()
     let i = 0
@@ -2707,7 +2367,6 @@ func ordered_map_map_values(om, cb) {
     result
 }
 
-// Filter ordered map entries, returning a new ordered map.
 func ordered_map_filter(om, pred) {
     let result = ordered_map_new()
     let i = 0
@@ -2720,7 +2379,6 @@ func ordered_map_filter(om, pred) {
     result
 }
 
-// Merge two ordered maps. Values from b overwrite a.
 func ordered_map_merge(a, b) {
     let result = ordered_map_new()
     let i = 0
@@ -2735,9 +2393,6 @@ func ordered_map_merge(a, b) {
     }
     result
 }
-
-// ── Stack ──────────────────────────────────────────────────────────
-
 func stack_new() { {"items": []} }
 func stack_push(st, val) { st["items"].push(val) }
 func stack_pop(st) {
@@ -2750,9 +2405,6 @@ func stack_peek(st) {
 }
 func stack_size(st) { len(st["items"]) }
 func stack_is_empty(st) { len(st["items"]) == 0 }
-
-// ── Ring Buffer ────────────────────────────────────────────────────
-
 func ring_buffer_new(capacity) {
     let buf = []
     let i = 0
@@ -2793,14 +2445,6 @@ func ring_buffer_to_array(rb) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 13. CRC32 Checksum
-// ════════════════════════════════════════════════════════════════════
-
-// Precomputed CRC32 table (IEEE polynomial 0xEDB88320).
-// Since MAGI doesn't have const arrays computed at compile time,
-// we build the table on first use.
 let _crc32_table = null
 
 func crc32_build_table() {
@@ -2812,10 +2456,8 @@ func crc32_build_table() {
         let j = 0
         while j < 8 {
             if crc % 2 != 0 {
-                // crc = (crc >> 1) ^ 0xEDB88320
                 crc = int(crc / 2)
-                // XOR with polynomial — need bitwise XOR via integer math
-                crc = bit_xor(crc, 3988292384)  // 0xEDB88320
+                crc = bit_xor(crc, 3988292384)
             } else {
                 crc = int(crc / 2)
             }
@@ -2828,10 +2470,9 @@ func crc32_build_table() {
     table
 }
 
-// Compute CRC32 checksum of a string (IEEE polynomial).
 func crc32(data) {
     const table = crc32_build_table()
-    let crc = 4294967295  // 0xFFFFFFFF
+    let crc = 4294967295
     let i = 0
     while i < len(data) {
         const byte_val = char_code_at(data, i)
@@ -2839,24 +2480,16 @@ func crc32(data) {
         crc = bit_xor(int(crc / 256), table[idx])
         i = i + 1
     }
-    bit_xor(crc, 4294967295)  // ^ 0xFFFFFFFF
+    bit_xor(crc, 4294967295)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 14. Semver (Semantic Versioning)
-// ════════════════════════════════════════════════════════════════════
-
-// Parse a semver string "major.minor.patch[-pre]" into a map.
 func semver_parse(s) {
     const trimmed = s.trim()
     if len(trimmed) == 0 { return {"error": "empty version string"} }
-    // Split off build metadata (+...)
     let ver_str = trimmed
     const plus_pos = ver_str.indexOf("+")
     if plus_pos >= 0 {
         ver_str = ver_str.slice(0, plus_pos)
     }
-    // Split off pre-release (-...)
     let pre = ""
     const dash_pos = ver_str.indexOf("-")
     if dash_pos >= 0 {
@@ -2873,7 +2506,6 @@ func semver_parse(s) {
     {"major": major, "minor": minor, "patch": patch, "pre": pre}
 }
 
-// Format a semver map back to string.
 func semver_to_string(v) {
     let result = f"{v['major']}.{v['minor']}.{v['patch']}"
     if len(v["pre"]) > 0 {
@@ -2882,23 +2514,20 @@ func semver_to_string(v) {
     result
 }
 
-// Compare two semver maps. Returns -1, 0, or 1.
 func semver_compare(a, b) {
     if a["major"] != b["major"] { return if a["major"] < b["major"] { -1 } else { 1 } }
     if a["minor"] != b["minor"] { return if a["minor"] < b["minor"] { -1 } else { 1 } }
     if a["patch"] != b["patch"] { return if a["patch"] < b["patch"] { -1 } else { 1 } }
-    // Pre-release comparison
     const a_pre = a["pre"]
     const b_pre = b["pre"]
     if len(a_pre) == 0 && len(b_pre) == 0 { return 0 }
-    if len(a_pre) == 0 { return 1 }   // release > pre-release
-    if len(b_pre) == 0 { return -1 }  // pre-release < release
+    if len(a_pre) == 0 { return 1 }
+    if len(b_pre) == 0 { return -1 }
     if a_pre < b_pre { return -1 }
     if a_pre > b_pre { return 1 }
     0
 }
 
-// Check if version satisfies a constraint like ">=1.2.0", "<2.0.0".
 func semver_satisfies(version, constraint) {
     const trimmed = constraint.trim()
     let op = ""
@@ -2918,16 +2547,9 @@ func semver_satisfies(version, constraint) {
     if op == "<" { return cmp < 0 }
     cmp == 0
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 15. CSV Parser/Writer
-// ════════════════════════════════════════════════════════════════════
-
-// Parse a CSV string into {headers: [...], records: [[...], ...]}.
 func csv_parse(text) {
     const lines = text.split("\n")
     if len(lines) == 0 { return {"headers": [], "records": []} }
-    // Filter empty trailing lines
     let non_empty = []
     for line in lines {
         if len(line.trim()) > 0 { non_empty.push(line) }
@@ -2943,7 +2565,6 @@ func csv_parse(text) {
     {"headers": headers, "records": records}
 }
 
-// Parse a single CSV line into fields, handling quoted fields.
 func csv_parse_line(line) {
     let fields = []
     let current = ""
@@ -2980,7 +2601,6 @@ func csv_parse_line(line) {
     fields
 }
 
-// Write a CSV string from headers and rows.
 func csv_write(headers, rows) {
     let result = csv_format_line(headers) + "\n"
     for row in rows {
@@ -2989,7 +2609,6 @@ func csv_write(headers, rows) {
     result
 }
 
-// Format a single CSV line, quoting fields that contain commas or quotes.
 func csv_format_line(fields) {
     let parts = []
     for field in fields {
@@ -3001,12 +2620,6 @@ func csv_format_line(fields) {
     }
     parts.join(",")
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 16. Glob Pattern Matching
-// ════════════════════════════════════════════════════════════════════
-
-// Match a filename against a glob pattern (* and ?).
 func glob_match(pattern, text) {
     glob_match_inner(pattern, text, 0, 0)
 }
@@ -3014,7 +2627,6 @@ func glob_match(pattern, text) {
 func glob_match_inner(pattern, text, pi, ti) {
     if pi == len(pattern) { return ti == len(text) }
     if pattern[pi] == "*" {
-        // Try matching zero or more characters
         let k = ti
         while k <= len(text) {
             if glob_match_inner(pattern, text, pi + 1, k) { return true }
@@ -3029,7 +2641,6 @@ func glob_match_inner(pattern, text, pi, ti) {
     false
 }
 
-// Match a path against a glob pattern with ** support.
 func glob_match_path(pattern, path) {
     const pat_parts = pattern.split("/")
     const path_parts = path.split("/")
@@ -3039,7 +2650,6 @@ func glob_match_path(pattern, path) {
 func glob_match_path_inner(pat_parts, path_parts, pi, ti) {
     if pi == len(pat_parts) { return ti == len(path_parts) }
     if pat_parts[pi] == "**" {
-        // Match zero or more path components
         let k = ti
         while k <= len(path_parts) {
             if glob_match_path_inner(pat_parts, path_parts, pi + 1, k) { return true }
@@ -3053,20 +2663,12 @@ func glob_match_path_inner(pat_parts, path_parts, pi, ti) {
     }
     false
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 17. String Similarity and Search
-// ════════════════════════════════════════════════════════════════════
-
-// Normalized Levenshtein similarity (0.0 to 1.0).
 func levenshtein_similarity(a, b) {
     const max_len = if len(a) > len(b) { len(a) } else { len(b) }
     if max_len == 0 { return 1.0 }
     1.0 - levenshtein(a, b) / max_len
 }
 
-// Find the best match for `query` among `candidates`.
-// Returns the candidate with the lowest Levenshtein distance.
 func fuzzy_match(query, candidates) {
     if len(candidates) == 0 { return null }
     let best = candidates[0]
@@ -3083,7 +2685,6 @@ func fuzzy_match(query, candidates) {
     best
 }
 
-// Suggest similar names when a name is not found.
 func did_you_mean(name, candidates, max_distance) {
     let suggestions = []
     for candidate in candidates {
@@ -3094,12 +2695,6 @@ func did_you_mean(name, candidates, max_distance) {
     }
     suggestions
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 18. TOML Parser (basic)
-// ════════════════════════════════════════════════════════════════════
-
-// Parse a TOML string into a nested map structure.
 func toml_parse(input) {
     let root = {}
     let current_section = []
@@ -3108,34 +2703,27 @@ func toml_parse(input) {
     while line_no < len(lines) {
         let line = lines[line_no].trim()
         line_no = line_no + 1
-        // Skip empty and comments
         if len(line) == 0 || line[0] == "#" { continue }
-        // Table header [section]
         if line[0] == "[" && line[len(line) - 1] == "]" {
             if line[1] == "[" && line[len(line) - 2] == "]" {
-                // Array of tables [[section]]
                 const section_name = line.slice(2, len(line) - 2).trim()
                 current_section = section_name.split(".")
             } else {
                 const section_name = line.slice(1, len(line) - 1).trim()
                 current_section = section_name.split(".")
             }
-            // Ensure section path exists in root
             toml_ensure_path(root, current_section)
             continue
         }
-        // Key = value
         const eq_pos = line.indexOf("=")
         if eq_pos < 0 { continue }
         const key = line.slice(0, eq_pos).trim()
-        // Strip surrounding quotes from key
         let clean_key = key
         if len(key) >= 2 && key[0] == "\"" && key[len(key) - 1] == "\"" {
             clean_key = key.slice(1, len(key) - 1)
         }
         const value_str = line.slice(eq_pos + 1, len(line)).trim()
         const value = toml_parse_value(value_str)
-        // Insert into the right section
         if len(current_section) == 0 {
             root[clean_key] = value
         } else {
@@ -3160,7 +2748,6 @@ func toml_ensure_path(root, path) {
 
 func toml_parse_value(s) {
     let trimmed = s.trim()
-    // Strip trailing comment
     let in_string = false
     let escape = false
     let i = 0
@@ -3177,14 +2764,12 @@ func toml_parse_value(s) {
     }
     if trimmed == "true" { return true }
     if trimmed == "false" { return false }
-    // String
     if len(trimmed) >= 2 && trimmed[0] == "\"" && trimmed[len(trimmed) - 1] == "\"" {
         return toml_unescape(trimmed.slice(1, len(trimmed) - 1))
     }
     if len(trimmed) >= 2 && trimmed[0] == "'" && trimmed[len(trimmed) - 1] == "'" {
         return trimmed.slice(1, len(trimmed) - 1)
     }
-    // Array
     if trimmed[0] == "[" && trimmed[len(trimmed) - 1] == "]" {
         const inner = trimmed.slice(1, len(trimmed) - 1).trim()
         if len(inner) == 0 { return [] }
@@ -3196,7 +2781,6 @@ func toml_parse_value(s) {
         }
         return result
     }
-    // Inline table
     if trimmed[0] == "{" && trimmed[len(trimmed) - 1] == "}" {
         const inner = trimmed.slice(1, len(trimmed) - 1).trim()
         let table = {}
@@ -3215,12 +2799,10 @@ func toml_parse_value(s) {
         }
         return table
     }
-    // Number
     const as_int = to_int(trimmed)
     if to_string(as_int) == trimmed { return as_int }
     const as_float = to_float(trimmed)
     if to_string(as_float) != "NaN" { return as_float }
-    // Bare string fallback
     trimmed
 }
 
@@ -3275,17 +2857,14 @@ func toml_split_elements(s) {
     results
 }
 
-// Serialize a TOML table map to TOML string.
 func toml_stringify(table) {
     let result = ""
-    // First pass: simple key-value pairs
     for key in keys(table) {
         const val = table[key]
         if typeof(val) != "map" || typeof(val) == "array" {
             result = result + toml_key_escape(key) + " = " + toml_value_to_string(val) + "\n"
         }
     }
-    // Second pass: sub-tables
     for key in keys(table) {
         const val = table[key]
         if typeof(val) == "map" && typeof(val) != "array" {
@@ -3332,11 +2911,6 @@ func toml_value_to_string(val) {
     }
     to_string(val)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 19. Adler32 Checksum
-// ════════════════════════════════════════════════════════════════════
-
 func adler32(data) {
     let a = 1
     let b = 0
@@ -3348,12 +2922,6 @@ func adler32(data) {
     }
     b * 65536 + a
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 20. String Utilities (additional)
-// ════════════════════════════════════════════════════════════════════
-
-// Repeat a string n times.
 func string_repeat(s, n) {
     let result = ""
     let i = 0
@@ -3364,7 +2932,6 @@ func string_repeat(s, n) {
     result
 }
 
-// Count occurrences of substring in string.
 func string_count(s, sub) {
     if len(sub) == 0 { return 0 }
     let count = 0
@@ -3380,7 +2947,6 @@ func string_count(s, sub) {
     count
 }
 
-// Reverse a string.
 func string_reverse(s) {
     let result = ""
     let i = len(s) - 1
@@ -3391,7 +2957,6 @@ func string_reverse(s) {
     result
 }
 
-// Check if a string is a palindrome.
 func is_palindrome(s) {
     let i = 0
     let j = len(s) - 1
@@ -3403,19 +2968,16 @@ func is_palindrome(s) {
     true
 }
 
-// Capitalize the first character of a string.
 func capitalize(s) {
     if len(s) == 0 { return "" }
     to_upper_char(s[0]) + s.slice(1, len(s))
 }
 
-// Uncapitalize the first character.
 func uncapitalize(s) {
     if len(s) == 0 { return "" }
     to_lower_char(s[0]) + s.slice(1, len(s))
 }
 
-// Check if a string contains only whitespace.
 func is_blank(s) {
     let i = 0
     while i < len(s) {
@@ -3425,7 +2987,6 @@ func is_blank(s) {
     true
 }
 
-// Remove all whitespace from a string.
 func strip_whitespace(s) {
     let result = ""
     let i = 0
@@ -3439,7 +3000,6 @@ func strip_whitespace(s) {
     result
 }
 
-// Squeeze consecutive occurrences of a character into one.
 func squeeze(s, ch) {
     if len(s) == 0 { return "" }
     let result = s[0]
@@ -3453,7 +3013,6 @@ func squeeze(s, ch) {
     result
 }
 
-// Split a string into chunks of the given size.
 func chunk(s, size) {
     let result = []
     let i = 0
@@ -3464,12 +3023,6 @@ func chunk(s, size) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 21. Number Formatting
-// ════════════════════════════════════════════════════════════════════
-
-// Format a number with thousands separators.
 func format_number(n) {
     const s = to_string(int(n))
     let negative = false
@@ -3492,7 +3045,6 @@ func format_number(n) {
     if negative { "-" + result } else { result }
 }
 
-// Format bytes as human-readable size (KB, MB, GB, etc.).
 func format_bytes(bytes) {
     const units = ["B", "KB", "MB", "GB", "TB", "PB"]
     let size = to_float(bytes)
@@ -3504,17 +3056,10 @@ func format_bytes(bytes) {
     if unit_idx == 0 {
         f"{int(size)} {units[unit_idx]}"
     } else {
-        // Round to 1 decimal
         const rounded = int(size * 10.0) / 10.0
         f"{rounded} {units[unit_idx]}"
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 22. Sorting and Search Algorithms
-// ════════════════════════════════════════════════════════════════════
-
-// Binary search on a sorted array. Returns index or -1.
 func binary_search(arr, target) {
     let lo = 0
     let hi = len(arr) - 1
@@ -3527,7 +3072,6 @@ func binary_search(arr, target) {
     -1
 }
 
-// Merge sort (returns new sorted array).
 func merge_sort(arr) {
     if len(arr) <= 1 { return arr }
     const mid = int(len(arr) / 2)
@@ -3554,7 +3098,6 @@ func merge_arrays(left, right) {
     result
 }
 
-// Group array elements by a key function.
 func group_by(arr, key_fn) {
     let groups = {}
     for item in arr {
@@ -3568,7 +3111,6 @@ func group_by(arr, key_fn) {
     groups
 }
 
-// Unique elements preserving order.
 func unique(arr) {
     let seen = {}
     let result = []
@@ -3582,7 +3124,6 @@ func unique(arr) {
     result
 }
 
-// Flatten a nested array by one level.
 func flatten(arr) {
     let result = []
     for item in arr {
@@ -3597,7 +3138,6 @@ func flatten(arr) {
     result
 }
 
-// Zip two arrays into an array of pairs.
 func zip(a, b) {
     let result = []
     const min_len = if len(a) < len(b) { len(a) } else { len(b) }
@@ -3609,7 +3149,6 @@ func zip(a, b) {
     result
 }
 
-// Unzip an array of pairs into two arrays.
 func unzip(pairs) {
     let a = []
     let b = []
@@ -3620,7 +3159,6 @@ func unzip(pairs) {
     [a, b]
 }
 
-// Range of integers [start, end).
 func range(start, end) {
     let result = []
     let i = start
@@ -3631,7 +3169,6 @@ func range(start, end) {
     result
 }
 
-// Range with step.
 func range_step(start, end, step) {
     let result = []
     let i = start
@@ -3648,37 +3185,27 @@ func range_step(start, end, step) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 23. Math Extras (additional)
-// ════════════════════════════════════════════════════════════════════
-
-// Clamp a number to [min, max].
 func clamp(n, min_val, max_val) {
     if n < min_val { min_val }
     else if n > max_val { max_val }
     else { n }
 }
 
-// Linear interpolation between a and b.
 func lerp(a, b, t) {
     a + (b - a) * t
 }
 
-// Map a value from one range to another.
 func map_range(value, from_min, from_max, to_min, to_max) {
     const t = (value - from_min) / (from_max - from_min)
     to_min + t * (to_max - to_min)
 }
 
-// Sum of an array.
 func math_sum(arr) {
     let total = 0
     for n in arr { total = total + n }
     total
 }
 
-// Product of an array.
 func math_product(arr) {
     if len(arr) == 0 { return 0 }
     let total = 1
@@ -3686,7 +3213,6 @@ func math_product(arr) {
     total
 }
 
-// Min of an array.
 func math_min(arr) {
     if len(arr) == 0 { return null }
     let result = arr[0]
@@ -3698,7 +3224,6 @@ func math_min(arr) {
     result
 }
 
-// Max of an array.
 func math_max(arr) {
     if len(arr) == 0 { return null }
     let result = arr[0]
@@ -3710,7 +3235,6 @@ func math_max(arr) {
     result
 }
 
-// Power (integer exponentiation).
 func int_pow(base, exp) {
     if exp < 0 { return 0 }
     let result = 1
@@ -3722,31 +3246,26 @@ func int_pow(base, exp) {
     result
 }
 
-// Absolute value.
 func math_abs(n) {
     if n < 0 { -n } else { n }
 }
 
-// Sign of a number (-1, 0, or 1).
 func math_sign(n) {
     if n > 0 { 1 }
     else if n < 0 { -1 }
     else { 0 }
 }
 
-// Integer division (floor division).
 func div_floor(a, b) {
     const q = int(a / b)
     if (a % b != 0) && ((a < 0) != (b < 0)) { q - 1 } else { q }
 }
 
-// Modulo (always non-negative result).
 func mod_floor(a, b) {
     const r = a % b
     if r < 0 { r + abs(b) } else { r }
 }
 
-// Combinations C(n, k).
 func combinations(n, k) {
     if k < 0 || k > n { return 0 }
     if k == 0 || k == n { return 1 }
@@ -3759,7 +3278,6 @@ func combinations(n, k) {
     result
 }
 
-// Permutations P(n, k).
 func permutations(n, k) {
     if k < 0 || k > n { return 0 }
     let result = 1
@@ -3770,12 +3288,6 @@ func permutations(n, k) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 24. Color Utilities
-// ════════════════════════════════════════════════════════════════════
-
-// Parse a hex color string (#RRGGBB or #RGB) to [r, g, b].
 func color_parse_hex(hex) {
     let s = hex
     if s[0] == "#" { s = s.slice(1, len(s)) }
@@ -3794,7 +3306,6 @@ func color_parse_hex(hex) {
     [0, 0, 0]
 }
 
-// Convert [r, g, b] to hex string #RRGGBB.
 func color_to_hex(rgb) {
     const r = rgb[0]
     const g = rgb[1]
@@ -3802,7 +3313,6 @@ func color_to_hex(rgb) {
     "#" + HEX_LOWER[int(r / 16)] + HEX_LOWER[r % 16] + HEX_LOWER[int(g / 16)] + HEX_LOWER[g % 16] + HEX_LOWER[int(b / 16)] + HEX_LOWER[b % 16]
 }
 
-// Blend two colors with a ratio t (0.0 = color a, 1.0 = color b).
 func color_blend(a, b, t) {
     const r = int(a[0] + (b[0] - a[0]) * t)
     const g = int(a[1] + (b[1] - a[1]) * t)
@@ -3810,27 +3320,18 @@ func color_blend(a, b, t) {
     [clamp(r, 0, 255), clamp(g, 0, 255), clamp(bl, 0, 255)]
 }
 
-// Lighten a color by percentage (0-100).
 func color_lighten(rgb, percent) {
     color_blend(rgb, [255, 255, 255], percent / 100.0)
 }
 
-// Darken a color by percentage (0-100).
 func color_darken(rgb, percent) {
     color_blend(rgb, [0, 0, 0], percent / 100.0)
 }
 
-// Convert RGB to grayscale using luminance weights.
 func color_grayscale(rgb) {
     const gray = int(0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2])
     [gray, gray, gray]
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 25. Path Utilities
-// ════════════════════════════════════════════════════════════════════
-
-// Get the file extension from a path.
 func path_extension(path) {
     const last_dot = path.lastIndexOf(".")
     const last_slash = path.lastIndexOf("/")
@@ -3838,14 +3339,12 @@ func path_extension(path) {
     path.slice(last_dot + 1, len(path))
 }
 
-// Get the filename from a path (last component).
 func path_filename(path) {
     const last_slash = path.lastIndexOf("/")
     if last_slash < 0 { return path }
     path.slice(last_slash + 1, len(path))
 }
 
-// Get the directory part of a path.
 func path_dirname(path) {
     const last_slash = path.lastIndexOf("/")
     if last_slash < 0 { return "." }
@@ -3853,7 +3352,6 @@ func path_dirname(path) {
     path.slice(0, last_slash)
 }
 
-// Get the stem (filename without extension).
 func path_stem(path) {
     const name = path_filename(path)
     const dot = name.lastIndexOf(".")
@@ -3861,7 +3359,6 @@ func path_stem(path) {
     name.slice(0, dot)
 }
 
-// Join two path components.
 func path_join(a, b) {
     if len(a) == 0 { return b }
     if len(b) == 0 { return a }
@@ -3870,7 +3367,6 @@ func path_join(a, b) {
     else { a + "/" + b }
 }
 
-// Normalize a path (resolve . and .. components).
 func path_normalize(path) {
     const parts = path.split("/")
     let result = []
@@ -3892,16 +3388,9 @@ func path_normalize(path) {
     normalized
 }
 
-// Check if a path is absolute.
 func path_is_absolute(path) {
     len(path) > 0 && path[0] == "/"
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 26. Template Engine (simple)
-// ════════════════════════════════════════════════════════════════════
-
-// Simple template substitution: replace {{key}} with values from a map.
 func template_render(template, vars) {
     let result = template
     for key in keys(vars) {
@@ -3911,10 +3400,8 @@ func template_render(template, vars) {
     result
 }
 
-// Render a template with conditional blocks: {{#if key}}...{{/if}}.
 func template_render_full(template, vars) {
     let result = template_render(template, vars)
-    // Process {{#if key}}...{{/if}} blocks
     while result.contains("{{#if ") {
         const if_start = result.indexOf("{{#if ")
         if if_start < 0 { break }
@@ -3936,20 +3423,11 @@ func template_render_full(template, vars) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 27. Diff Algorithm (simplified)
-// ════════════════════════════════════════════════════════════════════
-
-// Compute a simple line diff between two texts.
-// Returns an array of {op: "+"/"-"/"=", line: "..."} entries.
 func diff_lines(old_text, new_text) {
     const old_lines = old_text.split("\n")
     const new_lines = new_text.split("\n")
-    // Simple LCS-based diff using DP
     const m = len(old_lines)
     const n = len(new_lines)
-    // Build LCS length table
     let dp = []
     let i = 0
     while i <= m {
@@ -3972,7 +3450,6 @@ func diff_lines(old_text, new_text) {
         }
         i = i + 1
     }
-    // Backtrack to build diff
     let result = []
     i = m
     let j = n
@@ -3989,7 +3466,6 @@ func diff_lines(old_text, new_text) {
             i = i - 1
         }
     }
-    // Reverse to get correct order
     let reversed = []
     i = len(result) - 1
     while i >= 0 {
@@ -3999,7 +3475,6 @@ func diff_lines(old_text, new_text) {
     reversed
 }
 
-// Format a diff as a unified diff string.
 func diff_format(diff_entries) {
     let result = ""
     for entry in diff_entries {
@@ -4013,15 +3488,8 @@ func diff_format(diff_entries) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 28. Event Emitter Pattern
-// ════════════════════════════════════════════════════════════════════
-
-// Create a new event emitter.
 func emitter_new() { {"listeners": {}} }
 
-// Register a listener for an event.
 func emitter_on(emitter, event, handler) {
     if !emitter["listeners"].has(event) {
         emitter["listeners"][event] = []
@@ -4029,7 +3497,6 @@ func emitter_on(emitter, event, handler) {
     emitter["listeners"][event].push(handler)
 }
 
-// Emit an event, calling all registered listeners.
 func emitter_emit(emitter, event, data) {
     if emitter["listeners"].has(event) {
         const handlers = emitter["listeners"][event]
@@ -4039,14 +3506,12 @@ func emitter_emit(emitter, event, data) {
     }
 }
 
-// Remove all listeners for an event.
 func emitter_off(emitter, event) {
     if emitter["listeners"].has(event) {
         emitter["listeners"][event] = []
     }
 }
 
-// Count listeners for an event.
 func emitter_listener_count(emitter, event) {
     if emitter["listeners"].has(event) {
         len(emitter["listeners"][event])
@@ -4054,86 +3519,54 @@ func emitter_listener_count(emitter, event) {
         0
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 29. Result Type Pattern
-// ════════════════════════════════════════════════════════════════════
-
-// Create an Ok result.
 func result_ok(value) { {"__result": "ok", "value": value} }
 
-// Create an Err result.
 func result_err(error) { {"__result": "err", "error": error} }
 
-// Check if a result is Ok.
 func result_is_ok(r) { typeof(r) == "map" && r.has("__result") && r["__result"] == "ok" }
 
-// Check if a result is Err.
 func result_is_err(r) { typeof(r) == "map" && r.has("__result") && r["__result"] == "err" }
 
-// Unwrap an Ok value, or panic on Err.
 func result_unwrap(r) {
     if result_is_ok(r) { return r["value"] }
     panic(f"unwrap on Err: {r['error']}")
 }
 
-// Unwrap an Ok value, or return default on Err.
 func result_unwrap_or(r, default_val) {
     if result_is_ok(r) { r["value"] } else { default_val }
 }
 
-// Map over an Ok value.
 func result_map(r, cb) {
     if result_is_ok(r) { result_ok(cb(r["value"])) } else { r }
 }
 
-// Chain results.
 func result_and_then(r, cb) {
     if result_is_ok(r) { cb(r["value"]) } else { r }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 30. Option Type Pattern
-// ════════════════════════════════════════════════════════════════════
-
-// Create a Some option.
 func option_some(value) { {"__option": "some", "value": value} }
 
-// Create a None option.
 func option_none() { {"__option": "none"} }
 
-// Check if an option is Some.
 func option_is_some(o) { typeof(o) == "map" && o.has("__option") && o["__option"] == "some" }
 
-// Check if an option is None.
 func option_is_none(o) { typeof(o) == "map" && o.has("__option") && o["__option"] == "none" }
 
-// Unwrap a Some value, or panic on None.
 func option_unwrap(o) {
     if option_is_some(o) { return o["value"] }
     panic("unwrap on None")
 }
 
-// Unwrap a Some value, or return default on None.
 func option_unwrap_or(o, default_val) {
     if option_is_some(o) { o["value"] } else { default_val }
 }
 
-// Map over a Some value.
 func option_map(o, cb) {
     if option_is_some(o) { option_some(cb(o["value"])) } else { o }
 }
 
-// Filter an option: returns None if predicate fails.
 func option_filter(o, pred) {
     if option_is_some(o) && pred(o["value"]) { o } else { option_none() }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 31. YAML Emitter
-// ════════════════════════════════════════════════════════════════════
-
-// Emit a YAML value to string.
 func yaml_emit(val) {
     let out = ""
     yaml_emit_value(val, out, 0, true)
@@ -4216,12 +3649,6 @@ func yaml_escape_string(s) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 32. XML Parser and Emitter
-// ════════════════════════════════════════════════════════════════════
-
-// XML node: {"tag": name, "attrs": {}, "children": [], "text": ""}
 func xml_parse(source) {
     let pos = 0
     let nodes = []
@@ -4271,7 +3698,7 @@ func xml_parse(source) {
     }
 
     func parse_tag_open() {
-        pos = pos + 1 // skip <
+        pos = pos + 1
         let tag = ""
         while pos < len(source) && source[pos] != " " && source[pos] != ">" && source[pos] != "/" {
             tag = tag + source[pos]
@@ -4306,19 +3733,16 @@ func xml_parse(source) {
         skip_ws()
         if pos >= len(source) { return null }
         if source[pos] == "<" {
-            // Check for comment
             if pos + 3 < len(source) && source[pos + 1] == "!" && source[pos + 2] == "-" && source[pos + 3] == "-" {
                 const end = source.index_of("-->", pos)
                 if end >= 0 { pos = end + 3 } else { pos = len(source) }
                 return parse_node()
             }
-            // Check for processing instruction <?xml ... ?>
             if pos + 1 < len(source) && source[pos + 1] == "?" {
                 const end = source.index_of("?>", pos)
                 if end >= 0 { pos = end + 2 } else { pos = len(source) }
                 return parse_node()
             }
-            // Check for closing tag
             if pos + 1 < len(source) && source[pos + 1] == "/" {
                 return null
             }
@@ -4326,12 +3750,10 @@ func xml_parse(source) {
             let children = []
             let text = ""
             if !info.self_closing {
-                // Parse children until closing tag
                 while pos < len(source) {
                     skip_ws()
                     if pos >= len(source) { break }
                     if source[pos] == "<" && pos + 1 < len(source) && source[pos + 1] == "/" {
-                        // Skip closing tag
                         const end = source.index_of(">", pos)
                         if end >= 0 { pos = end + 1 }
                         break
@@ -4354,7 +3776,6 @@ func xml_parse(source) {
     if root != null { root } else { {"tag": "", "attrs": {}, "children": [], "text": ""} }
 }
 
-// Emit an XML node to string.
 func xml_emit(node) {
     xml_emit_node(node, 0)
 }
@@ -4391,36 +3812,26 @@ func xml_escape_text(s) {
 func xml_escape_attr(s) {
     xml_escape_text(s).replace("\"", "&quot;")
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 33. TOML Parser Improvements
-// ════════════════════════════════════════════════════════════════════
-
-// Parse inline tables: { key = val, key2 = val2 }
 func toml_parse_inline_table(s, pos) {
     let table = {}
-    pos = pos + 1 // skip {
+    pos = pos + 1
     while pos < len(s) && s[pos] != "}" {
-        // Skip whitespace
         while pos < len(s) && (s[pos] == " " || s[pos] == "\t") { pos = pos + 1 }
         if pos >= len(s) || s[pos] == "}" { break }
-        // Parse key
         let key = ""
         while pos < len(s) && s[pos] != "=" && s[pos] != " " {
             key = key + s[pos]
             pos = pos + 1
         }
-        // Skip to =
         while pos < len(s) && s[pos] != "=" { pos = pos + 1 }
-        pos = pos + 1 // skip =
+        pos = pos + 1
         while pos < len(s) && (s[pos] == " " || s[pos] == "\t") { pos = pos + 1 }
-        // Parse value
         const vr = toml_parse_value(s, pos)
         table[key.trim()] = vr[0]
         pos = vr[1]
         while pos < len(s) && (s[pos] == " " || s[pos] == "\t" || s[pos] == ",") { pos = pos + 1 }
     }
-    if pos < len(s) { pos = pos + 1 } // skip }
+    if pos < len(s) { pos = pos + 1 }
     [table, pos]
 }
 
@@ -4428,9 +3839,7 @@ func toml_parse_value(s, pos) {
     while pos < len(s) && (s[pos] == " " || s[pos] == "\t") { pos = pos + 1 }
     if pos >= len(s) { return [null, pos] }
 
-    // String
     if s[pos] == "\"" {
-        // Multi-line string
         if pos + 2 < len(s) && s[pos + 1] == "\"" && s[pos + 2] == "\"" {
             pos = pos + 3
             let val = ""
@@ -4463,12 +3872,10 @@ func toml_parse_value(s, pos) {
         return [val, pos]
     }
 
-    // Inline table
     if s[pos] == "{" {
         return toml_parse_inline_table(s, pos)
     }
 
-    // Array
     if s[pos] == "[" {
         pos = pos + 1
         let arr = []
@@ -4483,7 +3890,6 @@ func toml_parse_value(s, pos) {
         return [arr, pos]
     }
 
-    // Boolean
     if pos + 4 <= len(s) && s.substring(pos, pos + 4) == "true" {
         return [true, pos + 4]
     }
@@ -4491,8 +3897,6 @@ func toml_parse_value(s, pos) {
         return [false, pos + 5]
     }
 
-    // Datetime (ISO 8601)
-    // Check for pattern: YYYY-MM-DD
     let look = pos
     let is_datetime = false
     if look + 10 <= len(s) && s[look + 4] == "-" && s[look + 7] == "-" {
@@ -4507,7 +3911,6 @@ func toml_parse_value(s, pos) {
         return [dt_str.trim(), pos]
     }
 
-    // Number (int or float)
     let num_str = ""
     while pos < len(s) && s[pos] != "," && s[pos] != "]" && s[pos] != "}" && s[pos] != "\n" && s[pos] != "#" && s[pos] != " " {
         if s[pos] != "_" { num_str = num_str + s[pos] }
@@ -4518,11 +3921,6 @@ func toml_parse_value(s, pos) {
     }
     [parse_int(num_str), pos]
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 34. MIME Type Detection
-// ════════════════════════════════════════════════════════════════════
-
 func mime_type_from_extension(ext) {
     const e = ext.to_lower()
     if e == "html" || e == "htm" { return "text/html" }
@@ -4563,22 +3961,15 @@ func mime_type_from_path(path) {
     const ext = path.substring(dot + 1)
     mime_type_from_extension(ext)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 35. Semantic Versioning
-// ════════════════════════════════════════════════════════════════════
-
 func semver_parse(s) {
     let rest = s
     let pre = ""
     let build = ""
-    // Split off build metadata
     const plus_idx = rest.index_of("+")
     if plus_idx >= 0 {
         build = rest.substring(plus_idx + 1)
         rest = rest.substring(0, plus_idx)
     }
-    // Split off pre-release
     const dash_idx = rest.index_of("-")
     if dash_idx >= 0 {
         pre = rest.substring(dash_idx + 1)
@@ -4606,7 +3997,6 @@ func semver_compare(a, b) {
     if a.major != b.major { return if a.major < b.major { -1 } else { 1 } }
     if a.minor != b.minor { return if a.minor < b.minor { -1 } else { 1 } }
     if a.patch != b.patch { return if a.patch < b.patch { -1 } else { 1 } }
-    // Pre-release has lower precedence than release
     if len(a.pre) == 0 && len(b.pre) > 0 { return 1 }
     if len(a.pre) > 0 && len(b.pre) == 0 { return -1 }
     if a.pre < b.pre { return -1 }
@@ -4626,7 +4016,6 @@ func semver_bump_patch(v) {
     {"major": v.major, "minor": v.minor, "patch": v.patch + 1, "pre": "", "build": ""}
 }
 
-// Check if version satisfies a constraint string (^, ~, >=, <, !=, *)
 func semver_satisfies(version, constraint) {
     const c = constraint.trim()
     if c == "*" { return true }
@@ -4667,16 +4056,10 @@ func semver_satisfies(version, constraint) {
         if target.has("error") { return false }
         return semver_compare(version, target) < 0
     }
-    // Exact match
     const target = semver_parse(c)
     if target.has("error") { return false }
     semver_compare(version, target) == 0
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 36. Cookie Parser
-// ════════════════════════════════════════════════════════════════════
-
 func cookie_parse(header) {
     let cookies = {}
     const pairs = header.split(";")
@@ -4705,11 +4088,6 @@ func cookie_serialize(name, value, options) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 37. Multipart Form Data Parser
-// ════════════════════════════════════════════════════════════════════
-
 func multipart_parse(body, boundary) {
     let parts = []
     const delimiter = "--" + boundary
@@ -4717,7 +4095,6 @@ func multipart_parse(body, boundary) {
     for section in sections {
         const trimmed = section.trim()
         if len(trimmed) == 0 || trimmed == "--" { continue }
-        // Split headers from body
         const sep = trimmed.index_of("\r\n\r\n")
         let headers_str = ""
         let part_body = ""
@@ -4733,7 +4110,6 @@ func multipart_parse(body, boundary) {
                 part_body = trimmed
             }
         }
-        // Parse headers
         let headers = {}
         for line in headers_str.split("\n") {
             const colon = line.index_of(":")
@@ -4743,7 +4119,6 @@ func multipart_parse(body, boundary) {
                 headers[hname] = hval
             }
         }
-        // Extract name and filename from content-disposition
         let name = ""
         let filename = ""
         if headers.has("content-disposition") {
@@ -4763,13 +4138,6 @@ func multipart_parse(body, boundary) {
     }
     parts
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 38. Template Engine (Mustache/Handlebars-style)
-// ════════════════════════════════════════════════════════════════════
-
-// Render a template with data.
-// Supports: {{var}}, {{#if cond}}...{{/if}}, {{#each arr}}...{{/each}}, {{> partial}}
 func template_render(tmpl, data, partials) {
     if partials == null { partials = {} }
     let result = ""
@@ -4777,7 +4145,6 @@ func template_render(tmpl, data, partials) {
     while pos < len(tmpl) {
         if pos + 1 < len(tmpl) && tmpl[pos] == "{" && tmpl[pos + 1] == "{" {
             pos = pos + 2
-            // Find closing }}
             const close = tmpl.index_of("}}", pos)
             if close < 0 { break }
             const tag = tmpl.substring(pos, close).trim()
@@ -4790,7 +4157,6 @@ func template_render(tmpl, data, partials) {
                 if end_pos < 0 { break }
                 const inner = tmpl.substring(pos, end_pos)
                 pos = end_pos + len(end_tag)
-                // Check else
                 const else_idx = inner.index_of("{{else}}")
                 if data.has(cond_key) && data[cond_key] {
                     if else_idx >= 0 {
@@ -4813,9 +4179,7 @@ func template_render(tmpl, data, partials) {
                     let idx = 0
                     for item in arr {
                         let item_data = {}
-                        // Merge parent data
                         for k in data.keys() { item_data[k] = data[k] }
-                        // Add loop context
                         const t = typeof(item)
                         if t == "map" {
                             for k in item.keys() { item_data[k] = item[k] }
@@ -4839,17 +4203,14 @@ func template_render(tmpl, data, partials) {
                     result = result + template_render(inner, data, partials)
                 }
             } else if tag.starts_with("> ") {
-                // Partial
                 const partial_name = tag.substring(2).trim()
                 if partials.has(partial_name) {
                     result = result + template_render(partials[partial_name], data, partials)
                 }
             } else if tag.starts_with("{") && tag.ends_with("}") {
-                // Unescaped: {{{var}}}
                 const var_name = tag.substring(1, len(tag) - 1).trim()
                 if data.has(var_name) { result = result + to_string(data[var_name]) }
             } else {
-                // Variable interpolation (HTML-escaped)
                 const parts = tag.split(".")
                 let value = data
                 for part in parts {
@@ -4871,19 +4232,12 @@ func template_render(tmpl, data, partials) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 39. Diff (Line-level, Word-level, Patch Generation)
-// ════════════════════════════════════════════════════════════════════
-
-// Compute line-level diff using longest common subsequence.
 func diff_lines(a_text, b_text) {
     const a_lines = a_text.split("\n")
     const b_lines = b_text.split("\n")
     const m = len(a_lines)
     const n = len(b_lines)
 
-    // Build LCS table
     let dp = []
     let i = 0
     while i <= m {
@@ -4907,7 +4261,6 @@ func diff_lines(a_text, b_text) {
         i = i + 1
     }
 
-    // Backtrack to build diff
     let result = []
     i = m
     let j = n
@@ -4928,7 +4281,6 @@ func diff_lines(a_text, b_text) {
     result
 }
 
-// Word-level diff within a line.
 func diff_words(a, b) {
     const a_words = a.split(" ")
     const b_words = b.split(" ")
@@ -4976,7 +4328,6 @@ func diff_words(a, b) {
     result
 }
 
-// Generate unified diff patch string.
 func diff_patch(a_text, b_text, filename) {
     const hunks = diff_lines(a_text, b_text)
     let result = f"--- a/{filename}\n+++ b/{filename}\n"
@@ -4998,7 +4349,6 @@ func diff_patch(a_text, b_text, filename) {
     result
 }
 
-// Side-by-side format.
 func diff_side_by_side(a_text, b_text, width) {
     if width == null { width = 80 }
     const half = int(width / 2) - 3
@@ -5016,11 +4366,6 @@ func diff_side_by_side(a_text, b_text, width) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 40. Bloom Filter
-// ════════════════════════════════════════════════════════════════════
-
 func bloom_new(size, hash_count) {
     if size == null { size = 1024 }
     if hash_count == null { hash_count = 3 }
@@ -5060,11 +4405,6 @@ func bloom_test(bloom, value) {
     }
     true
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 41. Consistent Hashing
-// ════════════════════════════════════════════════════════════════════
-
 func consistent_hash_new(replicas) {
     if replicas == null { replicas = 150 }
     {"ring": [], "nodes": [], "replicas": replicas}
@@ -5097,21 +4437,15 @@ func consistent_hash_add(ch, node) {
 func consistent_hash_get(ch, key) {
     if len(ch.ring) == 0 { return null }
     const h = consistent_hash_fnv(to_string(key))
-    // Binary search for first ring entry >= h
     let lo = 0
     let hi = len(ch.ring) - 1
     while lo < hi {
         const mid = int((lo + hi) / 2)
         if ch.ring[mid].hash < h { lo = mid + 1 } else { hi = mid }
     }
-    if ch.ring[lo].hash < h { lo = 0 } // wrap around
+    if ch.ring[lo].hash < h { lo = 0 }
     ch.ring[lo].node
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 42. Rate Limiter (Token Bucket)
-// ════════════════════════════════════════════════════════════════════
-
 func rate_limiter_new(capacity, refill_rate) {
     {
         "capacity": capacity,
@@ -5122,7 +4456,6 @@ func rate_limiter_new(capacity, refill_rate) {
 }
 
 func rate_limiter_allow(rl, now) {
-    // Refill tokens based on elapsed time
     if rl.last_refill > 0 {
         const elapsed = now - rl.last_refill
         const new_tokens = elapsed * rl.refill_rate
@@ -5136,11 +4469,6 @@ func rate_limiter_allow(rl, now) {
         false
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 43. Circuit Breaker
-// ════════════════════════════════════════════════════════════════════
-
 const CB_CLOSED = "closed"
 const CB_OPEN = "open"
 const CB_HALF_OPEN = "half_open"
@@ -5166,7 +4494,6 @@ func circuit_breaker_allow(cb, now) {
         }
         return false
     }
-    // HALF_OPEN: allow one request to test
     true
 }
 
@@ -5189,11 +4516,6 @@ func circuit_breaker_record_failure(cb, now) {
         cb.state = CB_OPEN
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 44. Retry with Exponential Backoff
-// ════════════════════════════════════════════════════════════════════
-
 func retry_config_new(max_retries, initial_delay_ms, max_delay_ms, backoff_factor) {
     if max_retries == null { max_retries = 3 }
     if initial_delay_ms == null { initial_delay_ms = 100 }
@@ -5217,18 +4539,12 @@ func retry_get_delay(config, attempt) {
     if delay > config.max_delay_ms { delay = config.max_delay_ms }
     delay
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 45. LRU Cache Improvements
-// ════════════════════════════════════════════════════════════════════
-
 func lru_cache_new(capacity) {
     {"capacity": capacity, "items": [], "map": {}}
 }
 
 func lru_cache_get(cache, key) {
     if !cache.map.has(key) { return null }
-    // Move to front (most recently used)
     const val = cache.map[key]
     let new_items = [key]
     for item in cache.items {
@@ -5241,7 +4557,6 @@ func lru_cache_get(cache, key) {
 func lru_cache_put(cache, key, value) {
     if cache.map.has(key) {
         cache.map[key] = value
-        // Move to front
         let new_items = [key]
         for item in cache.items {
             if item != key { new_items.push(item) }
@@ -5249,7 +4564,6 @@ func lru_cache_put(cache, key, value) {
         cache.items = new_items
         return null
     }
-    // Evict if at capacity
     if len(cache.items) >= cache.capacity {
         const evicted = cache.items[len(cache.items) - 1]
         cache.items = cache.items.slice(0, len(cache.items) - 1)
@@ -5272,11 +4586,6 @@ func lru_cache_remove(cache, key) {
 func lru_cache_contains(cache, key) { cache.map.has(key) }
 func lru_cache_size(cache) { len(cache.items) }
 func lru_cache_keys(cache) { cache.items }
-
-// ════════════════════════════════════════════════════════════════════
-// 46. Trie Improvements (Prefix Search, Autocomplete)
-// ════════════════════════════════════════════════════════════════════
-
 func trie_new() { {"children": {}, "is_end": false, "value": null} }
 
 func trie_insert(trie, key, value) {
@@ -5344,12 +4653,6 @@ func trie_collect(node, current, results, max) {
 func trie_prefix_search(trie, prefix) {
     trie_autocomplete(trie, prefix, 1000)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 47. Graph Algorithms
-// ════════════════════════════════════════════════════════════════════
-
-// Graph: {"nodes": [node_id, ...], "edges": [[from, to, weight], ...]}
 func graph_new() { {"nodes": [], "edges": []} }
 
 func graph_add_node(g, id) {
@@ -5361,7 +4664,6 @@ func graph_add_edge(g, from, to, weight) {
     g.edges.push([from, to, weight])
 }
 
-// Dijkstra's shortest path from source to all reachable nodes.
 func graph_dijkstra(g, source) {
     let dist = {}
     let prev = {}
@@ -5376,7 +4678,6 @@ func graph_dijkstra(g, source) {
     queue.push(source)
 
     while len(queue) > 0 {
-        // Find unvisited node with smallest distance
         let min_dist = 999999999
         let min_idx = 0
         let i = 0
@@ -5392,7 +4693,6 @@ func graph_dijkstra(g, source) {
         if visited.has(u) { continue }
         visited[u] = true
 
-        // Relax neighbors
         for edge in g.edges {
             if edge[0] == u {
                 const v = edge[1]
@@ -5409,7 +4709,6 @@ func graph_dijkstra(g, source) {
     {"dist": dist, "prev": prev}
 }
 
-// Reconstruct path from Dijkstra result.
 func graph_shortest_path(g, source, target) {
     const result = graph_dijkstra(g, source)
     let path = []
@@ -5426,11 +4725,9 @@ func graph_shortest_path(g, source, target) {
     }
 }
 
-// Floyd-Warshall all-pairs shortest paths.
 func graph_floyd_warshall(g) {
     const n = len(g.nodes)
     let dist = {}
-    // Initialize distance matrix
     for u in g.nodes {
         dist[u] = {}
         for v in g.nodes {
@@ -5440,7 +4737,6 @@ func graph_floyd_warshall(g) {
     for edge in g.edges {
         dist[edge[0]][edge[1]] = edge[2]
     }
-    // DP relaxation
     for k in g.nodes {
         for i in g.nodes {
             for j in g.nodes {
@@ -5454,9 +4750,7 @@ func graph_floyd_warshall(g) {
     dist
 }
 
-// Kruskal's minimum spanning tree.
 func graph_kruskal(g) {
-    // Union-Find
     let parent = {}
     let rank = {}
     for node in g.nodes {
@@ -5479,7 +4773,6 @@ func graph_kruskal(g) {
         true
     }
 
-    // Sort edges by weight
     let sorted_edges = g.edges.slice(0)
     sorted_edges.sort((a, b) => a[2] - b[2])
 
@@ -5494,7 +4787,6 @@ func graph_kruskal(g) {
     {"edges": mst, "total_weight": total_weight}
 }
 
-// A* pathfinding with heuristic.
 func graph_astar(g, start, goal, heuristic) {
     let open_set = [start]
     let came_from = {}
@@ -5509,7 +4801,6 @@ func graph_astar(g, start, goal, heuristic) {
     f_score[start] = heuristic(start, goal)
 
     while len(open_set) > 0 {
-        // Find node in open_set with lowest f_score
         let best = open_set[0]
         let best_f = f_score[best]
         for node in open_set {
@@ -5520,7 +4811,6 @@ func graph_astar(g, start, goal, heuristic) {
         }
 
         if best == goal {
-            // Reconstruct path
             let path = [goal]
             let current = goal
             while came_from.has(current) {
@@ -5531,12 +4821,10 @@ func graph_astar(g, start, goal, heuristic) {
             return {"path": path, "distance": g_score[goal]}
         }
 
-        // Remove best from open_set
         let new_open = []
         for node in open_set { if node != best { new_open.push(node) } }
         open_set = new_open
 
-        // Check neighbors
         for edge in g.edges {
             if edge[0] == best {
                 const neighbor = edge[1]
@@ -5554,18 +4842,11 @@ func graph_astar(g, start, goal, heuristic) {
     }
     {"path": [], "distance": -1}
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 48. String Matching Algorithms
-// ════════════════════════════════════════════════════════════════════
-
-// KMP (Knuth-Morris-Pratt) pattern matching.
 func kmp_search(text, pattern) {
     const n = len(text)
     const m = len(pattern)
     if m == 0 { return [] }
 
-    // Build failure function
     let fail = [0]
     let i = 1
     let j = 0
@@ -5581,7 +4862,6 @@ func kmp_search(text, pattern) {
         i = i + 1
     }
 
-    // Search
     let matches = []
     j = 0
     i = 0
@@ -5597,7 +4877,6 @@ func kmp_search(text, pattern) {
     matches
 }
 
-// Rabin-Karp pattern matching with rolling hash.
 func rabin_karp_search(text, pattern) {
     const n = len(text)
     const m = len(pattern)
@@ -5607,7 +4886,6 @@ func rabin_karp_search(text, pattern) {
     const modulus = 1000000007
     let matches = []
 
-    // Compute hash of pattern and first window
     let pat_hash = 0
     let txt_hash = 0
     let h = 1
@@ -5624,7 +4902,6 @@ func rabin_karp_search(text, pattern) {
     i = 0
     while i <= n - m {
         if pat_hash == txt_hash {
-            // Verify character by character
             let matched = true
             let j = 0
             while j < m {
@@ -5633,7 +4910,6 @@ func rabin_karp_search(text, pattern) {
             }
             if matched { matches.push(i) }
         }
-        // Slide window
         if i < n - m {
             txt_hash = (base * (txt_hash - char_code_at(text, i) * h) + char_code_at(text, i + m)) % modulus
             if txt_hash < 0 { txt_hash = txt_hash + modulus }
@@ -5643,12 +4919,9 @@ func rabin_karp_search(text, pattern) {
     matches
 }
 
-// Aho-Corasick multi-pattern search.
 func aho_corasick_new(patterns) {
-    // Build trie with failure links
     let nodes = [{"children": {}, "fail": 0, "output": []}]
 
-    // Insert patterns
     let pi = 0
     while pi < len(patterns) {
         const pat = patterns[pi]
@@ -5667,7 +4940,6 @@ func aho_corasick_new(patterns) {
         pi = pi + 1
     }
 
-    // Build failure links via BFS
     let queue = []
     for c in nodes[0].children.keys() {
         const child = nodes[0].children[c]
@@ -5686,7 +4958,6 @@ func aho_corasick_new(patterns) {
                 f = nodes[f].fail
             }
             nodes[v].fail = if nodes[f].children.has(c) && nodes[f].children[c] != v { nodes[f].children[c] } else { 0 }
-            // Merge output
             const fail_output = nodes[nodes[v].fail].output
             for o in fail_output { nodes[v].output.push(o) }
         }
@@ -5707,7 +4978,6 @@ func aho_corasick_search(ac, text) {
         if ac.nodes[current].children.has(c) {
             current = ac.nodes[current].children[c]
         }
-        // Report matches
         for pat_idx in ac.nodes[current].output {
             const pat = ac.patterns[pat_idx]
             matches.push({"pattern": pat, "index": i - len(pat) + 1})
@@ -5716,14 +4986,7 @@ func aho_corasick_search(ac, text) {
     }
     matches
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 49. Enhanced Regex: Named Groups, Backreferences, Unicode Categories
-// ════════════════════════════════════════════════════════════════════
-
-// Named group extraction from regex matches.
 func regex_named_groups(pattern, text) {
-    // Extract named group definitions: (?P<name>...)
     let groups = {}
     let group_names = []
     let pat_copy = pattern
@@ -5737,15 +5000,12 @@ func regex_named_groups(pattern, text) {
         group_names.push(name)
         search_pos = name_end + 1
     }
-    // Simplify: strip named group syntax for basic matching
     let simple_pat = pattern
     for name in group_names {
         simple_pat = simple_pat.replace(f"(?P<{name}>", "(")
     }
-    // Use basic regex match
     const m = regex_match(simple_pat, text)
     if m == null { return null }
-    // Map captured groups to names
     let i = 0
     while i < len(group_names) && i + 1 < len(m) {
         groups[group_names[i]] = m[i + 1]
@@ -5754,7 +5014,6 @@ func regex_named_groups(pattern, text) {
     groups
 }
 
-// Unicode character category check.
 func unicode_is_letter(c) {
     const code = char_code_at(c, 0)
     (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code > 127
@@ -5779,12 +5038,6 @@ func unicode_is_lower(c) {
     const code = char_code_at(c, 0)
     code >= 97 && code <= 122
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 50. DNS Resolution Helpers
-// ════════════════════════════════════════════════════════════════════
-
-// Parse a DNS name from a query string into labels.
 func dns_parse_name(name) {
     const labels = name.split(".")
     let valid = true
@@ -5794,13 +5047,11 @@ func dns_parse_name(name) {
     {"labels": labels, "valid": valid, "fqdn": name}
 }
 
-// Check if a hostname is a valid DNS name.
 func dns_is_valid_hostname(name) {
     if len(name) == 0 || len(name) > 253 { return false }
     const labels = name.split(".")
     for label in labels {
         if len(label) == 0 || len(label) > 63 { return false }
-        // Must start with alphanumeric
         const first = label[0]
         if !((first >= "a" && first <= "z") || (first >= "A" && first <= "Z") || (first >= "0" && first <= "9")) {
             return false
@@ -5809,17 +5060,15 @@ func dns_is_valid_hostname(name) {
     true
 }
 
-// Build a DNS query packet (simplified).
 func dns_build_query(name, query_type) {
-    if query_type == null { query_type = 1 } // A record
+    if query_type == null { query_type = 1 }
     let packet = {}
     packet.id = 1234
-    packet.flags = 256 // standard query, recursion desired
+    packet.flags = 256
     packet.questions = [{"name": name, "type": query_type, "class": 1}]
     packet
 }
 
-// DNS record types.
 const DNS_TYPE_A = 1
 const DNS_TYPE_AAAA = 28
 const DNS_TYPE_CNAME = 5
@@ -5842,27 +5091,18 @@ func dns_type_name(type_code) {
     if type_code == 12 { return "PTR" }
     f"TYPE{type_code}"
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 51. Enhanced Regex (Lookahead, Unicode)
-// ════════════════════════════════════════════════════════════════════
-
-// Positive lookahead: checks if pattern matches at position without consuming.
 func regex_lookahead(pattern, text, pos) {
     const sub = text.substring(pos)
     const m = regex_match(pattern, sub)
     m != null
 }
 
-// Negative lookahead: returns true if pattern does NOT match.
 func regex_negative_lookahead(pattern, text, pos) {
     !regex_lookahead(pattern, text, pos)
 }
 
-// Positive lookbehind: checks if pattern matches text before position.
 func regex_lookbehind(pattern, text, pos) {
     if pos <= 0 { return false }
-    // Try matching the last N characters where N = len(pattern) estimate
     let check_len = len(pattern) * 2
     if check_len > pos { check_len = pos }
     const sub = text.substring(pos - check_len, pos)
@@ -5870,8 +5110,6 @@ func regex_lookbehind(pattern, text, pos) {
     m != null
 }
 
-// Backreference substitution in replacement strings.
-// \1, \2 etc. refer to capture groups.
 func regex_replace_backrefs(match_result, replacement) {
     let result = replacement
     if match_result == null { return result }
@@ -5886,7 +5124,6 @@ func regex_replace_backrefs(match_result, replacement) {
     result
 }
 
-// Character class checks for regex engine.
 func regex_is_word_char(c) {
     (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
 }
@@ -5897,7 +5134,6 @@ func regex_is_boundary(text, pos) {
     before != after
 }
 
-// Unicode category checking for \p{...} patterns.
 func regex_unicode_category(c, category) {
     if category == "L" || category == "Letter" { return unicode_is_letter(c) }
     if category == "N" || category == "Number" { return unicode_is_digit(c) }
@@ -5910,11 +5146,6 @@ func regex_unicode_category(c, category) {
     }
     false
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 52. Priority Queue (Binary Heap)
-// ════════════════════════════════════════════════════════════════════
-
 func heap_new(compare_fn) {
     if compare_fn == null { compare_fn = (a, b) => a - b }
     {"items": [], "cmp": compare_fn}
@@ -5971,11 +5202,6 @@ func heap_sift_down(h, idx) {
         idx = smallest
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 53. Ring Buffer / Circular Buffer
-// ════════════════════════════════════════════════════════════════════
-
 func ring_buffer_new(capacity) {
     let data = []
     let i = 0
@@ -6019,11 +5245,6 @@ func ring_buffer_to_array(rb) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 54. Disjoint Set (Union-Find)
-// ════════════════════════════════════════════════════════════════════
-
 func union_find_new(n) {
     let parent = []
     let rank = []
@@ -6038,7 +5259,7 @@ func union_find_new(n) {
 
 func union_find_find(uf, x) {
     while uf.parent[x] != x {
-        uf.parent[x] = uf.parent[uf.parent[x]] // path compression
+        uf.parent[x] = uf.parent[uf.parent[x]]
         x = uf.parent[x]
     }
     x
@@ -6065,13 +5286,7 @@ func union_find_connected(uf, x, y) {
 }
 
 func union_find_components(uf) { uf.count }
-
-// ════════════════════════════════════════════════════════════════════
-// 55. Topological Sort
-// ════════════════════════════════════════════════════════════════════
-
 func topological_sort(g) {
-    // Kahn's algorithm
     let in_degree = {}
     for node in g.nodes { in_degree[node] = 0 }
     for edge in g.edges {
@@ -6100,16 +5315,10 @@ func topological_sort(g) {
     }
     {"order": result}
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 56. Interval Tree
-// ════════════════════════════════════════════════════════════════════
-
 func interval_tree_new() { {"intervals": []} }
 
 func interval_tree_insert(tree, lo, hi, data) {
     tree.intervals.push({"lo": lo, "hi": hi, "data": data})
-    // Keep sorted by lo for efficient querying
     tree.intervals.sort((a, b) => a.lo - b.lo)
 }
 
@@ -6134,17 +5343,11 @@ func interval_tree_overlap(tree, lo, hi) {
     }
     results
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 57. Leaky Bucket Rate Limiter
-// ════════════════════════════════════════════════════════════════════
-
 func leaky_bucket_new(capacity, leak_rate) {
     {"capacity": capacity, "level": 0.0, "leak_rate": leak_rate, "last_time": 0}
 }
 
 func leaky_bucket_allow(bucket, now) {
-    // Leak accumulated water
     if bucket.last_time > 0 {
         const elapsed = now - bucket.last_time
         bucket.level = bucket.level - elapsed * bucket.leak_rate
@@ -6158,17 +5361,11 @@ func leaky_bucket_allow(bucket, now) {
         false
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 58. Sliding Window Counter
-// ════════════════════════════════════════════════════════════════════
-
 func sliding_window_new(window_size, max_count) {
     {"window_size": window_size, "max_count": max_count, "events": []}
 }
 
 func sliding_window_allow(sw, now) {
-    // Remove expired events
     let new_events = []
     for event in sw.events {
         if now - event < sw.window_size {
@@ -6191,11 +5388,6 @@ func sliding_window_count(sw, now) {
     }
     count
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 59. Skip List (Probabilistic Sorted Data Structure)
-// ════════════════════════════════════════════════════════════════════
-
 func skip_list_new(max_level) {
     if max_level == null { max_level = 16 }
     let forward = []
@@ -6206,7 +5398,6 @@ func skip_list_new(max_level) {
 
 func skip_list_random_level(sl) {
     let level = 0
-    // Approximate coin flip using FNV hash of a counter
     let counter = len(sl.header.forward)
     while level < sl.max_level - 1 {
         counter = (counter * 2654435761) % 2147483647
@@ -6270,11 +5461,6 @@ func skip_list_search(sl, key) {
         null
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 60. Bit Manipulation Utilities
-// ════════════════════════════════════════════════════════════════════
-
 func bit_count_ones(n) {
     let count = 0
     let val = n
@@ -6304,7 +5490,7 @@ func bit_leading_zeros(n) {
     if n == 0 { return 32 }
     let count = 0
     let val = n
-    let bit = 2147483648 // 2^31
+    let bit = 2147483648
     while bit > 0 {
         if val >= bit { break }
         count = count + 1
@@ -6347,12 +5533,6 @@ func bit_rotate_right(n, count, bits) {
     if bits == null { bits = 32 }
     bit_rotate_left(n, bits - count, bits)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 61. String Utilities (Additional)
-// ════════════════════════════════════════════════════════════════════
-
-// Center a string within a given width.
 func string_center(s, width, pad_char) {
     if pad_char == null { pad_char = " " }
     if len(s) >= width { return s }
@@ -6362,14 +5542,12 @@ func string_center(s, width, pad_char) {
     pad_char.repeat(left_pad) + s + pad_char.repeat(right_pad)
 }
 
-// Truncate a string with ellipsis.
 func string_truncate(s, max_len, suffix) {
     if suffix == null { suffix = "..." }
     if len(s) <= max_len { return s }
     s.substring(0, max_len - len(suffix)) + suffix
 }
 
-// Count occurrences of a substring.
 func string_count(s, sub) {
     let count = 0
     let pos = 0
@@ -6382,7 +5560,6 @@ func string_count(s, sub) {
     count
 }
 
-// Capitalize the first letter of each word.
 func string_title_case(s) {
     let result = ""
     let capitalize_next = true
@@ -6403,7 +5580,6 @@ func string_title_case(s) {
     result
 }
 
-// Convert to camelCase.
 func string_camel_case(s) {
     const parts = s.replace("-", "_").split("_")
     if len(parts) == 0 { return "" }
@@ -6419,7 +5595,6 @@ func string_camel_case(s) {
     result
 }
 
-// Convert to kebab-case.
 func string_kebab_case(s) {
     let result = ""
     let i = 0
@@ -6446,7 +5621,6 @@ func string_kebab_case(s) {
     result
 }
 
-// Check if string is a palindrome.
 func string_is_palindrome(s) {
     const clean = s.to_lower()
     let left = 0
@@ -6459,7 +5633,6 @@ func string_is_palindrome(s) {
     true
 }
 
-// Compute the longest common prefix of an array of strings.
 func string_longest_common_prefix(strings) {
     if len(strings) == 0 { return "" }
     let prefix = strings[0]
@@ -6474,7 +5647,6 @@ func string_longest_common_prefix(strings) {
     prefix
 }
 
-// Compute the longest common suffix.
 func string_longest_common_suffix(strings) {
     let reversed = strings.map(s => {
         let r = ""
@@ -6489,7 +5661,6 @@ func string_longest_common_suffix(strings) {
     result
 }
 
-// Hamming distance between two equal-length strings.
 func string_hamming_distance(a, b) {
     if len(a) != len(b) { return -1 }
     let dist = 0
@@ -6500,11 +5671,6 @@ func string_hamming_distance(a, b) {
     }
     dist
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 62. Statistics Utilities (Extended)
-// ════════════════════════════════════════════════════════════════════
-
 func stats_variance(values) {
     if len(values) == 0 { return 0.0 }
     const mean = stats_mean(values)
@@ -6592,11 +5758,6 @@ func stats_sum(values) {
 func stats_range(values) {
     stats_max(values) - stats_min(values)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 63. CSV Writer (Enhanced)
-// ════════════════════════════════════════════════════════════════════
-
 func csv_escape(value) {
     const s = to_string(value)
     if s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") {
@@ -6630,11 +5791,6 @@ func csv_to_maps(headers, rows) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 64. TOML Emitter
-// ════════════════════════════════════════════════════════════════════
-
 func toml_emit(table) {
     let result = ""
     toml_emit_table(table, "", result)
@@ -6653,12 +5809,10 @@ func toml_emit_table(table, prefix, result) {
         }
     }
 
-    // Emit simple key-value pairs first
     for key in inline_keys {
         result = result + key + " = " + toml_emit_value(table[key]) + "\n"
     }
 
-    // Emit subtables
     for key in subtable_keys {
         const full_key = if len(prefix) > 0 { prefix + "." + key } else { key }
         result = result + "\n[" + full_key + "]\n"
@@ -6689,7 +5843,6 @@ func toml_emit_value(val) {
         return "[" + parts.join(", ") + "]"
     }
     if t == "map" {
-        // Inline table
         let pairs = []
         for k in val.keys() {
             pairs.push(k + " = " + toml_emit_value(val[k]))
@@ -6698,17 +5851,10 @@ func toml_emit_value(val) {
     }
     to_string(val)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 13. Full HTTP/1.1 Parser
-// ════════════════════════════════════════════════════════════════════
-
-// Parse an HTTP/1.1 request
 func http_parse_request(raw) {
     const lines = raw.split("\r\n")
     if len(lines) == 0 { return {"error": "empty request"} }
 
-    // Request line: METHOD PATH HTTP/1.1
     const request_line = lines[0]
     const parts = request_line.split(" ")
     if len(parts) < 3 {
@@ -6719,18 +5865,16 @@ func http_parse_request(raw) {
     const path = parts[1]
     const version = parts[2]
 
-    // Headers
     let headers = {"__s": true}
     let i = 1
     while i < len(lines) {
         const line = lines[i]
-        if line == "" { i = i + 1; break }  // Empty line separates headers from body
+        if line == "" { i = i + 1; break }
         const colon = line.index_of(":")
         if colon > 0 {
             const name = line[0..colon].trim().to_lower()
             const value = line[colon + 1..len(line)].trim()
             if headers.has(name) {
-                // Multiple values: append with comma
                 headers[name] = headers[name] + ", " + value
             } else {
                 headers[name] = value
@@ -6739,7 +5883,6 @@ func http_parse_request(raw) {
         i = i + 1
     }
 
-    // Body
     let body = ""
     if i < len(lines) {
         let body_lines = []
@@ -6750,7 +5893,6 @@ func http_parse_request(raw) {
         body = body_lines.join("\r\n")
     }
 
-    // Handle chunked transfer encoding
     if headers.has("transfer-encoding") && headers["transfer-encoding"].contains("chunked") {
         body = http_decode_chunked(body)
     }
@@ -6764,12 +5906,10 @@ func http_parse_request(raw) {
     }
 }
 
-// Parse an HTTP/1.1 response
 func http_parse_response(raw) {
     const lines = raw.split("\r\n")
     if len(lines) == 0 { return {"error": "empty response"} }
 
-    // Status line: HTTP/1.1 200 OK
     const status_line = lines[0]
     const space1 = status_line.index_of(" ")
     if space1 < 0 { return {"error": "malformed status line"} }
@@ -6785,7 +5925,6 @@ func http_parse_response(raw) {
         status_code = parse_int(rest)
     }
 
-    // Headers
     let headers = {"__s": true}
     let i = 1
     while i < len(lines) {
@@ -6800,7 +5939,6 @@ func http_parse_response(raw) {
         i = i + 1
     }
 
-    // Body
     let body = ""
     if i < len(lines) {
         let body_lines = []
@@ -6811,16 +5949,13 @@ func http_parse_response(raw) {
         body = body_lines.join("\r\n")
     }
 
-    // Chunked decoding
     if headers.has("transfer-encoding") && headers["transfer-encoding"].contains("chunked") {
         body = http_decode_chunked(body)
     }
 
-    // Trailers
     let trailers = {"__s": true}
     if headers.has("trailer") {
         const trailer_names = headers["trailer"].split(",").map(t => t.trim().to_lower())
-        // Parse trailers from end of chunked body
         const parsed_trailers = http_parse_trailers(raw)
         for name in trailer_names {
             if parsed_trailers.has(name) {
@@ -6839,27 +5974,24 @@ func http_parse_response(raw) {
     }
 }
 
-// Decode chunked transfer encoding
 func http_decode_chunked(data) {
     let result = ""
     let pos = 0
     while pos < len(data) {
-        // Read chunk size (hex)
         let size_end = data[pos..len(data)].index_of("\r\n")
         if size_end < 0 { break }
         size_end = pos + size_end
         const size_str = data[pos..size_end].trim()
-        // Strip chunk extensions
         const semi = size_str.index_of(";")
         const hex_str = if semi >= 0 { size_str[0..semi] } else { size_str }
         const chunk_size = parse_hex_int(hex_str)
-        if chunk_size == 0 { break }  // Last chunk
+        if chunk_size == 0 { break }
 
-        pos = size_end + 2  // skip \r\n
+        pos = size_end + 2
         if pos + chunk_size <= len(data) {
             result = result + data[pos..pos + chunk_size]
         }
-        pos = pos + chunk_size + 2  // skip chunk data + \r\n
+        pos = pos + chunk_size + 2
     }
     result
 }
@@ -6880,7 +6012,6 @@ func parse_hex_int(s) {
 
 func http_parse_trailers(raw) {
     let trailers = {"__s": true}
-    // Trailers appear after the final "0\r\n" chunk marker
     const last_chunk = raw.index_of("0\r\n")
     if last_chunk < 0 { return trailers }
     const after = raw[last_chunk + 3..len(raw)]
@@ -6897,7 +6028,6 @@ func http_parse_trailers(raw) {
     trailers
 }
 
-// Build an HTTP/1.1 request string
 func http_build_request(method, path, headers, body) {
     let req = f"{method} {path} HTTP/1.1\r\n"
     for name in headers.keys() {
@@ -6914,8 +6044,7 @@ func http_build_request(method, path, headers, body) {
     req
 }
 
-// Keep-alive connection pooling state
-let http_conn_pool = {"__s": true}  // host:port -> [conn_info]
+let http_conn_pool = {"__s": true}
 
 func http_get_connection(host, port) {
     const key = f"{host}:{port}"
@@ -6925,7 +6054,7 @@ func http_get_connection(host, port) {
             return pool.pop()
         }
     }
-    null  // No pooled connection available
+    null
 }
 
 func http_return_connection(host, port, conn) {
@@ -6934,16 +6063,10 @@ func http_return_connection(host, port, conn) {
         http_conn_pool[key] = []
     }
     const pool = http_conn_pool[key]
-    if len(pool) < 6 {  // Max pool size per host
+    if len(pool) < 6 {
         pool.push(conn)
     }
-    // else: discard (pool full)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 14. Full WebSocket Frame Parser
-// ════════════════════════════════════════════════════════════════════
-
 const WS_OPCODE_CONTINUATION = 0x0
 const WS_OPCODE_TEXT = 0x1
 const WS_OPCODE_BINARY = 0x2
@@ -7048,7 +6171,6 @@ func ws_build_frame(opcode, payload, mask) {
     }
 
     if mask {
-        // Generate random mask key
         const mask_key = [
             secure_random_int(0, 256), secure_random_int(0, 256),
             secure_random_int(0, 256), secure_random_int(0, 256),
@@ -7071,11 +6193,6 @@ func ws_build_close_frame(code, reason) {
     if reason != null { payload = payload + reason }
     ws_build_frame(WS_OPCODE_CLOSE, payload, true)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 15. Full MIME Multipart Parser
-// ════════════════════════════════════════════════════════════════════
-
 func mime_parse_multipart(data, boundary) {
     let parts = []
     const delimiter = "--" + boundary
@@ -7086,20 +6203,16 @@ func mime_parse_multipart(data, boundary) {
     for section in sections {
         const trimmed = section.trim()
         if trimmed == "" || trimmed == "--" { continue }
-        // Strip leading \r\n
         let s = trimmed
         if s.starts_with("\r\n") { s = s[2..len(s)] }
-        // Strip trailing -- (end marker)
         if s.ends_with("--") { s = s[0..len(s) - 2] }
 
-        // Split headers from body
         const sep = s.index_of("\r\n\r\n")
         if sep < 0 { continue }
 
         const header_text = s[0..sep]
         const body = s[sep + 4..len(s)]
 
-        // Parse headers
         let headers = {"__s": true}
         const header_lines = header_text.split("\r\n")
         for hl in header_lines {
@@ -7111,7 +6224,6 @@ func mime_parse_multipart(data, boundary) {
             }
         }
 
-        // Extract content-disposition params
         let name = null
         let filename = null
         if headers.has("content-disposition") {
@@ -7135,7 +6247,6 @@ func mime_extract_param(header, param_name) {
     const search = param_name + "=\""
     const idx = header.index_of(search)
     if idx < 0 {
-        // Try without quotes
         const search2 = param_name + "="
         const idx2 = header.index_of(search2)
         if idx2 < 0 { return null }
@@ -7154,7 +6265,6 @@ func mime_build_multipart(parts, boundary) {
     let body = ""
     for part in parts {
         body = body + "--" + boundary + "\r\n"
-        // Content-Disposition
         let cd = "Content-Disposition: form-data"
         if part.has("name") { cd = cd + f"; name=\"{part[\"name\"]}\"" }
         if part.has("filename") { cd = cd + f"; filename=\"{part[\"filename\"]}\"" }
@@ -7168,11 +6278,6 @@ func mime_build_multipart(parts, boundary) {
     body = body + "--" + boundary + "--\r\n"
     body
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 16. INI File Parser
-// ════════════════════════════════════════════════════════════════════
-
 func ini_parse(text) {
     let result = {"__s": true}
     let current_section = "__default"
@@ -7184,7 +6289,6 @@ func ini_parse(text) {
         if len(trimmed) == 0 { continue }
         if trimmed[0] == ";" || trimmed[0] == "#" { continue }
 
-        // Section header: [section]
         if trimmed[0] == "[" {
             const close = trimmed.index_of("]")
             if close > 1 {
@@ -7196,17 +6300,14 @@ func ini_parse(text) {
             continue
         }
 
-        // Key = value
         const eq = trimmed.index_of("=")
         if eq > 0 {
             const key = trimmed[0..eq].trim()
             let value = trimmed[eq + 1..len(trimmed)].trim()
-            // Strip inline comments
             const semi = value.index_of(";")
             if semi > 0 { value = value[0..semi].trim() }
             const hash = value.index_of("#")
             if hash > 0 { value = value[0..hash].trim() }
-            // Strip quotes
             if len(value) >= 2 && value[0] == "\"" && value[len(value) - 1] == "\"" {
                 value = value[1..len(value) - 1]
             }
@@ -7233,11 +6334,6 @@ func ini_emit(data) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 17. Properties File Parser
-// ════════════════════════════════════════════════════════════════════
-
 func properties_parse(text) {
     let result = {"__s": true}
     const lines = text.split("\n")
@@ -7246,13 +6342,10 @@ func properties_parse(text) {
         if len(trimmed) == 0 { continue }
         if trimmed[0] == "#" || trimmed[0] == "!" { continue }
 
-        // Handle continuation lines (ending with \)
         let full_line = trimmed
-        // Key=value or key:value or key value
         let sep = full_line.index_of("=")
         if sep < 0 { sep = full_line.index_of(":") }
         if sep < 0 {
-            // Space separator
             sep = full_line.index_of(" ")
         }
         if sep > 0 {
@@ -7278,16 +6371,10 @@ func properties_emit(data) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 18. Full Glob with Brace Expansion
-// ════════════════════════════════════════════════════════════════════
-
 func glob_expand_braces(pattern) {
     const brace_start = pattern.index_of("{")
     if brace_start < 0 { return [pattern] }
 
-    // Find matching close brace
     let depth = 0
     let brace_end = -1
     let i = brace_start
@@ -7305,7 +6392,6 @@ func glob_expand_braces(pattern) {
     const suffix = pattern[brace_end + 1..len(pattern)]
     const alternatives_str = pattern[brace_start + 1..brace_end]
 
-    // Split by comma (respecting nested braces)
     let alternatives = []
     let current = ""
     depth = 0
@@ -7324,7 +6410,6 @@ func glob_expand_braces(pattern) {
     }
     alternatives.push(current)
 
-    // Recursively expand each alternative
     let results = []
     for alt in alternatives {
         const expanded = glob_expand_braces(prefix + alt + suffix)
@@ -7334,7 +6419,6 @@ func glob_expand_braces(pattern) {
 }
 
 func glob_match_extended(pattern, text) {
-    // First expand braces
     const patterns = glob_expand_braces(pattern)
     for p in patterns {
         if glob_match_single(p, text) { return true }
@@ -7354,19 +6438,16 @@ func glob_match_single(pattern, text) {
             ti = ti + 1
         } else if pi < len(pattern) && pattern[pi] == "*" {
             if pi + 1 < len(pattern) && pattern[pi + 1] == "*" {
-                // ** matches across directories
                 pi = pi + 2
                 if pi < len(pattern) && pattern[pi] == "/" { pi = pi + 1 }
                 star_pi = pi
                 star_ti = ti
             } else {
-                // * matches within single directory (no /)
                 star_pi = pi
                 star_ti = ti + 1
                 pi = pi + 1
             }
         } else if pi < len(pattern) && pattern[pi] == "[" {
-            // Character class [abc] or [a-z]
             const match_result = glob_match_char_class(pattern, pi, text[ti])
             if match_result["matched"] {
                 pi = match_result["end_pos"]
@@ -7392,7 +6473,7 @@ func glob_match_single(pattern, text) {
 }
 
 func glob_match_char_class(pattern, start, c) {
-    let i = start + 1  // skip [
+    let i = start + 1
     let negate = false
     if i < len(pattern) && (pattern[i] == "!" || pattern[i] == "^") {
         negate = true
@@ -7402,7 +6483,6 @@ func glob_match_char_class(pattern, start, c) {
     let matched = false
     while i < len(pattern) && pattern[i] != "]" {
         if i + 2 < len(pattern) && pattern[i + 1] == "-" {
-            // Range: a-z
             const lo = pattern[i]
             const hi = pattern[i + 2]
             if c >= lo && c <= hi { matched = true }
@@ -7413,43 +6493,34 @@ func glob_match_char_class(pattern, start, c) {
         }
     }
 
-    if i < len(pattern) { i = i + 1 }  // skip ]
+    if i < len(pattern) { i = i + 1 }
     if negate { matched = !matched }
     {"matched": matched, "end_pos": i}
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 19. Full Diff with Patience Algorithm
-// ════════════════════════════════════════════════════════════════════
-
 func diff_patience(a_lines, b_lines) {
-    // Find unique common lines
     let a_unique = {"__s": true}
     let b_unique = {"__s": true}
 
-    // Count occurrences in A
     let ai = 0
     for line in a_lines {
         if a_unique.has(line) {
-            a_unique[line] = -1  // Not unique
+            a_unique[line] = -1
         } else {
             a_unique[line] = ai
         }
         ai = ai + 1
     }
 
-    // Count occurrences in B
     let bi = 0
     for line in b_lines {
         if b_unique.has(line) {
-            b_unique[line] = -1  // Not unique
+            b_unique[line] = -1
         } else {
             b_unique[line] = bi
         }
         bi = bi + 1
     }
 
-    // Find unique common lines
     let common = []
     for line in a_unique.keys() {
         if line == "__s" { continue }
@@ -7458,25 +6529,20 @@ func diff_patience(a_lines, b_lines) {
         }
     }
 
-    // Sort by position in A
     common = sort_by(common, c => c["a_idx"])
 
-    // Find longest increasing subsequence of B indices (patience sorting)
     const lis = diff_lis(common.map(c => c["b_idx"]))
 
-    // Build diff from LIS anchors
     let anchors = []
     for idx in lis {
         anchors.push(common[idx])
     }
 
-    // Generate hunks between anchors
     let hunks = []
     let a_pos = 0
     let b_pos = 0
 
     for anchor in anchors {
-        // Lines before anchor
         if a_pos < anchor["a_idx"] || b_pos < anchor["b_idx"] {
             const hunk = diff_build_hunk(a_lines, b_lines, a_pos, anchor["a_idx"], b_pos, anchor["b_idx"])
             if hunk != null { hunks.push(hunk) }
@@ -7485,7 +6551,6 @@ func diff_patience(a_lines, b_lines) {
         b_pos = anchor["b_idx"] + 1
     }
 
-    // Lines after last anchor
     if a_pos < len(a_lines) || b_pos < len(b_lines) {
         const hunk = diff_build_hunk(a_lines, b_lines, a_pos, len(a_lines), b_pos, len(b_lines))
         if hunk != null { hunks.push(hunk) }
@@ -7495,14 +6560,12 @@ func diff_patience(a_lines, b_lines) {
 }
 
 func diff_lis(arr) {
-    // Longest increasing subsequence using patience sorting
     if len(arr) == 0 { return [] }
     let piles = []
     let indices = []
 
     let i = 0
     for val in arr {
-        // Binary search for leftmost pile with top >= val
         let lo = 0
         let hi = len(piles)
         while lo < hi {
@@ -7552,11 +6615,6 @@ func diff_format_unified(hunks, a_name, b_name) {
     }
     out_str
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 20. Binary Search Tree
-// ════════════════════════════════════════════════════════════════════
-
 func bst_new() { null }
 
 func bst_node(key, value, left, right) {
@@ -7571,7 +6629,6 @@ func bst_insert(node, key, value) {
     if key > node["key"] {
         return bst_node(node["key"], node["value"], node["left"], bst_insert(node["right"], key, value))
     }
-    // Equal: update value
     bst_node(key, value, node["left"], node["right"])
 }
 
@@ -7590,10 +6647,8 @@ func bst_delete(node, key) {
     if key > node["key"] {
         return bst_node(node["key"], node["value"], node["left"], bst_delete(node["right"], key))
     }
-    // Found: delete this node
     if node["left"] == null { return node["right"] }
     if node["right"] == null { return node["left"] }
-    // Two children: replace with in-order successor
     const succ = bst_min_node(node["right"])
     bst_node(succ["key"], succ["value"], node["left"], bst_delete(node["right"], succ["key"]))
 }
@@ -7621,11 +6676,6 @@ func bst_height(node) {
     const rh = bst_height(node["right"])
     1 + max(lh, rh)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 21. AVL Tree
-// ════════════════════════════════════════════════════════════════════
-
 func avl_node(key, value, left, right, height) {
     {"key": key, "value": value, "left": left, "right": right, "height": height}
 }
@@ -7665,20 +6715,16 @@ func avl_balance(node) {
     const node_upd = avl_update_height(node)
     const bf = avl_balance_factor(node_upd)
 
-    // Left heavy
     if bf > 1 {
         if avl_balance_factor(node_upd["left"]) < 0 {
-            // Left-Right case
             const new_left = avl_rotate_left(node_upd["left"])
             return avl_rotate_right(avl_node(node_upd["key"], node_upd["value"], new_left, node_upd["right"], node_upd["height"]))
         }
         return avl_rotate_right(node_upd)
     }
 
-    // Right heavy
     if bf < -1 {
         if avl_balance_factor(node_upd["right"]) > 0 {
-            // Right-Left case
             const new_right = avl_rotate_right(node_upd["right"])
             return avl_rotate_left(avl_node(node_upd["key"], node_upd["value"], node_upd["left"], new_right, node_upd["height"]))
         }
@@ -7702,7 +6748,7 @@ func avl_insert(node, key, value) {
 }
 
 func avl_find(node, key) {
-    bst_find(node, key)  // Same traversal as BST
+    bst_find(node, key)
 }
 
 func avl_delete(node, key) {
@@ -7721,11 +6767,6 @@ func avl_delete(node, key) {
     const new_right = avl_delete(node["right"], succ["key"])
     avl_balance(avl_node(succ["key"], succ["value"], node["left"], new_right, 0))
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 22. Red-Black Tree Fundamentals
-// ════════════════════════════════════════════════════════════════════
-
 const RB_RED = 0
 const RB_BLACK = 1
 
@@ -7742,7 +6783,6 @@ func rb_is_red(node) {
 }
 
 func rb_insert(tree, key, value) {
-    // Standard BST insert
     let new_node = rb_node(key, value, RB_RED, null, null, null)
 
     if tree["root"] == null {
@@ -7750,7 +6790,6 @@ func rb_insert(tree, key, value) {
         return {"root": new_node, "size": 1}
     }
 
-    // Insert as in BST
     let current = tree["root"]
     let parent = null
     while current != null {
@@ -7760,7 +6799,6 @@ func rb_insert(tree, key, value) {
         } else if key > current["key"] {
             current = current["right"]
         } else {
-            // Update existing
             current["value"] = value
             return tree
         }
@@ -7773,17 +6811,14 @@ func rb_insert(tree, key, value) {
         parent["right"] = new_node
     }
 
-    // Fix red-black violations
     const fixed_root = rb_fix_insert(tree["root"], new_node)
     fixed_root["color"] = RB_BLACK
     {"root": fixed_root, "size": tree["size"] + 1}
 }
 
 func rb_fix_insert(root, node) {
-    // Simplified fix-up: ensure root is black
     if node == null { return root }
     let current = node
-    // Walk up to root and fix colors
     while current != null && current["parent"] != null && rb_is_red(current["parent"]) {
         const parent = current["parent"]
         const grandparent = parent["parent"]
@@ -7792,21 +6827,16 @@ func rb_fix_insert(root, node) {
         if parent == grandparent["left"] {
             const uncle = grandparent["right"]
             if rb_is_red(uncle) {
-                // Case 1: Uncle is red
                 parent["color"] = RB_BLACK
                 uncle["color"] = RB_BLACK
                 grandparent["color"] = RB_RED
                 current = grandparent
             } else {
                 if current == parent["right"] {
-                    // Case 2: Triangle
                     current = parent
-                    // Would rotate left here
                 }
-                // Case 3: Line
                 parent["color"] = RB_BLACK
                 grandparent["color"] = RB_RED
-                // Would rotate right here
                 break
             }
         } else {
@@ -7840,12 +6870,6 @@ func rb_inorder(tree) {
 func rb_size(tree) {
     tree["size"]
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 13. MessagePack Encoder/Decoder
-// ════════════════════════════════════════════════════════════════════
-
-// MessagePack format type codes
 const MSGPACK_NIL = 0xc0
 const MSGPACK_FALSE = 0xc2
 const MSGPACK_TRUE = 0xc3
@@ -7867,7 +6891,6 @@ const MSGPACK_ARRAY32 = 0xdd
 const MSGPACK_MAP16 = 0xde
 const MSGPACK_MAP32 = 0xdf
 
-// Encode a MAGI value to MessagePack bytes (as array of ints 0-255)
 func msgpack_encode(value) {
     let bytes = []
     msgpack_encode_value(value, bytes)
@@ -7912,16 +6935,13 @@ func msgpack_encode_value(value, bytes) {
         return
     }
 
-    // Default: encode as string representation
     msgpack_encode_string(to_string(value), bytes)
 }
 
 func msgpack_encode_int(n, bytes) {
     if n >= 0 && n <= 127 {
-        // Positive fixint
         bytes.push(n)
     } else if n >= -32 && n < 0 {
-        // Negative fixint
         bytes.push(256 + n)
     } else if n >= -128 && n <= 127 {
         bytes.push(MSGPACK_INT8)
@@ -7940,7 +6960,6 @@ func msgpack_encode_int(n, bytes) {
         bytes.push(u % 256)
     } else {
         bytes.push(MSGPACK_INT64)
-        // Encode 8 bytes big-endian
         let v = if n < 0 { 0 - n } else { n }
         let buf = []
         let i = 0
@@ -7950,15 +6969,13 @@ func msgpack_encode_int(n, bytes) {
             i = i + 1
         }
         buf.reverse()
-        if n < 0 { buf[0] = buf[0] + 128 } // Set sign bit
+        if n < 0 { buf[0] = buf[0] + 128 }
         for b in buf { bytes.push(b) }
     }
 }
 
 func msgpack_encode_float(f, bytes) {
     bytes.push(MSGPACK_FLOAT64)
-    // IEEE 754 double: simplified encoding (8 bytes big-endian)
-    // In practice, would use bitwise ops; here encode as string hack
     let i = 0
     while i < 8 {
         bytes.push(0)
@@ -7969,7 +6986,6 @@ func msgpack_encode_float(f, bytes) {
 func msgpack_encode_string(s, bytes) {
     const n = len(s)
     if n <= 31 {
-        // fixstr
         bytes.push(0xa0 + n)
     } else if n <= 255 {
         bytes.push(MSGPACK_STR8)
@@ -7985,7 +7001,6 @@ func msgpack_encode_string(s, bytes) {
         bytes.push((n / 256) % 256)
         bytes.push(n % 256)
     }
-    // Encode UTF-8 bytes
     let i = 0
     while i < n {
         bytes.push(char_code_at(s, i))
@@ -8035,9 +7050,8 @@ func msgpack_encode_map(m, bytes) {
     }
 }
 
-// Decode MessagePack bytes to a MAGI value
 func msgpack_decode(bytes) {
-    let pos = [0] // Use array for pass-by-reference
+    let pos = [0]
     msgpack_decode_value(bytes, pos)
 }
 
@@ -8046,25 +7060,20 @@ func msgpack_decode_value(bytes, pos) {
     const b = bytes[pos[0]]
     pos[0] = pos[0] + 1
 
-    // Positive fixint
     if b <= 0x7f { return b }
 
-    // Negative fixint
     if b >= 0xe0 { return b - 256 }
 
-    // fixstr
     if b >= 0xa0 && b <= 0xbf {
         const n = b - 0xa0
         return msgpack_read_string(bytes, pos, n)
     }
 
-    // fixarray
     if b >= 0x90 && b <= 0x9f {
         const n = b - 0x90
         return msgpack_read_array(bytes, pos, n)
     }
 
-    // fixmap
     if b >= 0x80 && b <= 0x8f {
         const n = b - 0x80
         return msgpack_read_map(bytes, pos, n)
@@ -8113,11 +7122,11 @@ func msgpack_decode_value(bytes, pos) {
         },
         MSGPACK_FLOAT32 => {
             pos[0] = pos[0] + 4
-            0.0 // Simplified: would need IEEE 754 decode
+            0.0
         },
         MSGPACK_FLOAT64 => {
             pos[0] = pos[0] + 8
-            0.0 // Simplified: would need IEEE 754 decode
+            0.0
         },
         MSGPACK_STR8 => {
             const n = bytes[pos[0]]; pos[0] = pos[0] + 1
@@ -8189,12 +7198,6 @@ func msgpack_read_map(bytes, pos, n) {
     }
     result
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 14. CBOR Encoder/Decoder
-// ════════════════════════════════════════════════════════════════════
-
-// CBOR major types
 const CBOR_UNSIGNED = 0
 const CBOR_NEGATIVE = 1
 const CBOR_BYTES = 2
@@ -8212,7 +7215,7 @@ func cbor_encode(value) {
 
 func cbor_encode_value(value, bytes) {
     if value == null {
-        bytes.push(0xf6) // null
+        bytes.push(0xf6)
         return
     }
     const t = typeof(value)
@@ -8229,9 +7232,9 @@ func cbor_encode_value(value, bytes) {
         return
     }
     if t == "float64" {
-        bytes.push(0xfb) // float64
+        bytes.push(0xfb)
         let i = 0
-        while i < 8 { bytes.push(0); i = i + 1 } // Simplified
+        while i < 8 { bytes.push(0); i = i + 1 }
         return
     }
     if t == "string" {
@@ -8335,9 +7338,9 @@ func cbor_decode_value(bytes, pos) {
                 0xf4 => false,
                 0xf5 => true,
                 0xf6 => null,
-                0xf7 => null, // undefined
-                0xfb => { pos[0] = pos[0] + 8; 0.0 }, // float64
-                0xfa => { pos[0] = pos[0] + 4; 0.0 }, // float32
+                0xf7 => null,
+                0xfb => { pos[0] = pos[0] + 8; 0.0 },
+                0xfa => { pos[0] = pos[0] + 4; 0.0 },
                 _ => null,
             }
         },
@@ -8367,12 +7370,6 @@ func cbor_read_uint(info, bytes, pos) {
     }
     0
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 15. Date/Time Library (Full)
-// ════════════════════════════════════════════════════════════════════
-
-// Days in each month (non-leap)
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                      "July", "August", "September", "October", "November", "December"]
@@ -8394,7 +7391,6 @@ func days_in_year(year) {
     if is_leap_year(year) { 366 } else { 365 }
 }
 
-// Create a datetime
 func datetime_new(year, month, day, hour, minute, second) {
     {
         "year": year, "month": month, "day": day,
@@ -8405,7 +7401,6 @@ func datetime_new(year, month, day, hour, minute, second) {
     }
 }
 
-// Day of week (Zeller's congruence): 0=Sunday, 6=Saturday
 func day_of_week(year, month, day) {
     let y = year
     let m = month
@@ -8417,7 +7412,6 @@ func day_of_week(year, month, day) {
     ((h + 6) % 7)
 }
 
-// Day of year (1-based)
 func day_of_year(year, month, day) {
     let doy = 0
     let m = 1
@@ -8428,7 +7422,6 @@ func day_of_year(year, month, day) {
     doy + day
 }
 
-// ISO week number
 func iso_week(year, month, day) {
     const doy = day_of_year(year, month, day)
     const dow = day_of_week(year, month, day)
@@ -8439,7 +7432,6 @@ func iso_week(year, month, day) {
     else { week }
 }
 
-// Format a datetime using strftime-like format string
 func datetime_format(dt, fmt) {
     let result = ""
     let i = 0
@@ -8500,7 +7492,6 @@ func pad_number(n, width) {
     s
 }
 
-// Parse a datetime from string
 func datetime_parse(s, fmt) {
     let year = 2000
     let month = 1
@@ -8543,7 +7534,6 @@ func parse_digits(s, start, count) {
     to_int64(num_str)
 }
 
-// Datetime arithmetic
 func datetime_add_days(dt, days) {
     let y = dt["year"]
     let m = dt["month"]
@@ -8579,14 +7569,12 @@ func datetime_add_hours(dt, hours) {
 }
 
 func datetime_diff_days(a, b) {
-    // Simplified: count days from epoch for each
     let da = date_to_epoch_days(a["year"], a["month"], a["day"])
     let db = date_to_epoch_days(b["year"], b["month"], b["day"])
     da - db
 }
 
 func date_to_epoch_days(year, month, day) {
-    // Days from year 0 (simplified Julian day count)
     let y = year
     let m = month
     if m <= 2 { y = y - 1; m = m + 12 }
@@ -8594,11 +7582,6 @@ func date_to_epoch_days(year, month, day) {
     const B = 2 - A + A / 4
     (365 * (y + 4716)) / 1 + (30 * (m + 1) + 3) / 5 + day + B - 1524
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 16. Path Library (Full)
-// ════════════════════════════════════════════════════════════════════
-
 func path_normalize(path) {
     let parts = path.split("/")
     let result = []
@@ -8668,14 +7651,12 @@ func path_relative(from, to) {
     const from_parts = path_normalize(from).split("/").filter(p => len(p) > 0)
     const to_parts = path_normalize(to).split("/").filter(p => len(p) > 0)
 
-    // Find common prefix
     let common = 0
     while common < len(from_parts) && common < len(to_parts) {
         if from_parts[common] != to_parts[common] { break }
         common = common + 1
     }
 
-    // Build relative path
     let result = []
     let ups = len(from_parts) - common
     while ups > 0 { result.push(".."); ups = ups - 1 }
@@ -8685,7 +7666,6 @@ func path_relative(from, to) {
     if len(result) == 0 { "." } else { result.join("/") }
 }
 
-// Simple glob matching
 func glob_match(pattern, path) {
     glob_match_rec(pattern, 0, path, 0)
 }
@@ -8695,10 +7675,8 @@ func glob_match_rec(pattern, pi, str, si) {
         const pc = pattern[pi]
         if pc == "*" {
             if pi + 1 < len(pattern) && pattern[pi + 1] == "*" {
-                // ** matches any depth
                 pi = pi + 2
                 if pi < len(pattern) && pattern[pi] == "/" { pi = pi + 1 }
-                // Try matching rest at every position
                 let s = si
                 while s <= len(str) {
                     if glob_match_rec(pattern, pi, str, s) { return true }
@@ -8706,7 +7684,6 @@ func glob_match_rec(pattern, pi, str, si) {
                 }
                 return false
             }
-            // * matches anything except /
             pi = pi + 1
             let s = si
             while s <= len(str) {
@@ -8726,21 +7703,13 @@ func glob_match_rec(pattern, pi, str, si) {
         pi = pi + 1
         si = si + 1
     }
-    // Consume trailing stars
     while pi < len(pattern) && pattern[pi] == "*" { pi = pi + 1 }
     pi == len(pattern) && si == len(str)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 17. Stream Processing (Lazy Iterators)
-// ════════════════════════════════════════════════════════════════════
-
-// Create a lazy iterator from an array
 func stream_from(source) {
     {"__stream": true, "__source": source, "__ops": [], "__index": 0}
 }
 
-// Create a range stream
 func stream_range(start, end) {
     let arr = []
     let i = start
@@ -8748,49 +7717,42 @@ func stream_range(start, end) {
     stream_from(arr)
 }
 
-// Lazy map
 func stream_map(stream, cb) {
     let new_stream = stream_clone(stream)
     new_stream["__ops"].push({"type": "map", "fn": cb})
     new_stream
 }
 
-// Lazy filter
 func stream_filter(stream, cb) {
     let new_stream = stream_clone(stream)
     new_stream["__ops"].push({"type": "filter", "fn": cb})
     new_stream
 }
 
-// Lazy take
 func stream_take(stream, n) {
     let new_stream = stream_clone(stream)
     new_stream["__ops"].push({"type": "take", "n": n})
     new_stream
 }
 
-// Lazy skip
 func stream_skip(stream, n) {
     let new_stream = stream_clone(stream)
     new_stream["__ops"].push({"type": "skip", "n": n})
     new_stream
 }
 
-// Lazy flat_map
 func stream_flat_map(stream, cb) {
     let new_stream = stream_clone(stream)
     new_stream["__ops"].push({"type": "flat_map", "fn": cb})
     new_stream
 }
 
-// Clone a stream
 func stream_clone(stream) {
     let ops = []
     for op in stream["__ops"] { ops.push(op) }
     {"__stream": true, "__source": stream["__source"], "__ops": ops, "__index": 0}
 }
 
-// Collect stream to array (evaluate lazily)
 func stream_collect(stream) {
     let items = []
     const source = stream["__source"]
@@ -8798,7 +7760,6 @@ func stream_collect(stream) {
         for item in source { items.push(item) }
     }
 
-    // Apply each operation
     for op in stream["__ops"] {
         match op["type"] {
             "map" => {
@@ -8832,7 +7793,6 @@ func stream_collect(stream) {
     items
 }
 
-// Terminal operations
 func stream_reduce(stream, initial, cb) {
     const items = stream_collect(stream)
     let acc = initial
@@ -8863,22 +7823,14 @@ func stream_find(stream, cb) {
     const items = stream_collect(stream)
     items.find(cb)
 }
-
-// ════════════════════════════════════════════════════════════════════
-// 18. Promise/Future Combinators
-// ════════════════════════════════════════════════════════════════════
-
-// Create a resolved promise
 func promise_resolve(value) {
     {"__promise": true, "__state": "fulfilled", "__value": value, "__handlers": []}
 }
 
-// Create a rejected promise
 func promise_reject(reason) {
     {"__promise": true, "__state": "rejected", "__value": reason, "__handlers": []}
 }
 
-// Create a pending promise
 let __promise_current = null
 func promise_new(executor) {
     let p = {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
@@ -8889,7 +7841,6 @@ func promise_new(executor) {
     p
 }
 
-// Chain: .then(on_fulfilled, on_rejected)
 func promise_then(p, on_fulfilled, on_rejected) {
     let next = {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
 
@@ -8908,12 +7859,10 @@ func promise_then(p, on_fulfilled, on_rejected) {
     next
 }
 
-// Catch shorthand
 func promise_catch(p, on_rejected) {
     promise_then(p, null, on_rejected)
 }
 
-// Finally shorthand
 func promise_finally(p, on_finally) {
     promise_then(p,
         v => { on_finally(); v },
@@ -8921,7 +7870,6 @@ func promise_finally(p, on_finally) {
     )
 }
 
-// Flush pending handlers
 func promise_flush(p) {
     for handler in p["__handlers"] {
         promise_handle(p, handler)
@@ -8953,7 +7901,6 @@ func promise_handle(p, handler) {
     promise_flush(next)
 }
 
-// Promise.all — resolve when all resolve
 func promise_all(promises) {
     if len(promises) == 0 { return promise_resolve([]) }
     let results = []
@@ -8973,7 +7920,6 @@ func promise_all(promises) {
     else { {"__promise": true, "__state": "pending", "__value": null, "__handlers": []} }
 }
 
-// Promise.race — resolve/reject with first settled
 func promise_race(promises) {
     for p in promises {
         if p["__state"] != "pending" { return p }
@@ -8981,7 +7927,6 @@ func promise_race(promises) {
     {"__promise": true, "__state": "pending", "__value": null, "__handlers": []}
 }
 
-// Promise.allSettled — wait for all to settle
 func promise_all_settled(promises) {
     let results = []
     for p in promises {
@@ -8996,7 +7941,6 @@ func promise_all_settled(promises) {
     promise_resolve(results)
 }
 
-// Promise.any — resolve with first fulfilled
 func promise_any(promises) {
     let errors = []
     for p in promises {

@@ -1,28 +1,15 @@
-// MAGI Self-Hosted Compiler — Intermediate Representation
-//
-// Shared IR used by all compilation backends.
-// Stack-based instruction set that maps naturally to WASM.
-//
-// NOTE: MAGI struct fields are value-typed (arrays inside structs are copies).
-// All mutable IR state uses module-level variables (like the parser/lexer).
-
-// ── Instruction ──────────────────────────────────────────────────
-
 enum Instruction {
-    // Constants
     PushNull,
     PushBool(bool),
     PushI64(int),
     PushF64(float),
-    PushString(int),   // index into string pool
+    PushString(int),
 
-    // Locals & Globals
     LocalGet(int),
     LocalSet(int),
     GlobalGet(int),
     GlobalSet(int),
 
-    // Arithmetic (i64)
     I64Add,
     I64Sub,
     I64Mul,
@@ -30,13 +17,11 @@ enum Instruction {
     I64Rem,
     I64Neg,
 
-    // Arithmetic (f64)
     F64Add,
     F64Sub,
     F64Mul,
     F64Div,
 
-    // Comparison (i64)
     I64Eq,
     I64Ne,
     I64Lt,
@@ -44,10 +29,8 @@ enum Instruction {
     I64Le,
     I64Ge,
 
-    // Logical
     BoolNot,
 
-    // Control flow
     Block,
     Loop,
     End,
@@ -59,16 +42,13 @@ enum Instruction {
     Return,
     Drop,
 
-    // Functions & I/O
-    Call(string, int),  // name, arg_count
+    Call(string, int),
     Print,
 
-    // Collections
-    ArrayNew(int),   // element count
+    ArrayNew(int),
     ArrayGet,
     StringConcat,
 
-    // Runtime dispatch
     RuntimeCall(string),
 }
 
@@ -118,18 +98,10 @@ func Instruction.dump(self) {
         Instruction::RuntimeCall(name) => f"runtime_call({name})",
     }
 }
-
-// ── IrLocal ───────────────────────────────────────────────────────
-
 struct IrLocal {
     name: string,
     idx: int,
 }
-
-// ── IrFunction ───────────────────────────────────────────────────
-// Stored as an array of maps in the module's functions list.
-// Each function is a map: { name, param_count, locals, instructions }
-
 func ir_func_new(name, param_count) {
     { "name": name, "param_count": param_count, "locals": [], "instructions": [] }
 }
@@ -151,10 +123,6 @@ func ir_func_find_local(f, name) {
     }
     found
 }
-
-// ── IrModule ─────────────────────────────────────────────────────
-// Stored as module-level mutable arrays.
-
 let ir_strings = []
 let ir_functions = []
 let ir_globals = []
@@ -165,7 +133,6 @@ func ir_module_reset() {
     ir_globals = []
 }
 
-// Intern a string, return its index
 func ir_intern_string(s) {
     let i = 0
     while i < len(ir_strings) {
@@ -179,12 +146,10 @@ func ir_intern_string(s) {
     idx
 }
 
-// Add a function to the module
 func ir_add_function(f) {
     ir_functions.push(f)
 }
 
-// Find a function by name, return index or -1
 func ir_find_function(name) {
     let i = 0
     while i < len(ir_functions) {
@@ -196,9 +161,6 @@ func ir_find_function(name) {
     }
     -1
 }
-
-// ── Test helper: create a snapshot of current module state ────────
-
 func ir_snapshot() {
     {
         "functions": ir_functions,

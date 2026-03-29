@@ -1,17 +1,7 @@
-// MAGI Self-Hosted Compiler — Platform FFI
-//
-// Provides OS-level access: terminal raw mode, SDL2 graphics, PulseAudio audio.
-// All operations delegate to stage 0 builtins.
-
-// ── Terminal (Termios FFI) ──────────────────────────────────────────
-
 func platform_raw_mode_enable() { raw_mode_enable() }
 func platform_raw_mode_disable() { raw_mode_disable() }
 func platform_read_byte() { read_byte() }
 func platform_read_byte_timeout(deciseconds) { read_byte_timeout(deciseconds) }
-
-// ── SDL2 Graphics ───────────────────────────────────────────────────
-
 func platform_sdl_init(title, width, height) { sdl_init(title, width, height) }
 func platform_sdl_set_color(handle, r, g, b) { sdl_set_color(handle, r, g, b) }
 func platform_sdl_clear(handle) { sdl_clear(handle) }
@@ -24,20 +14,13 @@ func platform_sdl_delay(ms) { sdl_delay(ms) }
 func platform_sdl_ticks(handle) { sdl_ticks(handle) }
 func platform_sdl_destroy(handle) { sdl_destroy(handle) }
 
-// SDL event constants
 const SDL_QUIT_EVENT = 256
 const SDL_KEYDOWN = 768
 const SDL_KEYUP = 769
-
-// ── PulseAudio Streaming ────────────────────────────────────────────
-
 func platform_audio_stream_new(sample_rate) { audio_stream_new(sample_rate) }
 func platform_audio_write_samples(handle, samples) { audio_write_samples(handle, samples) }
 func platform_audio_drain(handle) { audio_drain(handle) }
 func platform_audio_close(handle) { audio_close(handle) }
-
-// ── WebGPU (WASM target) ────────────────────────────────────────────
-
 func platform_gpu_init(canvas) { gpu_init(canvas) }
 func platform_gpu_create_buffer(device, size, usage) { gpu_create_buffer(device, size, usage) }
 func platform_gpu_create_shader(device, code) { gpu_create_shader(device, code) }
@@ -50,19 +33,12 @@ func platform_gpu_present(device) { gpu_present(device) }
 func platform_gpu_write_buffer(device, buffer, data) { gpu_write_buffer(device, buffer, data) }
 func platform_gpu_create_texture(device, width, height, format) { gpu_create_texture(device, width, height, format) }
 func platform_gpu_destroy(device) { gpu_destroy(device) }
-
-// ── OS Detection ────────────────────────────────────────────────────
-
 func platform_os() { os_name() }
 func platform_arch() { env_get("MAGI_BUILD_TARGET") ?? "unknown" }
 func platform_is_linux() { platform_os() == "linux" }
 func platform_is_macos() { platform_os() == "macos" }
 func platform_is_windows() { platform_os() == "windows" }
-
-// ── Terminal Dimensions ─────────────────────────────────────────────
-
 func platform_terminal_width() {
-    // Default 80 columns — stage 0 uses ioctl TIOCGWINSZ
     const cols = env_get("COLUMNS")
     if cols != null { return parse_int(cols) ?? 80 }
     80
@@ -79,7 +55,6 @@ func platform_terminal_size() {
 }
 
 func platform_is_tty() {
-    // Check if stdout is a terminal
     env_get("TERM") != null
 }
 
@@ -89,9 +64,6 @@ func platform_supports_color() {
     const term = env_get("TERM") ?? ""
     term.contains("color") || term.contains("xterm") || term.contains("screen") || term.contains("256")
 }
-
-// ── Environment Helpers ─────────────────────────────────────────────
-
 func platform_home_dir() {
     env_get("HOME") ?? env_get("USERPROFILE") ?? "/"
 }
@@ -117,9 +89,6 @@ func platform_shared_lib_extension() {
     else if platform_is_windows() { ".dll" }
     else { ".so" }
 }
-
-// ── Process Info ────────────────────────────────────────────────────
-
 func platform_pid() { pid() }
 func platform_cwd() { cwd() }
 
@@ -127,9 +96,6 @@ func platform_env_get(key) { env_get(key) }
 func platform_env_set(key, value) { env_set(key, value) }
 func platform_env_has(key) { env_has(key) }
 func platform_env_keys() { env_keys() }
-
-// ── SDL2 Scancode Constants ─────────────────────────────────────────
-
 const SCANCODE_A = 4
 const SCANCODE_B = 5
 const SCANCODE_C = 6

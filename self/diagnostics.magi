@@ -1,22 +1,8 @@
-// MAGI Self-Hosted Compiler — Diagnostics Engine
-//
-// Renders compiler errors and warnings with ariadne-style output:
-//   - Source-annotated error messages with line/column spans
-//   - Color-coded severity (error = red, warning = yellow, info = blue)
-//   - Multi-line span support
-//   - Related information and suggestions
-//   - Machine-readable JSON output mode
-
-// ══════════════════════════════════════════════════════════════════
-// ── Diagnostic Types ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 const SEVERITY_ERROR = "error"
 const SEVERITY_WARNING = "warning"
 const SEVERITY_INFO = "info"
 const SEVERITY_HINT = "hint"
 
-// Create a diagnostic
 func diag_new(severity, code, message, file, line, col) {
     {
         "severity": severity,
@@ -33,7 +19,6 @@ func diag_new(severity, code, message, file, line, col) {
     }
 }
 
-// Add a label (annotation) to a diagnostic
 func diag_add_label(diag, line, col, end_line, end_col, message, style) {
     let labels = diag["labels"]
     labels.push({
@@ -48,7 +33,6 @@ func diag_add_label(diag, line, col, end_line, end_col, message, style) {
     diag
 }
 
-// Add a note to a diagnostic
 func diag_add_note(diag, note) {
     let notes = diag["notes"]
     notes.push(note)
@@ -56,7 +40,6 @@ func diag_add_note(diag, note) {
     diag
 }
 
-// Add a suggestion (fix) to a diagnostic
 func diag_add_suggestion(diag, message, replacement, line, col, end_line, end_col) {
     let suggestions = diag["suggestions"]
     suggestions.push({
@@ -70,11 +53,6 @@ func diag_add_suggestion(diag, message, replacement, line, col, end_line, end_co
     diag["suggestions"] = suggestions
     diag
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── ANSI Color Codes ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 const ANSI_RESET = "\x1b[0m"
 const ANSI_BOLD = "\x1b[1m"
 const ANSI_DIM = "\x1b[2m"
@@ -105,12 +83,6 @@ func diag_severity_prefix(severity) {
         _ => "note"
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Text Rendering (Ariadne-style) ──────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Render a diagnostic to a human-readable string
 func diag_render(diag, source) {
     let lines = []
     const sev = diag["severity"]
@@ -123,7 +95,6 @@ func diag_render(diag, source) {
     const color = diag_severity_color(sev)
     const prefix = diag_severity_prefix(sev)
 
-    // Header: error[E001]: message
     let header = ANSI_BOLD + color + prefix
     if code != null && code != "" {
         header = header + "[" + code + "]"
@@ -131,20 +102,16 @@ func diag_render(diag, source) {
     header = header + ANSI_RESET + ANSI_BOLD + ": " + msg + ANSI_RESET
     lines.push(header)
 
-    // Location: --> file:line:col
     const location = ANSI_BLUE + "  --> " + ANSI_RESET + file + ":" + to_string(line_num) + ":" + to_string(col_num)
     lines.push(location)
 
-    // Source context
     if source != null && source != "" {
         const src_lines = source.split("\n")
         const gutter_width = len(to_string(line_num + 2))
 
-        // Show lines around the error
         const start_line = max(1, line_num - 1)
         const end_line_num = min(len(src_lines), line_num + 1)
 
-        // Blank gutter line
         lines.push(ANSI_BLUE + diag_pad_right("", gutter_width) + " |" + ANSI_RESET)
 
         let i = start_line
@@ -156,15 +123,12 @@ func diag_render(diag, source) {
                 const padded_num = diag_pad_left(line_str, gutter_width)
 
                 if i == line_num {
-                    // Error line
                     lines.push(ANSI_BLUE + padded_num + " | " + ANSI_RESET + src_line)
 
-                    // Underline
                     let underline = ""
                     let j = 0
                     while j < col_num - 1 { underline = underline + " "; j = j + 1 }
 
-                    // Primary label
                     const labels = diag["labels"]
                     let label_msg = ""
                     let underline_len = 1
@@ -187,24 +151,20 @@ func diag_render(diag, source) {
 
                     lines.push(ANSI_BLUE + underline_str)
                 } else {
-                    // Context line
                     lines.push(ANSI_BLUE + padded_num + " | " + ANSI_RESET + ANSI_DIM + src_line + ANSI_RESET)
                 }
             }
             i = i + 1
         }
 
-        // Closing gutter
         lines.push(ANSI_BLUE + diag_pad_right("", gutter_width) + " |" + ANSI_RESET)
     }
 
-    // Notes
     const notes = diag["notes"]
     for note in notes {
         lines.push(ANSI_BLUE + "  = " + ANSI_RESET + ANSI_BOLD + "note" + ANSI_RESET + ": " + note)
     }
 
-    // Suggestions
     const suggestions = diag["suggestions"]
     for sug in suggestions {
         lines.push(ANSI_GREEN + "  = " + ANSI_RESET + ANSI_BOLD + "help" + ANSI_RESET + ": " + sug["message"])
@@ -213,14 +173,9 @@ func diag_render(diag, source) {
         }
     }
 
-    lines.push("") // blank line after diagnostic
+    lines.push("")
     lines.join("\n")
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── JSON Output Mode ────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func diag_to_json(diag) {
     let labels = []
     for label in diag["labels"] {
@@ -243,12 +198,6 @@ func diag_to_json(diag) {
         "suggestions": diag["suggestions"]
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Diagnostic Collection ───────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// A diagnostic collector accumulates diagnostics and renders them
 let diag_collected = []
 let diag_error_count = 0
 let diag_warning_count = 0
@@ -272,7 +221,6 @@ func diag_render_all(source) {
     for d in diag_collected {
         out_str = out_str + diag_render(d, source)
     }
-    // Summary
     if diag_error_count > 0 || diag_warning_count > 0 {
         let parts = []
         if diag_error_count > 0 {
@@ -293,11 +241,6 @@ func diag_render_all_json() {
     }
     to_json(items)
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Utility Functions ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func diag_pad_left(s, width) {
     let result = s
     while len(result) < width { result = " " + result }
@@ -309,11 +252,6 @@ func diag_pad_right(s, width) {
     while len(result) < width { result = result + " " }
     result
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Convenience Constructors ────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func diag_error(code, message, file, line, col) {
     diag_new(SEVERITY_ERROR, code, message, file, line, col)
 }
@@ -330,7 +268,6 @@ func diag_hint(code, message, file, line, col) {
     diag_new(SEVERITY_HINT, code, message, file, line, col)
 }
 
-// Quick error emitter
 func diag_emit_error(code, message, file, line, col) {
     diag_emit(diag_error(code, message, file, line, col))
 }

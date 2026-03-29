@@ -1,32 +1,16 @@
-// MAGI Self-Hosted Compiler — Telemetry and Performance Stats
-//
-// Collects performance metrics during compilation and execution:
-//   - Phase timing (lex, parse, type-check, compile, etc.)
-//   - Memory usage tracking
-//   - Instruction counts
-//   - Cache hit rates
-//   - Source code metrics (LOC, function count, complexity)
-
-// ══════════════════════════════════════════════════════════════════
-// ── Phase Timer ─────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 let telemetry_timers = {"__s": true}
 let telemetry_enabled = false
 
-// Enable/disable telemetry collection
 func telemetry_enable() { telemetry_enabled = true }
 func telemetry_disable() { telemetry_enabled = false }
 func telemetry_is_enabled() { telemetry_enabled }
 
-// Start timing a phase
 func telemetry_start(phase_name) {
     if !telemetry_enabled { return null }
     const now = time_now_ms()
     telemetry_timers[phase_name] = {"start": now, "end": 0, "elapsed": 0}
 }
 
-// End timing a phase
 func telemetry_end(phase_name) {
     if !telemetry_enabled { return null }
     if !telemetry_timers.has(phase_name) { return null }
@@ -37,16 +21,10 @@ func telemetry_end(phase_name) {
     telemetry_timers[phase_name] = timer
 }
 
-// Get elapsed time for a phase in milliseconds
 func telemetry_elapsed(phase_name) {
     if !telemetry_timers.has(phase_name) || phase_name == "__s" { return 0 }
     telemetry_timers[phase_name]["elapsed"]
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Counters ────────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 let telemetry_counters = {"__s": true}
 
 func telemetry_count(name) {
@@ -70,11 +48,6 @@ func telemetry_count_add(name, amount) {
 func telemetry_get_count(name) {
     if telemetry_counters.has(name) && name != "__s" { telemetry_counters[name] } else { 0 }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Gauges (current values) ─────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 let telemetry_gauges = {"__s": true}
 
 func telemetry_gauge_set(name, value) {
@@ -85,12 +58,6 @@ func telemetry_gauge_set(name, value) {
 func telemetry_gauge_get(name) {
     if telemetry_gauges.has(name) && name != "__s" { telemetry_gauges[name] } else { 0 }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Source Code Metrics ─────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Compute metrics from source code
 func telemetry_source_metrics(source) {
     const lines = source.split("\n")
     let total_lines = len(lines)
@@ -114,7 +81,6 @@ func telemetry_source_metrics(source) {
     }
 }
 
-// Compute metrics from a parsed program
 func telemetry_program_metrics(program) {
     if program == null { return {"functions": 0, "structs": 0, "enums": 0, "imports": 0, "tests": 0} }
 
@@ -153,18 +119,11 @@ func telemetry_program_metrics(program) {
         "total_statements": len(program.statements),
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Report Generation ───────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
-// Generate a summary report
 func telemetry_report() {
     let lines = []
     lines.push("=== MAGI Telemetry Report ===")
     lines.push("")
 
-    // Phase timings
     lines.push("Phase Timings:")
     for name in telemetry_timers.keys() {
         if name == "__s" { continue }
@@ -173,7 +132,6 @@ func telemetry_report() {
     }
     lines.push("")
 
-    // Counters
     if telemetry_has_counters() {
         lines.push("Counters:")
         for name in telemetry_counters.keys() {
@@ -183,7 +141,6 @@ func telemetry_report() {
         lines.push("")
     }
 
-    // Gauges
     if telemetry_has_gauges() {
         lines.push("Gauges:")
         for name in telemetry_gauges.keys() {
@@ -193,7 +150,6 @@ func telemetry_report() {
         lines.push("")
     }
 
-    // Total time
     let total_ms = 0
     for name in telemetry_timers.keys() {
         if name != "__s" { total_ms = total_ms + telemetry_elapsed(name) }
@@ -213,7 +169,6 @@ func telemetry_has_gauges() {
     false
 }
 
-// Generate JSON report
 func telemetry_report_json() {
     let timings = {"__s": true}
     for name in telemetry_timers.keys() {
@@ -239,11 +194,6 @@ func telemetry_report_json() {
         "gauges": gauges
     })
 }
-
-// ══════════════════════════════════════════════════════════════════
-// ── Reset ───────────────────────────────────────────────────────
-// ══════════════════════════════════════════════════════════════════
-
 func telemetry_reset() {
     telemetry_timers = {"__s": true}
     telemetry_counters = {"__s": true}

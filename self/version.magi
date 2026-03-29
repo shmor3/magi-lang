@@ -1,15 +1,9 @@
-// MAGI Self-Hosted Compiler — Version Management
-//
-// Semantic versioning, feature tracking, and compatibility checks.
 
 const MAGI_VERSION_MAJOR = 1
 const MAGI_VERSION_MINOR = 0
 const MAGI_VERSION_PATCH = 0
-const MAGI_VERSION_PRE = "self"
-const MAGI_VERSION = "1.0.0-self"
-
-// ── Semver Parsing ──────────────────────────────────────────────────
-
+const MAGI_VERSION_PRE = ""
+const MAGI_VERSION = "1.0.0"
 func semver_parse(s) {
     let major = 0
     let minor = 0
@@ -59,9 +53,6 @@ func semver_compare(a, b) {
 func semver_bump_major(v) { { "major": v.major + 1, "minor": 0, "patch": 0, "pre": "", "build": "" } }
 func semver_bump_minor(v) { { "major": v.major, "minor": v.minor + 1, "patch": 0, "pre": "", "build": "" } }
 func semver_bump_patch(v) { { "major": v.major, "minor": v.minor, "patch": v.patch + 1, "pre": "", "build": "" } }
-
-// ── Constraint Checking ─────────────────────────────────────────────
-
 func semver_satisfies(version, constraint) {
     const v = if typeof(version) == "string" { semver_parse(version) } else { version }
     const trimmed = constraint.trim()
@@ -105,7 +96,6 @@ func semver_satisfies(version, constraint) {
         return semver_compare(v, target) != 0
     }
 
-    // Exact match
     const target = semver_parse(trimmed)
     semver_compare(v, target) == 0
 }
@@ -116,9 +106,6 @@ func semver_satisfies_all(version, constraints) {
     }
     true
 }
-
-// ── Feature Tracking ────────────────────────────────────────────────
-
 const MAGI_FEATURES = [
     "func_keyword",
     "interface_keyword",

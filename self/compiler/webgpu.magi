@@ -1,60 +1,32 @@
-// MAGI Self-Hosted Compiler — WebGPU Backend
-//
-// Provides the WebGPU import descriptor table and a JS host bridge template.
-// The 19 WebGPU import descriptors match the standard WebGPU WASM binding API.
-//
-// Entry points:
-//   webgpu_imports()    -> []map   — import descriptors for WASM module
-//   webgpu_js_bridge()  -> string  — JS host bridge template
-
-// ── WebGPU Import Descriptors ─────────────────────────────────────
-//
-// Each descriptor: { "module", "name", "kind", "params", "result" }
-// kind: "func" | "memory"
-// params/result use WASM value type strings: "i32", "i64", "f32", "f64", "void"
-
 func webgpu_imports() {
     [
-        // Device & adapter
         { "module": "webgpu", "name": "request_adapter",        "kind": "func", "params": [],                        "result": "i32" },
         { "module": "webgpu", "name": "request_device",         "kind": "func", "params": ["i32"],                   "result": "i32" },
         { "module": "webgpu", "name": "device_destroy",         "kind": "func", "params": ["i32"],                   "result": "void" },
 
-        // Buffers
         { "module": "webgpu", "name": "create_buffer",          "kind": "func", "params": ["i32", "i64", "i32"],     "result": "i32" },
         { "module": "webgpu", "name": "write_buffer",           "kind": "func", "params": ["i32", "i32", "i32", "i32"], "result": "void" },
         { "module": "webgpu", "name": "read_buffer",            "kind": "func", "params": ["i32", "i32", "i32"],     "result": "void" },
         { "module": "webgpu", "name": "destroy_buffer",         "kind": "func", "params": ["i32"],                   "result": "void" },
 
-        // Textures
         { "module": "webgpu", "name": "create_texture",         "kind": "func", "params": ["i32", "i32", "i32", "i32"], "result": "i32" },
         { "module": "webgpu", "name": "destroy_texture",        "kind": "func", "params": ["i32"],                   "result": "void" },
 
-        // Shader & pipeline
         { "module": "webgpu", "name": "create_shader_module",   "kind": "func", "params": ["i32", "i32"],            "result": "i32" },
         { "module": "webgpu", "name": "create_compute_pipeline","kind": "func", "params": ["i32", "i32"],            "result": "i32" },
         { "module": "webgpu", "name": "create_render_pipeline", "kind": "func", "params": ["i32", "i32"],            "result": "i32" },
         { "module": "webgpu", "name": "destroy_pipeline",       "kind": "func", "params": ["i32"],                   "result": "void" },
 
-        // Bind groups
         { "module": "webgpu", "name": "create_bind_group",      "kind": "func", "params": ["i32", "i32", "i32"],     "result": "i32" },
         { "module": "webgpu", "name": "destroy_bind_group",     "kind": "func", "params": ["i32"],                   "result": "void" },
 
-        // Command encoding & submission
         { "module": "webgpu", "name": "create_command_encoder", "kind": "func", "params": ["i32"],                   "result": "i32" },
         { "module": "webgpu", "name": "dispatch_compute",       "kind": "func", "params": ["i32", "i32", "i32", "i32", "i32"], "result": "void" },
         { "module": "webgpu", "name": "submit_commands",        "kind": "func", "params": ["i32", "i32"],            "result": "void" },
 
-        // Memory (shared linear memory for data exchange)
         { "module": "webgpu", "name": "memory",                 "kind": "memory", "params": [],                      "result": "void" },
     ]
 }
-
-// ── JS Host Bridge Template ───────────────────────────────────────
-//
-// Returns a JavaScript template string that wraps a WASM module
-// with WebGPU host function implementations.
-
 func webgpu_js_bridge() {
     "// MAGI WebGPU Host Bridge — auto-generated\n// Load with: const bridge = await magiWebGPU(wasmBytes);\n\nexport async function magiWebGPU(wasmBytes) {\n  const adapter = await navigator.gpu.requestAdapter();\n  const device  = await adapter.requestDevice();\n\n  // Handle table: maps i32 handles to GPU objects\n  const handles = new Map();\n  let   nextHandle = 1;\n  const alloc = (obj) => { const h = nextHandle++; handles.set(h, obj); return h; };\n  const get   = (h)   => handles.get(h);\n  const free  = (h)   => handles.delete(h);\n\n  let memory;\n  const getMem = () => new Uint8Array(memory.buffer);\n\n  const imports = {\n    webgpu: {\n      request_adapter:         () => alloc(adapter),\n      request_device:          (_adapterH) => alloc(device),\n      device_destroy:          (h) => { get(h)?.destroy?.(); free(h); },\n\n      create_buffer:           (devH, sizeHi, usage) => {\n        const size = Number(BigInt.asUintN(64, BigInt(sizeHi)));\n        return alloc(get(devH).createBuffer({ size, usage }));\n      },\n      write_buffer:            (bufH, offset, dataPtr, dataLen) => {\n        get(bufH) && device.queue.writeBuffer(get(bufH), offset, getMem(), dataPtr, dataLen);\n      },\n      read_buffer:             (bufH, dstPtr, byteLen) => {\n        // Async read — stub for synchronous ABI\n        void get(bufH)?.mapAsync(GPUMapMode.READ).then(() => {\n          getMem().set(new Uint8Array(get(bufH).getMappedRange(0, byteLen)), dstPtr);\n          get(bufH).unmap();\n        });\n      },\n      destroy_buffer:          (h) => { get(h)?.destroy(); free(h); },\n\n      create_texture:          (devH, w, h, fmt) => {\n        return alloc(get(devH).createTexture({ size: [w, h], format: fmt === 0 ? 'rgba8unorm' : 'r32float', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC }));\n      },\n      destroy_texture:         (h) => { get(h)?.destroy(); free(h); },\n\n      create_shader_module:    (devH, srcPtr) => {\n        const end  = getMem().indexOf(0, srcPtr);\n        const code = new TextDecoder().decode(getMem().slice(srcPtr, end));\n        return alloc(get(devH).createShaderModule({ code }));\n      },\n      create_compute_pipeline: (devH, shaderH) => {\n        return alloc(get(devH).createComputePipeline({ layout: 'auto', compute: { module: get(shaderH), entryPoint: 'main' } }));\n      },\n      create_render_pipeline:  (devH, shaderH) => {\n        return alloc(get(devH).createRenderPipeline({ layout: 'auto', vertex: { module: get(shaderH), entryPoint: 'vs_main' }, fragment: { module: get(shaderH), entryPoint: 'fs_main', targets: [{ format: 'bgra8unorm' }] } }));\n      },\n      destroy_pipeline:        (h) => free(h),\n\n      create_bind_group:       (devH, pipeH, bufH) => {\n        return alloc(get(devH).createBindGroup({ layout: get(pipeH).getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: get(bufH) } }] }));\n      },\n      destroy_bind_group:      (h) => free(h),\n\n      create_command_encoder:  (devH) => alloc(get(devH).createCommandEncoder()),\n      dispatch_compute:        (encH, pipeH, bgH, x, y) => {\n        const pass = get(encH).beginComputePass();\n        pass.setPipeline(get(pipeH));\n        pass.setBindGroup(0, get(bgH));\n        pass.dispatchWorkgroups(x, y, 1);\n        pass.end();\n      },\n      submit_commands:         (devH, encH) => {\n        const cmd = get(encH).finish();\n        get(devH).queue.submit([cmd]);\n        free(encH);\n      },\n\n      memory: null,  // filled in below\n    },\n  };\n\n  const { instance } = await WebAssembly.instantiate(wasmBytes, imports);\n  memory = instance.exports.memory;\n  imports.webgpu.memory = memory;\n\n  return instance.exports;\n}\n"
 }
