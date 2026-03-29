@@ -197,17 +197,143 @@ fn emit_native(
     let rt_path = format!("{}.magi_rt.c", output_path);
     std::fs::write(&rt_path, RUNTIME_C_SOURCE).map_err(|e| format!("write runtime: {}", e))?;
 
-    // Find SDL2 static lib in canvas package or system
-    let status = std::process::Command::new("cc")
-        .args([&obj_path, &rt_path, "-o", output_path, "-lm", "-O2"])
+    let mut link_args: Vec<String> = vec![obj_path.clone(), rt_path.clone()];
+    let mut temp_files: Vec<String> = vec![obj_path.clone(), rt_path.clone()];
+
+    // Resolve native dependencies from packages with [native] in magi.toml
+    let is_windows = target_triple.map(|t| t.contains("windows")).unwrap_or(false);
+    let platform_key = if is_windows { "windows-x86_64" } else { "linux-x86_64" };
+    let cc_cmd = if is_windows { "x86_64-w64-mingw32-gcc" } else { "cc" };
+
+    for pkg_dir in find_native_packages() {
+        let toml_path = format!("{}/magi.toml", pkg_dir);
+        if let Ok(toml) = std::fs::read_to_string(&toml_path) {
+            // Parse [native] section
+            let mut in_native = false;
+            for line in toml.lines() {
+                let trimmed = line.trim();
+                if trimmed == "[native]" { in_native = true; continue; }
+                if trimmed.starts_with('[') && trimmed != "[native]" { in_native = false; continue; }
+                if !in_native { continue; }
+
+                if trimmed.starts_with("sources") {
+                    for src in parse_toml_array(trimmed) {
+                        let src_path = format!("{}/{}", pkg_dir, src);
+                        if std::path::Path::new(&src_path).exists() {
+                            link_args.push(src_path);
+                        }
+                    }
+                }
+                if trimmed.starts_with("include") {
+                    for inc in parse_toml_array(trimmed) {
+                        let inc_path = format!("{}/{}", pkg_dir, inc);
+                        if std::path::Path::new(&inc_path).exists() {
+                            link_args.push(format!("-I{}", inc_path));
+                        }
+                    }
+                }
+                if trimmed.starts_with("link-static") && trimmed.contains(platform_key) {
+                    // Parse { linux-x86_64 = "path", windows-x86_64 = "path" }
+                    if let Some(val) = extract_platform_value(trimmed, platform_key) {
+                        let lib_path = format!("{}/{}", pkg_dir, val);
+                        if std::path::Path::new(&lib_path).exists() {
+                            link_args.push(lib_path);
+                        }
+                    }
+                }
+                if trimmed.starts_with("link-system-windows") && is_windows {
+                    for lib in parse_toml_array(trimmed) {
+                        link_args.push(format!("-l{}", lib));
+                    }
+                } else if trimmed.starts_with("link-system") && !trimmed.contains("windows") && !is_windows {
+                    for lib in parse_toml_array(trimmed) {
+                        link_args.push(format!("-l{}", lib));
+                    }
+                }
+            }
+        }
+    }
+
+    // Patch runtime to chain native package dispatchers
+    if link_args.len() > 2 {
+        // A native package was found — patch the runtime to call its dispatcher
+        let patched_rt = format!("{}.patched.c", output_path);
+        let rt_src = std::fs::read_to_string(&rt_path).unwrap_or_default();
+        let patched = rt_src.replace(
+            "// Unknown: return null",
+            "{ extern int64_t __magi_runtime_call_hook(const char*, int32_t, int64_t*); int64_t __hook_r = __magi_runtime_call_hook(name, argc, args); if (__hook_r != magi_make_null()) return __hook_r; } // Unknown: return null"
+        );
+        std::fs::write(&patched_rt, patched).ok();
+        // Replace rt_path in args
+        link_args[1] = patched_rt.clone();
+        temp_files.push(patched_rt);
+    }
+
+    link_args.push("-o".into());
+    link_args.push(output_path.into());
+    if !is_windows { link_args.push("-lm".into()); }
+    link_args.push("-O2".into());
+    if is_windows { link_args.push("-mwindows".into()); }
+
+    let status = std::process::Command::new(cc_cmd)
+        .args(&link_args)
         .status()
         .map_err(|e| format!("linker: {}", e))?;
 
-    let _ = std::fs::remove_file(&obj_path);
-    let _ = std::fs::remove_file(&rt_path);
+    for f in &temp_files { let _ = std::fs::remove_file(f); }
 
     if !status.success() { return Err("linking failed".into()); }
     Ok(())
+}
+
+fn find_native_packages() -> Vec<String> {
+    let mut dirs = Vec::new();
+    let search_paths = ["packages", "../packages", "../../packages",
+        "/home/dev/workspace/magi/magi-lang/packages"];
+    for base in &search_paths {
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let pkg_dir = entry.path();
+                let toml = pkg_dir.join("magi.toml");
+                if toml.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&toml) {
+                        if content.contains("[native]") {
+                            dirs.push(pkg_dir.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dirs
+}
+
+fn parse_toml_array(line: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    if let Some(start) = line.find('[') {
+        if let Some(end) = line.rfind(']') {
+            let inner = &line[start+1..end];
+            for item in inner.split(',') {
+                let s = item.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !s.is_empty() { result.push(s); }
+            }
+        }
+    }
+    result
+}
+
+fn extract_platform_value(line: &str, platform: &str) -> Option<String> {
+    if let Some(pos) = line.find(platform) {
+        let after = &line[pos + platform.len()..];
+        if let Some(eq) = after.find('=') {
+            let val_part = &after[eq+1..];
+            let trimmed = val_part.trim().trim_start_matches('"');
+            if let Some(end) = trimmed.find('"') {
+                return Some(trimmed[..end].to_string());
+            }
+        }
+    }
+    None
 }
 
 // ── Control flow stack entry ────────────────────────────────

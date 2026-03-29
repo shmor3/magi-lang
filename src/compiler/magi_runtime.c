@@ -10,8 +10,16 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#include <process.h>
+#define getcwd _getcwd
+#define getpid _getpid
+#else
 #include <time.h>
 #include <unistd.h>
+#endif
 
 // Command line args (set by main before calling __main)
 int __magi_argc = 0;
@@ -1305,16 +1313,24 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         return val ? magi_make_string(val) : magi_make_null();
     }
     if (strcmp(name, "env_set") == 0) {
+        #ifdef _WIN32
+        _putenv_s(magi_as_string(a), magi_as_string(b));
+        #else
         setenv(magi_as_string(a), magi_as_string(b), 1);
+        #endif
         return magi_make_null();
     }
     if (strcmp(name, "env_has") == 0) {
         return magi_make_bool(getenv(magi_as_string(a)) != NULL);
     }
     if (strcmp(name, "timestamp_ms") == 0 || strcmp(name, "time_ms") == 0) {
+        #ifdef _WIN32
+        return magi_make_int((int64_t)GetTickCount64());
+        #else
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         return magi_make_int(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+        #endif
     }
     if (strcmp(name, "exit") == 0) {
         exit((int)magi_as_int(a));

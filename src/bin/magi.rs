@@ -7357,7 +7357,7 @@ fn print_usage() {
     eprintln!("  init <name>                 Create a new MAGI project");
     eprintln!("  get [file | dir]            Fetch all git dependencies");
     eprintln!("  bench [options] <file.magi>  Benchmark a .magi file");
-    eprintln!("  compile <file.magi>         Compile to native binary (default) or WASM");
+    eprintln!("  build <file.magi>           Build native binary (or --target wasm/x86_64-pc-windows-gnu/...)");
     eprintln!("  doc <file.magi>             Generate Markdown documentation");
     eprintln!("  test-all                    Run tests across all workspace members");
     eprintln!("  lsp                         Start the Language Server Protocol server");
@@ -7391,8 +7391,9 @@ fn print_usage() {
     eprintln!("  magi fmt --write main.magi  Format a file in-place");
     eprintln!("  magi bench -n 500 main.magi Benchmark a file (500 iterations)");
     eprintln!("  magi init my-project        Scaffold a new project");
-    eprintln!("  magi compile main.magi      Compile to native binary");
-    eprintln!("  magi compile main.magi --target wasm  Compile to dist/main.wasm");
+    eprintln!("  magi build main.magi        Build native binary for host platform");
+    eprintln!("  magi build main.magi --target wasm  Build to dist/main.wasm");
+    eprintln!("  magi build main.magi --target x86_64-pc-windows-gnu -o main.exe  Cross-compile for Windows");
     eprintln!("  magi test-all               Run tests for all workspace members");
 }
 
@@ -7490,14 +7491,14 @@ fn main_inner() {
                 }
             }
         }
-        "compile" | "build" => {
+        "build" => {
             if args.len() < 3 {
                 eprintln!("error: missing file argument");
-                eprintln!("Usage: magi compile [--target native|wasm] [-O0..3] [-o output] <file.magi>");
+                eprintln!("Usage: magi build [--target <triple>] [-O0..3] [-o output] <file.magi>");
+                eprintln!("Targets: wasm, x86_64-pc-windows-gnu, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, ...");
                 process::exit(1);
             }
-            // Parse compile flags
-            let mut target = "native";
+            let mut target: Option<String> = None;
             let mut opt_level: u8 = 2;
             let mut output_path: Option<String> = None;
             let mut file_path: Option<String> = None;
@@ -7506,7 +7507,7 @@ fn main_inner() {
                 match args[i].as_str() {
                     "--target" => {
                         i += 1;
-                        if i < args.len() { target = if args[i] == "wasm" { "wasm" } else { "native" }; }
+                        if i < args.len() { target = Some(args[i].clone()); }
                     }
                     "-o" | "--output" => {
                         i += 1;
@@ -7516,7 +7517,7 @@ fn main_inner() {
                     "-O1" => opt_level = 1,
                     "-O2" => opt_level = 2,
                     "-O3" => opt_level = 3,
-                    "-Os" => opt_level = 2, // size = default
+                    "-Os" => opt_level = 2,
                     _ => {
                         if file_path.is_none() && !args[i].starts_with('-') {
                             file_path = Some(args[i].clone());
@@ -7532,10 +7533,13 @@ fn main_inner() {
                     process::exit(1);
                 }
             };
-            if target == "wasm" {
-                cmd_compile(&file_path);
-            } else {
-                cmd_compile_native(&file_path, opt_level, output_path.as_deref());
+            match target.as_deref() {
+                Some("wasm") | Some("wasm32") | Some("wasm32-unknown-unknown") => {
+                    cmd_compile(&file_path);
+                }
+                _ => {
+                    cmd_compile_native(&file_path, opt_level, output_path.as_deref(), target.as_deref());
+                }
             }
         }
         "check" => {
@@ -7690,7 +7694,7 @@ fn main_inner() {
                 eprintln!("Usage: magi compile <file.magi> (compile-native is deprecated)");
                 process::exit(1);
             }
-            cmd_compile_native(&args[2], 2, None);
+            cmd_compile_native(&args[2], 2, None, None);
         }
         "debug" | "dbg" => {
             if args.len() < 3 {
@@ -9810,7 +9814,7 @@ fn cmd_compile(path: &str) {
     }
 }
 
-fn cmd_compile_native(path: &str, opt_level: u8, output: Option<&str>) {
+fn cmd_compile_native(path: &str, opt_level: u8, output: Option<&str>, target: Option<&str>) {
     let source = read_source(path);
 
     // Resolve dependencies
@@ -9842,7 +9846,7 @@ fn cmd_compile_native(path: &str, opt_level: u8, output: Option<&str>) {
         }
     };
 
-    match magi_lang::compiler::llvm::compile_native(&combined_source, None, opt_level, &out_path) {
+    match magi_lang::compiler::llvm::compile_native(&combined_source, target, opt_level, &out_path) {
         Ok(()) => {
             #[cfg(unix)]
             {
