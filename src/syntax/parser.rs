@@ -3190,6 +3190,13 @@ impl Parser {
     }
 
     fn is_map_literal(&self) -> bool {
+        // `{}` in expression position is an empty map literal
+        if self.pos + 1 < self.tokens.len()
+            && self.tokens[self.pos].kind == TokenKind::LBrace
+            && self.tokens[self.pos + 1].kind == TokenKind::RBrace
+        {
+            return true;
+        }
         // Look ahead: `{` then (StringLiteral | Ident) then `:` means map
         if self.pos + 2 < self.tokens.len() {
             self.tokens[self.pos].kind == TokenKind::LBrace

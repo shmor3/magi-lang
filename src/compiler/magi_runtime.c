@@ -172,6 +172,8 @@ static inline int64_t magi_byte_array_get(MagiArray* arr, int64_t idx) {
 int64_t __magi_array_len(int64_t arr_val);
 int64_t __magi_array_push(int64_t arr_val, int64_t val);
 int64_t __magi_to_string(int64_t val);
+int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args);
+int64_t __magi_call_fn(int64_t fn_val, int32_t call_argc, int64_t* call_args);
 
 // ===== Print =====
 void __magi_print(int64_t val) {
@@ -288,10 +290,24 @@ void __magi_array_set(int64_t arr_val, int64_t idx_val, int64_t val) {
         return;
     }
     MagiArray* arr = magi_array_ptr(arr_val);
+    if (!arr) return;
     int64_t idx = magi_as_int(idx_val);
-    if (!arr || idx < 0 || idx >= arr->len) return;
-    if (magi_is_byte_array(arr)) return;
-    arr->data[idx] = val;
+
+    // Copy-on-write for embedded byte arrays (cap == -1)
+    if (magi_is_byte_array(arr)) {
+        int len = arr->len;
+        const unsigned char* raw = (const unsigned char*)(uintptr_t)arr->data;
+        int64_t* new_data = (int64_t*)malloc(len * sizeof(int64_t));
+        for (int i = 0; i < len; i++) {
+            new_data[i] = magi_make_int(raw[i]);
+        }
+        arr->data = new_data;
+        arr->cap = len;
+    }
+
+    if (idx >= 0 && idx < arr->len) {
+        arr->data[idx] = val;
+    }
 }
 
 int64_t __magi_array_len(int64_t arr_val) {
@@ -571,9 +587,993 @@ static int64_t magi_method_flat_map(int64_t arr_val, int64_t fn_val) {
 }
 
 // ===== Runtime Call Dispatch =====
+// Sentinel value for "not handled" — uses unused tag 7, which no valid value produces.
+// ===== Numeric Runtime Dispatch IDs =====
+// Used by __magi_runtime_call_id for O(1) jump-table dispatch
+// instead of the O(n) strcmp chain in __magi_runtime_call.
+enum MagiBuiltinId {
+    MAGI_RT_UNKNOWN = 0,
+    // Arithmetic
+    MAGI_RT_ADD = 1, MAGI_RT_SUB, MAGI_RT_MUL, MAGI_RT_DIV, MAGI_RT_MOD, MAGI_RT_REM,
+    MAGI_RT_EQ, MAGI_RT_NE, MAGI_RT_LT, MAGI_RT_GT, MAGI_RT_LE, MAGI_RT_GE,
+    MAGI_RT_NEG, MAGI_RT_POW,
+    // Logical
+    MAGI_RT_AND, MAGI_RT_OR, MAGI_RT_NOT,
+    // Bitwise
+    MAGI_RT_BIT_AND, MAGI_RT_BIT_OR, MAGI_RT_BIT_XOR,
+    MAGI_RT_SHL, MAGI_RT_SHR, MAGI_RT_BIT_NOT, MAGI_RT_BIT_ANDNOT,
+    // Collections
+    MAGI_RT_LEN, MAGI_RT_PUSH, MAGI_RT_POP,
+    MAGI_RT_HAS, MAGI_RT_CONTAINS, MAGI_RT_KEYS, MAGI_RT_VALUES, MAGI_RT_ENTRIES,
+    MAGI_RT_MAP, MAGI_RT_FILTER, MAGI_RT_REDUCE, MAGI_RT_FIND,
+    MAGI_RT_EVERY, MAGI_RT_SOME, MAGI_RT_FOR_EACH,
+    MAGI_RT_REVERSE, MAGI_RT_SORT, MAGI_RT_SORT_BY, MAGI_RT_FLAT_MAP,
+    MAGI_RT_INDEX_OF, MAGI_RT_INCLUDES,
+    // String
+    MAGI_RT_TO_STRING, MAGI_RT_TYPEOF, MAGI_RT_SPLIT, MAGI_RT_JOIN,
+    MAGI_RT_TRIM, MAGI_RT_UPPER, MAGI_RT_LOWER,
+    MAGI_RT_STARTS_WITH, MAGI_RT_ENDS_WITH,
+    MAGI_RT_REPLACE, MAGI_RT_SUBSTRING, MAGI_RT_CHAR_AT, MAGI_RT_CONCAT,
+    // Math
+    MAGI_RT_ABS, MAGI_RT_FLOOR, MAGI_RT_CEIL, MAGI_RT_SQRT, MAGI_RT_ROUND,
+    MAGI_RT_SIN, MAGI_RT_COS, MAGI_RT_TAN, MAGI_RT_ATAN, MAGI_RT_ATAN2,
+    MAGI_RT_ASIN, MAGI_RT_ACOS, MAGI_RT_FPOW, MAGI_RT_FMOD,
+    MAGI_RT_LOG, MAGI_RT_LOG2, MAGI_RT_LOG10, MAGI_RT_EXP,
+    MAGI_RT_MIN, MAGI_RT_MAX, MAGI_RT_RANDOM,
+    MAGI_RT_IS_NAN, MAGI_RT_IS_FINITE,
+    // Range/slice
+    MAGI_RT_RANGE, MAGI_RT_SLICE, MAGI_RT_REPEAT,
+    // Map
+    MAGI_RT_MAP_GET, MAGI_RT_MAP_SET, MAGI_RT_HAS_KEY,
+    // Parse
+    MAGI_RT_PARSE_INT, MAGI_RT_PARSE_FLOAT,
+    MAGI_RT_JSON_PARSE, MAGI_RT_JSON_STRINGIFY,
+    // I/O
+    MAGI_RT_PRINTLN, MAGI_RT_PRINT,
+    // Process
+    MAGI_RT_EXIT, MAGI_RT_PANIC, MAGI_RT_TIMESTAMP_MS, MAGI_RT_PROCESS_ARGS,
+    MAGI_RT_ENV_GET, MAGI_RT_ENV_SET, MAGI_RT_ENV_HAS,
+    MAGI_RT_EXEC_CMD, MAGI_RT_CWD, MAGI_RT_OS_NAME, MAGI_RT_PID,
+    // Byte
+    MAGI_RT_BYTE_SLICE,
+    // File I/O
+    MAGI_RT_FS_READ, MAGI_RT_FS_WRITE, MAGI_RT_FS_EXISTS, MAGI_RT_FS_DELETE,
+    MAGI_RT_FS_READ_BYTES, MAGI_RT_FS_SIZE, MAGI_RT_FS_READ_LINES,
+    MAGI_RT_FS_MKDIR, MAGI_RT_FILE_APPEND, MAGI_RT_LIST_DIR,
+    // Path
+    MAGI_RT_PATH_JOIN,
+    // Renderers (domain-specific)
+    MAGI_RT_RENDER_SEG_COLS, MAGI_RT_RENDER_WALL_COL, MAGI_RT_RENDER_FLAT_COL,
+    MAGI_RT_COUNT
+};
+
+#define FAST_BINOP_SENTINEL ((int64_t)(NANBOX_SIG | ((uint64_t)7 << TAG_SHIFT)))
+
+// Fast inline arithmetic for common cases: int+int, float ops, string eq/ne.
+// Avoids the full strcmp dispatch chain for hot-path operations.
+static inline int64_t __magi_fast_binop(const char* name, int64_t a, int64_t b) {
+    int ta = magi_get_tag(a), tb = magi_get_tag(b);
+
+    // Case 1: int + int — all arithmetic and comparisons
+    if (ta == TAG_I64 && tb == TAG_I64) {
+        int64_t av = magi_sext48(magi_get_payload(a));
+        int64_t bv = magi_sext48(magi_get_payload(b));
+        switch (name[2]) {
+            case 'a': return magi_make_int(av + bv); // __add
+            case 's': return magi_make_int(av - bv); // __sub
+            case 'm': if (name[3]=='u') return magi_make_int(av * bv); // __mul
+                      if (name[3]=='o') return (bv==0) ? magi_make_int(0) : magi_make_int(av % bv); // __mod
+                      break;
+            case 'd': return (bv==0) ? magi_make_int(0) : magi_make_int(av / bv); // __div
+            case 'r': return (bv==0) ? magi_make_int(0) : magi_make_int(av % bv); // __rem/__mod
+            case 'l': if (name[3]=='t') return magi_make_bool(av < bv);  // __lt
+                      if (name[3]=='e') return magi_make_bool(av <= bv); // __le
+                      break;
+            case 'g': if (name[3]=='t') return magi_make_bool(av > bv);  // __gt
+                      if (name[3]=='e') return magi_make_bool(av >= bv); // __ge
+                      break;
+            case 'e': return magi_make_bool(av == bv); // __eq
+            case 'n': return magi_make_bool(av != bv); // __ne
+        }
+        return FAST_BINOP_SENTINEL;
+    }
+
+    // Case 2: string operands — handle eq/ne inline, fall through for concat/repeat
+    if (ta == TAG_STRING || tb == TAG_STRING) {
+        if (ta == TAG_STRING && tb == TAG_STRING) {
+            if (name[2] == 'e') return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) == 0); // __eq
+            if (name[2] == 'n') return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) != 0); // __ne
+        }
+        return FAST_BINOP_SENTINEL; // concat, repeat, etc. need full dispatch
+    }
+
+    // Case 2b: array/map operands — need deep equality via full dispatch
+    if (ta == TAG_ARRAY || ta == TAG_MAP || tb == TAG_ARRAY || tb == TAG_MAP)
+        return FAST_BINOP_SENTINEL;
+
+    // Case 3: float operands — at least one is float (tag == 8), neither is string
+    {
+        double fa = magi_as_float(a);
+        double fb = magi_as_float(b);
+        switch (name[2]) {
+            case 'a': return magi_make_float(fa + fb); // __add
+            case 's': return magi_make_float(fa - fb); // __sub
+            case 'm': if (name[3]=='u') return magi_make_float(fa * fb); // __mul
+                      if (name[3]=='o') return magi_make_float(fmod(fa, fb)); // __mod
+                      break;
+            case 'd': return (fb == 0.0) ? magi_make_float(0.0) : magi_make_float(fa / fb); // __div
+            case 'r': return magi_make_float(fmod(fa, fb)); // __rem
+            case 'l': if (name[3]=='t') return magi_make_bool(fa < fb);  // __lt
+                      if (name[3]=='e') return magi_make_bool(fa <= fb); // __le
+                      break;
+            case 'g': if (name[3]=='t') return magi_make_bool(fa > fb);  // __gt
+                      if (name[3]=='e') return magi_make_bool(fa >= fb); // __ge
+                      break;
+            case 'e': return magi_make_bool(fa == fb); // __eq
+            case 'n': if (name[3]=='e') {
+                          if (name[4]=='g') return magi_make_float(-fa); // __neg (unary)
+                          return magi_make_bool(fa != fb); // __ne
+                      }
+                      break;
+        }
+    }
+
+    return FAST_BINOP_SENTINEL;
+}
+
+// ===== Direct Builtin Wrappers (bypass RuntimeCall dispatch) =====
+
+int64_t __magi_builtin_len(int64_t a) {
+    if (magi_get_tag(a) == TAG_ARRAY) return __magi_array_len(a);
+    if (magi_get_tag(a) == TAG_STRING) return __magi_string_len(a);
+    if (magi_get_tag(a) == TAG_MAP) {
+        MagiMap* map = magi_map_ptr(a);
+        return magi_make_int(map ? map->len : 0);
+    }
+    return magi_make_int(0);
+}
+
+int64_t __magi_builtin_push(int64_t arr, int64_t val) {
+    return __magi_array_push(arr, val);
+}
+
+int64_t __magi_builtin_abs(int64_t a) {
+    if (magi_get_tag(a) == TAG_I64) {
+        int64_t v = magi_sext48(magi_get_payload(a));
+        return magi_make_int(v < 0 ? -v : v);
+    }
+    return magi_make_float(fabs(magi_as_float(a)));
+}
+
+int64_t __magi_builtin_floor(int64_t a) {
+    return magi_make_float(floor(magi_as_float(a)));
+}
+
+int64_t __magi_builtin_sqrt(int64_t a) {
+    return magi_make_float(sqrt(magi_as_float(a)));
+}
+
+int64_t __magi_builtin_cos(int64_t a) {
+    return magi_make_float(cos(magi_as_float(a)));
+}
+
+int64_t __magi_builtin_sin(int64_t a) {
+    return magi_make_float(sin(magi_as_float(a)));
+}
+
+int64_t __magi_builtin_atan2(int64_t a, int64_t b) {
+    return magi_make_float(atan2(magi_as_float(a), magi_as_float(b)));
+}
+
+// ===== Numeric ID Dispatch (O(1) jump table) =====
+// Called from LLVM-compiled code with a compile-time constant ID.
+// Falls back to __magi_runtime_call for unknown IDs.
+int64_t __magi_runtime_call_id(int32_t id, int32_t argc, int64_t* args) {
+    int64_t a = argc > 0 ? args[0] : magi_make_null();
+    int64_t b = argc > 1 ? args[1] : magi_make_null();
+
+    switch (id) {
+    // ── Arithmetic ──
+    case MAGI_RT_ADD: {
+        int ta = magi_get_tag(a), tb = magi_get_tag(b);
+        if (ta == TAG_I64 && tb == TAG_I64)
+            return magi_make_int(magi_sext48(magi_get_payload(a)) + magi_sext48(magi_get_payload(b)));
+        if (ta == TAG_STRING && tb == TAG_STRING)
+            return __magi_string_concat(a, b);
+        if (ta == TAG_STRING || tb == TAG_STRING) {
+            int64_t sa = (ta == TAG_STRING) ? a : __magi_to_string(a);
+            int64_t sb = (tb == TAG_STRING) ? b : __magi_to_string(b);
+            return __magi_string_concat(sa, sb);
+        }
+        return magi_make_float(magi_as_float(a) + magi_as_float(b));
+    }
+    case MAGI_RT_SUB: {
+        int ta = magi_get_tag(a), tb = magi_get_tag(b);
+        if (ta == TAG_I64 && tb == TAG_I64)
+            return magi_make_int(magi_sext48(magi_get_payload(a)) - magi_sext48(magi_get_payload(b)));
+        return magi_make_float(magi_as_float(a) - magi_as_float(b));
+    }
+    case MAGI_RT_MUL: {
+        int ta = magi_get_tag(a), tb = magi_get_tag(b);
+        if (ta == TAG_I64 && tb == TAG_I64)
+            return magi_make_int(magi_sext48(magi_get_payload(a)) * magi_sext48(magi_get_payload(b)));
+        if (ta == TAG_STRING && tb == TAG_I64) {
+            int64_t repeat_args[2] = { a, b };
+            return __magi_runtime_call_id(MAGI_RT_REPEAT, 2, repeat_args);
+        }
+        if (ta == TAG_I64 && tb == TAG_STRING) {
+            int64_t repeat_args[2] = { b, a };
+            return __magi_runtime_call_id(MAGI_RT_REPEAT, 2, repeat_args);
+        }
+        return magi_make_float(magi_as_float(a) * magi_as_float(b));
+    }
+    case MAGI_RT_DIV: {
+        int ta = magi_get_tag(a), tb = magi_get_tag(b);
+        if (ta == TAG_I64 && tb == TAG_I64) {
+            int64_t bv = magi_sext48(magi_get_payload(b));
+            return (bv == 0) ? magi_make_int(0) : magi_make_int(magi_sext48(magi_get_payload(a)) / bv);
+        }
+        return magi_make_float(magi_as_float(a) / magi_as_float(b));
+    }
+    case MAGI_RT_MOD:
+    case MAGI_RT_REM: {
+        int ta = magi_get_tag(a), tb = magi_get_tag(b);
+        if (ta == TAG_I64 && tb == TAG_I64) {
+            int64_t bv = magi_sext48(magi_get_payload(b));
+            return (bv == 0) ? magi_make_int(0) : magi_make_int(magi_sext48(magi_get_payload(a)) % bv);
+        }
+        return magi_make_float(fmod(magi_as_float(a), magi_as_float(b)));
+    }
+    case MAGI_RT_POW:
+        return magi_make_float(pow(magi_as_float(a), magi_as_float(b)));
+    case MAGI_RT_NEG: {
+        if (magi_get_tag(a) == TAG_I64) return magi_make_int(-magi_sext48(magi_get_payload(a)));
+        return magi_make_float(-magi_as_float(a));
+    }
+
+    // ── Comparison ──
+    case MAGI_RT_EQ: {
+        if (a == b) return magi_make_bool(1);
+        if (magi_get_tag(a) == TAG_STRING && magi_get_tag(b) == TAG_STRING)
+            return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) == 0);
+        if (magi_get_tag(a) == TAG_ARRAY && magi_get_tag(b) == TAG_ARRAY) {
+            MagiArray* aa = magi_array_ptr(a);
+            MagiArray* ab = magi_array_ptr(b);
+            if (!aa && !ab) return magi_make_bool(1);
+            if (!aa || !ab || aa->len != ab->len) return magi_make_bool(0);
+            for (int i = 0; i < aa->len; i++) {
+                int64_t eq_args[2] = {aa->data[i], ab->data[i]};
+                int64_t eq = __magi_runtime_call_id(MAGI_RT_EQ, 2, eq_args);
+                if (!magi_as_bool(eq)) return magi_make_bool(0);
+            }
+            return magi_make_bool(1);
+        }
+        if (magi_get_tag(a) == TAG_MAP && magi_get_tag(b) == TAG_MAP) {
+            MagiMap* ma = magi_map_ptr(a);
+            MagiMap* mb = magi_map_ptr(b);
+            if (!ma && !mb) return magi_make_bool(1);
+            if (!ma || !mb || ma->len != mb->len) return magi_make_bool(0);
+            for (int i = 0; i < ma->len; i++) {
+                int found = 0;
+                for (int j = 0; j < mb->len; j++) {
+                    if (strcmp(ma->keys[i], mb->keys[j]) == 0) {
+                        int64_t eq_args[2] = {ma->values[i], mb->values[j]};
+                        int64_t eq = __magi_runtime_call_id(MAGI_RT_EQ, 2, eq_args);
+                        if (!magi_as_bool(eq)) return magi_make_bool(0);
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) return magi_make_bool(0);
+            }
+            return magi_make_bool(1);
+        }
+        return magi_make_bool(0);
+    }
+    case MAGI_RT_NE: {
+        int64_t eq_args[2] = {a, b};
+        int64_t eq = __magi_runtime_call_id(MAGI_RT_EQ, 2, eq_args);
+        return magi_make_bool(!magi_as_bool(eq));
+    }
+    case MAGI_RT_LT: {
+        if (magi_get_tag(a) == TAG_I64 && magi_get_tag(b) == TAG_I64)
+            return magi_make_bool(magi_sext48(magi_get_payload(a)) < magi_sext48(magi_get_payload(b)));
+        return magi_make_bool(magi_as_float(a) < magi_as_float(b));
+    }
+    case MAGI_RT_GT: {
+        if (magi_get_tag(a) == TAG_I64 && magi_get_tag(b) == TAG_I64)
+            return magi_make_bool(magi_sext48(magi_get_payload(a)) > magi_sext48(magi_get_payload(b)));
+        return magi_make_bool(magi_as_float(a) > magi_as_float(b));
+    }
+    case MAGI_RT_LE: {
+        if (magi_get_tag(a) == TAG_I64 && magi_get_tag(b) == TAG_I64)
+            return magi_make_bool(magi_sext48(magi_get_payload(a)) <= magi_sext48(magi_get_payload(b)));
+        return magi_make_bool(magi_as_float(a) <= magi_as_float(b));
+    }
+    case MAGI_RT_GE: {
+        if (magi_get_tag(a) == TAG_I64 && magi_get_tag(b) == TAG_I64)
+            return magi_make_bool(magi_sext48(magi_get_payload(a)) >= magi_sext48(magi_get_payload(b)));
+        return magi_make_bool(magi_as_float(a) >= magi_as_float(b));
+    }
+
+    // ── Logical ──
+    case MAGI_RT_AND: return magi_make_bool(magi_as_bool(a) && magi_as_bool(b));
+    case MAGI_RT_OR: return magi_make_bool(magi_as_bool(a) || magi_as_bool(b));
+    case MAGI_RT_NOT: return magi_make_bool(!magi_as_bool(a));
+
+    // ── Bitwise ──
+    case MAGI_RT_BIT_AND: return magi_make_int(magi_as_int(a) & magi_as_int(b));
+    case MAGI_RT_BIT_OR: return magi_make_int(magi_as_int(a) | magi_as_int(b));
+    case MAGI_RT_BIT_XOR: return magi_make_int(magi_as_int(a) ^ magi_as_int(b));
+    case MAGI_RT_SHL: return magi_make_int(magi_as_int(a) << (magi_as_int(b) & 63));
+    case MAGI_RT_SHR: return magi_make_int(magi_as_int(a) >> (magi_as_int(b) & 63));
+    case MAGI_RT_BIT_NOT: return magi_make_int(~magi_as_int(a));
+    case MAGI_RT_BIT_ANDNOT: return magi_make_int(magi_as_int(a) & ~magi_as_int(b));
+
+    // ── Range ──
+    case MAGI_RT_RANGE: {
+        int64_t start = magi_as_int(a);
+        int64_t end = magi_as_int(b);
+        int inclusive = (argc > 2) ? magi_as_bool(args[2]) : 0;
+        int64_t count = inclusive ? (end - start + 1) : (end - start);
+        if (count < 0) count = 0;
+        if (count > 10000000) count = 10000000;
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = (int32_t)count;
+        arr->cap = (int32_t)(count > 8 ? count : 8);
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+        for (int64_t i = 0; i < count; i++) {
+            arr->data[i] = magi_make_int(start + i);
+        }
+        return magi_make_array_val(arr);
+    }
+
+    // ── Collection operations ──
+    case MAGI_RT_LEN: {
+        if (magi_get_tag(a) == TAG_ARRAY) return __magi_array_len(a);
+        if (magi_get_tag(a) == TAG_STRING) return __magi_string_len(a);
+        if (magi_get_tag(a) == TAG_MAP) {
+            MagiMap* map = magi_map_ptr(a);
+            return magi_make_int(map ? map->len : 0);
+        }
+        return magi_make_int(0);
+    }
+    case MAGI_RT_TO_STRING: return __magi_to_string(a);
+    case MAGI_RT_TYPEOF: {
+        int t = magi_get_tag(a);
+        const char* tn;
+        switch(t) {
+            case TAG_NULL: tn = "null"; break;
+            case TAG_BOOL: tn = "bool"; break;
+            case TAG_I64: tn = "int"; break;
+            case TAG_STRING: tn = "string"; break;
+            case TAG_ARRAY: tn = "array"; break;
+            case TAG_MAP: tn = "map"; break;
+            case 8: tn = "float"; break;
+            default: tn = "unknown"; break;
+        }
+        return magi_make_string(tn);
+    }
+    case MAGI_RT_PUSH: return __magi_array_push(a, b);
+    case MAGI_RT_POP: {
+        MagiArray* arr = magi_array_ptr(a);
+        if (!arr || arr->len == 0) return magi_make_null();
+        return arr->data[--arr->len];
+    }
+    case MAGI_RT_HAS: {
+        if (magi_get_tag(a) == TAG_MAP) {
+            MagiMap* map = magi_map_ptr(a);
+            const char* key = magi_as_string(b);
+            if (!map || !key) return magi_make_bool(0);
+            for (int i = 0; i < map->len; i++) {
+                if (strcmp(map->keys[i], key) == 0) return magi_make_bool(1);
+            }
+            return magi_make_bool(0);
+        }
+        if (magi_get_tag(a) == TAG_ARRAY) {
+            MagiArray* arr = magi_array_ptr(a);
+            if (!arr) return magi_make_bool(0);
+            for (int i = 0; i < arr->len; i++) {
+                if (arr->data[i] == b) return magi_make_bool(1);
+                if (magi_get_tag(arr->data[i]) == TAG_STRING && magi_get_tag(b) == TAG_STRING &&
+                    strcmp(magi_as_string(arr->data[i]), magi_as_string(b)) == 0)
+                    return magi_make_bool(1);
+            }
+            return magi_make_bool(0);
+        }
+        return magi_make_bool(0);
+    }
+    case MAGI_RT_CONTAINS: {
+        int64_t has_args[2] = { a, b };
+        return __magi_runtime_call_id(MAGI_RT_HAS, 2, has_args);
+    }
+    case MAGI_RT_INCLUDES: {
+        if (magi_get_tag(a) == TAG_ARRAY) {
+            MagiArray* arr = magi_array_ptr(a);
+            if (!arr) return magi_make_bool(0);
+            for (int i = 0; i < arr->len; i++) { if (arr->data[i] == b) return magi_make_bool(1); }
+            return magi_make_bool(0);
+        }
+        if (magi_get_tag(a) == TAG_STRING) {
+            const char* s = magi_as_string(a);
+            const char* sub = magi_as_string(b);
+            return magi_make_bool(strstr(s, sub) != NULL);
+        }
+        return magi_make_bool(0);
+    }
+
+    // ── Array/Collection methods with callbacks ──
+    case MAGI_RT_MAP: return magi_method_map(a, b);
+    case MAGI_RT_FILTER: return magi_method_filter(a, b);
+    case MAGI_RT_REDUCE: { int64_t c = argc > 2 ? args[2] : magi_make_null(); return magi_method_reduce(a, b, c); }
+    case MAGI_RT_FOR_EACH: return magi_method_for_each(a, b);
+    case MAGI_RT_FIND: return magi_method_find(a, b);
+    case MAGI_RT_EVERY: return magi_method_every(a, b);
+    case MAGI_RT_SOME: return magi_method_some(a, b);
+    case MAGI_RT_FLAT_MAP: return magi_method_flat_map(a, b);
+    case MAGI_RT_SORT_BY: {
+        MagiArray* arr = magi_array_ptr(a);
+        if (!arr || arr->len <= 1) return a;
+        for (int i = 1; i < arr->len; i++) {
+            int64_t key = arr->data[i];
+            int j = i - 1;
+            while (j >= 0) {
+                int64_t cmp_args[2] = { arr->data[j], key };
+                int64_t cmp = __magi_call_fn(b, 2, cmp_args);
+                if (magi_as_int(cmp) <= 0) break;
+                arr->data[j + 1] = arr->data[j];
+                j--;
+            }
+            arr->data[j + 1] = key;
+        }
+        return a;
+    }
+    case MAGI_RT_REVERSE: {
+        MagiArray* arr = magi_array_ptr(a);
+        if (!arr) return a;
+        for (int i = 0, j = arr->len - 1; i < j; i++, j--) {
+            int64_t tmp = arr->data[i]; arr->data[i] = arr->data[j]; arr->data[j] = tmp;
+        }
+        return a;
+    }
+    case MAGI_RT_SORT: {
+        MagiArray* arr = magi_array_ptr(a);
+        if (!arr || arr->len <= 1) return a;
+        for (int i = 1; i < arr->len; i++) {
+            int64_t key = arr->data[i];
+            double kv = magi_as_float(key);
+            int j = i - 1;
+            while (j >= 0 && magi_as_float(arr->data[j]) > kv) { arr->data[j+1] = arr->data[j]; j--; }
+            arr->data[j + 1] = key;
+        }
+        return a;
+    }
+    case MAGI_RT_INDEX_OF: {
+        if (magi_get_tag(a) == TAG_ARRAY) {
+            MagiArray* arr = magi_array_ptr(a);
+            if (!arr) return magi_make_int(-1);
+            for (int i = 0; i < arr->len; i++) { if (arr->data[i] == b) return magi_make_int(i); }
+            return magi_make_int(-1);
+        }
+        if (magi_get_tag(a) == TAG_STRING) {
+            const char* s = magi_as_string(a);
+            const char* sub = magi_as_string(b);
+            const char* p = strstr(s, sub);
+            return p ? magi_make_int(p - s) : magi_make_int(-1);
+        }
+        return magi_make_int(-1);
+    }
+    case MAGI_RT_JOIN: {
+        MagiArray* arr = magi_array_ptr(a);
+        if (!arr) return magi_make_string("");
+        const char* sep = magi_as_string(b);
+        size_t total = 0, seplen = strlen(sep);
+        char** strs = (char**)malloc(sizeof(char*) * arr->len);
+        for (int i = 0; i < arr->len; i++) {
+            char buf[256]; magi_val_to_str(arr->data[i], buf, sizeof(buf));
+            if (magi_get_tag(arr->data[i]) == TAG_STRING) {
+                strs[i] = strdup(magi_as_string(arr->data[i]));
+            } else {
+                strs[i] = strdup(buf);
+            }
+            total += strlen(strs[i]);
+        }
+        total += seplen * (arr->len > 0 ? arr->len - 1 : 0);
+        char* result = (char*)malloc(total + 1);
+        result[0] = '\0';
+        for (int i = 0; i < arr->len; i++) {
+            if (i > 0) strcat(result, sep);
+            strcat(result, strs[i]);
+            free(strs[i]);
+        }
+        free(strs);
+        return magi_make_string(result);
+    }
+
+    // ── Slice ──
+    case MAGI_RT_SLICE: {
+        int64_t start_v = argc > 1 ? args[1] : magi_make_int(0);
+        int64_t end_v = argc > 2 ? args[2] : magi_make_null();
+        int64_t start = magi_as_int(start_v);
+        if (magi_get_tag(a) == TAG_ARRAY) {
+            MagiArray* arr = magi_array_ptr(a);
+            if (!arr) return magi_make_null();
+            int64_t end = magi_is_tagged(end_v) && magi_get_tag(end_v) == TAG_NULL ? arr->len : magi_as_int(end_v);
+            if (start < 0) start += arr->len;
+            if (end < 0) end += arr->len;
+            if (start < 0) start = 0;
+            if (end > arr->len) end = arr->len;
+            if (start >= end) return __magi_array_new(0, NULL);
+            int64_t count = end - start;
+            return __magi_array_new((int32_t)count, arr->data + start);
+        }
+        if (magi_get_tag(a) == TAG_STRING) {
+            const char* s = magi_as_string(a);
+            int64_t slen = (int64_t)strlen(s);
+            int64_t end = magi_is_tagged(end_v) && magi_get_tag(end_v) == TAG_NULL ? slen : magi_as_int(end_v);
+            if (start < 0) start += slen;
+            if (end < 0) end += slen;
+            if (start < 0) start = 0;
+            if (end > slen) end = slen;
+            if (start >= end) return magi_make_string("");
+            int64_t count = end - start;
+            char* result = (char*)malloc(count + 1);
+            memcpy(result, s + start, count);
+            result[count] = '\0';
+            return magi_make_string(result);
+        }
+        return magi_make_null();
+    }
+    case MAGI_RT_REPEAT: {
+        if (magi_get_tag(a) == TAG_STRING) {
+            const char* s = magi_as_string(a);
+            int64_t n = magi_as_int(b);
+            if (n <= 0) return magi_make_string("");
+            size_t slen = strlen(s);
+            char* result = (char*)malloc(slen * n + 1);
+            result[0] = '\0';
+            for (int64_t i = 0; i < n; i++) memcpy(result + i * slen, s, slen);
+            result[slen * n] = '\0';
+            return magi_make_string(result);
+        }
+        return magi_make_null();
+    }
+
+    // ── Map operations ──
+    case MAGI_RT_MAP_GET: return __magi_map_get(a, b);
+    case MAGI_RT_MAP_SET: {
+        int64_t val = argc > 2 ? args[2] : magi_make_null();
+        __magi_map_set(a, b, val);
+        return magi_make_null();
+    }
+    case MAGI_RT_KEYS: {
+        MagiMap* map = magi_map_ptr(a);
+        if (!map) return __magi_array_new(0, NULL);
+        int64_t* elems = (int64_t*)malloc(sizeof(int64_t) * map->len);
+        for (int i = 0; i < map->len; i++) elems[i] = magi_make_string(map->keys[i]);
+        int64_t result = __magi_array_new(map->len, elems);
+        free(elems);
+        return result;
+    }
+    case MAGI_RT_VALUES: {
+        MagiMap* map = magi_map_ptr(a);
+        if (!map) return __magi_array_new(0, NULL);
+        return __magi_array_new(map->len, map->values);
+    }
+    case MAGI_RT_ENTRIES: {
+        MagiMap* map = magi_map_ptr(a);
+        if (!map) return __magi_array_new(0, NULL);
+        int64_t* pairs = (int64_t*)malloc(sizeof(int64_t) * map->len);
+        for (int i = 0; i < map->len; i++) {
+            int64_t pair_data[2] = { magi_make_string(map->keys[i]), map->values[i] };
+            pairs[i] = __magi_array_new(2, pair_data);
+        }
+        int64_t result = __magi_array_new(map->len, pairs);
+        free(pairs);
+        return result;
+    }
+    case MAGI_RT_HAS_KEY: {
+        MagiMap* map = magi_map_ptr(a);
+        const char* key = magi_as_string(b);
+        if (!map) return magi_make_bool(0);
+        for (int i = 0; i < map->len; i++) { if (strcmp(map->keys[i], key) == 0) return magi_make_bool(1); }
+        return magi_make_bool(0);
+    }
+
+    // ── String operations ──
+    case MAGI_RT_PARSE_INT: {
+        const char* s = magi_as_string(a);
+        return magi_make_int((int64_t)atoll(s));
+    }
+    case MAGI_RT_PARSE_FLOAT: {
+        const char* s = magi_as_string(a);
+        return magi_make_float(atof(s));
+    }
+    case MAGI_RT_CONCAT: return __magi_string_concat(a, b);
+    case MAGI_RT_SPLIT: {
+        const char* s = magi_as_string(a);
+        const char* delim = magi_as_string(b);
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = 0; arr->cap = 16;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+        size_t dlen = strlen(delim);
+        if (dlen == 0) {
+            for (size_t i = 0; i < strlen(s); i++) {
+                char* ch = (char*)malloc(2); ch[0] = s[i]; ch[1] = '\0';
+                if (arr->len >= arr->cap) { arr->cap *= 2; arr->data = (int64_t*)realloc(arr->data, sizeof(int64_t) * arr->cap); }
+                arr->data[arr->len++] = magi_make_string(ch);
+            }
+        } else {
+            const char* p = s;
+            while (1) {
+                const char* found = strstr(p, delim);
+                size_t part_len = found ? (size_t)(found - p) : strlen(p);
+                char* part = (char*)malloc(part_len + 1);
+                memcpy(part, p, part_len); part[part_len] = '\0';
+                if (arr->len >= arr->cap) { arr->cap *= 2; arr->data = (int64_t*)realloc(arr->data, sizeof(int64_t) * arr->cap); }
+                arr->data[arr->len++] = magi_make_string(part);
+                if (!found) break;
+                p = found + dlen;
+            }
+        }
+        return magi_make_array_val(arr);
+    }
+    case MAGI_RT_TRIM: {
+        const char* s = magi_as_string(a);
+        size_t len = strlen(s);
+        size_t start = 0, end = len;
+        while (start < len && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r')) start++;
+        while (end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r')) end--;
+        char* result = (char*)malloc(end - start + 1);
+        memcpy(result, s + start, end - start); result[end - start] = '\0';
+        return magi_make_string(result);
+    }
+    case MAGI_RT_UPPER: {
+        const char* s = magi_as_string(a);
+        size_t len = strlen(s);
+        char* result = (char*)malloc(len + 1);
+        for (size_t i = 0; i < len; i++) result[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
+        result[len] = '\0';
+        return magi_make_string(result);
+    }
+    case MAGI_RT_LOWER: {
+        const char* s = magi_as_string(a);
+        size_t len = strlen(s);
+        char* result = (char*)malloc(len + 1);
+        for (size_t i = 0; i < len; i++) result[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
+        result[len] = '\0';
+        return magi_make_string(result);
+    }
+    case MAGI_RT_STARTS_WITH:
+        return magi_make_bool(strncmp(magi_as_string(a), magi_as_string(b), strlen(magi_as_string(b))) == 0);
+    case MAGI_RT_ENDS_WITH: {
+        const char* s = magi_as_string(a), *suffix = magi_as_string(b);
+        size_t sl = strlen(s), sufl = strlen(suffix);
+        return magi_make_bool(sl >= sufl && strcmp(s + sl - sufl, suffix) == 0);
+    }
+    case MAGI_RT_REPLACE: {
+        const char* s = magi_as_string(a);
+        const char* from = magi_as_string(b);
+        const char* to = argc > 2 ? magi_as_string(args[2]) : "";
+        size_t slen = strlen(s), flen = strlen(from), tlen = strlen(to);
+        if (flen == 0) return a;
+        int count = 0;
+        const char* p = s;
+        while ((p = strstr(p, from))) { count++; p += flen; }
+        char* result = (char*)malloc(slen + count * (tlen - flen) + 1);
+        char* w = result;
+        p = s;
+        while (*p) {
+            if (strncmp(p, from, flen) == 0) { memcpy(w, to, tlen); w += tlen; p += flen; }
+            else { *w++ = *p++; }
+        }
+        *w = '\0';
+        return magi_make_string(result);
+    }
+    case MAGI_RT_SUBSTRING: {
+        const char* s = magi_as_string(a);
+        int64_t slen = (int64_t)strlen(s);
+        int64_t start = magi_as_int(b);
+        int64_t end = argc > 2 ? magi_as_int(args[2]) : slen;
+        if (start < 0) start += slen;
+        if (end < 0) end += slen;
+        if (start < 0) start = 0;
+        if (end > slen) end = slen;
+        if (start >= end) return magi_make_string("");
+        int64_t cnt = end - start;
+        char* result = (char*)malloc(cnt + 1);
+        memcpy(result, s + start, cnt); result[cnt] = '\0';
+        return magi_make_string(result);
+    }
+    case MAGI_RT_CHAR_AT: {
+        const char* s = magi_as_string(a);
+        int64_t idx = magi_as_int(b);
+        size_t slen = strlen(s);
+        if (idx < 0 || idx >= (int64_t)slen) return magi_make_string("");
+        char* result = (char*)malloc(2);
+        result[0] = s[idx]; result[1] = '\0';
+        return magi_make_string(result);
+    }
+
+    // ── Math ──
+    case MAGI_RT_ABS: {
+        if (magi_get_tag(a) == TAG_I64) {
+            int64_t v = magi_sext48(magi_get_payload(a));
+            return magi_make_int(v < 0 ? -v : v);
+        }
+        return magi_make_float(fabs(magi_as_float(a)));
+    }
+    case MAGI_RT_FLOOR: return magi_make_float(floor(magi_as_float(a)));
+    case MAGI_RT_CEIL: return magi_make_float(ceil(magi_as_float(a)));
+    case MAGI_RT_SQRT: return magi_make_float(sqrt(magi_as_float(a)));
+    case MAGI_RT_ROUND: return magi_make_float(round(magi_as_float(a)));
+    case MAGI_RT_SIN: return magi_make_float(sin(magi_as_float(a)));
+    case MAGI_RT_COS: return magi_make_float(cos(magi_as_float(a)));
+    case MAGI_RT_TAN: return magi_make_float(tan(magi_as_float(a)));
+    case MAGI_RT_LOG: return magi_make_float(log(magi_as_float(a)));
+    case MAGI_RT_LOG2: return magi_make_float(log2(magi_as_float(a)));
+    case MAGI_RT_LOG10: return magi_make_float(log10(magi_as_float(a)));
+    case MAGI_RT_EXP: return magi_make_float(exp(magi_as_float(a)));
+    case MAGI_RT_ATAN: return magi_make_float(atan(magi_as_float(a)));
+    case MAGI_RT_ATAN2: return magi_make_float(atan2(magi_as_float(a), magi_as_float(b)));
+    case MAGI_RT_ASIN: return magi_make_float(asin(magi_as_float(a)));
+    case MAGI_RT_ACOS: return magi_make_float(acos(magi_as_float(a)));
+    case MAGI_RT_FPOW: return magi_make_float(pow(magi_as_float(a), magi_as_float(b)));
+    case MAGI_RT_FMOD: return magi_make_float(fmod(magi_as_float(a), magi_as_float(b)));
+    case MAGI_RT_MIN: {
+        double da = magi_as_float(a), db = magi_as_float(b);
+        return da < db ? a : b;
+    }
+    case MAGI_RT_MAX: {
+        double da = magi_as_float(a), db = magi_as_float(b);
+        return da > db ? a : b;
+    }
+    case MAGI_RT_RANDOM: return magi_make_float((double)rand() / RAND_MAX);
+    case MAGI_RT_IS_NAN: {
+        if (!magi_is_tagged(a)) { double d; memcpy(&d, &a, sizeof(d)); return magi_make_bool(isnan(d)); }
+        return magi_make_bool(0);
+    }
+    case MAGI_RT_IS_FINITE: {
+        if (!magi_is_tagged(a)) { double d; memcpy(&d, &a, sizeof(d)); return magi_make_bool(isfinite(d)); }
+        return magi_make_bool(1);
+    }
+
+    // ── I/O ──
+    case MAGI_RT_PRINTLN: __magi_print(a); return magi_make_null();
+    case MAGI_RT_PRINT: {
+        char* s = magi_val_to_dyn_str(a, 1);
+        printf("%s", s);
+        fflush(stdout);
+        free(s);
+        return magi_make_null();
+    }
+
+    // ── Process/OS ──
+    case MAGI_RT_PROCESS_ARGS: {
+        extern int __magi_argc;
+        extern char** __magi_argv;
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = __magi_argc > 1 ? __magi_argc - 1 : 0;
+        arr->cap = arr->len > 8 ? arr->len : 8;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+        for (int i = 1; i < __magi_argc; i++) {
+            arr->data[i - 1] = magi_make_string(__magi_argv[i]);
+        }
+        return magi_make_array_val(arr);
+    }
+    case MAGI_RT_ENV_GET: {
+        const char* key = magi_as_string(a);
+        const char* val = getenv(key);
+        return val ? magi_make_string(val) : magi_make_null();
+    }
+    case MAGI_RT_ENV_SET: {
+        #ifdef _WIN32
+        _putenv_s(magi_as_string(a), magi_as_string(b));
+        #else
+        setenv(magi_as_string(a), magi_as_string(b), 1);
+        #endif
+        return magi_make_null();
+    }
+    case MAGI_RT_ENV_HAS:
+        return magi_make_bool(getenv(magi_as_string(a)) != NULL);
+    case MAGI_RT_TIMESTAMP_MS: {
+        #ifdef _WIN32
+        return magi_make_int((int64_t)GetTickCount64());
+        #else
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        return magi_make_int(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+        #endif
+    }
+    case MAGI_RT_EXIT: exit((int)magi_as_int(a));
+    case MAGI_RT_PANIC: {
+        const char* msg = magi_as_string(a);
+        fprintf(stderr, "panic: %s\n", msg);
+        exit(1);
+    }
+    case MAGI_RT_EXEC_CMD: {
+        const char* cmd = magi_as_string(a);
+        int r = system(cmd);
+        return magi_make_int(r);
+    }
+    case MAGI_RT_CWD: {
+        char buf[4096];
+        if (getcwd(buf, sizeof(buf))) return magi_make_string(strdup(buf));
+        return magi_make_string("/");
+    }
+    case MAGI_RT_OS_NAME: {
+        #ifdef __linux__
+        return magi_make_string("linux");
+        #elif __APPLE__
+        return magi_make_string("macos");
+        #elif _WIN32
+        return magi_make_string("windows");
+        #else
+        return magi_make_string("unknown");
+        #endif
+    }
+    case MAGI_RT_PID: return magi_make_int(getpid());
+
+    // ── Byte ──
+    case MAGI_RT_BYTE_SLICE: {
+        int64_t c = argc > 2 ? args[2] : magi_make_int(0);
+        return __magi_byte_slice(a, b, c);
+    }
+
+    // ── File I/O ──
+    case MAGI_RT_PATH_JOIN: {
+        const char* p1 = magi_as_string(a);
+        const char* p2 = magi_as_string(b);
+        size_t l1 = strlen(p1), l2 = strlen(p2);
+        char* result = (char*)malloc(l1 + l2 + 2);
+        memcpy(result, p1, l1);
+        if (l1 > 0 && p1[l1-1] != '/') { result[l1] = '/'; memcpy(result+l1+1, p2, l2+1); }
+        else { memcpy(result+l1, p2, l2+1); }
+        return magi_make_string(result);
+    }
+    case MAGI_RT_FS_READ_BYTES: {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "rb");
+        if (!f) return magi_make_null();
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = (int32_t)len;
+        arr->cap = (int32_t)len;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * len);
+        unsigned char* buf = (unsigned char*)malloc(len);
+        fread(buf, 1, len, f);
+        fclose(f);
+        for (long i = 0; i < len; i++) {
+            arr->data[i] = magi_make_int(buf[i]);
+        }
+        free(buf);
+        return magi_make_array_val(arr);
+    }
+    case MAGI_RT_FS_SIZE: {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "rb");
+        if (!f) return magi_make_int(0);
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fclose(f);
+        return magi_make_int(sz);
+    }
+    case MAGI_RT_FS_WRITE: {
+        const char* path = magi_as_string(a);
+        const char* content = magi_as_string(b);
+        FILE* f = fopen(path, "w");
+        if (f) { fputs(content, f); fclose(f); return magi_make_string(path); }
+        return magi_make_null();
+    }
+    case MAGI_RT_FS_READ: {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "r");
+        if (!f) return magi_make_null();
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        char* buf = (char*)malloc(len + 1);
+        fread(buf, 1, len, f);
+        buf[len] = '\0';
+        fclose(f);
+        return magi_make_string(buf);
+    }
+    case MAGI_RT_FS_EXISTS: {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "r");
+        if (f) { fclose(f); return magi_make_bool(1); }
+        return magi_make_bool(0);
+    }
+    case MAGI_RT_FS_DELETE:
+        return magi_make_bool(remove(magi_as_string(a)) == 0);
+    case MAGI_RT_FS_READ_LINES: {
+        const char* path = magi_as_string(a);
+        FILE* f = fopen(path, "r");
+        if (!f) return __magi_array_new(0, NULL);
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = 0; arr->cap = 32;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+        char line[4096];
+        while (fgets(line, sizeof(line), f)) {
+            size_t len = strlen(line);
+            if (len > 0 && line[len-1] == '\n') line[--len] = '\0';
+            if (arr->len >= arr->cap) { arr->cap *= 2; arr->data = (int64_t*)realloc(arr->data, sizeof(int64_t) * arr->cap); }
+            arr->data[arr->len++] = magi_make_string(strdup(line));
+        }
+        fclose(f);
+        return magi_make_array_val(arr);
+    }
+    case MAGI_RT_FS_MKDIR: {
+        #ifdef _WIN32
+        int r = _mkdir(magi_as_string(a));
+        #else
+        int r = mkdir(magi_as_string(a), 0755);
+        #endif
+        return magi_make_bool(r == 0 || errno == EEXIST);
+    }
+    case MAGI_RT_FILE_APPEND: {
+        const char* path = magi_as_string(a);
+        const char* content = magi_as_string(b);
+        FILE* f = fopen(path, "a");
+        if (f) { fputs(content, f); fclose(f); return magi_make_string(path); }
+        return magi_make_null();
+    }
+    case MAGI_RT_LIST_DIR: {
+        const char* path = magi_as_string(a);
+        DIR* d = opendir(path);
+        if (!d) return __magi_array_new(0, NULL);
+        MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+        arr->len = 0; arr->cap = 32;
+        arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+        struct dirent* entry;
+        while ((entry = readdir(d)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+            if (arr->len >= arr->cap) { arr->cap *= 2; arr->data = (int64_t*)realloc(arr->data, sizeof(int64_t) * arr->cap); }
+            arr->data[arr->len++] = magi_make_string(strdup(entry->d_name));
+        }
+        closedir(d);
+        for (int i = 1; i < arr->len; i++) {
+            int64_t key = arr->data[i];
+            const char* ks = magi_as_string(key);
+            int j = i - 1;
+            while (j >= 0 && strcmp(magi_as_string(arr->data[j]), ks) > 0) { arr->data[j+1] = arr->data[j]; j--; }
+            arr->data[j+1] = key;
+        }
+        return magi_make_array_val(arr);
+    }
+
+    // ── JSON ──
+    case MAGI_RT_JSON_PARSE: {
+        // Delegate to the string-based handler for the complex JSON parser
+        return __magi_runtime_call("parse_json", argc, args);
+    }
+    case MAGI_RT_JSON_STRINGIFY:
+        return magi_make_string(magi_to_json(a));
+
+    // ── Renderers ──
+    case MAGI_RT_RENDER_SEG_COLS:
+        return __magi_runtime_call("__render_seg_cols", argc, args);
+    case MAGI_RT_RENDER_WALL_COL:
+        return __magi_runtime_call("__render_wall_col", argc, args);
+    case MAGI_RT_RENDER_FLAT_COL:
+        return __magi_runtime_call("__render_flat_col", argc, args);
+
+    default:
+        return magi_make_null();
+    }
+}
+
 int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     int64_t a = argc > 0 ? args[0] : magi_make_null();
     int64_t b = argc > 1 ? args[1] : magi_make_null();
+
+    // Fast path: common arithmetic/comparisons (avoids strcmp chain)
+    if (name[0] == '_' && name[1] == '_') {
+        int64_t fast = __magi_fast_binop(name, a, b);
+        if (fast != FAST_BINOP_SENTINEL) return fast;
+    }
 
     // Arithmetic
     if (strcmp(name, "__add") == 0) {
@@ -640,13 +1640,47 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         // String content equality: two different string pointers may have same content
         if (magi_get_tag(a) == TAG_STRING && magi_get_tag(b) == TAG_STRING)
             return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) == 0);
+        // Deep array equality
+        if (magi_get_tag(a) == TAG_ARRAY && magi_get_tag(b) == TAG_ARRAY) {
+            MagiArray* aa = magi_array_ptr(a);
+            MagiArray* ab = magi_array_ptr(b);
+            if (!aa && !ab) return magi_make_bool(1);
+            if (!aa || !ab || aa->len != ab->len) return magi_make_bool(0);
+            for (int i = 0; i < aa->len; i++) {
+                int64_t eq_args[2] = {aa->data[i], ab->data[i]};
+                int64_t eq = __magi_runtime_call("__eq", 2, eq_args);
+                if (!magi_as_bool(eq)) return magi_make_bool(0);
+            }
+            return magi_make_bool(1);
+        }
+        // Deep map equality
+        if (magi_get_tag(a) == TAG_MAP && magi_get_tag(b) == TAG_MAP) {
+            MagiMap* ma = magi_map_ptr(a);
+            MagiMap* mb = magi_map_ptr(b);
+            if (!ma && !mb) return magi_make_bool(1);
+            if (!ma || !mb || ma->len != mb->len) return magi_make_bool(0);
+            for (int i = 0; i < ma->len; i++) {
+                int found = 0;
+                for (int j = 0; j < mb->len; j++) {
+                    if (strcmp(ma->keys[i], mb->keys[j]) == 0) {
+                        int64_t eq_args[2] = {ma->values[i], mb->values[j]};
+                        int64_t eq = __magi_runtime_call("__eq", 2, eq_args);
+                        if (!magi_as_bool(eq)) return magi_make_bool(0);
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found) return magi_make_bool(0);
+            }
+            return magi_make_bool(1);
+        }
         return magi_make_bool(0);
     }
     if (strcmp(name, "__ne") == 0) {
-        if (a == b) return magi_make_bool(0);
-        if (magi_get_tag(a) == TAG_STRING && magi_get_tag(b) == TAG_STRING)
-            return magi_make_bool(strcmp(magi_as_string(a), magi_as_string(b)) != 0);
-        return magi_make_bool(1);
+        // Negate __eq for consistent deep equality
+        int64_t eq_args[2] = {a, b};
+        int64_t eq = __magi_runtime_call("__eq", 2, eq_args);
+        return magi_make_bool(!magi_as_bool(eq));
     }
     if (strcmp(name, "__lt") == 0) {
         if (magi_get_tag(a) == TAG_I64 && magi_get_tag(b) == TAG_I64)
@@ -733,6 +1767,34 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         MagiArray* arr = magi_array_ptr(a);
         if (!arr || arr->len == 0) return magi_make_null();
         return arr->data[--arr->len];
+    }
+    if (strcmp(name, "has") == 0) {
+        if (magi_get_tag(a) == TAG_MAP) {
+            MagiMap* map = magi_map_ptr(a);
+            const char* key = magi_as_string(b);
+            if (!map || !key) return magi_make_bool(0);
+            for (int i = 0; i < map->len; i++) {
+                if (strcmp(map->keys[i], key) == 0) return magi_make_bool(1);
+            }
+            return magi_make_bool(0);
+        }
+        if (magi_get_tag(a) == TAG_ARRAY) {
+            MagiArray* arr = magi_array_ptr(a);
+            if (!arr) return magi_make_bool(0);
+            for (int i = 0; i < arr->len; i++) {
+                if (arr->data[i] == b) return magi_make_bool(1);
+                if (magi_get_tag(arr->data[i]) == TAG_STRING && magi_get_tag(b) == TAG_STRING &&
+                    strcmp(magi_as_string(arr->data[i]), magi_as_string(b)) == 0)
+                    return magi_make_bool(1);
+            }
+            return magi_make_bool(0);
+        }
+        return magi_make_bool(0);
+    }
+    if (strcmp(name, "contains") == 0) {
+        // Alias for has
+        int64_t has_args[2] = { a, b };
+        return __magi_runtime_call("has", 2, has_args);
     }
 
     // Array/Collection methods with callbacks
@@ -1394,6 +2456,196 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     if (strcmp(name, "__byte_slice") == 0) {
         int64_t c = argc > 2 ? args[2] : magi_make_int(0);
         return __magi_byte_slice(a, b, c);
+    }
+
+    // Native seg renderer: processes an entire seg's column range in C
+    // Args: fb, hor_ocl, floor_ocl, ceil_ocl,
+    //       scr_x1, scr_x2, cx1, cy1, cx2, cy2,
+    //       floor_h, ceil_h, back_floor_h, back_ceil_h,
+    //       has_back, has_upper, has_lower,
+    //       light_level, game_focus_x, aspect_ratio, cam_focus_x, cam_focus_y
+    if (strcmp(name, "__render_seg_cols") == 0 && argc >= 22) {
+        MagiArray* fb = magi_array_ptr(args[0]);
+        MagiArray* hor_ocl = magi_array_ptr(args[1]);
+        MagiArray* floor_ocl = magi_array_ptr(args[2]);
+        MagiArray* ceil_ocl = magi_array_ptr(args[3]);
+        if (!fb || !hor_ocl || !floor_ocl || !ceil_ocl) return magi_make_null();
+        int scr_x1 = (int)magi_as_int(args[4]);
+        int scr_x2 = (int)magi_as_int(args[5]);
+        double cx1 = magi_as_float(args[6]);
+        double cy1 = magi_as_float(args[7]);
+        double cx2 = magi_as_float(args[8]);
+        double cy2 = magi_as_float(args[9]);
+        double floor_h = magi_as_float(args[10]);
+        double ceil_h = magi_as_float(args[11]);
+        double back_floor_h = magi_as_float(args[12]);
+        double back_ceil_h = magi_as_float(args[13]);
+        int has_back = (int)magi_as_int(args[14]);
+        int has_upper = (int)magi_as_int(args[15]);
+        int has_lower = (int)magi_as_int(args[16]);
+        int light_level = (int)magi_as_int(args[17]);
+        double gfx = magi_as_float(args[18]);
+        double ar = magi_as_float(args[19]);
+        double cfx = magi_as_float(args[20]);
+        double cfy = magi_as_float(args[21]);
+        int SW = 320, VH = 168;
+        double x_range = (double)(scr_x2 - scr_x1);
+        if (x_range <= 0) return magi_make_null();
+        for (int ix = scr_x1; ix < scr_x2; ix++) {
+            int x = ix;
+            if (x < 0 || x >= SW) continue;
+            if (magi_as_bool(hor_ocl->data[x])) continue;
+            double t = (double)(ix - scr_x1) / x_range;
+            double depth = cx1 + t * (cx2 - cx1);
+            if (depth <= 0.1) continue;
+            double bot_y_f = cfy - gfx * floor_h / depth;
+            double top_y_f = cfy - gfx * ceil_h / depth;
+            int bot_y = (int)bot_y_f;
+            int top_y = (int)top_y_f;
+            int fl_ocl = (int)magi_as_int(floor_ocl->data[x]);
+            int cl_ocl = (int)magi_as_int(ceil_ocl->data[x]);
+            int cb = bot_y < fl_ocl ? bot_y : fl_ocl;
+            int ct = top_y > cl_ocl ? top_y : cl_ocl;
+            if (cb <= ct) continue;
+            // Light
+            int cmap_idx = (32 - light_level / 8) + (int)(depth / 48.0);
+            if (cmap_idx < 0) cmap_idx = 0;
+            if (cmap_idx > 31) cmap_idx = 31;
+            int color = has_back ? (has_upper ? 64 : (has_lower ? 104 : 80)) : 96;
+            // Fill wall with solid color for now (texture handled by MAGI caller)
+            for (int y = ct + 1; y < cb; y++) {
+                if (y >= 0 && y < VH) {
+                    int fi = y * SW + x;
+                    if (fi >= 0 && fi < fb->len) fb->data[fi] = magi_make_int(color);
+                }
+            }
+            // Occlude
+            if (!has_back) {
+                hor_ocl->data[x] = magi_make_bool(1);
+                floor_ocl->data[x] = magi_make_int(VH / 2);
+                ceil_ocl->data[x] = magi_make_int(VH / 2);
+            } else {
+                if (has_upper) {
+                    int bty = (int)(cfy - gfx * back_ceil_h / depth);
+                    if (bty > cl_ocl) ceil_ocl->data[x] = magi_make_int(bty);
+                }
+                if (has_lower) {
+                    int bby = (int)(cfy - gfx * back_floor_h / depth);
+                    if (bby < fl_ocl) floor_ocl->data[x] = magi_make_int(bby);
+                }
+            }
+        }
+        return magi_make_null();
+    }
+
+    // Native wall column renderer
+    // Args: fb, column_data, x, y1, y2, col_h, scr_top, scr_h, tex_h, cmap
+    if (strcmp(name, "__render_wall_col") == 0 && argc >= 10) {
+        MagiArray* fb = magi_array_ptr(args[0]);
+        MagiArray* col = magi_array_ptr(args[1]);
+        if (!fb || !col) return magi_make_null();
+        int x = (int)magi_as_int(args[2]);
+        int y1 = (int)magi_as_int(args[3]);
+        int y2 = (int)magi_as_int(args[4]);
+        int col_h = (int)magi_as_int(args[5]);
+        double scr_top = magi_as_float(args[6]);
+        double scr_h = magi_as_float(args[7]);
+        int tex_h = (int)magi_as_int(args[8]);
+        MagiArray* cmap = magi_array_ptr(args[9]);
+        if (col_h <= 0 || scr_h <= 0.0 || tex_h <= 0) return magi_make_null();
+        int SW = 320;
+        for (int y = y1; y <= y2; y++) {
+            if (y < 0 || y >= 168) continue;
+            double ay = ((double)y - scr_top) / scr_h;
+            int ty = (int)(ay * tex_h);
+            ty = ((ty % col_h) + col_h) % col_h;
+            int px = 0;
+            if (col->cap == -1) {
+                const unsigned char* raw = (const unsigned char*)(uintptr_t)col->data;
+                if (ty >= 0 && ty < col->len) px = raw[ty];
+            } else if (ty >= 0 && ty < col->len) {
+                px = (int)magi_as_int(col->data[ty]);
+            }
+            if (cmap && px >= 0 && px < 256 && px < cmap->len) {
+                if (cmap->cap == -1) {
+                    const unsigned char* raw = (const unsigned char*)(uintptr_t)cmap->data;
+                    px = raw[px];
+                } else {
+                    px = (int)magi_as_int(cmap->data[px]);
+                }
+            }
+            int fi = y * SW + x;
+            if (fi >= 0 && fi < fb->len) fb->data[fi] = magi_make_int(px);
+        }
+        return magi_make_null();
+    }
+
+    // Native flat column renderer — replaces the per-pixel MAGI loop
+    // Args: fb, flat, x, y1, y2, viewx, viewy, viewz, viewangle, plane_height, projection, centery, cmap, xtoviewangle_x, finesine_arr, finecosine_offset
+    if (strcmp(name, "__render_flat_col") == 0 && argc >= 14) {
+        MagiArray* fb = magi_array_ptr(args[0]);
+        MagiArray* flat = magi_array_ptr(args[1]);
+        if (!fb || !flat || flat->len < 4096) return magi_make_null();
+        int x = (int)magi_as_int(args[2]);
+        int y1 = (int)magi_as_int(args[3]);
+        int y2 = (int)magi_as_int(args[4]);
+        int64_t viewx = magi_as_int(args[5]);
+        int64_t viewy = magi_as_int(args[6]);
+        int64_t viewz = magi_as_int(args[7]);
+        int64_t viewangle = magi_as_int(args[8]);
+        int64_t plane_height = magi_as_int(args[9]);
+        int64_t projection = magi_as_int(args[10]);
+        int centery = (int)magi_as_int(args[11]);
+        MagiArray* cmap = magi_array_ptr(args[12]);
+        int64_t xtoviewangle_x = magi_as_int(args[13]);
+        MagiArray* sine_arr = argc > 14 ? magi_array_ptr(args[14]) : NULL;
+        int cosine_offset = argc > 15 ? (int)magi_as_int(args[15]) : 0;
+        int SCREENWIDTH = 320;
+        int64_t plane_z = plane_height - viewz;
+        if (plane_z < 0) plane_z = -plane_z;
+        if (plane_z == 0) return magi_make_null();
+        int64_t FRACUNIT = 1 << 16;
+        int64_t ANG360 = (int64_t)0x100000000LL;
+        for (int y = y1; y <= y2; y++) {
+            if (y < 0 || y >= 168) continue;
+            int dy = y - centery;
+            if (dy < 0) dy = -dy;
+            if (dy == 0) continue;
+            int64_t dist = (plane_z * (projection >> 6)) / (((int64_t)dy) << (16 - 6));
+            if (dist <= 0) continue;
+            int64_t col_angle = viewangle + xtoviewangle_x;
+            int64_t cos_idx = ((col_angle & (ANG360 - 1)) >> 19) & 8191;
+            int64_t sin_idx = cos_idx;
+            int64_t cos_off = (sin_idx + cosine_offset) % (sine_arr ? sine_arr->len : 10240);
+            int64_t cos_v = sine_arr && cos_off >= 0 && cos_off < sine_arr->len ? magi_as_int(sine_arr->data[cos_off]) : 0;
+            int64_t sin_v = sine_arr && sin_idx >= 0 && sin_idx < sine_arr->len ? magi_as_int(sine_arr->data[sin_idx]) : 0;
+            int64_t map_x = viewx + ((dist * cos_v) >> 16);
+            int64_t map_y = viewy - ((dist * sin_v) >> 16);
+            int tx = (int)(((map_x >> 16) & 63) + 64) % 64;
+            int ty = (int)(((map_y >> 16) & 63) + 64) % 64;
+            int flat_idx = ty * 64 + tx;
+            int px = 0;
+            if (flat->cap == -1) {
+                // Byte array (embedded data) — read raw bytes
+                const unsigned char* raw = (const unsigned char*)(uintptr_t)flat->data;
+                if (flat_idx >= 0 && flat_idx < flat->len) px = raw[flat_idx];
+            } else if (flat_idx >= 0 && flat_idx < flat->len) {
+                px = (int)magi_as_int(flat->data[flat_idx]);
+            }
+            if (cmap && px >= 0 && px < 256 && px < cmap->len) {
+                if (cmap->cap == -1) {
+                    const unsigned char* raw = (const unsigned char*)(uintptr_t)cmap->data;
+                    px = raw[px];
+                } else {
+                    px = (int)magi_as_int(cmap->data[px]);
+                }
+            }
+            int fb_idx = y * SCREENWIDTH + x;
+            if (fb_idx >= 0 && fb_idx < fb->len) {
+                fb->data[fb_idx] = magi_make_int(px);
+            }
+        }
+        return magi_make_null();
     }
 
     // Unknown: return null

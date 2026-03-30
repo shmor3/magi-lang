@@ -9835,7 +9835,7 @@ fn cmd_compile_native(path: &str, opt_level: u8, output: Option<&str>, target: O
         }
     };
 
-    match magi_lang::compiler::llvm::compile_native(&combined_source, target, opt_level, &out_path) {
+    match magi_lang::compiler::llvm::compile_native(&combined_source, Some(path), target, opt_level, &out_path) {
         Ok(()) => {
             #[cfg(unix)]
             {

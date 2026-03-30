@@ -31,6 +31,7 @@ const STRING_TAG: u64 = NANBOX_SIG | ((tag::STRING as u64) << 48);
 /// Compile MAGI source to a native binary via LLVM.
 pub fn compile_native(
     source: &str,
+    source_path: Option<&str>,
     target_triple: Option<&str>,
     opt_level: u8,
     output_path: &str,
@@ -41,13 +42,14 @@ pub fn compile_native(
     let mut compiler = super::Compiler::new();
     let ir_mod = compiler.compile(&program).map_err(|e| format!("{}", e))?;
 
-    emit_native(&ir_mod, target_triple, opt_level, output_path)
+    emit_native(&ir_mod, source_path, target_triple, opt_level, output_path)
 }
 
 /// Core LLVM pipeline: IR module → object file → linked binary.
 /// All LLVM objects live in this function's scope to satisfy lifetime requirements.
 fn emit_native(
     ir_mod: &IrModule,
+    source_path: Option<&str>,
     target_triple: Option<&str>,
     opt_level: u8,
     output_path: &str,
@@ -55,6 +57,20 @@ fn emit_native(
     let ctx = Context::create();
     let module = ctx.create_module("magi_program");
     let b = ctx.create_builder();
+
+    // Set the module's target triple to match the compilation target.
+    // This ensures correct calling conventions (e.g., Windows x64 vs System V).
+    // Normalize short target names to full LLVM triples.
+    let norm_triple = match target_triple {
+        Some(t) if t.contains("windows") && !t.contains("-pc-") => {
+            let arch = t.split('-').next().unwrap_or("x86_64");
+            Some(format!("{}-pc-windows-gnu", arch))
+        }
+        other => other.map(String::from),
+    };
+    let triple_ref = norm_triple.as_deref().or(target_triple);
+    let mod_triple = triple_ref.map(TargetTriple::create).unwrap_or_else(TargetMachine::get_default_triple);
+    module.set_triple(&mod_triple);
 
     let i64_t = ctx.i64_type();
     let i32_t = ctx.i32_type();
@@ -70,6 +86,7 @@ fn emit_native(
     }
     rt_decl!("__magi_print", void_t, [i64_t]);
     rt_decl!("__magi_runtime_call", i64_t, [ptr_t, i32_t, ptr_t]);
+    rt_decl!("__magi_runtime_call_id", i64_t, [i32_t, i32_t, ptr_t]);
     rt_decl!("__magi_array_new", i64_t, [i32_t, ptr_t]);
     rt_decl!("__magi_array_get", i64_t, [i64_t, i64_t]);
     rt_decl!("__magi_array_set", void_t, [i64_t, i64_t, i64_t]);
@@ -80,6 +97,16 @@ fn emit_native(
     rt_decl!("__magi_string_concat", i64_t, [i64_t, i64_t]);
     rt_decl!("__magi_string_len", i64_t, [i64_t]);
     rt_decl!("__magi_to_string", i64_t, [i64_t]);
+
+    // ── Direct builtin wrappers (bypass RuntimeCall dispatch) ──
+    rt_decl!("__magi_builtin_len", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_push", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_builtin_abs", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_floor", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_sqrt", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_cos", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_sin", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_atan2", i64_t, [i64_t, i64_t]);
 
     // ── Globals ─────────────────────────────────────────────
     let mut globals: Vec<PointerValue> = Vec::new();
@@ -198,10 +225,9 @@ fn emit_native(
         2 => OptimizationLevel::Default, _ => OptimizationLevel::Aggressive,
     };
     Target::initialize_all(&InitializationConfig::default());
-    let triple = target_triple.map(TargetTriple::create).unwrap_or_else(TargetMachine::get_default_triple);
-    let target = Target::from_triple(&triple).map_err(|e| format!("invalid target: {}", e))?;
+    let target = Target::from_triple(&mod_triple).map_err(|e| format!("invalid target: {}", e))?;
     let machine = target
-        .create_target_machine(&triple, "generic", "", opt, RelocMode::PIC, CodeModel::Default)
+        .create_target_machine(&mod_triple, "generic", "", opt, RelocMode::PIC, CodeModel::Default)
         .ok_or("failed to create target machine")?;
 
     let obj_path = format!("{}.o", output_path);
@@ -216,12 +242,18 @@ fn emit_native(
 
     // Resolve native dependencies from packages with [native] in magi.toml
     let triple_str = target_triple.unwrap_or("");
-    let is_windows = triple_str.contains("windows");
-    let is_macos = triple_str.contains("apple") || triple_str.contains("darwin") || triple_str.contains("macos");
-    let platform_key = if is_windows { "windows-x86_64" } else if is_macos { "macos-x86_64" } else { "linux-x86_64" };
+    let is_windows = if triple_str.is_empty() { cfg!(target_os = "windows") } else { triple_str.contains("windows") };
+    let is_macos = if triple_str.is_empty() { cfg!(target_os = "macos") } else { triple_str.contains("apple") || triple_str.contains("darwin") || triple_str.contains("macos") };
+    let host_arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+    let target_arch = if !triple_str.is_empty() {
+        if triple_str.contains("aarch64") || triple_str.contains("arm64") { "aarch64" } else { "x86_64" }
+    } else { host_arch };
+    let platform_key = if is_windows { if target_arch == "aarch64" { "windows-aarch64" } else { "windows-x86_64" } }
+        else if is_macos { if target_arch == "aarch64" { "macos-aarch64" } else { "macos-x86_64" } }
+        else { if target_arch == "aarch64" { "linux-aarch64" } else { "linux-x86_64" } };
     let cc_cmd = if is_windows { "x86_64-w64-mingw32-gcc" } else { "cc" };
 
-    for pkg_dir in find_native_packages() {
+    for pkg_dir in find_native_packages(source_path) {
         let toml_path = format!("{}/magi.toml", pkg_dir);
         if let Ok(toml) = std::fs::read_to_string(&toml_path) {
             // Parse [native] section
@@ -308,17 +340,39 @@ fn emit_native(
         .status()
         .map_err(|e| format!("linker: {}", e))?;
 
-    for f in &temp_files { let _ = std::fs::remove_file(f); }
+    if std::env::var("MAGI_KEEP_C").is_ok() {
+        eprintln!("Keeping temp files: {:?}", temp_files);
+    } else {
+        for f in &temp_files { let _ = std::fs::remove_file(f); }
+    }
 
     if !status.success() { return Err("linking failed".into()); }
     Ok(())
 }
 
-fn find_native_packages() -> Vec<String> {
+fn find_native_packages(source_path: Option<&str>) -> Vec<String> {
     let mut dirs = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let search_paths = ["packages", "../packages", "../../packages",
-        "/home/dev/workspace/magi/magi-lang/packages"];
+    let exe_dir = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let exe_packages = exe_dir.as_ref()
+        .map(|d| d.join("../../packages").to_string_lossy().to_string());
+    let mut search_paths_owned = vec![
+        "packages".to_string(),
+        "../packages".to_string(),
+        "../../packages".to_string(),
+    ];
+    // Add search paths relative to the source file being compiled
+    if let Some(sp) = source_path {
+        let src_dir = std::path::Path::new(sp).parent();
+        if let Some(dir) = src_dir {
+            search_paths_owned.push(dir.join("packages").to_string_lossy().to_string());
+            search_paths_owned.push(dir.join("../packages").to_string_lossy().to_string());
+        }
+    }
+    let mut all_paths: Vec<&str> = search_paths_owned.iter().map(|s| s.as_str()).collect();
+    if let Some(ref ep) = exe_packages { all_paths.push(ep.as_str()); }
+    let search_paths = all_paths;
     for base in &search_paths {
         if let Ok(entries) = std::fs::read_dir(base) {
             for entry in entries.flatten() {
@@ -452,6 +506,149 @@ fn terminated(b: &Builder) -> bool {
     b.get_insert_block().map(|bb| bb.get_terminator().is_some()).unwrap_or(true)
 }
 
+// ── Numeric dispatch ID mapping ─────────────────────────────
+// Maps RuntimeCall string names to enum MagiBuiltinId values.
+// Must match the enum in magi_runtime.c exactly.
+fn runtime_id(name: &str) -> Option<u32> {
+    Some(match name {
+        // Arithmetic
+        "__add" => 1,
+        "__sub" => 2,
+        "__mul" => 3,
+        "__div" => 4,
+        "__mod" => 5,
+        "__rem" => 6,
+        "__eq" => 7,
+        "__ne" => 8,
+        "__lt" => 9,
+        "__gt" => 10,
+        "__le" => 11,
+        "__ge" => 12,
+        "__neg" => 13,
+        "__pow" => 14,
+        // Logical
+        "__and" => 15,
+        "__or" => 16,
+        "__not" => 17,
+        // Bitwise
+        "__bit_and" => 18,
+        "__bit_or" => 19,
+        "__bit_xor" => 20,
+        "__shl" | "__bit_shl" => 21,
+        "__shr" | "__bit_shr" => 22,
+        "__bit_not" => 23,
+        "__bit_andnot" => 24,
+        // Collections
+        "len" => 25,
+        "push" | "array_push" | "__array_push" => 26,
+        "pop" | "array_pop" => 27,
+        "has" => 28,
+        "contains" => 29,
+        "keys" => 30,
+        "values" => 31,
+        "entries" => 32,
+        "map" => 33,
+        "filter" => 34,
+        "reduce" => 35,
+        "find" => 36,
+        "every" => 37,
+        "some" => 38,
+        "for_each" | "forEach" => 39,
+        "reverse" => 40,
+        "sort" => 41,
+        "sort_by" | "sortBy" => 42,
+        "flat_map" | "flatMap" => 43,
+        "index_of" | "indexOf" => 44,
+        "includes" => 45,
+        // String
+        "to_string" | "string" => 46,
+        "typeof" | "type_of" => 47,
+        "split" => 48,
+        "join" => 49,
+        "trim" => 50,
+        "upper" | "to_upper" | "toUpperCase" => 51,
+        "lower" | "to_lower" | "toLowerCase" => 52,
+        "starts_with" | "startsWith" => 53,
+        "ends_with" | "endsWith" => 54,
+        "replace" => 55,
+        "substring" | "substr" | "slice" => 56,
+        "char_at" | "charAt" => 57,
+        "concat" => 58,
+        // Math
+        "abs" => 59,
+        "floor" => 60,
+        "ceil" => 61,
+        "sqrt" => 62,
+        "round" => 63,
+        "sin" => 64,
+        "cos" => 65,
+        "tan" => 66,
+        "atan" => 67,
+        "atan2" => 68,
+        "asin" => 69,
+        "acos" => 70,
+        "pow" => 71,
+        "fmod" => 72,
+        "log" => 73,
+        "log2" => 74,
+        "log10" => 75,
+        "exp" => 76,
+        "min" => 77,
+        "max" => 78,
+        "random" => 79,
+        "is_nan" | "isNaN" => 80,
+        "is_finite" | "isFinite" => 81,
+        // Range/slice
+        "__range" => 82,
+        "__slice" => 83,
+        "__repeat" => 84,
+        // Map
+        "map_get" => 85,
+        "map_set" => 86,
+        "has_key" | "hasKey" => 87,
+        // Parse
+        "parse_int" => 88,
+        "parse_float" => 89,
+        "parse_json" | "json_parse" => 90,
+        "stringify_json" | "json_stringify" | "to_json" => 91,
+        // I/O
+        "println" => 92,
+        "print" => 93,
+        // Process
+        "exit" => 94,
+        "panic" => 95,
+        "timestamp_ms" | "time_ms" => 96,
+        "process_args" | "args" => 97,
+        "env_get" => 98,
+        "env_set" => 99,
+        "env_has" => 100,
+        "exec_cmd" => 101,
+        "cwd" => 102,
+        "os_name" => 103,
+        "pid" => 104,
+        // Byte
+        "__byte_slice" => 105,
+        // File I/O
+        "fs_read" | "file_read" | "read_file" => 106,
+        "fs_write" | "file_write" | "write_file" => 107,
+        "fs_exists" | "file_exists" => 108,
+        "fs_delete" | "file_delete" | "delete_file" => 109,
+        "fs_read_bytes" | "read_file_bytes" => 110,
+        "fs_size" | "file_size" => 111,
+        "fs_read_lines" => 112,
+        "fs_mkdir" | "mkdir" | "create_dir" => 113,
+        "file_append" | "append_file" => 114,
+        "list_dir" | "read_dir" | "fs_list_dir" | "fs_list" => 115,
+        // Path
+        "path_join" => 116,
+        // Renderers
+        "__render_seg_cols" => 117,
+        "__render_wall_col" => 118,
+        "__render_flat_col" => 119,
+        _ => return None,
+    })
+}
+
 // ── Function body compilation ───────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -484,6 +681,14 @@ fn compile_fn<'ctx>(
         }
         locals.push(a);
     }
+
+    // Pre-allocate a reusable args buffer for RuntimeCall (avoids alloca-in-loop stack overflow).
+    let max_rc_args = func.instructions.iter().filter_map(|inst| {
+        if let Instruction::RuntimeCall { arg_count, .. } = inst { Some(*arg_count as u64) }
+        else if let Instruction::CallIndirect(arity) = inst { Some(*arity as u64) }
+        else { None }
+    }).max().unwrap_or(1).max(1);
+    let rc_args_buf = b.build_array_alloca(i64_t, i32_t.const_int(max_rc_args, false), "rcbuf").unwrap();
 
     let mut stack: Vec<IntValue<'ctx>> = Vec::new();
     let mut cf: Vec<CfEntry<'ctx>> = Vec::new();
@@ -541,9 +746,33 @@ fn compile_fn<'ctx>(
             Instruction::I64Add => { let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); stack.push(tag_i64(b,ctx,b.build_int_add(av,bv,"a").unwrap())); }
             Instruction::I64Sub => { let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); stack.push(tag_i64(b,ctx,b.build_int_sub(av,bv,"s").unwrap())); }
             Instruction::I64Mul => { let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); stack.push(tag_i64(b,ctx,b.build_int_mul(av,bv,"m").unwrap())); }
-            Instruction::I64Div => { let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); stack.push(tag_i64(b,ctx,b.build_int_signed_div(av,bv,"d").unwrap())); }
-            Instruction::I64Rem => { let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); stack.push(tag_i64(b,ctx,b.build_int_signed_rem(av,bv,"r").unwrap())); }
-            Instruction::I64Neg => { let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx))); stack.push(tag_i64(b,ctx,b.build_int_neg(av,"n").unwrap())); }
+            Instruction::I64Div => {
+                let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx)));
+                let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx)));
+                let is_zero = b.build_int_compare(IntPredicate::EQ, bv, i64_t.const_zero(), "dz").unwrap();
+                let safe_b = b.build_select(is_zero, i64_t.const_int(1,false), bv, "sb").unwrap().into_int_value();
+                let div = b.build_int_signed_div(av, safe_b, "d").unwrap();
+                let res = b.build_select(is_zero, i64_t.const_zero(), div, "dr").unwrap().into_int_value();
+                stack.push(tag_i64(b,ctx,res));
+            }
+            Instruction::I64Rem => {
+                let bv = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx)));
+                let av = ext_i64(b,ctx,stack.pop().unwrap_or(cnull(ctx)));
+                let is_zero = b.build_int_compare(IntPredicate::EQ, bv, i64_t.const_zero(), "rz").unwrap();
+                let safe_b = b.build_select(is_zero, i64_t.const_int(1,false), bv, "srb").unwrap().into_int_value();
+                let rem = b.build_int_signed_rem(av, safe_b, "r").unwrap();
+                let res = b.build_select(is_zero, i64_t.const_zero(), rem, "rr").unwrap().into_int_value();
+                stack.push(tag_i64(b,ctx,res));
+            }
+            Instruction::I64Neg => {
+                let val = stack.pop().unwrap_or(cnull(ctx));
+                let masked = b.build_and(val, ci64(ctx, NANBOX_SIG), "nm").unwrap();
+                let is_float = b.build_int_compare(IntPredicate::NE, masked, ci64(ctx, NANBOX_SIG), "isf").unwrap();
+                let float_neg = b.build_xor(val, ci64(ctx, 0x8000_0000_0000_0000u64), "fn").unwrap();
+                let int_neg = tag_i64(b, ctx, b.build_int_neg(ext_i64(b, ctx, val), "in").unwrap());
+                let result = b.build_select(is_float, float_neg, int_neg, "neg").unwrap();
+                stack.push(result.into_int_value());
+            }
 
             // ── i64 comparisons ────────────────────────
             Instruction::I64Eq => icmp_push(b, ctx, &mut stack, IntPredicate::EQ),
@@ -743,16 +972,15 @@ fn compile_fn<'ctx>(
             }
             Instruction::CallIndirect(type_idx) => {
                 // Indirect call: function index is on the stack, then args
-                // type_idx tells us the arity from the IR type table
+                // type_idx is the arity (number of arguments)
                 let fn_idx_val = stack.pop().unwrap_or(cnull(ctx));
-                let arity = ir.functions.get(*type_idx as usize).map(|f| f.param_count).unwrap_or(0) as usize;
+                let arity = *type_idx as usize;
                 let mut call_args: Vec<IntValue> = (0..arity).map(|_| stack.pop().unwrap_or(cnull(ctx))).collect();
                 call_args.reverse();
 
-                // Build args array for __magi_call_fn
-                let args_alloca = b.build_array_alloca(i64_t, i32_t.const_int(std::cmp::max(arity, 1) as u64, false), "ia").unwrap();
+                // Reuse pre-allocated args buffer
                 for (i, a) in call_args.iter().enumerate() {
-                    let p = unsafe { b.build_gep(i64_t, args_alloca, &[i32_t.const_int(i as u64, false)], "iap").unwrap() };
+                    let p = unsafe { b.build_gep(i64_t, rc_args_buf, &[i32_t.const_int(i as u64, false)], "iap").unwrap() };
                     b.build_store(p, *a).unwrap();
                 }
 
@@ -761,7 +989,7 @@ fn compile_fn<'ctx>(
                     let ft = i64_t.fn_type(&[i64_t.into(), i32_t.into(), ctx.ptr_type(AddressSpace::default()).into()], false);
                     module.add_function("__magi_call_fn", ft, None)
                 });
-                let result = b.build_call(call_fn, &[fn_idx_val.into(), i32_t.const_int(arity as u64, false).into(), args_alloca.into()], "ic").unwrap();
+                let result = b.build_call(call_fn, &[fn_idx_val.into(), i32_t.const_int(arity as u64, false).into(), rc_args_buf.into()], "ic").unwrap();
                 stack.push(result.try_as_basic_value().left().unwrap().into_int_value());
             }
 
@@ -809,10 +1037,111 @@ fn compile_fn<'ctx>(
                 stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
             }
             Instruction::ArrayGet => {
-                let idx = stack.pop().unwrap_or(cnull(ctx));
-                let arr = stack.pop().unwrap_or(cnull(ctx));
-                let r = b.build_call(rt["__magi_array_get"], &[arr.into(), idx.into()], "ag").unwrap();
-                stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
+                let idx_val = stack.pop().unwrap_or(cnull(ctx));
+                let arr_val = stack.pop().unwrap_or(cnull(ctx));
+
+                // Check if arr_val is a NaN-boxed TAG_ARRAY: (v >> 48) & 7 == 4
+                let arr_tag = b.build_and(
+                    b.build_right_shift(arr_val, ci64(ctx, 48), false, "as48").unwrap(),
+                    ci64(ctx, 7), "atg",
+                ).unwrap();
+                let is_array = b.build_int_compare(
+                    IntPredicate::EQ, arr_tag, ci64(ctx, tag::ARRAY as u64), "ia",
+                ).unwrap();
+
+                let fast_bb = ctx.append_basic_block(lf, "aget_fast");
+                let slow_bb = ctx.append_basic_block(lf, "aget_slow");
+                let merge_bb = ctx.append_basic_block(lf, "aget_merge");
+
+                b.build_conditional_branch(is_array, fast_bb, slow_bb).unwrap();
+
+                // ── Fast path: inline array access ──
+                b.position_at_end(fast_bb);
+
+                // Extract MagiArray* from payload bits
+                let ptr_raw = b.build_and(arr_val, ci64(ctx, PAYLOAD_MASK_U64), "pr").unwrap();
+                let arr_ptr = b.build_int_to_ptr(
+                    ptr_raw, ctx.ptr_type(AddressSpace::default()), "ap",
+                ).unwrap();
+
+                // Load cap at byte offset 12 (struct: {i64* data, i32 len, i32 cap})
+                let cap_byte_ptr = unsafe {
+                    b.build_gep(ctx.i8_type(), arr_ptr,
+                        &[i32_t.const_int(12, false)], "cbp").unwrap()
+                };
+                let cap_val = b.build_load(i32_t, cap_byte_ptr, "cap")
+                    .unwrap().into_int_value();
+
+                // Check cap != -1 (not a byte array)
+                let is_regular = b.build_int_compare(
+                    IntPredicate::NE, cap_val,
+                    i32_t.const_int(-1i32 as u32 as u64, false), "ir",
+                ).unwrap();
+
+                // Extract integer index from NaN-boxed value
+                let idx_int = ext_i64(b, ctx, idx_val);
+                let idx_i32 = b.build_int_truncate(idx_int, i32_t, "ii32").unwrap();
+
+                // Load len at byte offset 8
+                let len_byte_ptr = unsafe {
+                    b.build_gep(ctx.i8_type(), arr_ptr,
+                        &[i32_t.const_int(8, false)], "lbp").unwrap()
+                };
+                let len_val = b.build_load(i32_t, len_byte_ptr, "len")
+                    .unwrap().into_int_value();
+
+                // Bounds check: 0 <= idx < len
+                let ge_zero = b.build_int_compare(
+                    IntPredicate::SGE, idx_i32, i32_t.const_zero(), "gz",
+                ).unwrap();
+                let lt_len = b.build_int_compare(
+                    IntPredicate::SLT, idx_i32, len_val, "ll",
+                ).unwrap();
+                let in_bounds = b.build_and(ge_zero, lt_len, "ib").unwrap();
+                let can_inline = b.build_and(is_regular, in_bounds, "ci").unwrap();
+
+                let inline_bb = ctx.append_basic_block(lf, "aget_inline");
+                let oob_bb = ctx.append_basic_block(lf, "aget_oob");
+                b.build_conditional_branch(can_inline, inline_bb, oob_bb).unwrap();
+
+                // ── Inline load: arr->data[idx] ──
+                b.position_at_end(inline_bb);
+                // Load data pointer at byte offset 0
+                let data_ptr = b.build_load(
+                    ctx.ptr_type(AddressSpace::default()), arr_ptr, "dp",
+                ).unwrap().into_pointer_value();
+                let idx_u64 = b.build_int_z_extend(idx_i32, i64_t, "iu64").unwrap();
+                let elem_ptr = unsafe {
+                    b.build_gep(i64_t, data_ptr, &[idx_u64], "ep").unwrap()
+                };
+                let fast_result = b.build_load(i64_t, elem_ptr, "fr")
+                    .unwrap().into_int_value();
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // ── OOB / byte array: return null ──
+                b.position_at_end(oob_bb);
+                let oob_result = cnull(ctx);
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // ── Slow path: maps, byte arrays → call C runtime ──
+                b.position_at_end(slow_bb);
+                let slow_r = b.build_call(
+                    rt["__magi_array_get"],
+                    &[arr_val.into(), idx_val.into()], "sg",
+                ).unwrap();
+                let slow_result = slow_r.try_as_basic_value().left()
+                    .unwrap().into_int_value();
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // ── Merge ──
+                b.position_at_end(merge_bb);
+                let phi = b.build_phi(i64_t, "aget_r").unwrap();
+                phi.add_incoming(&[
+                    (&fast_result, inline_bb),
+                    (&oob_result, oob_bb),
+                    (&slow_result, slow_bb),
+                ]);
+                stack.push(phi.as_basic_value().into_int_value());
             }
             Instruction::ArraySet => {
                 let v = stack.pop().unwrap_or(cnull(ctx));
@@ -902,18 +1231,319 @@ fn compile_fn<'ctx>(
                         stack.push(cnull(ctx));
                     }
                 } else {
-                    let np = str_ptr(b, ir, str_cache, *name);
-                    let ac = *arg_count;
-                    let aa = b.build_array_alloca(i64_t, i32_t.const_int(std::cmp::max(ac,1) as u64, false), "ra").unwrap();
-                    let mut args: Vec<IntValue> = (0..ac).map(|_| stack.pop().unwrap_or(cnull(ctx))).collect();
-                    args.reverse();
-                    for (i, a) in args.iter().enumerate() {
-                        let p = unsafe { b.build_gep(i64_t, aa, &[i32_t.const_int(i as u64, false)], "ap").unwrap() };
-                        b.build_store(p, *a).unwrap();
+                    // Direct call optimization for known builtins
+                    let direct_builtin: Option<(&str, usize)> = match (fn_name.as_str(), *arg_count) {
+                        ("len", 1) => Some(("__magi_builtin_len", 1)),
+                        ("push" | "array_push" | "__array_push", 2) => Some(("__magi_builtin_push", 2)),
+                        ("abs", 1) => Some(("__magi_builtin_abs", 1)),
+                        ("floor", 1) => Some(("__magi_builtin_floor", 1)),
+                        ("sqrt", 1) => Some(("__magi_builtin_sqrt", 1)),
+                        ("cos", 1) => Some(("__magi_builtin_cos", 1)),
+                        ("sin", 1) => Some(("__magi_builtin_sin", 1)),
+                        ("atan2", 2) => Some(("__magi_builtin_atan2", 2)),
+                        _ => None,
+                    };
+
+                    if let Some((c_name, expected_argc)) = direct_builtin {
+                        let mut args: Vec<IntValue> = (0..(*arg_count)).map(|_| stack.pop().unwrap_or(cnull(ctx))).collect();
+                        args.reverse();
+                        args.truncate(expected_argc);
+                        let call_args: Vec<BasicMetadataValueEnum> = args.iter().map(|a| (*a).into()).collect();
+                        let r = b.build_call(rt[c_name], &call_args, "db").unwrap();
+                        stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
+                    } else if *arg_count == 2 && matches!(fn_name.as_str(),
+                        "__add" | "__sub" | "__mul" | "__div" | "__mod" | "__rem" |
+                        "__lt" | "__gt" | "__le" | "__ge" | "__neg")
+                    {
+                        // ── Inline binary op: int fast path → float path → C fallback ──
+                        let bv = stack.pop().unwrap_or(cnull(ctx));
+                        let av = stack.pop().unwrap_or(cnull(ctx));
+
+                        // Check if value is tagged: (v & NANBOX_SIG) == NANBOX_SIG
+                        let a_masked = b.build_and(av, ci64(ctx, NANBOX_SIG), "am").unwrap();
+                        let a_tagged = b.build_int_compare(IntPredicate::EQ, a_masked, ci64(ctx, NANBOX_SIG), "at").unwrap();
+                        let b_masked = b.build_and(bv, ci64(ctx, NANBOX_SIG), "bm").unwrap();
+                        let b_tagged = b.build_int_compare(IntPredicate::EQ, b_masked, ci64(ctx, NANBOX_SIG), "bt").unwrap();
+                        let both_tagged = b.build_and(a_tagged, b_tagged, "bt2").unwrap();
+
+                        // Extract tag bits: (v >> 48) & 7
+                        let a_tag = b.build_and(b.build_right_shift(av, ci64(ctx, 48), false, "as48").unwrap(), ci64(ctx, 7), "atg").unwrap();
+                        let b_tag = b.build_and(b.build_right_shift(bv, ci64(ctx, 48), false, "bs48").unwrap(), ci64(ctx, 7), "btg").unwrap();
+                        let a_is_i64 = b.build_int_compare(IntPredicate::EQ, a_tag, ci64(ctx, tag::I64 as u64), "ai").unwrap();
+                        let b_is_i64 = b.build_int_compare(IntPredicate::EQ, b_tag, ci64(ctx, tag::I64 as u64), "bi").unwrap();
+                        let both_i64 = b.build_and(a_is_i64, b_is_i64, "bi2").unwrap();
+                        let both_int = b.build_and(both_tagged, both_i64, "bint").unwrap();
+
+                        let int_bb = ctx.append_basic_block(lf, "iop");
+                        let float_bb = ctx.append_basic_block(lf, "fop");
+                        let fallback_bb = ctx.append_basic_block(lf, "fbop");
+                        let merge_bb = ctx.append_basic_block(lf, "mop");
+
+                        b.build_conditional_branch(both_int, int_bb, float_bb).unwrap();
+
+                        // ── Integer path ──
+                        b.position_at_end(int_bb);
+                        let ai = ext_i64(b, ctx, av);
+                        let bi = ext_i64(b, ctx, bv);
+                        let int_result = match fn_name.as_str() {
+                            "__add" => tag_i64(b, ctx, b.build_int_add(ai, bi, "ia").unwrap()),
+                            "__sub" => tag_i64(b, ctx, b.build_int_sub(ai, bi, "is").unwrap()),
+                            "__mul" => tag_i64(b, ctx, b.build_int_mul(ai, bi, "im").unwrap()),
+                            "__div" => {
+                                let zr = b.build_int_compare(IntPredicate::EQ, bi, i64_t.const_zero(), "dz").unwrap();
+                                let sb = b.build_select(zr, i64_t.const_int(1, false), bi, "sb").unwrap().into_int_value();
+                                let dv = b.build_int_signed_div(ai, sb, "id").unwrap();
+                                let dr = b.build_select(zr, i64_t.const_zero(), dv, "dr").unwrap().into_int_value();
+                                tag_i64(b, ctx, dr)
+                            }
+                            "__mod" | "__rem" => {
+                                let zr = b.build_int_compare(IntPredicate::EQ, bi, i64_t.const_zero(), "mz").unwrap();
+                                let sb = b.build_select(zr, i64_t.const_int(1, false), bi, "smb").unwrap().into_int_value();
+                                let rm = b.build_int_signed_rem(ai, sb, "ir").unwrap();
+                                let rr = b.build_select(zr, i64_t.const_zero(), rm, "rr").unwrap().into_int_value();
+                                tag_i64(b, ctx, rr)
+                            }
+                            "__lt" => tag_bool(b, ctx, b.build_int_compare(IntPredicate::SLT, ai, bi, "lt").unwrap()),
+                            "__gt" => tag_bool(b, ctx, b.build_int_compare(IntPredicate::SGT, ai, bi, "gt").unwrap()),
+                            "__le" => tag_bool(b, ctx, b.build_int_compare(IntPredicate::SLE, ai, bi, "le").unwrap()),
+                            "__ge" => tag_bool(b, ctx, b.build_int_compare(IntPredicate::SGE, ai, bi, "ge").unwrap()),
+                            _ => tag_i64(b, ctx, b.build_int_add(ai, bi, "ia").unwrap()),
+                        };
+                        b.build_unconditional_branch(merge_bb).unwrap();
+                        let int_exit_bb = b.get_insert_block().unwrap();
+
+                        // ── Float path: both untagged (raw f64) or mixed int/float ──
+                        // Check neither operand is a string/array/map (tag 3,4,5)
+                        b.position_at_end(float_bb);
+                        let a_is_str_arr = b.build_int_compare(IntPredicate::UGE, a_tag, ci64(ctx, tag::STRING as u64), "asa").unwrap();
+                        let b_is_str_arr = b.build_int_compare(IntPredicate::UGE, b_tag, ci64(ctx, tag::STRING as u64), "bsa").unwrap();
+                        // If untagged (float), tag bits are garbage — check tagged flag first
+                        let a_needs_fb = b.build_and(a_tagged, a_is_str_arr, "anf").unwrap();
+                        let b_needs_fb = b.build_and(b_tagged, b_is_str_arr, "bnf").unwrap();
+                        let any_complex = b.build_or(a_needs_fb, b_needs_fb, "acx").unwrap();
+                        b.build_conditional_branch(any_complex, fallback_bb, {
+                            let do_float_bb = ctx.append_basic_block(lf, "dfl");
+                            do_float_bb
+                        }).unwrap();
+
+                        // Actual float computation block (after the check)
+                        let do_float_bb = lf.get_last_basic_block().unwrap();
+                        b.position_at_end(do_float_bb);
+                        // Convert both to f64: untagged values are already IEEE doubles;
+                        // tagged i64 values need int→float conversion
+                        let af = {
+                            let raw_f = to_f64(b, ctx, av);
+                            let int_as_f = b.build_signed_int_to_float(ext_i64(b, ctx, av), ctx.f64_type(), "aif").unwrap();
+                            b.build_select(a_tagged, int_as_f, raw_f, "af").unwrap().into_float_value()
+                        };
+                        let bf = {
+                            let raw_f = to_f64(b, ctx, bv);
+                            let int_as_f = b.build_signed_int_to_float(ext_i64(b, ctx, bv), ctx.f64_type(), "bif").unwrap();
+                            b.build_select(b_tagged, int_as_f, raw_f, "bf").unwrap().into_float_value()
+                        };
+                        let float_result = match fn_name.as_str() {
+                            "__add" => from_f64(b, ctx, b.build_float_add(af, bf, "fa").unwrap()),
+                            "__sub" => from_f64(b, ctx, b.build_float_sub(af, bf, "fs").unwrap()),
+                            "__mul" => from_f64(b, ctx, b.build_float_mul(af, bf, "fm").unwrap()),
+                            "__div" => from_f64(b, ctx, b.build_float_div(af, bf, "fd").unwrap()),
+                            "__mod" | "__rem" => from_f64(b, ctx, b.build_float_rem(af, bf, "fre").unwrap()),
+                            "__lt" => tag_bool(b, ctx, b.build_float_compare(inkwell::FloatPredicate::OLT, af, bf, "flt").unwrap()),
+                            "__gt" => tag_bool(b, ctx, b.build_float_compare(inkwell::FloatPredicate::OGT, af, bf, "fgt").unwrap()),
+                            "__le" => tag_bool(b, ctx, b.build_float_compare(inkwell::FloatPredicate::OLE, af, bf, "fle").unwrap()),
+                            "__ge" => tag_bool(b, ctx, b.build_float_compare(inkwell::FloatPredicate::OGE, af, bf, "fge").unwrap()),
+                            _ => from_f64(b, ctx, b.build_float_add(af, bf, "fa").unwrap()),
+                        };
+                        b.build_unconditional_branch(merge_bb).unwrap();
+                        let float_exit_bb = b.get_insert_block().unwrap();
+
+                        // ── Fallback: call C runtime for strings/arrays/maps ──
+                        b.position_at_end(fallback_bb);
+                        let p0 = unsafe { b.build_gep(i64_t, rc_args_buf, &[i32_t.const_int(0, false)], "p0").unwrap() };
+                        b.build_store(p0, av).unwrap();
+                        let p1 = unsafe { b.build_gep(i64_t, rc_args_buf, &[i32_t.const_int(1, false)], "p1").unwrap() };
+                        b.build_store(p1, bv).unwrap();
+                        let fb_r = if let Some(rid) = runtime_id(fn_name) {
+                            b.build_call(rt["__magi_runtime_call_id"], &[i32_t.const_int(rid as u64, false).into(), i32_t.const_int(2, false).into(), rc_args_buf.into()], "fr").unwrap()
+                        } else {
+                            let np = str_ptr(b, ir, str_cache, *name);
+                            b.build_call(rt["__magi_runtime_call"], &[np.into(), i32_t.const_int(2, false).into(), rc_args_buf.into()], "fr").unwrap()
+                        };
+                        let fb_val = fb_r.try_as_basic_value().left().unwrap().into_int_value();
+                        b.build_unconditional_branch(merge_bb).unwrap();
+                        let fb_exit_bb = b.get_insert_block().unwrap();
+
+                        // ── Merge with phi ──
+                        b.position_at_end(merge_bb);
+                        let phi = b.build_phi(i64_t, "opr").unwrap();
+                        phi.add_incoming(&[(&int_result, int_exit_bb), (&float_result, float_exit_bb), (&fb_val, fb_exit_bb)]);
+                        stack.push(phi.as_basic_value().into_int_value());
+                    } else {
+                        let ac = *arg_count;
+                        let mut args: Vec<IntValue> = (0..ac).map(|_| stack.pop().unwrap_or(cnull(ctx))).collect();
+                        args.reverse();
+                        for (i, a) in args.iter().enumerate() {
+                            let p = unsafe { b.build_gep(i64_t, rc_args_buf, &[i32_t.const_int(i as u64, false)], "ap").unwrap() };
+                            b.build_store(p, *a).unwrap();
+                        }
+                        let r = if let Some(rid) = runtime_id(fn_name) {
+                            b.build_call(rt["__magi_runtime_call_id"], &[i32_t.const_int(rid as u64, false).into(), i32_t.const_int(ac as u64, false).into(), rc_args_buf.into()], "rc").unwrap()
+                        } else {
+                            let np = str_ptr(b, ir, str_cache, *name);
+                            b.build_call(rt["__magi_runtime_call"], &[np.into(), i32_t.const_int(ac as u64, false).into(), rc_args_buf.into()], "rc").unwrap()
+                        };
+                        stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
                     }
-                    let r = b.build_call(rt["__magi_runtime_call"], &[np.into(), i32_t.const_int(ac as u64, false).into(), aa.into()], "rc").unwrap();
-                    stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
                 }
+            }
+
+            // ── Raw (untagged) loop counter operations ────
+            Instruction::PushRawI64(n) => {
+                stack.push(i64_t.const_int(*n as u64, false));
+            }
+            Instruction::RawI64Add => {
+                let bv = stack.pop().unwrap_or(i64_t.const_zero());
+                let av = stack.pop().unwrap_or(i64_t.const_zero());
+                stack.push(b.build_int_add(av, bv, "radd").unwrap());
+            }
+            Instruction::RawI64Ge => {
+                let bv = stack.pop().unwrap_or(i64_t.const_zero());
+                let av = stack.pop().unwrap_or(i64_t.const_zero());
+                let c = b.build_int_compare(IntPredicate::SGE, av, bv, "rge").unwrap();
+                stack.push(b.build_int_z_extend(c, i64_t, "rgex").unwrap());
+            }
+            Instruction::RawBrIf(depth) => {
+                let c = stack.pop().unwrap_or(i64_t.const_zero());
+                // Raw boolean: nonzero = true, no truthy extraction needed.
+                let cb = b.build_int_compare(IntPredicate::NE, c, i64_t.const_zero(), "rbnz").unwrap();
+                let idx = cf.len().saturating_sub(1 + *depth as usize);
+                let cont = ctx.append_basic_block(lf, "rbc");
+                if let Some(e) = cf.get(idx) {
+                    let t = if e.is_loop { e.branch_target } else { e.merge_block };
+                    if !terminated(b) { b.build_conditional_branch(cb, t, cont).unwrap(); }
+                }
+                b.position_at_end(cont);
+            }
+            Instruction::RawArrayLen => {
+                // Inline array length extraction: load arr->len as raw i32, extend to i64.
+                let arr_val = stack.pop().unwrap_or(cnull(ctx));
+
+                // Extract MagiArray* from payload bits.
+                let ptr_raw = b.build_and(arr_val, ci64(ctx, PAYLOAD_MASK_U64), "rlpr").unwrap();
+                let arr_ptr = b.build_int_to_ptr(
+                    ptr_raw, ctx.ptr_type(AddressSpace::default()), "rlap",
+                ).unwrap();
+
+                // Load len at byte offset 8 (struct: {i64* data, i32 len, i32 cap}).
+                let len_byte_ptr = unsafe {
+                    b.build_gep(ctx.i8_type(), arr_ptr,
+                        &[i32_t.const_int(8, false)], "rllbp").unwrap()
+                };
+                let len_i32 = b.build_load(i32_t, len_byte_ptr, "rllen")
+                    .unwrap().into_int_value();
+                let len_i64 = b.build_int_z_extend(len_i32, i64_t, "rll64").unwrap();
+                stack.push(len_i64);
+            }
+            Instruction::RawArrayGet => {
+                // Pop raw i64 index + tagged array, push tagged element.
+                let raw_idx = stack.pop().unwrap_or(i64_t.const_zero());
+                let arr_val = stack.pop().unwrap_or(cnull(ctx));
+
+                // Check if arr_val is a NaN-boxed TAG_ARRAY: (v >> 48) & 7 == 4
+                let arr_tag = b.build_and(
+                    b.build_right_shift(arr_val, ci64(ctx, 48), false, "rgas48").unwrap(),
+                    ci64(ctx, 7), "rgatg",
+                ).unwrap();
+                let is_array = b.build_int_compare(
+                    IntPredicate::EQ, arr_tag, ci64(ctx, tag::ARRAY as u64), "rgia",
+                ).unwrap();
+
+                let fast_bb = ctx.append_basic_block(lf, "rga_fast");
+                let slow_bb = ctx.append_basic_block(lf, "rga_slow");
+                let merge_bb = ctx.append_basic_block(lf, "rga_merge");
+
+                b.build_conditional_branch(is_array, fast_bb, slow_bb).unwrap();
+
+                // ── Fast path: inline array access with raw index ──
+                b.position_at_end(fast_bb);
+
+                let ptr_raw = b.build_and(arr_val, ci64(ctx, PAYLOAD_MASK_U64), "rgapr").unwrap();
+                let arr_ptr = b.build_int_to_ptr(
+                    ptr_raw, ctx.ptr_type(AddressSpace::default()), "rgaap",
+                ).unwrap();
+
+                // Load cap at byte offset 12
+                let cap_byte_ptr = unsafe {
+                    b.build_gep(ctx.i8_type(), arr_ptr,
+                        &[i32_t.const_int(12, false)], "rgacbp").unwrap()
+                };
+                let cap_val = b.build_load(i32_t, cap_byte_ptr, "rgacap")
+                    .unwrap().into_int_value();
+
+                let is_regular = b.build_int_compare(
+                    IntPredicate::NE, cap_val,
+                    i32_t.const_int(-1i32 as u32 as u64, false), "rgair",
+                ).unwrap();
+
+                // Truncate raw i64 index to i32 for bounds check
+                let idx_i32 = b.build_int_truncate(raw_idx, i32_t, "rgai32").unwrap();
+
+                // Load len at byte offset 8
+                let len_byte_ptr = unsafe {
+                    b.build_gep(ctx.i8_type(), arr_ptr,
+                        &[i32_t.const_int(8, false)], "rgalbp").unwrap()
+                };
+                let len_val = b.build_load(i32_t, len_byte_ptr, "rgalen")
+                    .unwrap().into_int_value();
+
+                // Bounds check: 0 <= idx < len
+                let ge_zero = b.build_int_compare(
+                    IntPredicate::SGE, idx_i32, i32_t.const_zero(), "rgagz",
+                ).unwrap();
+                let lt_len = b.build_int_compare(
+                    IntPredicate::SLT, idx_i32, len_val, "rgall",
+                ).unwrap();
+                let in_bounds = b.build_and(ge_zero, lt_len, "rgaib").unwrap();
+                let can_inline = b.build_and(is_regular, in_bounds, "rgaci").unwrap();
+
+                let inline_bb = ctx.append_basic_block(lf, "rga_inline");
+                let oob_bb = ctx.append_basic_block(lf, "rga_oob");
+                b.build_conditional_branch(can_inline, inline_bb, oob_bb).unwrap();
+
+                // ── Inline load: arr->data[idx] ──
+                b.position_at_end(inline_bb);
+                let data_ptr = b.build_load(
+                    ctx.ptr_type(AddressSpace::default()), arr_ptr, "rgadp",
+                ).unwrap().into_pointer_value();
+                let idx_u64 = b.build_int_z_extend(idx_i32, i64_t, "rgaiu64").unwrap();
+                let elem_ptr = unsafe {
+                    b.build_gep(i64_t, data_ptr, &[idx_u64], "rgaep").unwrap()
+                };
+                let fast_result = b.build_load(i64_t, elem_ptr, "rgafr")
+                    .unwrap().into_int_value();
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // ── OOB: return null ──
+                b.position_at_end(oob_bb);
+                let oob_result = cnull(ctx);
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // ── Slow path: maps, byte arrays → call C runtime ──
+                // Tag the raw index before calling C runtime (expects tagged values)
+                b.position_at_end(slow_bb);
+                let tagged_idx = tag_i64(b, ctx, raw_idx);
+                let slow_r = b.build_call(
+                    rt["__magi_array_get"],
+                    &[arr_val.into(), tagged_idx.into()], "rgasg",
+                ).unwrap();
+                let slow_result = slow_r.try_as_basic_value().left()
+                    .unwrap().into_int_value();
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // ── Merge ──
+                b.position_at_end(merge_bb);
+                let phi = b.build_phi(i64_t, "rga_r").unwrap();
+                phi.add_incoming(&[(&fast_result, inline_bb), (&oob_result, oob_bb), (&slow_result, slow_bb)]);
+                stack.push(phi.as_basic_value().into_int_value());
             }
         }
     }

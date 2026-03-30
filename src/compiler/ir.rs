@@ -286,6 +286,20 @@ pub enum Instruction {
     Print,
     /// Call a runtime built-in by name index (string pool index).
     RuntimeCall { name: u32, arg_count: u32 },
+
+    // ── Raw (untagged) operations for loop counters ──────────
+    /// Push an unboxed i64 constant (no NaN-boxing).
+    PushRawI64(i64),
+    /// Add two raw i64 values (no tag extraction/retagging).
+    RawI64Add,
+    /// Compare two raw i64 values (signed >=), push raw boolean (0 or 1).
+    RawI64Ge,
+    /// Branch if raw boolean (top of stack) is nonzero. No truthy extraction.
+    RawBrIf(u32),
+    /// Pop tagged array, push raw i64 length (no tagging of result).
+    RawArrayLen,
+    /// Pop raw i64 index + tagged array, push tagged element.
+    RawArrayGet,
 }
 
 /// Type tags for the NaN-boxing tagged value representation.

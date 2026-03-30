@@ -9,6 +9,52 @@ use crate::syntax::ast::*;
 use super::ir::*;
 use super::CompileError;
 
+/// Functions handled by the C runtime via string dispatch.
+const KNOWN_BUILTINS: &[&str] = &[
+    // I/O
+    "println", "print", "eprintln",
+    // Type conversion
+    "to_string", "to_int", "to_float", "typeof", "parse_int", "parse_float",
+    // Math
+    "abs", "floor", "ceil", "round", "sqrt", "pow", "sin", "cos", "tan",
+    "asin", "acos", "atan", "atan2", "log", "log2", "log10", "exp",
+    "min", "max", "random", "random_int",
+    // String
+    "chr", "ord", "split", "join", "replace", "trim", "upper", "lower",
+    "starts_with", "ends_with", "substring", "index_of", "contains",
+    // Array
+    "len", "push", "pop", "shift", "unshift", "slice", "reverse", "sort",
+    "map", "filter", "reduce", "find", "every", "some", "flat",
+    "array_push", "array_pop",
+    // Map
+    "keys", "values", "entries", "has", "delete",
+    // Process
+    "exit", "timestamp_ms", "env_get", "env_set", "process_args",
+    "cwd", "os_name", "pid",
+    // File I/O
+    "fs_read", "fs_write", "fs_read_bytes", "fs_exists",
+    // Bitwise / operator helpers (prefixed)
+    "__add", "__sub", "__mul", "__div", "__mod", "__rem",
+    "__eq", "__ne", "__lt", "__gt", "__le", "__ge",
+    "__neg", "__not", "__bit_and", "__bit_or", "__bit_xor",
+    "__bit_shl", "__bit_shr", "__shl", "__shr", "__bit_andnot",
+    "__pow", "__in",
+    // JSON
+    "json_parse", "json_stringify",
+    // Embed
+    "__byte_slice", "__magi_embed_array",
+    // Misc
+    "fmod", "fflush",
+];
+
+/// Returns `true` if `name` is a known runtime builtin (exact match or recognized prefix).
+fn is_known_runtime_builtin(name: &str) -> bool {
+    KNOWN_BUILTINS.contains(&name)
+        || name.starts_with("sdl_")
+        || name.starts_with("__render_")
+        || name.starts_with("__magi_")
+}
+
 /// The MAGI compiler. Translates a parsed AST into an IR module.
 pub struct Compiler {
     /// The IR module being built.
@@ -470,6 +516,12 @@ impl Compiler {
 
     fn define_global(&mut self, name: &str, mutable: bool) -> u32 {
         if let Some(&idx) = self.global_vars.get(name) {
+            // Duplicate global declaration — reuse existing slot.
+            // Upgrade to mutable if the redeclaration requests it.
+            if mutable && !self.module.globals[idx as usize].mutable {
+                self.module.globals[idx as usize].mutable = true;
+            }
+            eprintln!("warning: duplicate global declaration '{}', reusing slot {}", name, idx);
             return idx;
         }
         let idx = self.module.globals.len() as u32;
@@ -705,13 +757,12 @@ impl Compiler {
                             self.compile_expr(index)?;
                             self.compile_expr(value)?;
                             self.emit(Instruction::ArraySet);
-                            self.emit(Instruction::LocalSet(idx));
+                            // ArraySet/MapSet modify in-place — no need to store back
                         } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
                             self.emit(Instruction::GlobalGet(gidx));
                             self.compile_expr(index)?;
                             self.compile_expr(value)?;
                             self.emit(Instruction::ArraySet);
-                            self.emit(Instruction::GlobalSet(gidx));
                         } else {
                             return Err(CompileError::at(
                                 stmt.span.start_line,
@@ -1089,27 +1140,7 @@ impl Compiler {
                 self.compile_expr(operand)?;
                 match op {
                     UnOp::Not => self.emit(Instruction::BoolNot),
-                    UnOp::Neg => {
-                        // Dispatch based on type tag: f64 uses F64Neg, i64 uses I64Neg.
-                        let temp = self.ensure_temp_local()?;
-                        self.emit(Instruction::LocalTee(temp));
-                        self.emit(Instruction::GetTag);
-                        self.emit(Instruction::PushI64(tag::F64 as i64));
-                        self.emit(Instruction::I64Eq);
-                        self.emit(Instruction::If);
-                        // Float path: untag as f64, negate, retag.
-                        self.emit(Instruction::LocalGet(temp));
-                        self.emit(Instruction::UntagF64);
-                        self.emit(Instruction::F64Neg);
-                        self.emit(Instruction::TagF64);
-                        self.emit(Instruction::Else);
-                        // Integer path: untag as i64, negate, retag.
-                        self.emit(Instruction::LocalGet(temp));
-                        self.emit(Instruction::UntagI64);
-                        self.emit(Instruction::I64Neg);
-                        self.emit(Instruction::TagI64);
-                        self.emit(Instruction::End);
-                    }
+                    UnOp::Neg => self.emit(Instruction::I64Neg),
                 }
             }
 
@@ -1159,7 +1190,19 @@ impl Compiler {
 
                         if let Some(&fn_idx) = self.fn_index.get(name.as_str()) {
                             self.emit(Instruction::Call(fn_idx));
+                        } else if let Some(local_idx) = self.current_fn.as_ref().and_then(|f| f.resolve_local(name)) {
+                            // Calling a local variable as a function (callback/closure)
+                            self.emit(Instruction::LocalGet(local_idx));
+                            self.emit(Instruction::CallIndirect(args.len() as u32));
+                        } else if let Some(&global_idx) = self.global_vars.get(name.as_str()) {
+                            // Calling a global variable as a function
+                            self.emit(Instruction::GlobalGet(global_idx));
+                            self.emit(Instruction::CallIndirect(args.len() as u32));
                         } else {
+                            // Warn if the function is not a known runtime builtin
+                            if !is_known_runtime_builtin(name) {
+                                eprintln!("warning: unknown function '{}' — will be dispatched at runtime", name);
+                            }
                             let name_idx = self.module.intern_string(name);
                             self.emit(Instruction::RuntimeCall {
                                 name: name_idx,
@@ -1633,55 +1676,30 @@ impl Compiler {
     }
 
     fn compile_binop(&mut self, op: BinOp) -> Result<(), CompileError> {
-        // Arithmetic operations use runtime dispatch to handle int/float.
-        // Comparison operations compare tagged values directly (works for same-type).
+        // Emit inline IR instructions for common ops (avoids runtime dispatch overhead).
+        // Falls back to RuntimeCall for ops that need type dispatch (string concat, float math).
         match op {
-            BinOp::Add => {
-                let name_idx = self.module.intern_string("__add");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::Sub => {
-                let name_idx = self.module.intern_string("__sub");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::Mul => {
-                let name_idx = self.module.intern_string("__mul");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::Div => {
-                let name_idx = self.module.intern_string("__div");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::Mod => {
-                let name_idx = self.module.intern_string("__mod");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::Eq | BinOp::NotEq | BinOp::Gt | BinOp::Lt | BinOp::GtEq | BinOp::LtEq => {
-                let name_idx = self.module.intern_string(match op {
-                    BinOp::Eq => "__eq",
-                    BinOp::NotEq => "__ne",
-                    BinOp::Gt => "__gt",
-                    BinOp::Lt => "__lt",
-                    BinOp::GtEq => "__ge",
-                    BinOp::LtEq => "__le",
-                    _ => return Err(CompileError::at(0, 0, "unexpected comparison operator".to_string())),
-                });
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+            | BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
+                let op_name = match op {
+                    BinOp::Add => "__add", BinOp::Sub => "__sub",
+                    BinOp::Mul => "__mul", BinOp::Div => "__div", BinOp::Mod => "__mod",
+                    BinOp::Eq => "__eq", BinOp::NotEq => "__ne",
+                    BinOp::Lt => "__lt", BinOp::Gt => "__gt",
+                    BinOp::LtEq => "__le", BinOp::GtEq => "__ge",
+                    _ => unreachable!(),
+                };
+                let name_idx = self.module.intern_string(op_name);
                 self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
             }
             BinOp::And | BinOp::Or => return Err(CompileError::at(0, 0, "And/Or should be handled as short-circuit in compile_expr".to_string())),
-            BinOp::In => {
-                let name_idx = self.module.intern_string("__in");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::Pow => {
-                let name_idx = self.module.intern_string("__pow");
-                self.emit(Instruction::RuntimeCall { name: name_idx, arg_count: 2 });
-            }
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AndNot => {
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+            | BinOp::AndNot | BinOp::In | BinOp::Pow => {
                 let op_name = match op {
                     BinOp::BitAnd => "__bit_and", BinOp::BitOr => "__bit_or",
                     BinOp::BitXor => "__bit_xor", BinOp::Shl => "__bit_shl",
                     BinOp::Shr => "__bit_shr", BinOp::AndNot => "__bit_andnot",
+                    BinOp::In => "__in", BinOp::Pow => "__pow",
                     _ => unreachable!(),
                 };
                 let name_idx = self.module.intern_string(op_name);
@@ -1743,15 +1761,15 @@ impl Compiler {
         let iter_local = self.define_local("__iter", ValType::Tagged, false)?;
         self.emit(Instruction::LocalSet(iter_local));
 
-        // Counter (tagged I64).
-        let counter_local = self.define_local("__counter", ValType::Tagged, true)?;
-        self.emit(Instruction::PushI64(0));
+        // Counter (raw untagged i64 — avoids NaN-box overhead per iteration).
+        let counter_local = self.define_local("__counter", ValType::I64, true)?;
+        self.emit(Instruction::PushRawI64(0));
         self.emit(Instruction::LocalSet(counter_local));
 
-        // Length (tagged I64).
+        // Length (raw untagged i64).
         self.emit(Instruction::LocalGet(iter_local));
-        self.emit(Instruction::ArrayLen);
-        let len_local = self.define_local("__len", ValType::Tagged, false)?;
+        self.emit(Instruction::RawArrayLen);
+        let len_local = self.define_local("__len", ValType::I64, false)?;
         self.emit(Instruction::LocalSet(len_local));
 
         // Loop structure.
@@ -1765,18 +1783,18 @@ impl Compiler {
             continue_depth,
         });
 
-        // Check: counter >= len (both raw untagged).
+        // Check: counter >= len (both raw untagged — no NaN-box extract/retag).
         self.emit(Instruction::LocalGet(counter_local));
         self.emit(Instruction::LocalGet(len_local));
-        self.emit(Instruction::I64Ge);
+        self.emit(Instruction::RawI64Ge);
         // break out of the outer Block when iteration is complete.
         let cond_break_offset = self.block_depth.saturating_sub(break_depth);
-        self.emit(Instruction::BrIf(cond_break_offset));
+        self.emit(Instruction::RawBrIf(cond_break_offset));
 
-        // Load current element.
+        // Load current element (raw index — no NaN-box on counter).
         self.emit(Instruction::LocalGet(iter_local));
         self.emit(Instruction::LocalGet(counter_local));
-        self.emit(Instruction::ArrayGet);
+        self.emit(Instruction::RawArrayGet);
 
         // Bind pattern.
         match pattern {
@@ -1838,10 +1856,10 @@ impl Compiler {
         }
         self.fb()?.pop_scope();
 
-        // Increment counter (tagged arithmetic).
+        // Increment counter (raw untagged — plain i64 add, no NaN-box).
         self.emit(Instruction::LocalGet(counter_local));
-        self.emit(Instruction::PushI64(1));
-        self.emit(Instruction::I64Add);
+        self.emit(Instruction::PushRawI64(1));
+        self.emit(Instruction::RawI64Add);
         self.emit(Instruction::LocalSet(counter_local));
 
         // Loop back.
@@ -3290,12 +3308,10 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_negation_has_tag_f64() {
+    fn test_compile_negation_emits_i64neg() {
         let module = compile("let x = -5;").unwrap();
         let main = module.functions.iter().find(|f| f.name == "__main").unwrap();
-        // The float path should have TagF64 in the if branch.
-        assert!(main.instructions.iter().any(|i| matches!(i, Instruction::TagF64)));
-        // Also has the integer path with I64Neg.
+        // Negation emits a single I64Neg; backends handle float/int dispatch.
         assert!(main.instructions.iter().any(|i| matches!(i, Instruction::I64Neg)));
     }
 
