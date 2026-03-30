@@ -645,6 +645,8 @@ fn runtime_id(name: &str) -> Option<u32> {
         "__render_seg_cols" => 117,
         "__render_wall_col" => 118,
         "__render_flat_col" => 119,
+        // Arena
+        "__arena_reset" => 120,
         _ => return None,
     })
 }

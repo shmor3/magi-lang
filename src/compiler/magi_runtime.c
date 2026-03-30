@@ -25,6 +25,75 @@
 int __magi_argc = 0;
 char** __magi_argv = NULL;
 
+// ===== Arena Allocator for Short-Lived Strings =====
+// Used by print/println to avoid malloc for temporary string formatting.
+// Strings allocated here are valid until __magi_arena_reset() is called.
+
+#define ARENA_BLOCK_SIZE (1024 * 1024)  // 1MB blocks
+
+typedef struct ArenaBlock {
+    char* data;
+    size_t used;
+    size_t capacity;
+    struct ArenaBlock* next;
+} ArenaBlock;
+
+static ArenaBlock* arena_head = NULL;
+static ArenaBlock* arena_current = NULL;
+static int arena_mode = 0;  // when 1, magi_val_to_dyn_str uses arena
+
+static void* arena_alloc(size_t size) {
+    // Align to 8 bytes
+    size = (size + 7) & ~7;
+
+    if (!arena_current || arena_current->used + size > arena_current->capacity) {
+        // Need a new block
+        size_t block_size = size > ARENA_BLOCK_SIZE ? size : ARENA_BLOCK_SIZE;
+        ArenaBlock* block = (ArenaBlock*)malloc(sizeof(ArenaBlock));
+        block->data = (char*)malloc(block_size);
+        block->used = 0;
+        block->capacity = block_size;
+        block->next = NULL;
+        if (arena_current) arena_current->next = block;
+        arena_current = block;
+        if (!arena_head) arena_head = block;
+    }
+
+    void* ptr = arena_current->data + arena_current->used;
+    arena_current->used += size;
+    return ptr;
+}
+
+// Reset arena: reuse all blocks without freeing
+void __magi_arena_reset(void) {
+    ArenaBlock* block = arena_head;
+    while (block) {
+        block->used = 0;
+        block = block->next;
+    }
+    arena_current = arena_head;
+}
+
+// Arena-aware strdup: copies string into arena when arena_mode is active
+static char* arena_strdup(const char* s) {
+    size_t len = strlen(s);
+    char* p = (char*)arena_alloc(len + 1);
+    memcpy(p, s, len + 1);
+    return p;
+}
+
+// Arena-aware malloc: returns arena memory when arena_mode is active
+static void* arena_malloc(size_t size) {
+    return arena_alloc(size);
+}
+
+// Arena-aware realloc: copies data to new arena allocation when arena_mode is active
+static void* arena_realloc(void* ptr, size_t old_size, size_t new_size) {
+    void* p = arena_alloc(new_size);
+    if (ptr && old_size > 0) memcpy(p, ptr, old_size < new_size ? old_size : new_size);
+    return p;
+}
+
 // ===== NaN-Boxing Constants =====
 #define NANBOX_SIG   ((uint64_t)0xFFF8000000000000ULL)
 #define NANBOX_MASK  ((uint64_t)0xFFF8000000000000ULL)
@@ -144,7 +213,50 @@ typedef struct {
     int64_t* values;
     int32_t len;
     int32_t cap;
+    // Hash table: open addressing with linear probing
+    uint32_t* hashes;     // pre-computed FNV-1a hash per key (parallel to keys[])
+    int32_t* buckets;     // bucket[hash % bucket_count] = index into keys/values, -1 = empty
+    int32_t bucket_count; // always a power of 2
 } MagiMap;
+
+static uint32_t fnv1a(const char* key) {
+    uint32_t hash = 2166136261u;
+    while (*key) {
+        hash ^= (uint8_t)*key++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static void magi_map_rehash(MagiMap* map) {
+    int32_t new_bc = map->bucket_count * 2;
+    if (new_bc < 16) new_bc = 16;
+    free(map->buckets);
+    map->buckets = (int32_t*)malloc(new_bc * sizeof(int32_t));
+    memset(map->buckets, -1, new_bc * sizeof(int32_t));
+    map->bucket_count = new_bc;
+    for (int i = 0; i < map->len; i++) {
+        uint32_t slot = map->hashes[i] & (uint32_t)(new_bc - 1);
+        while (map->buckets[slot] != -1) slot = (slot + 1) & (uint32_t)(new_bc - 1);
+        map->buckets[slot] = i;
+    }
+}
+
+static void magi_map_init_hash(MagiMap* map) {
+    int32_t bc = 16;
+    while (bc < map->cap * 2) bc *= 2;
+    map->hashes = (uint32_t*)malloc(sizeof(uint32_t) * map->cap);
+    map->buckets = (int32_t*)malloc(bc * sizeof(int32_t));
+    memset(map->buckets, -1, bc * sizeof(int32_t));
+    map->bucket_count = bc;
+    for (int i = 0; i < map->len; i++) {
+        uint32_t h = fnv1a(map->keys[i]);
+        map->hashes[i] = h;
+        uint32_t slot = h & (uint32_t)(bc - 1);
+        while (map->buckets[slot] != -1) slot = (slot + 1) & (uint32_t)(bc - 1);
+        map->buckets[slot] = i;
+    }
+}
 
 static inline MagiMap* magi_map_ptr(int64_t val) {
     if (!magi_is_tagged(val) || magi_get_tag(val) != TAG_MAP) return NULL;
@@ -177,14 +289,19 @@ int64_t __magi_call_fn(int64_t fn_val, int32_t call_argc, int64_t* call_args);
 
 // ===== Print =====
 void __magi_print(int64_t val) {
+    arena_mode = 1;
     char* s = magi_val_to_dyn_str(val, 1);
     printf("%s\n", s);
     fflush(stdout);
-    free(s);
+    // No free — s is arena-allocated, reset in bulk
+    arena_mode = 0;
 }
 
-// Dynamic string builder for value formatting
+// Dynamic string builder for value formatting.
+// When arena_mode is active, all allocations go to the arena (no free needed).
+// When arena_mode is off, uses malloc/strdup as before (caller must free).
 static char* magi_val_to_dyn_str(int64_t val, int for_display) {
+    int use_arena = arena_mode;
     if (!magi_is_tagged(val)) {
         double d;
         memcpy(&d, &val, sizeof(d));
@@ -193,61 +310,59 @@ static char* magi_val_to_dyn_str(int64_t val, int for_display) {
             snprintf(buf, sizeof(buf), "%lld", (long long)(int64_t)d);
         else
             snprintf(buf, sizeof(buf), "%.15g", d);
-        return strdup(buf);
+        return use_arena ? arena_strdup(buf) : strdup(buf);
     }
     switch (magi_get_tag(val)) {
-        case TAG_NULL: return strdup("null");
-        case TAG_BOOL: return strdup(magi_get_payload(val) ? "true" : "false");
-        case TAG_I64: { char buf[32]; snprintf(buf, sizeof(buf), "%lld", (long long)magi_sext48(magi_get_payload(val))); return strdup(buf); }
+        case TAG_NULL: return use_arena ? arena_strdup("null") : strdup("null");
+        case TAG_BOOL: return use_arena ? arena_strdup(magi_get_payload(val) ? "true" : "false") : strdup(magi_get_payload(val) ? "true" : "false");
+        case TAG_I64: { char buf[32]; snprintf(buf, sizeof(buf), "%lld", (long long)magi_sext48(magi_get_payload(val))); return use_arena ? arena_strdup(buf) : strdup(buf); }
         case TAG_STRING: {
             const char* s = magi_as_string(val);
-            if (for_display) return strdup(s);
+            if (for_display) return use_arena ? arena_strdup(s) : strdup(s);
             size_t len = strlen(s);
-            char* r = (char*)malloc(len + 3);
+            char* r = (char*)(use_arena ? arena_malloc(len + 3) : malloc(len + 3));
             r[0] = '"'; memcpy(r+1, s, len); r[len+1] = '"'; r[len+2] = '\0';
             return r;
         }
         case TAG_ARRAY: {
             MagiArray* arr = magi_array_ptr(val);
-            if (!arr) return strdup("[]");
+            if (!arr) return use_arena ? arena_strdup("[]") : strdup("[]");
             size_t cap = 256, pos = 0;
-            char* buf = (char*)malloc(cap);
+            char* buf = (char*)(use_arena ? arena_malloc(cap) : malloc(cap));
             buf[pos++] = '[';
             for (int i = 0; i < arr->len; i++) {
                 if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
-                // In display mode, array elements also use display mode (no quotes on strings)
                 char* elem = magi_val_to_dyn_str(arr->data[i], for_display);
                 size_t elen = strlen(elem);
-                while (pos + elen + 10 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+                while (pos + elen + 10 > cap) { size_t old = cap; cap *= 2; buf = (char*)(use_arena ? arena_realloc(buf, old, cap) : realloc(buf, cap)); }
                 memcpy(buf + pos, elem, elen); pos += elen;
-                free(elem);
+                if (!use_arena) free(elem);
             }
-            if (pos + 2 > cap) { cap += 4; buf = (char*)realloc(buf, cap); }
+            if (pos + 2 > cap) { size_t old = cap; cap += 4; buf = (char*)(use_arena ? arena_realloc(buf, old, cap) : realloc(buf, cap)); }
             buf[pos++] = ']'; buf[pos] = '\0';
             return buf;
         }
         case TAG_MAP: {
             MagiMap* map = magi_map_ptr(val);
-            if (!map) return strdup("{}");
+            if (!map) return use_arena ? arena_strdup("{}") : strdup("{}");
             size_t cap = 256, pos = 0;
-            char* buf = (char*)malloc(cap);
+            char* buf = (char*)(use_arena ? arena_malloc(cap) : malloc(cap));
             buf[pos++] = '{';
             for (int i = 0; i < map->len; i++) {
                 if (i > 0) { buf[pos++] = ','; buf[pos++] = ' '; }
                 char* v = magi_val_to_dyn_str(map->values[i], for_display);
                 size_t klen = strlen(map->keys[i]), vlen = strlen(v);
-                while (pos + klen + vlen + 10 > cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
-                // Keys without quotes (matching interpreter format)
+                while (pos + klen + vlen + 10 > cap) { size_t old = cap; cap *= 2; buf = (char*)(use_arena ? arena_realloc(buf, old, cap) : realloc(buf, cap)); }
                 memcpy(buf+pos, map->keys[i], klen); pos += klen;
                 buf[pos++] = ':'; buf[pos++] = ' ';
                 memcpy(buf+pos, v, vlen); pos += vlen;
-                free(v);
+                if (!use_arena) free(v);
             }
-            if (pos + 2 > cap) { cap += 4; buf = (char*)realloc(buf, cap); }
+            if (pos + 2 > cap) { size_t old = cap; cap += 4; buf = (char*)(use_arena ? arena_realloc(buf, old, cap) : realloc(buf, cap)); }
             buf[pos++] = '}'; buf[pos] = '\0';
             return buf;
         }
-        default: return strdup("<unknown>");
+        default: return use_arena ? arena_strdup("<unknown>") : strdup("<unknown>");
     }
 }
 
@@ -339,6 +454,7 @@ int64_t __magi_map_new(int32_t count, int64_t* entries) {
         map->keys[i] = strdup(key_str);
         map->values[i] = entries[i * 2 + 1];
     }
+    magi_map_init_hash(map);
     return magi_make_map_val(map);
 }
 
@@ -346,8 +462,14 @@ int64_t __magi_map_get(int64_t map_val, int64_t key_val) {
     MagiMap* map = magi_map_ptr(map_val);
     const char* key = magi_as_string(key_val);
     if (!map || !key) return magi_make_null();
-    for (int i = 0; i < map->len; i++) {
-        if (strcmp(map->keys[i], key) == 0) return map->values[i];
+    uint32_t h = fnv1a(key);
+    uint32_t mask = (uint32_t)(map->bucket_count - 1);
+    uint32_t slot = h & mask;
+    while (map->buckets[slot] != -1) {
+        int idx = map->buckets[slot];
+        if (map->hashes[idx] == h && strcmp(map->keys[idx], key) == 0)
+            return map->values[idx];
+        slot = (slot + 1) & mask;
     }
     return magi_make_null();
 }
@@ -356,17 +478,35 @@ void __magi_map_set(int64_t map_val, int64_t key_val, int64_t val) {
     MagiMap* map = magi_map_ptr(map_val);
     const char* key = magi_as_string(key_val);
     if (!map || !key) return;
-    for (int i = 0; i < map->len; i++) {
-        if (strcmp(map->keys[i], key) == 0) { map->values[i] = val; return; }
+    uint32_t h = fnv1a(key);
+    uint32_t mask = (uint32_t)(map->bucket_count - 1);
+    uint32_t slot = h & mask;
+    while (map->buckets[slot] != -1) {
+        int idx = map->buckets[slot];
+        if (map->hashes[idx] == h && strcmp(map->keys[idx], key) == 0) {
+            map->values[idx] = val;
+            return;
+        }
+        slot = (slot + 1) & mask;
     }
+    // New key — grow parallel arrays if needed
     if (map->len >= map->cap) {
         map->cap = map->cap < 8 ? 8 : map->cap * 2;
         map->keys = (char**)realloc(map->keys, sizeof(char*) * map->cap);
         map->values = (int64_t*)realloc(map->values, sizeof(int64_t) * map->cap);
+        map->hashes = (uint32_t*)realloc(map->hashes, sizeof(uint32_t) * map->cap);
     }
-    map->keys[map->len] = strdup(key);
-    map->values[map->len] = val;
+    int new_idx = map->len;
+    map->keys[new_idx] = strdup(key);
+    map->values[new_idx] = val;
+    map->hashes[new_idx] = h;
     map->len++;
+    // Rehash if load factor > 0.75
+    if (map->len * 4 > map->bucket_count * 3) {
+        magi_map_rehash(map);
+    } else {
+        map->buckets[slot] = new_idx;
+    }
 }
 
 // ===== String Operations =====
@@ -644,6 +784,8 @@ enum MagiBuiltinId {
     MAGI_RT_PATH_JOIN,
     // Renderers (domain-specific)
     MAGI_RT_RENDER_SEG_COLS, MAGI_RT_RENDER_WALL_COL, MAGI_RT_RENDER_FLAT_COL,
+    // Arena
+    MAGI_RT_ARENA_RESET,
     MAGI_RT_COUNT
 };
 
@@ -1341,10 +1483,11 @@ int64_t __magi_runtime_call_id(int32_t id, int32_t argc, int64_t* args) {
     // ── I/O ──
     case MAGI_RT_PRINTLN: __magi_print(a); return magi_make_null();
     case MAGI_RT_PRINT: {
+        arena_mode = 1;
         char* s = magi_val_to_dyn_str(a, 1);
         printf("%s", s);
         fflush(stdout);
-        free(s);
+        arena_mode = 0;
         return magi_make_null();
     }
 
@@ -1559,6 +1702,11 @@ int64_t __magi_runtime_call_id(int32_t id, int32_t argc, int64_t* args) {
         return __magi_runtime_call("__render_wall_col", argc, args);
     case MAGI_RT_RENDER_FLAT_COL:
         return __magi_runtime_call("__render_flat_col", argc, args);
+
+    // ── Arena ──
+    case MAGI_RT_ARENA_RESET:
+        __magi_arena_reset();
+        return magi_make_null();
 
     default:
         return magi_make_null();
@@ -2297,6 +2445,10 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
             map->len = 0; map->cap = 16;
             map->keys = (char**)malloc(sizeof(char*) * map->cap);
             map->values = (int64_t*)malloc(sizeof(int64_t) * map->cap);
+            map->hashes = (uint32_t*)malloc(sizeof(uint32_t) * map->cap);
+            map->bucket_count = 32;
+            map->buckets = (int32_t*)malloc(32 * sizeof(int32_t));
+            memset(map->buckets, -1, 32 * sizeof(int32_t));
             json++; // skip {
             while (*json) {
                 while (*json == ' ' || *json == '\n' || *json == '\t' || *json == '\r' || *json == ',') json++;
@@ -2366,10 +2518,20 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
                         else val = magi_make_float(d);
                         json = end;
                     }
-                    if (map->len >= map->cap) { map->cap *= 2; map->keys = (char**)realloc(map->keys, sizeof(char*) * map->cap); map->values = (int64_t*)realloc(map->values, sizeof(int64_t) * map->cap); }
+                    if (map->len >= map->cap) { map->cap *= 2; map->keys = (char**)realloc(map->keys, sizeof(char*) * map->cap); map->values = (int64_t*)realloc(map->values, sizeof(int64_t) * map->cap); map->hashes = (uint32_t*)realloc(map->hashes, sizeof(uint32_t) * map->cap); }
+                    uint32_t kh = fnv1a(key);
                     map->keys[map->len] = key;
                     map->values[map->len] = val;
-                    map->len++;
+                    map->hashes[map->len] = kh;
+                    if (map->len * 4 > map->bucket_count * 3) {
+                        map->len++;
+                        magi_map_rehash(map);
+                    } else {
+                        uint32_t ks = kh & (uint32_t)(map->bucket_count - 1);
+                        while (map->buckets[ks] != -1) ks = (ks + 1) & (uint32_t)(map->bucket_count - 1);
+                        map->buckets[ks] = map->len;
+                        map->len++;
+                    }
                 } else break;
             }
             return magi_make_map_val(map);
@@ -2456,6 +2618,11 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     if (strcmp(name, "__byte_slice") == 0) {
         int64_t c = argc > 2 ? args[2] : magi_make_int(0);
         return __magi_byte_slice(a, b, c);
+    }
+
+    if (strcmp(name, "__arena_reset") == 0) {
+        __magi_arena_reset();
+        return magi_make_null();
     }
 
     // Native seg renderer: processes an entire seg's column range in C
