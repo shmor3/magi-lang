@@ -250,7 +250,7 @@ impl WasmCodegen {
         let mut max_temps: u32 = 0;
         for inst in &func.instructions {
             let needed = match inst {
-                Instruction::BoolNot | Instruction::If | Instruction::IfVoid | Instruction::TagF64 => 1, // temp for truthiness/NaN check
+                Instruction::BoolNot | Instruction::If | Instruction::IfVoid | Instruction::TagF64 | Instruction::I64Neg => 1, // temp for truthiness/NaN check
                 Instruction::BrIf(_) => 1, // temp for truthiness check
                 Instruction::GetTag => 1, // temp for NaN-box check in select
                 Instruction::MemStoreI64 => 1, // temp for value during addr conversion
@@ -523,9 +523,39 @@ impl WasmCodegen {
                 f.instruction(&WasmInst::I64RemS);
             }
             Instruction::I64Neg => {
-                // Negate: multiply by -1. This avoids operand ordering issues with i64.sub.
-                f.instruction(&WasmInst::I64Const(-1));
-                f.instruction(&WasmInst::I64Mul);
+                // Dispatch: float (untagged raw f64 bits) vs integer (NaN-boxed).
+                let t = temp_base;
+                f.instruction(&WasmInst::LocalSet(t));
+                // Check if NaN-boxed tagged: (val & NANBOX_MASK) == NANBOX_SIG
+                f.instruction(&WasmInst::LocalGet(t));
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+                f.instruction(&WasmInst::I64Eq);
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
+                // Tagged integer path: untag payload, sign-extend, negate, retag
+                f.instruction(&WasmInst::I64Const(0));
+                // Extract 48-bit payload (strip tag bits first)
+                f.instruction(&WasmInst::LocalGet(t));
+                f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
+                f.instruction(&WasmInst::I64And);
+                // Sign-extend from 48 bits to 64 bits
+                f.instruction(&WasmInst::I64Const(16));
+                f.instruction(&WasmInst::I64Shl);
+                f.instruction(&WasmInst::I64Const(16));
+                f.instruction(&WasmInst::I64ShrS);
+                f.instruction(&WasmInst::I64Sub); // 0 - val = negate
+                // Mask back to 48-bit payload and retag
+                f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG | ((tag::I64 as i64) << tag::TAG_SHIFT)));
+                f.instruction(&WasmInst::I64Or);
+                f.instruction(&WasmInst::Else);
+                // Float path: XOR sign bit to flip sign
+                f.instruction(&WasmInst::LocalGet(t));
+                f.instruction(&WasmInst::I64Const(i64::MIN)); // 0x8000_0000_0000_0000
+                f.instruction(&WasmInst::I64Xor);
+                f.instruction(&WasmInst::End);
             }
 
             // ── Arithmetic (f64) ─────────────────────────
@@ -5040,25 +5070,20 @@ mod tests {
 
     #[test]
     fn test_e2e_lambda_call() {
-        // Known WASM limitation: lambda calls use indirect call_indirect
-        // via function table, which may not resolve correctly in the
-        // current alpha WASM compiler.
         let r = compile_and_run(r#"
             let f = |x| x;
             output f(42);
         "#);
-        // Lambda indirect calls produce null due to table-based dispatch issues.
-        assert_eq!(r.printed, vec!["null"]);
+        assert_eq!(r.printed, vec!["42"]);
     }
 
     #[test]
     fn test_e2e_lambda_no_params() {
-        // Same known limitation as above.
         let r = compile_and_run(r#"
             let f = || 99;
             output f();
         "#);
-        assert_eq!(r.printed, vec!["null"]);
+        assert_eq!(r.printed, vec!["99"]);
     }
 
     // ── E2E: Pipe operator ──────────────────────────────────────────
@@ -5146,11 +5171,8 @@ mod tests {
 
     #[test]
     fn test_e2e_output_empty_map() {
-        // Known WASM issue: empty map literal {} is parsed as a block
-        // expression (empty block returns null), not as a map literal.
-        // This is a parser/compiler ambiguity.
         let r = compile_and_run("output {};");
-        assert_eq!(r.printed, vec!["null"]);
+        assert_eq!(r.printed, vec!["{}"]);
     }
 
     // ── E2E: String interpolation ───────────────────────────────────
