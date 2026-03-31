@@ -2747,58 +2747,65 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
         return magi_make_null();
     }
 
-    // Native flat column renderer — replaces the per-pixel MAGI loop
-    // Args: fb, flat, x, y1, y2, viewx, viewy, viewz, viewangle, plane_height, projection, centery, cmap, xtoviewangle_x, finesine_arr, finecosine_offset
-    if (strcmp(name, "__render_flat_col") == 0 && argc >= 14) {
+    // Native flat column renderer using Rust-style inverse perspective
+    // Args: fb, flat, x, y1, y2, player_x, player_y, player_floor_h, player_angle_bam, plane_height, light_level, cmap
+    // Uses float inverse perspective matching doom-rust-renderer visplanes.rs
+    if (strcmp(name, "__render_flat_col") == 0 && argc >= 12) {
         MagiArray* fb = magi_array_ptr(args[0]);
         MagiArray* flat = magi_array_ptr(args[1]);
         if (!fb || !flat || flat->len < 4096) return magi_make_null();
         int x = (int)magi_as_int(args[2]);
         int y1 = (int)magi_as_int(args[3]);
         int y2 = (int)magi_as_int(args[4]);
-        int64_t viewx = magi_as_int(args[5]);
-        int64_t viewy = magi_as_int(args[6]);
-        int64_t viewz = magi_as_int(args[7]);
-        int64_t viewangle = magi_as_int(args[8]);
-        int64_t plane_height = magi_as_int(args[9]);
-        int64_t projection = magi_as_int(args[10]);
-        int centery = (int)magi_as_int(args[11]);
-        MagiArray* cmap = magi_array_ptr(args[12]);
-        int64_t xtoviewangle_x = magi_as_int(args[13]);
-        MagiArray* sine_arr = argc > 14 ? magi_array_ptr(args[14]) : NULL;
-        int cosine_offset = argc > 15 ? (int)magi_as_int(args[15]) : 0;
-        int SCREENWIDTH = 320;
-        int64_t plane_z = plane_height - viewz;
-        if (plane_z < 0) plane_z = -plane_z;
-        if (plane_z == 0) return magi_make_null();
-        int64_t FRACUNIT = 1 << 16;
-        int64_t ANG360 = (int64_t)0x100000000LL;
+        // Player position in map units (fixed-point >> 16)
+        double player_x = (double)magi_as_int(args[5]) / 65536.0;
+        double player_y = (double)magi_as_int(args[6]) / 65536.0;
+        double player_floor_h = (double)magi_as_int(args[7]) / 65536.0;
+        double player_angle_rad = (double)magi_as_int(args[8]) * 3.14159265358979323846 / 2147483648.0;
+        double plane_height = (double)magi_as_int(args[9]) / 65536.0;
+        int light_level = (int)magi_as_int(args[10]);
+        MagiArray* cmap = magi_array_ptr(args[11]);
+
+        int SW = 320, SH = 200, VH = 168;
+        double ASPECT = 200.0 / 240.0;
+        double GAME_FOCUS = (SW / ASPECT) / 2.0;
+        double CAM_FX = SW / 2.0;
+        double CAM_FY = SH / 2.0;
+        double EYE_H = 41.0;
+        double wz = plane_height - player_floor_h - EYE_H;
+
+        double cos_a = cos(player_angle_rad);
+        double sin_a = sin(player_angle_rad);
+
+        double vx_base = (CAM_FX - (double)x) / ASPECT;
+
         for (int y = y1; y <= y2; y++) {
-            if (y < 0 || y >= 168) continue;
-            int dy = y - centery;
-            if (dy < 0) dy = -dy;
-            if (dy == 0) continue;
-            int64_t dist = (plane_z * (projection >> 6)) / (((int64_t)dy) << (16 - 6));
-            if (dist <= 0) continue;
-            int64_t col_angle = viewangle + xtoviewangle_x;
-            int64_t cos_idx = ((col_angle & (ANG360 - 1)) >> 19) & 8191;
-            int64_t sin_idx = cos_idx;
-            int64_t cos_off = (sin_idx + cosine_offset) % (sine_arr ? sine_arr->len : 10240);
-            int64_t cos_v = sine_arr && cos_off >= 0 && cos_off < sine_arr->len ? magi_as_int(sine_arr->data[cos_off]) : 0;
-            int64_t sin_v = sine_arr && sin_idx >= 0 && sin_idx < sine_arr->len ? magi_as_int(sine_arr->data[sin_idx]) : 0;
-            int64_t map_x = viewx + ((dist * cos_v) >> 16);
-            int64_t map_y = viewy - ((dist * sin_v) >> 16);
-            int tx = (int)(((map_x >> 16) & 63) + 64) % 64;
-            int ty = (int)(((map_y >> 16) & 63) + 64) % 64;
+            if (y < 0 || y >= VH) continue;
+            double vy = CAM_FY - (double)y;
+            if (vy > -0.5 && vy < 0.5) continue; // skip horizon
+
+            // Inverse perspective: screen -> viewport -> world
+            double wx = GAME_FOCUS * wz / vy;
+            double wy = wz * vx_base / vy;
+
+            // Rotate back to world space
+            double rx = wx * cos_a - wy * sin_a;
+            double ry = wx * sin_a + wy * cos_a;
+
+            // World position + player offset, then wrap to 64x64 flat tile
+            int tx = ((int)floor(rx + player_x)) & 63;
+            int ty = ((int)floor(ry + player_y)) & 63;
+
             int flat_idx = ty * 64 + tx;
             int px = 0;
             if (flat->cap == -1) {
-                // Byte array (embedded data) — read raw bytes
                 const unsigned char* raw = (const unsigned char*)(uintptr_t)flat->data;
                 if (flat_idx >= 0 && flat_idx < flat->len) px = raw[flat_idx];
             } else if (flat_idx >= 0 && flat_idx < flat->len) {
                 px = (int)magi_as_int(flat->data[flat_idx]);
             }
+
+            // Light diminishing
             if (cmap && px >= 0 && px < 256 && px < cmap->len) {
                 if (cmap->cap == -1) {
                     const unsigned char* raw = (const unsigned char*)(uintptr_t)cmap->data;
@@ -2807,7 +2814,8 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
                     px = (int)magi_as_int(cmap->data[px]);
                 }
             }
-            int fb_idx = y * SCREENWIDTH + x;
+
+            int fb_idx = y * SW + x;
             if (fb_idx >= 0 && fb_idx < fb->len) {
                 fb->data[fb_idx] = magi_make_int(px);
             }
