@@ -757,12 +757,13 @@ impl Compiler {
                             self.compile_expr(index)?;
                             self.compile_expr(value)?;
                             self.emit(Instruction::ArraySet);
-                            // ArraySet/MapSet modify in-place — no need to store back
+                            self.emit(Instruction::Drop); // ArraySet pushes array back; drop it in statement context
                         } else if let Some(&gidx) = self.global_vars.get(name.as_str()) {
                             self.emit(Instruction::GlobalGet(gidx));
                             self.compile_expr(index)?;
                             self.compile_expr(value)?;
                             self.emit(Instruction::ArraySet);
+                            self.emit(Instruction::Drop);
                         } else {
                             return Err(CompileError::at(
                                 stmt.span.start_line,

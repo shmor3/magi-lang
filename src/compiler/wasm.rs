@@ -277,8 +277,11 @@ impl WasmCodegen {
                         "__sub" | "__mul" | "__div" | "__mod" if *arg_count == 2 => 2,
                         "__gt" | "__lt" | "__ge" | "__le" if *arg_count == 2 => 2,
                         "__eq" | "__ne" if *arg_count == 2 => 0, // raw comparison, no temps
+                        "__bit_and" | "__bit_or" | "__bit_xor" | "__bit_shl" | "__bit_shr" | "__bit_andnot" if *arg_count == 2 => 2,
+                        "__neg" if *arg_count == 1 => 1,
+                        "has" | "contains" if *arg_count == 2 => 3,
                         "sort" if *arg_count == 1 => 6, // ptr, len, i, j, key, tmp
-                        _ => 0,
+                        _ => if *arg_count > 0 { *arg_count as u32 } else { 0 }, // default: 1 temp per arg
                     }
                 }
                 Instruction::RawArrayGet => 2, // raw index + array ptr
