@@ -1103,8 +1103,8 @@ fn compile_fn<'ctx>(
                 let can_inline = b.build_and(is_regular, in_bounds, "ci").unwrap();
 
                 let inline_bb = ctx.append_basic_block(lf, "aget_inline");
-                let oob_bb = ctx.append_basic_block(lf, "aget_oob");
-                b.build_conditional_branch(can_inline, inline_bb, oob_bb).unwrap();
+                b.build_conditional_branch(can_inline, inline_bb, slow_bb).unwrap();
+                // Byte arrays (cap==-1) and OOB → slow path (C runtime handles both)
 
                 // ── Inline load: arr->data[idx] ──
                 b.position_at_end(inline_bb);
@@ -1120,12 +1120,7 @@ fn compile_fn<'ctx>(
                     .unwrap().into_int_value();
                 b.build_unconditional_branch(merge_bb).unwrap();
 
-                // ── OOB / byte array: return null ──
-                b.position_at_end(oob_bb);
-                let oob_result = cnull(ctx);
-                b.build_unconditional_branch(merge_bb).unwrap();
-
-                // ── Slow path: maps, byte arrays → call C runtime ──
+                // ── Slow path: maps, byte arrays, OOB → call C runtime ──
                 b.position_at_end(slow_bb);
                 let slow_r = b.build_call(
                     rt["__magi_array_get"],
@@ -1140,7 +1135,6 @@ fn compile_fn<'ctx>(
                 let phi = b.build_phi(i64_t, "aget_r").unwrap();
                 phi.add_incoming(&[
                     (&fast_result, inline_bb),
-                    (&oob_result, oob_bb),
                     (&slow_result, slow_bb),
                 ]);
                 stack.push(phi.as_basic_value().into_int_value());
