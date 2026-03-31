@@ -16,13 +16,13 @@ Issues discovered during Doom engine development. Updated 2026-03-31.
 ## Compiler — Open
 
 - ~~**Float equality edge case**~~: **Fixed.** `-0.0 == 0.0` now compares as doubles in both fast path and full dispatch.
+- ~~**Self-hosted parser `|` before `(`**~~: **Fixed.** `Bar` token added to precedence table as `PREC_BIT_OR`.
 - **48-bit pointer truncation risk**: NaN-boxing uses 48-bit payloads for pointers. Works on x86_64 but theoretically unsafe on systems with >48-bit addresses.
-- **Self-hosted parser `|` before `(`**: The self-hosted MAGI parser treats `data[offset] | (data[offset + 1] << 8)` as a lambda parameter list instead of bitwise OR.
 
 ## WASM Backend — Open
 
 - **No browser runtime**: WASM module compiles and validates but requires a full JavaScript runtime to execute. The browser page loads the module but stubs all imports — no actual execution.
-- **Tail expression codegen**: Functions ending with a value expression (not explicit `return`) may produce stack validation errors in WASM. Workaround: use explicit `return`.
+- ~~**Tail expression codegen**~~: **Fixed.** Functions without explicit `return` now push null before `End` in WASM backend.
 - **Duplicate function names**: Two functions with the same name in a combined file can cause WASM validation errors. Workaround: remove duplicates.
 
 ## Runtime — Fixed
@@ -51,7 +51,7 @@ Issues discovered during Doom engine development. Updated 2026-03-31.
 
 ## Performance — Open
 
-- **No inline MapGet**: Map field access (`obj["x"]`) still calls C function with hash lookup. Could be inlined for known string keys.
+- **No inline MapGet**: Map field access (`obj["x"]`) still calls C function with hash lookup. Low priority — hash table is already O(1), function call overhead ~5ns.
 - **String operations slow**: `to_string`, `split`, `join`, `replace` all go through RuntimeCall dispatch.
 
 ## SDL2 / Canvas Package
