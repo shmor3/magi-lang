@@ -327,6 +327,25 @@ impl WasmCodegen {
             self.emit_instruction(&mut f, inst, ir, num_imports, &string_offsets, &string_reverse_index, temp_base)?;
         }
 
+        // Ensure the function body produces exactly 1 value for the implicit return.
+        // If the last instruction was a Return, the End is unreachable.
+        // Otherwise, push a null to satisfy WASM's stack requirement.
+        let last_is_return = func.instructions.last().map_or(false, |i| matches!(i, Instruction::Return));
+        if !last_is_return {
+            // Check if the last instruction was a Drop (statement context) — stack is empty, push null.
+            // If last was a value-producing instruction — stack has 1 value, that's the implicit return.
+            let last_is_drop = func.instructions.last().map_or(false, |i| matches!(i, Instruction::Drop));
+            let last_is_void = func.instructions.last().map_or(true, |i| matches!(i,
+                Instruction::Drop | Instruction::LocalSet(_) | Instruction::GlobalSet(_) |
+                Instruction::ArraySet | Instruction::Print |
+                Instruction::End | Instruction::Br(_) | Instruction::BrIf(_)
+            ));
+            if last_is_void || last_is_drop {
+                // Stack is empty — push null as implicit return value
+                f.instruction(&WasmInst::I64Const(tag::encode(tag::NULL, 0)));
+            }
+        }
+
         // Implicit end.
         f.instruction(&WasmInst::End);
 
