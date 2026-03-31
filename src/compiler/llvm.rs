@@ -1140,10 +1140,68 @@ fn compile_fn<'ctx>(
                 stack.push(phi.as_basic_value().into_int_value());
             }
             Instruction::ArraySet => {
-                let v = stack.pop().unwrap_or(cnull(ctx));
-                let idx = stack.pop().unwrap_or(cnull(ctx));
-                let arr = stack.pop().unwrap_or(cnull(ctx));
-                b.build_call(rt["__magi_array_set"], &[arr.into(), idx.into(), v.into()], "").unwrap();
+                let val = stack.pop().unwrap_or(cnull(ctx));
+                let idx_val = stack.pop().unwrap_or(cnull(ctx));
+                let arr_val = stack.pop().unwrap_or(cnull(ctx));
+
+                // Check if TAG_ARRAY
+                let arr_tag = b.build_right_shift(
+                    b.build_and(arr_val, ci64(ctx, 0x0007_0000_0000_0000u64), "ast").unwrap(),
+                    ci64(ctx, 48), false, "astt",
+                ).unwrap();
+                let is_array = b.build_int_compare(
+                    IntPredicate::EQ, arr_tag, ci64(ctx, tag::ARRAY as u64), "asia",
+                ).unwrap();
+
+                let fast_bb = ctx.append_basic_block(lf, "aset_fast");
+                let slow_bb = ctx.append_basic_block(lf, "aset_slow");
+                let merge_bb = ctx.append_basic_block(lf, "aset_merge");
+
+                b.build_conditional_branch(is_array, fast_bb, slow_bb).unwrap();
+
+                // Fast path: inline array store
+                b.position_at_end(fast_bb);
+                let ptr_raw = b.build_and(arr_val, ci64(ctx, PAYLOAD_MASK_U64), "aspr").unwrap();
+                let arr_ptr = b.build_int_to_ptr(ptr_raw, ctx.ptr_type(AddressSpace::default()), "asap").unwrap();
+
+                // Load cap at offset 12
+                let cap_bp = unsafe { b.build_gep(ctx.i8_type(), arr_ptr, &[i32_t.const_int(12, false)], "ascbp").unwrap() };
+                let cap_val = b.build_load(i32_t, cap_bp, "ascap").unwrap().into_int_value();
+                let is_regular = b.build_int_compare(IntPredicate::NE, cap_val, i32_t.const_int(-1i32 as u32 as u64, false), "asir").unwrap();
+
+                // Extract index
+                let idx_int = ext_i64(b, ctx, idx_val);
+                let idx_i32 = b.build_int_truncate(idx_int, i32_t, "asi32").unwrap();
+
+                // Load len at offset 8
+                let len_bp = unsafe { b.build_gep(ctx.i8_type(), arr_ptr, &[i32_t.const_int(8, false)], "aslbp").unwrap() };
+                let len_val = b.build_load(i32_t, len_bp, "aslen").unwrap().into_int_value();
+
+                // Bounds check
+                let ge_z = b.build_int_compare(IntPredicate::SGE, idx_i32, i32_t.const_zero(), "asgz").unwrap();
+                let lt_l = b.build_int_compare(IntPredicate::SLT, idx_i32, len_val, "asll").unwrap();
+                let in_b = b.build_and(ge_z, lt_l, "asib").unwrap();
+                let can = b.build_and(is_regular, in_b, "asci").unwrap();
+
+                let inline_bb = ctx.append_basic_block(lf, "aset_inline");
+                b.build_conditional_branch(can, inline_bb, slow_bb).unwrap();
+
+                // Inline store
+                b.position_at_end(inline_bb);
+                let data_ptr = b.build_load(ctx.ptr_type(AddressSpace::default()), arr_ptr, "asdp").unwrap().into_pointer_value();
+                let idx_u64 = b.build_int_z_extend(idx_i32, i64_t, "asiu64").unwrap();
+                let elem_ptr = unsafe { b.build_gep(i64_t, data_ptr, &[idx_u64], "asep").unwrap() };
+                b.build_store(elem_ptr, val).unwrap();
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                // Slow path: maps, byte arrays -> C function
+                b.position_at_end(slow_bb);
+                b.build_call(rt["__magi_array_set"], &[arr_val.into(), idx_val.into(), val.into()], "").unwrap();
+                b.build_unconditional_branch(merge_bb).unwrap();
+
+                b.position_at_end(merge_bb);
+                // ArraySet pushes the array back for expression chaining
+                stack.push(arr_val);
             }
             Instruction::ArrayLen => {
                 let arr = stack.pop().unwrap_or(cnull(ctx));

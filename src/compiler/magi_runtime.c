@@ -74,6 +74,34 @@ void __magi_arena_reset(void) {
     arena_current = arena_head;
 }
 
+// Enter/leave arena mode: routes string_concat and to_string through arena
+void __magi_arena_enter(void) { arena_mode = 1; }
+void __magi_arena_leave(void) { arena_mode = 0; }
+
+// ===== Allocation Tracking =====
+static size_t magi_total_malloc = 0;
+static size_t magi_malloc_count = 0;
+static size_t magi_gc_warn_threshold = 512 * 1024 * 1024; // 512MB
+static int magi_gc_warned = 0;
+
+static void* tracked_malloc(size_t size) {
+    void* p = malloc(size);
+    if (p) {
+        magi_total_malloc += size;
+        magi_malloc_count++;
+        if (!magi_gc_warned && magi_total_malloc > magi_gc_warn_threshold) {
+            fprintf(stderr, "[magi] warning: heap allocations exceed %zuMB (%zu allocs). "
+                    "Consider calling __arena_reset() in hot loops.\n",
+                    magi_total_malloc / (1024 * 1024), magi_malloc_count);
+            magi_gc_warned = 1;
+        }
+    }
+    return p;
+}
+
+// Query allocation stats from MAGI code
+int64_t __magi_heap_allocated(void);
+
 // Arena-aware strdup: copies string into arena when arena_mode is active
 static char* arena_strdup(const char* s) {
     size_t len = strlen(s);
@@ -514,7 +542,7 @@ int64_t __magi_string_concat(int64_t a_val, int64_t b_val) {
     const char* a = magi_as_string(a_val);
     const char* b = magi_as_string(b_val);
     size_t la = strlen(a), lb = strlen(b);
-    char* result = (char*)malloc(la + lb + 1);
+    char* result = arena_mode ? (char*)arena_alloc(la + lb + 1) : (char*)tracked_malloc(la + lb + 1);
     memcpy(result, a, la);
     memcpy(result + la, b, lb);
     result[la + lb] = '\0';
@@ -529,8 +557,9 @@ int64_t __magi_string_len(int64_t val) {
 // ===== to_string =====
 int64_t __magi_to_string(int64_t val) {
     if (magi_is_tagged(val) && magi_get_tag(val) == TAG_STRING) return val;
+    // When arena_mode is active, magi_val_to_dyn_str already uses arena
     char* s = magi_val_to_dyn_str(val, 1); // display mode (no quotes on strings)
-    return magi_make_string(s); // s is already heap-allocated
+    return magi_make_string(s); // s is heap or arena allocated
 }
 
 // ===== JSON serialization =====
@@ -784,8 +813,11 @@ enum MagiBuiltinId {
     MAGI_RT_PATH_JOIN,
     // Renderers (domain-specific)
     MAGI_RT_RENDER_SEG_COLS, MAGI_RT_RENDER_WALL_COL, MAGI_RT_RENDER_FLAT_COL,
-    // Arena
+    // Arena / GC
     MAGI_RT_ARENA_RESET,
+    MAGI_RT_ARENA_ENTER,
+    MAGI_RT_ARENA_LEAVE,
+    MAGI_RT_HEAP_ALLOCATED,
     MAGI_RT_COUNT
 };
 
@@ -1822,6 +1854,13 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
             }
             return magi_make_bool(1);
         }
+        // Float equality: -0.0 == 0.0 (different bits but equal as doubles)
+        if (!magi_is_tagged(a) && !magi_is_tagged(b)) {
+            double da, db;
+            memcpy(&da, &a, sizeof(da));
+            memcpy(&db, &b, sizeof(db));
+            return magi_make_bool(da == db);
+        }
         return magi_make_bool(0);
     }
     if (strcmp(name, "__ne") == 0) {
@@ -2623,6 +2662,17 @@ int64_t __magi_runtime_call(const char* name, int32_t argc, int64_t* args) {
     if (strcmp(name, "__arena_reset") == 0) {
         __magi_arena_reset();
         return magi_make_null();
+    }
+    if (strcmp(name, "__arena_enter") == 0) {
+        __magi_arena_enter();
+        return magi_make_null();
+    }
+    if (strcmp(name, "__arena_leave") == 0) {
+        __magi_arena_leave();
+        return magi_make_null();
+    }
+    if (strcmp(name, "__heap_allocated") == 0) {
+        return magi_make_int((int64_t)magi_total_malloc);
     }
 
     // Native seg renderer: processes an entire seg's column range in C
