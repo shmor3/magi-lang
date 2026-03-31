@@ -15,7 +15,7 @@ Issues discovered during Doom engine development. Updated 2026-03-31.
 
 ## Compiler — Open
 
-- **Float equality edge case**: `-0.0 == 0.0` may not work correctly in all contexts due to NaN-boxing bit comparison.
+- ~~**Float equality edge case**~~: **Fixed.** `-0.0 == 0.0` now compares as doubles in both fast path and full dispatch.
 - **48-bit pointer truncation risk**: NaN-boxing uses 48-bit payloads for pointers. Works on x86_64 but theoretically unsafe on systems with >48-bit addresses.
 - **Self-hosted parser `|` before `(`**: The self-hosted MAGI parser treats `data[offset] | (data[offset + 1] << 8)` as a lambda parameter list instead of bitwise OR.
 
@@ -30,27 +30,28 @@ Issues discovered during Doom engine development. Updated 2026-03-31.
 - ~~**`has()` method missing**~~: **Fixed.** Implemented for maps and arrays.
 - ~~**Array/map equality not deep**~~: **Fixed.** `[1,2,3] == [1,2,3]` now returns true.
 - ~~**`embed()` byte arrays read-only**~~: **Fixed.** Copy-on-write: first `arr[i] = x` converts byte array to regular array.
+- ~~**Float equality edge case**~~: **Fixed.** `-0.0 == 0.0` compares correctly via double comparison.
 
 ## Runtime — Open
 
-- **No garbage collection**: All `malloc` calls never free. Long-running programs leak memory. Arena allocator added for print formatting only.
-- **String concatenation O(n^2)**: Building strings in loops (`s = s + piece`) copies the entire accumulated string each time.
+- **No garbage collection**: All `malloc` calls never free. Long-running programs leak memory. Arena allocator added for print formatting; Doom resets arena per frame.
+- **String concatenation O(n^2)**: Building strings in loops (`s = s + piece`) copies the entire accumulated string each time. Documented limitation.
 
 ## Performance — Done
 
 - **Inline binary ops**: `+,-,*,/,%,<,>,<=,>=` compiled as LLVM IR with 3-path int/float/fallback dispatch (3-5x speedup).
 - **Inline ArrayGet**: `array[i]` compiled as LLVM IR pointer math (2-3x speedup).
+- **Inline ArraySet**: `array[i] = val` compiled as LLVM IR pointer store (2-3x speedup for array writes).
 - **Hash table maps**: FNV-1a open addressing replaces O(n) strcmp scan (2-5x speedup).
 - **Numeric dispatch**: 119 runtime handlers via O(1) jump table instead of 116 strcmp calls (2-3x speedup).
 - **Untagged loop counters**: 6 raw IR instructions for for-in loops (2x speedup).
 - **Direct builtin calls**: len/push/abs/floor/sqrt/cos/sin/atan2 bypass dispatcher.
 - **Float fast path**: Mixed int/float arithmetic handled without full dispatch.
-- **Arena allocator**: Bump allocation for print formatting (less malloc pressure).
+- **Arena allocator**: Bump allocation for print formatting (less malloc pressure). Doom resets per frame.
 
 ## Performance — Open
 
 - **No inline MapGet**: Map field access (`obj["x"]`) still calls C function with hash lookup. Could be inlined for known string keys.
-- **No inline ArraySet**: `array[i] = val` still calls C function. Could be inlined like ArrayGet.
 - **String operations slow**: `to_string`, `split`, `join`, `replace` all go through RuntimeCall dispatch.
 
 ## SDL2 / Canvas Package
