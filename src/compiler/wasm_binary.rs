@@ -176,6 +176,7 @@ pub enum Inst {
     GlobalSet(u32),
 
     I32Load(MemArg),
+    I32Load8U(MemArg),
     I64Load(MemArg),
     F64Load(MemArg),
     I32Store(MemArg),
@@ -198,6 +199,7 @@ pub enum Inst {
     I32GeU,
     I32Add,
     I32Mul,
+    I32And,
     I32Or,
     I32Shl,
     I32WrapI64,
@@ -283,6 +285,7 @@ impl Inst {
             Inst::GlobalSet(i) => { out.push(0x24); encode_u32_leb128(*i, out); }
 
             Inst::I32Load(m) => { out.push(0x28); encode_memarg(m, out); }
+            Inst::I32Load8U(m) => { out.push(0x2D); encode_memarg(m, out); }
             Inst::I64Load(m) => { out.push(0x29); encode_memarg(m, out); }
             Inst::F64Load(m) => { out.push(0x2B); encode_memarg(m, out); }
             Inst::I32Store(m) => { out.push(0x36); encode_memarg(m, out); }
@@ -310,6 +313,7 @@ impl Inst {
             Inst::I32GeU => out.push(0x4E),
             Inst::I32Add => out.push(0x6A),
             Inst::I32Mul => out.push(0x6C),
+            Inst::I32And => out.push(0x71),
             Inst::I32Or => out.push(0x72),
             Inst::I32Shl => out.push(0x74),
             Inst::I32WrapI64 => out.push(0xA7),

@@ -28,6 +28,16 @@ const BOOL_TAG: u64 = NANBOX_SIG | ((tag::BOOL as u64) << 48);
 const I64_TAG: u64 = NANBOX_SIG | ((tag::I64 as u64) << 48);
 const STRING_TAG: u64 = NANBOX_SIG | ((tag::STRING as u64) << 48);
 
+/// Compile-time FNV-1a hash matching the C runtime's fnv1a() function.
+fn fnv1a_hash(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for &b in bytes {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
+}
+
 /// Compile MAGI source to a native binary via LLVM.
 pub fn compile_native(
     source: &str,
@@ -93,6 +103,7 @@ fn emit_native(
     rt_decl!("__magi_array_len", i64_t, [i64_t]);
     rt_decl!("__magi_map_new", i64_t, [i32_t, ptr_t]);
     rt_decl!("__magi_map_get", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_map_get_hash", i64_t, [i64_t, i64_t, i32_t]);
     rt_decl!("__magi_map_set", void_t, [i64_t, i64_t, i64_t]);
     rt_decl!("__magi_string_concat", i64_t, [i64_t, i64_t]);
     rt_decl!("__magi_string_len", i64_t, [i64_t]);
@@ -107,6 +118,15 @@ fn emit_native(
     rt_decl!("__magi_builtin_cos", i64_t, [i64_t]);
     rt_decl!("__magi_builtin_sin", i64_t, [i64_t]);
     rt_decl!("__magi_builtin_atan2", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_builtin_to_int", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_to_float", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_ceil", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_round", i64_t, [i64_t]);
+    rt_decl!("__magi_builtin_min", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_builtin_max", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_builtin_split", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_builtin_join", i64_t, [i64_t, i64_t]);
+    rt_decl!("__magi_builtin_replace", i64_t, [i64_t, i64_t, i64_t]);
 
     // ── Globals ─────────────────────────────────────────────
     let mut globals: Vec<PointerValue> = Vec::new();
@@ -280,7 +300,12 @@ fn emit_native(
                         }
                     }
                 }
-                if trimmed.starts_with("link-static") && trimmed.contains(platform_key) {
+                if trimmed.starts_with("link-dynamic") && trimmed.contains(platform_key) {
+                    if let Some(val) = extract_platform_value(trimmed, platform_key) {
+                        link_args.push(format!("-l{}", val));
+                    }
+                }
+                if trimmed.starts_with("link-static") && !trimmed.starts_with("link-system") && trimmed.contains(platform_key) {
                     // Parse { linux-x86_64 = "path", windows-x86_64 = "path" }
                     if let Some(val) = extract_platform_value(trimmed, platform_key) {
                         let lib_path = format!("{}/{}", pkg_dir, val);
@@ -1230,7 +1255,19 @@ fn compile_fn<'ctx>(
             Instruction::MapGet => {
                 let k = stack.pop().unwrap_or(cnull(ctx));
                 let m = stack.pop().unwrap_or(cnull(ctx));
-                let r = b.build_call(rt["__magi_map_get"], &[m.into(), k.into()], "mg").unwrap();
+                // Optimization: if the key is a constant string, pre-compute FNV-1a hash
+                let r = if ip > 0 {
+                    if let Instruction::PushString(sidx) = &insts[ip - 1] {
+                        let key_str = &ir.strings[*sidx as usize];
+                        let h = fnv1a_hash(key_str.as_bytes());
+                        let h_val = ctx.i32_type().const_int(h as u64, false);
+                        b.build_call(rt["__magi_map_get_hash"], &[m.into(), k.into(), h_val.into()], "mg").unwrap()
+                    } else {
+                        b.build_call(rt["__magi_map_get"], &[m.into(), k.into()], "mg").unwrap()
+                    }
+                } else {
+                    b.build_call(rt["__magi_map_get"], &[m.into(), k.into()], "mg").unwrap()
+                };
                 stack.push(r.try_as_basic_value().left().unwrap().into_int_value());
             }
             Instruction::MapSet => {
@@ -1295,6 +1332,16 @@ fn compile_fn<'ctx>(
                         ("cos", 1) => Some(("__magi_builtin_cos", 1)),
                         ("sin", 1) => Some(("__magi_builtin_sin", 1)),
                         ("atan2", 2) => Some(("__magi_builtin_atan2", 2)),
+                        ("to_string", 1) => Some(("__magi_to_string", 1)),
+                        ("to_int", 1) => Some(("__magi_builtin_to_int", 1)),
+                        ("to_float", 1) => Some(("__magi_builtin_to_float", 1)),
+                        ("ceil", 1) => Some(("__magi_builtin_ceil", 1)),
+                        ("round", 1) => Some(("__magi_builtin_round", 1)),
+                        ("min", 2) => Some(("__magi_builtin_min", 2)),
+                        ("max", 2) => Some(("__magi_builtin_max", 2)),
+                        ("split", 2) => Some(("__magi_builtin_split", 2)),
+                        ("join", 2) => Some(("__magi_builtin_join", 2)),
+                        ("replace", 3) => Some(("__magi_builtin_replace", 3)),
                         _ => None,
                     };
 

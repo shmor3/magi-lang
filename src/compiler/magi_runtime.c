@@ -1,6 +1,8 @@
 // MAGI LLVM Backend Runtime Library
 // Provides NaN-boxed value operations, I/O, collections, and type dispatch.
 // Compiled alongside user programs and linked into the final binary.
+//
+// NaN-boxing: 48-bit pointers. Validated at startup on all platforms.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,6 +87,7 @@ static size_t magi_gc_warn_threshold = 512 * 1024 * 1024; // 512MB
 static int magi_gc_warned = 0;
 
 static void* tracked_malloc(size_t size) {
+    if (arena_mode) return arena_alloc(size);
     void* p = malloc(size);
     if (p) {
         magi_total_malloc += size;
@@ -135,6 +138,20 @@ static void* arena_realloc(void* ptr, size_t old_size, size_t new_size) {
 #define TAG_STRING 3
 #define TAG_ARRAY  4
 #define TAG_MAP    5
+
+// Validate pointer size fits in 48-bit NaN-boxing payload at startup
+#ifdef __GNUC__
+__attribute__((constructor))
+#endif
+static void __magi_check_pointer_size(void) {
+    void* p = malloc(1);
+    if (p && ((uintptr_t)p >> 48) != 0) {
+        fprintf(stderr, "[magi] fatal: heap pointer %p exceeds 48-bit NaN-boxing limit\n", p);
+        free(p);
+        exit(1);
+    }
+    if (p) free(p);
+}
 
 // ===== Value Helpers =====
 static inline int magi_is_tagged(int64_t val) {
@@ -502,6 +519,23 @@ int64_t __magi_map_get(int64_t map_val, int64_t key_val) {
     return magi_make_null();
 }
 
+// Fast map get with pre-computed hash — avoids rehashing constant string keys
+int64_t __magi_map_get_hash(int64_t map_val, int64_t key_val, uint32_t h) {
+    MagiMap* map = magi_map_ptr(map_val);
+    if (!map) return magi_make_null();
+    const char* key = magi_as_string(key_val);
+    if (!key) return magi_make_null();
+    uint32_t mask = (uint32_t)(map->bucket_count - 1);
+    uint32_t slot = h & mask;
+    while (map->buckets[slot] != -1) {
+        int idx = map->buckets[slot];
+        if (map->hashes[idx] == h && strcmp(map->keys[idx], key) == 0)
+            return map->values[idx];
+        slot = (slot + 1) & mask;
+    }
+    return magi_make_null();
+}
+
 void __magi_map_set(int64_t map_val, int64_t key_val, int64_t val) {
     MagiMap* map = magi_map_ptr(map_val);
     const char* key = magi_as_string(key_val);
@@ -538,14 +572,54 @@ void __magi_map_set(int64_t map_val, int64_t key_val, int64_t val) {
 }
 
 // ===== String Operations =====
+// Track last string allocation for in-place append optimization
+static char* last_concat_ptr = NULL;
+static size_t last_concat_len = 0;
+static size_t last_concat_cap = 0;
+
 int64_t __magi_string_concat(int64_t a_val, int64_t b_val) {
     const char* a = magi_as_string(a_val);
     const char* b = magi_as_string(b_val);
     size_t la = strlen(a), lb = strlen(b);
-    char* result = arena_mode ? (char*)arena_alloc(la + lb + 1) : (char*)tracked_malloc(la + lb + 1);
+    size_t total = la + lb + 1;
+    if (arena_mode) {
+        char* result = (char*)arena_alloc(total);
+        memcpy(result, a, la);
+        memcpy(result + la, b, lb);
+        result[la + lb] = '\0';
+        return magi_make_string(result);
+    }
+    // Optimization: if left operand was the last concat result, realloc in place
+    if (a == last_concat_ptr && last_concat_cap > 0) {
+        if (total <= last_concat_cap) {
+            // Fits in existing allocation — just append
+            memcpy(last_concat_ptr + la, b, lb);
+            last_concat_ptr[la + lb] = '\0';
+            last_concat_len = la + lb;
+            return a_val; // Same pointer, same NaN-boxed value
+        }
+        // Need more space — realloc (amortized doubling)
+        size_t new_cap = last_concat_cap * 2;
+        if (new_cap < total) new_cap = total;
+        char* grown = (char*)realloc(last_concat_ptr, new_cap);
+        if (grown) {
+            memcpy(grown + la, b, lb);
+            grown[la + lb] = '\0';
+            last_concat_ptr = grown;
+            last_concat_len = la + lb;
+            last_concat_cap = new_cap;
+            return magi_make_string(grown);
+        }
+    }
+    // Fresh allocation with headroom for future appends
+    size_t cap = total < 64 ? 64 : total * 2;
+    char* result = (char*)tracked_malloc(cap);
     memcpy(result, a, la);
     memcpy(result + la, b, lb);
     result[la + lb] = '\0';
+    last_concat_ptr = result;
+    last_concat_len = la + lb;
+    last_concat_cap = cap;
     return magi_make_string(result);
 }
 
@@ -937,6 +1011,117 @@ int64_t __magi_builtin_sin(int64_t a) {
 
 int64_t __magi_builtin_atan2(int64_t a, int64_t b) {
     return magi_make_float(atan2(magi_as_float(a), magi_as_float(b)));
+}
+
+int64_t __magi_builtin_to_int(int64_t val) {
+    if (!magi_is_tagged(val)) { return magi_make_int((int64_t)magi_as_float(val)); }
+    switch (magi_get_tag(val)) {
+        case TAG_I64: return val;
+        case TAG_STRING: { const char* s = magi_as_string(val); return magi_make_int(atoll(s)); }
+        case TAG_BOOL: return magi_make_int(magi_get_payload(val) ? 1 : 0);
+        default: return magi_make_int(0);
+    }
+}
+
+int64_t __magi_builtin_to_float(int64_t val) {
+    if (!magi_is_tagged(val)) return val; // already float
+    switch (magi_get_tag(val)) {
+        case TAG_I64: return magi_make_float((double)magi_sext48(magi_get_payload(val)));
+        case TAG_STRING: { const char* s = magi_as_string(val); return magi_make_float(atof(s)); }
+        case TAG_BOOL: return magi_make_float(magi_get_payload(val) ? 1.0 : 0.0);
+        default: return magi_make_float(0.0);
+    }
+}
+
+int64_t __magi_builtin_ceil(int64_t val) {
+    return magi_make_float(ceil(magi_as_float(val)));
+}
+
+int64_t __magi_builtin_round(int64_t val) {
+    return magi_make_float(round(magi_as_float(val)));
+}
+
+int64_t __magi_builtin_min(int64_t a, int64_t b) {
+    double fa = magi_as_float(a), fb = magi_as_float(b);
+    return fa <= fb ? a : b;
+}
+
+int64_t __magi_builtin_max(int64_t a, int64_t b) {
+    double fa = magi_as_float(a), fb = magi_as_float(b);
+    return fa >= fb ? a : b;
+}
+
+int64_t __magi_builtin_split(int64_t str_val, int64_t delim_val) {
+    const char* s = magi_as_string(str_val);
+    const char* delim = magi_as_string(delim_val);
+    MagiArray* arr = (MagiArray*)malloc(sizeof(MagiArray));
+    arr->len = 0; arr->cap = 16;
+    arr->data = (int64_t*)malloc(sizeof(int64_t) * arr->cap);
+    size_t dlen = strlen(delim);
+    if (dlen == 0) {
+        for (size_t i = 0; i < strlen(s); i++) {
+            char* ch = (char*)malloc(2); ch[0] = s[i]; ch[1] = '\0';
+            if (arr->len >= arr->cap) { arr->cap *= 2; arr->data = (int64_t*)realloc(arr->data, sizeof(int64_t) * arr->cap); }
+            arr->data[arr->len++] = magi_make_string(ch);
+        }
+    } else {
+        const char* p = s;
+        while (1) {
+            const char* found = strstr(p, delim);
+            size_t part_len = found ? (size_t)(found - p) : strlen(p);
+            char* part = (char*)malloc(part_len + 1);
+            memcpy(part, p, part_len); part[part_len] = '\0';
+            if (arr->len >= arr->cap) { arr->cap *= 2; arr->data = (int64_t*)realloc(arr->data, sizeof(int64_t) * arr->cap); }
+            arr->data[arr->len++] = magi_make_string(part);
+            if (!found) break;
+            p = found + dlen;
+        }
+    }
+    return magi_make_array_val(arr);
+}
+
+int64_t __magi_builtin_join(int64_t arr_val, int64_t sep_val) {
+    MagiArray* arr = magi_array_ptr(arr_val);
+    if (!arr) return magi_make_string("");
+    const char* sep = magi_as_string(sep_val);
+    size_t total = 0, seplen = strlen(sep);
+    char** strs = (char**)malloc(sizeof(char*) * (arr->len > 0 ? arr->len : 1));
+    for (int i = 0; i < arr->len; i++) {
+        if (magi_is_tagged(arr->data[i]) && magi_get_tag(arr->data[i]) == TAG_STRING)
+            strs[i] = (char*)magi_as_string(arr->data[i]);
+        else { char buf[256]; magi_val_to_str(arr->data[i], buf, sizeof(buf)); strs[i] = strdup(buf); }
+        total += strlen(strs[i]);
+    }
+    total += seplen * (arr->len > 0 ? arr->len - 1 : 0);
+    char* result = (char*)malloc(total + 1);
+    char* w = result;
+    for (int i = 0; i < arr->len; i++) {
+        if (i > 0) { memcpy(w, sep, seplen); w += seplen; }
+        size_t l = strlen(strs[i]); memcpy(w, strs[i], l); w += l;
+    }
+    *w = '\0';
+    free(strs);
+    return magi_make_string(result);
+}
+
+int64_t __magi_builtin_replace(int64_t str_val, int64_t from_val, int64_t to_val) {
+    const char* s = magi_as_string(str_val);
+    const char* from = magi_as_string(from_val);
+    const char* to = magi_as_string(to_val);
+    size_t slen = strlen(s), flen = strlen(from), tlen = strlen(to);
+    if (flen == 0) return str_val;
+    int count = 0;
+    const char* p = s;
+    while ((p = strstr(p, from))) { count++; p += flen; }
+    char* result = (char*)malloc(slen + count * (tlen - flen) + 1);
+    char* w = result;
+    p = s;
+    while (*p) {
+        if (strncmp(p, from, flen) == 0) { memcpy(w, to, tlen); w += tlen; p += flen; }
+        else { *w++ = *p++; }
+    }
+    *w = '\0';
+    return magi_make_string(result);
 }
 
 // ===== Numeric ID Dispatch (O(1) jump table) =====

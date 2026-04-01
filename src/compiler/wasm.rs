@@ -36,6 +36,8 @@ pub struct WasmCodegen {
     /// Base offset in data section for string constants (default: 1024 = 0x400).
     /// See the memory layout diagram above.
     string_data_offset: u32,
+    /// Embedded file data offsets and lengths (from embed()).
+    embed_offsets: Vec<(u32, u32)>,
 }
 
 impl Default for WasmCodegen {
@@ -48,11 +50,51 @@ impl WasmCodegen {
     pub fn new() -> Self {
         Self {
             string_data_offset: 1024, // Start strings at 1KB offset.
+            embed_offsets: Vec::new(),
         }
     }
 
     /// Emit a complete WASM module binary.
-    pub fn emit(&self, ir: &IrModule) -> Result<Vec<u8>, CompileError> {
+    pub fn emit(&mut self, ir: &IrModule) -> Result<Vec<u8>, CompileError> {
+        // Deduplicate functions: keep last definition per name (matches interpreter)
+        // Build old→new index mapping so Call(idx) instructions get remapped
+        let ir = {
+            let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut deduped = Vec::new();
+            let mut idx_map: Vec<u32> = Vec::with_capacity(ir.functions.len());
+            for func in &ir.functions {
+                if let Some(&prev) = seen.get(&func.name) {
+                    deduped[prev] = func.clone();
+                    idx_map.push(prev as u32);
+                } else {
+                    let new_idx = deduped.len();
+                    seen.insert(func.name.clone(), new_idx);
+                    idx_map.push(new_idx as u32);
+                    deduped.push(func.clone());
+                }
+            }
+            // Remap Call(idx) instructions in all functions
+            if idx_map.iter().enumerate().any(|(i, &v)| v != i as u32) {
+                for func in &mut deduped {
+                    for inst in &mut func.instructions {
+                        if let Instruction::Call(ref mut idx) = inst {
+                            if (*idx as usize) < idx_map.len() {
+                                *idx = idx_map[*idx as usize];
+                            }
+                        }
+                    }
+                }
+            }
+            IrModule {
+                functions: deduped,
+                strings: ir.strings.clone(),
+                globals: ir.globals.clone(),
+                string_index: ir.string_index.clone(),
+                embedded_data: ir.embedded_data.clone(),
+            }
+        };
+        let ir = &ir;
+
         let mut module = Module::new();
 
         // ── Type section ─────────────────────────────────────
@@ -115,10 +157,17 @@ impl WasmCodegen {
         module.section(&tables);
 
         // ── Memory section ───────────────────────────────────
+        // Calculate total data section size to set minimum memory pages.
+        let string_data_size = self.calc_string_data_size(ir);
+        let embed_data_size: u32 = ir.embedded_data.iter()
+            .map(|ef| ((ef.data.len() as u32) + 3) & !3) // 4-byte aligned
+            .sum();
+        let total_data_end = self.string_data_offset + string_data_size + embed_data_size + 65536; // +64KB headroom
+        let min_pages = std::cmp::max(16, (total_data_end + 65535) / 65536); // round up to pages
         let mut memory = MemorySection::new();
         memory.memory(MemoryType {
-            minimum: 16, // 16 pages = 1MB initial.
-            maximum: Some(256), // 16MB max.
+            minimum: min_pages as u64,
+            maximum: Some(16384), // 1GB max.
             memory64: false,
             shared: false,
             page_size_log2: None,
@@ -188,7 +237,7 @@ impl WasmCodegen {
         }
         module.section(&code);
 
-        // ── Data section (string constants) ──────────────────
+        // ── Data section (string constants + embedded files) ──
         let mut data = DataSection::new();
         let mut offset = self.string_data_offset;
         for s in &ir.strings {
@@ -202,6 +251,17 @@ impl WasmCodegen {
                 buf.iter().copied(),
             );
             offset = offset.saturating_add(4u32.saturating_add(bytes.len() as u32));
+        }
+        // Embedded file data (from embed())
+        self.embed_offsets = Vec::new();
+        for ef in &ir.embedded_data {
+            let align = (offset + 3) & !3; // 4-byte align
+            self.embed_offsets.push((align, ef.data.len() as u32));
+            data.active(
+                &ConstExpr::i32_const(align as i32),
+                ef.data.iter().copied(),
+            );
+            offset = align + ef.data.len() as u32;
         }
         module.section(&data);
 
@@ -250,6 +310,7 @@ impl WasmCodegen {
         let mut max_temps: u32 = 0;
         for inst in &func.instructions {
             let needed = match inst {
+                Instruction::I64Eq | Instruction::I64Ne => 3, // temps for string-aware comparison
                 Instruction::BoolNot | Instruction::If | Instruction::IfVoid | Instruction::TagF64 | Instruction::I64Neg => 1, // temp for truthiness/NaN check
                 Instruction::BrIf(_) => 1, // temp for truthiness check
                 Instruction::GetTag => 1, // temp for NaN-box check in select
@@ -611,13 +672,145 @@ impl WasmCodegen {
             }
 
             // ── Comparison (i64) ─────────────────────────
-            Instruction::I64Eq => {
+            Instruction::I64Eq | Instruction::I64Ne => {
+                let is_ne = matches!(inst, Instruction::I64Ne);
+                let eq_val: i64 = if is_ne { 0 } else { 1 };
+                let ne_val: i64 = if is_ne { 1 } else { 0 };
+                // String-aware equality using locals for result (no stack tricks).
+                // t0=lhs/ptr_a, t1=rhs/ptr_b, t2=result/loop_counter
+                let t0 = temp_base;
+                let t1 = temp_base + 1;
+                let t2 = temp_base + 2;
+
+                f.instruction(&WasmInst::LocalSet(t1));
+                f.instruction(&WasmInst::LocalSet(t0));
+
+                // Fast path: bitwise equal
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::LocalGet(t1));
                 f.instruction(&WasmInst::I64Eq);
-                f.instruction(&WasmInst::I64ExtendI32U);
-            }
-            Instruction::I64Ne => {
-                f.instruction(&WasmInst::I64Ne);
-                f.instruction(&WasmInst::I64ExtendI32U);
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
+                f.instruction(&WasmInst::I64Const(eq_val));
+                f.instruction(&WasmInst::Else);
+
+                // Check both are STRING-tagged
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+                f.instruction(&WasmInst::I64Eq);
+                f.instruction(&WasmInst::LocalGet(t1));
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_MASK));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const(tag::NANBOX_SIG));
+                f.instruction(&WasmInst::I64Eq);
+                f.instruction(&WasmInst::I32And);
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
+                f.instruction(&WasmInst::I64ShrU);
+                f.instruction(&WasmInst::I64Const(0x07));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const(tag::STRING as i64));
+                f.instruction(&WasmInst::I64Eq);
+                f.instruction(&WasmInst::I32And);
+                f.instruction(&WasmInst::LocalGet(t1));
+                f.instruction(&WasmInst::I64Const(tag::TAG_SHIFT));
+                f.instruction(&WasmInst::I64ShrU);
+                f.instruction(&WasmInst::I64Const(0x07));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::I64Const(tag::STRING as i64));
+                f.instruction(&WasmInst::I64Eq);
+                f.instruction(&WasmInst::I32And);
+
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
+                // Both strings — extract pointers
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::LocalSet(t0));
+                f.instruction(&WasmInst::LocalGet(t1));
+                f.instruction(&WasmInst::I64Const(tag::PAYLOAD_MASK));
+                f.instruction(&WasmInst::I64And);
+                f.instruction(&WasmInst::LocalSet(t1));
+
+                // Compare lengths
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::LocalGet(t1));
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Eq);
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
+
+                // Lengths equal — byte compare loop using t2 as result
+                // Store eq_val as default result in t2
+                f.instruction(&WasmInst::I64Const(eq_val));
+                f.instruction(&WasmInst::LocalSet(t2));
+
+                // Use block/loop with t2 holding result, separate counter on stack not needed
+                // We'll use a counted approach: count down from len
+                // Actually simplest: reuse t2 as counter after storing result concept
+                // Let's use t2 as loop counter (0..len), and build result at the end
+                f.instruction(&WasmInst::I64Const(0));
+                f.instruction(&WasmInst::LocalSet(t2)); // t2 = 0 (loop index)
+
+                f.instruction(&WasmInst::Block(BlockType::Empty));  // $outer
+                f.instruction(&WasmInst::Loop(BlockType::Empty));   // $loop
+                // Check t2 >= len → done (equal)
+                f.instruction(&WasmInst::LocalGet(t2));
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32GeU);
+                f.instruction(&WasmInst::BrIf(1)); // br $outer if done
+
+                // Compare a[4+i] vs b[4+i]
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::LocalGet(t2));
+                f.instruction(&WasmInst::I64Add);
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::I32Load8U(MemArg { offset: 4, align: 0, memory_index: 0 }));
+                f.instruction(&WasmInst::LocalGet(t1));
+                f.instruction(&WasmInst::LocalGet(t2));
+                f.instruction(&WasmInst::I64Add);
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::I32Load8U(MemArg { offset: 4, align: 0, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Ne);
+                f.instruction(&WasmInst::BrIf(1)); // br $outer if mismatch
+
+                // i++
+                f.instruction(&WasmInst::LocalGet(t2));
+                f.instruction(&WasmInst::I64Const(1));
+                f.instruction(&WasmInst::I64Add);
+                f.instruction(&WasmInst::LocalSet(t2));
+                f.instruction(&WasmInst::Br(0)); // br $loop
+                f.instruction(&WasmInst::End); // end loop
+                f.instruction(&WasmInst::End); // end block
+
+                // After loop: if t2 == len → equal, else mismatch at t2
+                f.instruction(&WasmInst::LocalGet(t2));
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::LocalGet(t0));
+                f.instruction(&WasmInst::I32WrapI64);
+                f.instruction(&WasmInst::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                f.instruction(&WasmInst::I32Eq);
+                f.instruction(&WasmInst::If(BlockType::Result(WasmValType::I64)));
+                f.instruction(&WasmInst::I64Const(eq_val));
+                f.instruction(&WasmInst::Else);
+                f.instruction(&WasmInst::I64Const(ne_val));
+                f.instruction(&WasmInst::End);
+
+                f.instruction(&WasmInst::Else);
+                f.instruction(&WasmInst::I64Const(ne_val)); // lengths differ
+                f.instruction(&WasmInst::End);
+
+                f.instruction(&WasmInst::Else);
+                f.instruction(&WasmInst::I64Const(ne_val)); // not both strings
+                f.instruction(&WasmInst::End);
+
+                f.instruction(&WasmInst::End); // end if bitwise-equal
             }
             Instruction::I64Lt => {
                 f.instruction(&WasmInst::I64LtS);
@@ -3377,7 +3570,7 @@ mod tests {
         let program = parse_v2(src).expect("parse error");
         let mut compiler = Compiler::new();
         let module = compiler.compile(&program)?;
-        let codegen = WasmCodegen::new();
+        let mut codegen = WasmCodegen::new();
         codegen.emit(&module)
     }
 
@@ -5474,12 +5667,15 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_error_duplicate_function() {
+    fn test_duplicate_function_dedup() {
+        // Duplicate functions should compile without WASM validation error
+        // Last definition wins (matches interpreter behavior)
         let result = compile_to_wasm(r#"
             fn foo() { 1 }
             fn foo() { 2 }
+            output(foo());
         "#);
-        let _ = result;
+        assert!(result.is_ok(), "duplicate functions should not cause WASM validation error");
     }
 
     // ── WASM validation for edge cases ──────────────────────────────

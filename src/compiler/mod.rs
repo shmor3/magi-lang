@@ -24,7 +24,7 @@ use crate::syntax::ast::Program;
 pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, CompileError> {
     let mut compiler = Compiler::new();
     let module = compiler.compile(program)?;
-    let codegen = WasmCodegen::new();
+    let mut codegen = WasmCodegen::new();
     codegen.emit(&module)
 }
 
