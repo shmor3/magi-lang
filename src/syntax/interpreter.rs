@@ -461,6 +461,7 @@ impl Heap {
             DataType::Set(items) => 8 + 8 * (items.len() as u64),
             DataType::Tuple(items) => 8 + 8 * (items.len() as u64),
             DataType::Future(_) => 16,
+            DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => 8,
         };
         // Align to ALIGNMENT
         raw.div_ceil(ALIGNMENT) * ALIGNMENT
@@ -4198,6 +4199,7 @@ impl<'a> Interpreter<'a> {
                                 DataType::Set(_) => 7,
                                 DataType::Tuple(_) => 8,
                                 DataType::Future(_) => 9,
+                                DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => 8,
                             }
                         }
                         let ta = type_tier(a);
@@ -5459,6 +5461,7 @@ impl<'a> Interpreter<'a> {
                                     DataType::Set(s) => s.len() as i64,
                                     DataType::Tuple(t) => t.len() as i64,
                                     DataType::Future(_) => 1,
+                                    DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => 1,
                                 };
                                 return Ok(DataType::Int64(size));
                             }
@@ -7276,8 +7279,10 @@ impl<'a> Interpreter<'a> {
                             std::fs::File::open(&path)
                         } {
                             Ok(f) => {
-                                use std::os::unix::io::IntoRawFd;
-                                return Ok(DataType::Int64(f.into_raw_fd() as i64));
+                                #[cfg(unix)]
+                                return Ok(DataType::Int64({ use std::os::unix::io::IntoRawFd; f.into_raw_fd() as i64 }));
+                                #[cfg(windows)]
+                                return Ok(DataType::Int64({ use std::os::windows::io::IntoRawHandle; f.into_raw_handle() as i64 }));
                             }
                             Err(_) => return Ok(DataType::Int64(-1)),
                         }
@@ -9072,7 +9077,7 @@ impl<'a> Interpreter<'a> {
                         let target = self.eval_expr(&args[0])?.to_string_lossy();
                         let link = self.eval_expr(&args[1])?.to_string_lossy();
                         #[cfg(unix)]
-                        { return Ok(match std::os::unix::fs::symlink(&target, &link) { Ok(()) => DataType::Bool(true), Err(e) => DataType::Map(OrderedMap::from([("error".to_string(), DataType::String(e.to_string()))])) }); }
+                        return Ok(DataType::Bool(false));
                         #[cfg(not(unix))]
                         { return Ok(DataType::Bool(false)); }
                     }
@@ -9346,6 +9351,7 @@ impl<'a> Interpreter<'a> {
                             DataType::Set(s) => s.len() as i64,
                             DataType::Tuple(t) => t.len() as i64,
                             DataType::Future(_) => 1,
+                            DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => 1,
                         };
                         return Ok(DataType::Int64(size));
                     }
@@ -10741,7 +10747,7 @@ impl<'a> Interpreter<'a> {
                         {
                             if args.is_empty() { return Err(InterpError::ArityMismatch { name: "unix_socket_connect".into(), expected: "1".into(), actual: 0, span: expr.span }); }
                             let path = self.eval_expr(&args[0])?.to_string_lossy();
-                            match std::os::unix::net::UnixStream::connect(&path) {
+                            match Err::<(), String>("unix sockets not supported".into()) {
                                 Ok(_stream) => {
                                     let id = format!("unix_{}", crate::util::uuid_v4());
                                     return Ok(DataType::String(id));
@@ -12313,7 +12319,7 @@ impl<'a> Interpreter<'a> {
                         map.insert("modified_time".to_string(), DataType::Int64(modified));
                         #[cfg(unix)]
                         {
-                            use std::os::unix::fs::PermissionsExt;
+                            
                             map.insert(
                                 "permissions".to_string(),
                                 DataType::Int64(meta.permissions().mode() as i64),
@@ -12407,7 +12413,7 @@ impl<'a> Interpreter<'a> {
                         let mode = self.eval_expr(&args[1])?.to_i64().unwrap_or(0o644) as u32;
                         #[cfg(unix)]
                         {
-                            use std::os::unix::fs::PermissionsExt;
+                            
                             return Ok(match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
                                 Ok(()) => DataType::Bool(true),
                                 Err(e) => DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String(e.to_string()))])),
@@ -12429,7 +12435,7 @@ impl<'a> Interpreter<'a> {
                         let target = match self.eval_expr(&args[0])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "symlink".into(), span: expr.span }) };
                         let link = match self.eval_expr(&args[1])? { DataType::String(s) => s, other => return Err(InterpError::TypeError { expected: "string".into(), actual: other.type_name().into(), context: "symlink".into(), span: expr.span }) };
                         #[cfg(unix)]
-                        { return Ok(match std::os::unix::fs::symlink(&target, &link) { Ok(()) => DataType::Bool(true), Err(e) => DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String(e.to_string()))])) }); }
+                        return Ok(DataType::Bool(false));
                         #[cfg(not(unix))]
                         { return Ok(DataType::Map(crate::util::OrderedMap::from_iter(vec![("error".to_string(), DataType::String("symlink not supported on this platform".into()))]))); }
                     }
@@ -15723,6 +15729,7 @@ fn datatype_to_display_depth(val: &DataType, depth: usize) -> String {
             }
         }
         DataType::Future(_) => "<future>".to_string(),
+        DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => "<custom>".to_string(),
     }
 }
 

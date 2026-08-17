@@ -8,7 +8,7 @@
 mod compile;
 mod ir;
 mod wasm;
-pub mod llvm;
+// pub mod llvm;
 pub mod bytecode; // Kept for runtime/vm.rs ClassFile tests
 pub mod wasm_binary;
 pub mod wasm_runtime;

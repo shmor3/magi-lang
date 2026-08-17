@@ -149,6 +149,9 @@ impl GarbageCollector {
             DataType::Set(s) => 24 + s.len() * 16,
             DataType::Tuple(t) => 24 + t.len() * 16,
             DataType::Future(_) => 32,
+            DataType::Struct(_, fields) => 24 + fields.len() * 16,
+            DataType::Enum(_, _, fields) => 24 + fields.len() * 16,
+            DataType::ObjRef(_) => 8,
         }
     }
 

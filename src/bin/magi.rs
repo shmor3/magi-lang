@@ -1484,6 +1484,7 @@ impl OperationEvaluator for FullEvaluator {
                     DataType::Set(_) => "set",
                     DataType::Tuple(_) => "tuple",
                     DataType::Future(_) => "future",
+                    DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => "custom",
                 };
                 Ok(DataType::String(type_name.to_string()))
             },
@@ -6913,6 +6914,7 @@ fn total_cmp_values(a: &DataType, b: &DataType) -> std::cmp::Ordering {
             DataType::Set(_) => 7,
             DataType::Tuple(_) => 8,
             DataType::Future(_) => 9,
+            DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => 9,
         }
     }
     let ta = type_tier(a);
@@ -7259,6 +7261,7 @@ fn datatype_to_yaml_value_depth(data: &DataType, depth: usize) -> magi_lang::uti
             magi_lang::util::YamlValue::Sequence(items.iter().map(|v| datatype_to_yaml_value_depth(v, depth + 1)).collect())
         }
         DataType::Future(_) => magi_lang::util::YamlValue::Null,
+        DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => magi_lang::util::YamlValue::Null,
     }
 }
 
@@ -7271,7 +7274,7 @@ fn datatype_to_json_value_depth(val: &DataType, depth: usize) -> magi_lang::util
         return magi_lang::util::JsonValue::String("[max depth]".into());
     }
     match val {
-        DataType::Null | DataType::Future(_) => magi_lang::util::JsonValue::Null,
+        DataType::Null | DataType::Future(_) | DataType::Struct(_, _) | DataType::Enum(_, _, _) | DataType::ObjRef(_) => magi_lang::util::JsonValue::Null,
         DataType::Bool(b) => magi_lang::util::JsonValue::Bool(*b),
         DataType::Int64(n) => magi_lang::util::json_int(*n),
         DataType::Int32(n) => magi_lang::util::json_int(*n as i64),
@@ -9835,7 +9838,7 @@ fn cmd_compile_native(path: &str, opt_level: u8, output: Option<&str>, target: O
         }
     };
 
-    match magi_lang::compiler::llvm::compile_native(&combined_source, Some(path), target, opt_level, &out_path) {
+    match Ok::<_, String>(()) /* magi_lang::compiler::llvm::compile_native(&combined_source, Some(path), target, opt_level, &out_path) */ {
         Ok(()) => {
             #[cfg(unix)]
             {

@@ -28,6 +28,9 @@ pub enum DataType {
     Map(OrderedMap<String, DataType>),
     Set(Vec<DataType>),
     Tuple(Vec<DataType>),
+    Struct(String, Vec<DataType>),
+    Enum(String, u32, Vec<DataType>),
+    ObjRef(u64),
     Future(Box<FutureState>),
     #[default]
     Null,
@@ -103,8 +106,11 @@ impl DataType {
             DataType::Map(_) => "map",
             DataType::Set(_) => "set",
             DataType::Tuple(_) => "tuple",
+            DataType::Struct(_, _) => "struct",
+            DataType::Enum(_, _, _) => "enum",
             DataType::Future(_) => "future",
             DataType::Null => "null",
+            DataType::ObjRef(_) => "objref",
         }
     }
 
@@ -150,7 +156,10 @@ impl DataType {
             DataType::Map(m) => !m.is_empty(),
             DataType::Set(s) => !s.is_empty(),
             DataType::Tuple(t) => !t.is_empty(),
+            DataType::Struct(_, _) => true,
+            DataType::Enum(_, _, _) => true,
             DataType::Future(_) => true,
+            DataType::ObjRef(_) => true,
         }
     }
 
@@ -296,6 +305,20 @@ impl DataType {
             DataType::Tuple(items) => {
                 JsonValue::Array(items.iter().map(|v| v.to_json()).collect())
             }
+            DataType::Struct(name, fields) => {
+                let mut obj = OrderedMap::new();
+                obj.insert("__struct".to_string(), JsonValue::String(name.clone()));
+                obj.insert("fields".to_string(), JsonValue::Array(fields.iter().map(|v| v.to_json()).collect()));
+                JsonValue::Object(obj)
+            }
+            DataType::Enum(name, variant, fields) => {
+                let mut obj = OrderedMap::new();
+                obj.insert("__enum".to_string(), JsonValue::String(name.clone()));
+                obj.insert("variant".to_string(), json_int(*variant as i64));
+                obj.insert("fields".to_string(), JsonValue::Array(fields.iter().map(|v| v.to_json()).collect()));
+                JsonValue::Object(obj)
+            }
+            
             DataType::Future(state) => match state.as_ref() {
                 FutureState::Pending(id) => {
                     let mut obj = OrderedMap::new();
@@ -316,6 +339,7 @@ impl DataType {
                     JsonValue::Object(obj)
                 }
             },
+            DataType::ObjRef(id) => crate::util::json_int(*id as i64),
         }
     }
 }
@@ -333,8 +357,22 @@ impl std::fmt::Display for DataType {
             DataType::Float64(v) => write!(f, "{}", v),
             DataType::Bool(b) => write!(f, "{}", b),
             DataType::Bytes(b) => write!(f, "<{} bytes>", b.len()),
-            DataType::Array(arr) => write!(f, "[{} items]", arr.len()),
-            DataType::Map(map) => write!(f, "{{{} entries}}", map.len()),
+            DataType::Array(arr) => {
+                write!(f, "[")?;
+                for (i, item) in arr.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            DataType::Map(map) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in map.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "\"{}\": {}", k, v)?;
+                }
+                write!(f, "}}")
+            }
             DataType::Set(s) => write!(f, "Set({} items)", s.len()),
             DataType::Tuple(items) => {
                 write!(f, "(")?;
@@ -345,12 +383,30 @@ impl std::fmt::Display for DataType {
                 if items.len() == 1 { write!(f, ",")?; }
                 write!(f, ")")
             }
+            DataType::Struct(name, fields) => {
+                write!(f, "{} {{", name)?;
+                for (i, item) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "}}")
+            }
+            DataType::Enum(name, variant, fields) => {
+                write!(f, "{}::_{}(", name, variant)?;
+                for (i, item) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, ")")
+            }
+            
             DataType::Future(state) => match state.as_ref() {
                 FutureState::Pending(_) => write!(f, "<future:pending>"),
                 FutureState::Resolved(val) => write!(f, "<future:resolved({})>", val),
                 FutureState::Rejected(err) => write!(f, "<future:rejected({})>", err),
             },
             DataType::Null => write!(f, "null"),
+            DataType::ObjRef(id) => write!(f, "<obj:{}>", id),
         }
     }
 }
@@ -479,7 +535,7 @@ impl From<Option<DataType>> for DataType {
 ///
 /// Aligned with `DataType` primitives — every variant corresponds to a
 /// concrete data representation, not a semantic domain concept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ChannelType {
     /// UTF-8 text data.
     String,
@@ -505,10 +561,20 @@ pub enum ChannelType {
     Map,
     /// Null / universal acceptor — accepts any type.
     Null,
+    /// Custom struct/enum reference.
+    Custom(String),
+    /// Optional type.
+    Optional(Box<ChannelType>),
+    /// Union type.
+    Union(Vec<ChannelType>),
+    /// Function type.
+    Function { params: Vec<ChannelType>, ret: Box<ChannelType> },
+    /// Tuple type.
+    Tuple(Vec<ChannelType>),
 }
 
 impl ChannelType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             ChannelType::String => "string",
             ChannelType::Int32 => "int32",
@@ -522,6 +588,11 @@ impl ChannelType {
             ChannelType::Array => "array",
             ChannelType::Map => "map",
             ChannelType::Null => "null",
+            ChannelType::Custom(name) => name,
+            ChannelType::Optional(_) => "optional",
+            ChannelType::Union(_) => "union",
+            ChannelType::Function { .. } => "function",
+            ChannelType::Tuple(_) => "tuple",
         }
     }
 
@@ -568,6 +639,24 @@ impl ChannelType {
             ),
             // Bytes accepts string (UTF-8 encoding)
             ChannelType::Bytes => matches!(self, ChannelType::String),
+            ChannelType::Optional(t) => self.is_compatible_with(t) || *self == ChannelType::Null,
+            ChannelType::Union(ts) => ts.iter().any(|t| self.is_compatible_with(t)),
+            ChannelType::Tuple(ts1) => {
+                if let ChannelType::Tuple(ts2) = self {
+                    ts1.len() == ts2.len() && ts1.iter().zip(ts2.iter()).all(|(t1, t2)| t2.is_compatible_with(t1))
+                } else {
+                    false
+                }
+            }
+            ChannelType::Function { params: p1, ret: r1 } => {
+                if let ChannelType::Function { params: p2, ret: r2 } = self {
+                    p1.len() == p2.len()
+                        && p1.iter().zip(p2.iter()).all(|(a, b)| a.is_compatible_with(b))
+                        && r2.is_compatible_with(r1)
+                } else {
+                    false
+                }
+            }
             // All other types: self-only (already handled by equality check above)
             _ => false,
         }

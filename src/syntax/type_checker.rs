@@ -576,7 +576,7 @@ impl TypeChecker {
 
                 // Check existence first.
                 let (exists, is_mutable, declared_type) = match self.lookup(name) {
-                    Some(info) => (true, info.mutable, info.declared_type),
+                    Some(info) => (true, info.mutable, info.declared_type.clone()),
                     None => (false, false, None),
                 };
 
@@ -915,7 +915,7 @@ impl TypeChecker {
                 if let Some(expr) = val_expr {
                     let ret_type = self.infer_expr(expr);
                     // Collect return type for inference (#66)
-                    self.collected_return_types.push(ret_type);
+                    self.collected_return_types.push(ret_type.clone());
                     // Validate return value against declared return type
                     if self.current_return_type != ChannelType::Null
                         && ret_type != ChannelType::Null
@@ -1057,7 +1057,7 @@ impl TypeChecker {
                 let val_type = self.infer_expr(value);
 
                 let (exists, is_mutable, var_type, declared_type) = match self.lookup(name) {
-                    Some(info) => (true, info.mutable, info.channel_type, info.declared_type),
+                    Some(info) => (true, info.mutable, info.channel_type.clone(), info.declared_type.clone()),
                     None => (false, false, ChannelType::Null, None),
                 };
 
@@ -1267,7 +1267,7 @@ impl TypeChecker {
                     name,
                 );
                 // Store known const value type for propagation.
-                self.const_values.insert(name.clone(), ct);
+                self.const_values.insert(name.clone(), ct.clone());
                 // Store computed literal for use in match patterns and array sizes.
                 if let Some(lit) = folded {
                     self.const_literals.insert(name.clone(), lit);
@@ -1829,10 +1829,10 @@ impl TypeChecker {
                     return ChannelType::Null;
                 }
                 // Use const-propagated type if available (more precise than scope lookup).
-                let const_type = self.const_values.get(name.as_str()).copied();
+                let const_type = self.const_values.get(name.as_str()).cloned();
                 // Copy out what we need before the mutable borrow.
                 let ct = match self.lookup(name) {
-                    Some(info) => const_type.unwrap_or(info.channel_type),
+                    Some(info) => const_type.unwrap_or(info.channel_type.clone()),
                     None => {
                         if self.function_sigs.contains_key(name.as_str()) {
                             if let Some(sig) = self.function_sigs.get_mut(name.as_str()) {
@@ -1865,7 +1865,7 @@ impl TypeChecker {
             ExpressionKind::BinaryOp { op, left, right } => {
                 let left_ty = self.infer_expr(left);
                 let right_ty = self.infer_expr(right);
-                self.check_binop_literals(*op, left, right, left_ty, right_ty, expr.span);
+                self.check_binop_literals(*op, left, right, left_ty.clone(), right_ty.clone(), expr.span);
                 self.infer_binop(*op, left_ty, right_ty, expr.span)
             }
 
@@ -1903,7 +1903,7 @@ impl TypeChecker {
                         ChannelType::Bool
                     }
                     UnOp::Neg => {
-                        if !is_numeric(operand_ty) && operand_ty != ChannelType::Null {
+                        if !is_numeric(operand_ty.clone()) && operand_ty != ChannelType::Null {
                             self.emit_coded(
                                 expr.span.start_line,
                                 expr.span.start_col,
@@ -1917,7 +1917,7 @@ impl TypeChecker {
                             );
                         }
                         // Preserve the input numeric type.
-                        if is_numeric(operand_ty) {
+                        if is_numeric(operand_ty.clone()) {
                             operand_ty
                         } else {
                             ChannelType::Null
@@ -1991,7 +1991,7 @@ impl TypeChecker {
                         );
                     }
                     for (i, (param_name, expected_type)) in sig.params.iter().enumerate() {
-                        if let Some(&actual_type) = arg_types.get(i) {
+                        if let Some(actual_type) = arg_types.get(i).cloned() {
                             if actual_type != ChannelType::Null
                                 && *expected_type != ChannelType::Null
                                 && !actual_type.is_compatible_with(expected_type)
@@ -2047,7 +2047,7 @@ impl TypeChecker {
 
                     // Check positional arg types against expected input ports.
                     for (i, (port_name, expected_type)) in expected_inputs.iter().enumerate() {
-                        if let Some(&actual_type) = arg_types.get(i) {
+                        if let Some(actual_type) = arg_types.get(i).cloned() {
                             if actual_type != ChannelType::Null
                                 && *expected_type != ChannelType::Null
                                 && !actual_type.is_compatible_with(expected_type)
@@ -2092,7 +2092,7 @@ impl TypeChecker {
                             }
                             // Check positional arg types against expected input ports.
                             for (i, (port_name, expected_type)) in expected_inputs.iter().enumerate() {
-                                if let Some(&actual_type) = arg_types.get(i) {
+                                if let Some(actual_type) = arg_types.get(i).cloned() {
                                     if actual_type != ChannelType::Null
                                         && *expected_type != ChannelType::Null
                                         && !actual_type.is_compatible_with(expected_type)
@@ -2131,19 +2131,19 @@ impl TypeChecker {
                     "typeof" => return ChannelType::String,
                     "println" | "print" | "debug_log" => {
                         // Args already inferred at arg_types collection above
-                        return arg_types.first().copied().unwrap_or(ChannelType::Null);
+                        return arg_types.first().cloned().unwrap_or(ChannelType::Null);
                     }
                     "assert" | "assert_eq" | "assert_ne" | "assert_throws" => {
                         // Args already inferred at arg_types collection above
                         return ChannelType::Null;
                     }
                     // Option/Result constructors and helpers (#78)
-                    "Some" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
+                    "Some" => return arg_types.first().cloned().unwrap_or(ChannelType::Null),
                     "None" => return ChannelType::Null,
                     "Ok" | "Err" => return ChannelType::Map,
                     "is_some" | "is_none" | "is_ok" | "is_err" => return ChannelType::Bool,
-                    "unwrap" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
-                    "unwrap_or" => return arg_types.first().copied().unwrap_or(ChannelType::Null),
+                    "unwrap" => return arg_types.first().cloned().unwrap_or(ChannelType::Null),
+                    "unwrap_or" => return arg_types.first().cloned().unwrap_or(ChannelType::Null),
                     // Concurrency: channel operations
                     "channel" => return ChannelType::Array,
                     "chan_send" => return ChannelType::Null,
@@ -2229,7 +2229,7 @@ impl TypeChecker {
                 };
 
                 // Unify branch types (supports numeric promotion).
-                let unified = unify_types(&[then_ty, else_ty]);
+                let unified = unify_types(&[then_ty.clone(), else_ty.clone()]);
                 if unified == ChannelType::Null
                     && then_ty != ChannelType::Null
                     && else_ty != ChannelType::Null
@@ -2276,7 +2276,7 @@ impl TypeChecker {
                 // Range expressions in index position are valid (array slicing)
                 let is_range_slice = matches!(&index.kind, ExpressionKind::Range { .. });
                 if obj_ty == ChannelType::Array
-                    && !is_integer(idx_ty)
+                    && !is_integer(idx_ty.clone())
                     && idx_ty != ChannelType::Null
                     && !is_range_slice
                 {
@@ -2384,7 +2384,7 @@ impl TypeChecker {
                 let start_ty = self.infer_expr(start);
                 let end_ty = self.infer_expr(end);
 
-                if !is_numeric(start_ty) && start_ty != ChannelType::Null {
+                if !is_numeric(start_ty.clone()) && start_ty != ChannelType::Null {
                     self.emit_coded(
                         start.span.start_line,
                         start.span.start_col,
@@ -2394,7 +2394,7 @@ impl TypeChecker {
                         None,
                     );
                 }
-                if !is_numeric(end_ty) && end_ty != ChannelType::Null {
+                if !is_numeric(end_ty.clone()) && end_ty != ChannelType::Null {
                     self.emit_coded(
                         end.span.start_line,
                         end.span.start_col,
@@ -2463,7 +2463,7 @@ impl TypeChecker {
                 }
 
                 // Resolve method to an OperationType based on receiver type + method name
-                let op_name = resolve_method_type(obj_ty, method);
+                let op_name = resolve_method_type(obj_ty.clone(), method);
                 if let Some(name) = op_name {
                     if let Some(op) = OperationType::parse(&name) {
                         // Prepend receiver type as first arg for type refinement
@@ -2522,7 +2522,7 @@ impl TypeChecker {
 
                 // Unknown method — warn (but suppress if receiver type is unknown/Null)
                 if obj_ty != ChannelType::Null {
-                    let available = available_methods_for_channel_type(obj_ty);
+                    let available = available_methods_for_channel_type(obj_ty.clone());
                     let suggestion = super::errors::suggest_name(method, &available);
                     self.emit_coded(
                         expr.span.start_line,
@@ -2621,7 +2621,7 @@ impl TypeChecker {
                 let mut arm_types = Vec::new();
                 for arm in arms {
                     self.push_scope();
-                    self.bind_pattern_vars(&arm.pattern, val_type, &arm.span);
+                    self.bind_pattern_vars(&arm.pattern, val_type.clone(), &arm.span);
                     if let Some(guard) = &arm.guard {
                         let guard_ty = self.infer_expr(guard);
                         if guard_ty != ChannelType::Bool && guard_ty != ChannelType::Null {
@@ -2864,7 +2864,7 @@ impl TypeChecker {
                         }
                         // Check positional arg types against expected input ports.
                         for (i, (port_name, expected_type)) in expected_inputs.iter().enumerate() {
-                            if let Some(&actual_type) = arg_types.get(i) {
+                            if let Some(actual_type) = arg_types.get(i).cloned() {
                                 if actual_type != ChannelType::Null
                                     && *expected_type != ChannelType::Null
                                     && !actual_type.is_compatible_with(expected_type)
@@ -3167,7 +3167,7 @@ impl TypeChecker {
                 // binding each only once to avoid duplicate definitions.
                 let mut bound = std::collections::HashSet::new();
                 for alt in alternatives {
-                    self.bind_pattern_vars_collecting(alt, val_type, span, &mut bound);
+                    self.bind_pattern_vars_collecting(alt, val_type.clone(), span, &mut bound);
                 }
             }
             Pattern::Rest(name) => {
@@ -3219,7 +3219,7 @@ impl TypeChecker {
             }
             Pattern::TypePattern { name, type_name } => {
                 let resolved = self.resolve_type(type_name);
-                let ct = resolved.unwrap_or(ChannelType::Null);
+                let ct = resolved.clone().unwrap_or(ChannelType::Null);
                 if resolved.is_none() {
                     self.emit_coded(
                         span.start_line,
@@ -3233,7 +3233,7 @@ impl TypeChecker {
                 self.define_var(name, ct, false, span.start_line, span.start_col);
             }
             Pattern::Binding { name, pattern } => {
-                self.define_var(name, val_type, false, span.start_line, span.start_col);
+                self.define_var(name, val_type.clone(), false, span.start_line, span.start_col);
                 self.bind_pattern_vars(pattern, val_type, span);
             }
             Pattern::RangePattern { start, end, .. } => {
@@ -3272,7 +3272,7 @@ impl TypeChecker {
             }
             Pattern::Or(alternatives) => {
                 for alt in alternatives {
-                    self.bind_pattern_vars_collecting(alt, val_type, span, bound);
+                    self.bind_pattern_vars_collecting(alt, val_type.clone(), span, bound);
                 }
             }
             Pattern::Rest(name) => {
@@ -3295,7 +3295,7 @@ impl TypeChecker {
             }
             Pattern::Binding { name, pattern } => {
                 if bound.insert(name.clone()) {
-                    self.define_var(name, val_type, false, span.start_line, span.start_col);
+                    self.define_var(name, val_type.clone(), false, span.start_line, span.start_col);
                 }
                 self.bind_pattern_vars_collecting(pattern, val_type, span, bound);
             }
@@ -3339,8 +3339,8 @@ impl TypeChecker {
 
                 // String repetition: "abc" * 3 or 3 * "abc" returns String.
                 if op == BinOp::Mul
-                    && ((left == ChannelType::String && is_numeric(right))
-                        || (is_numeric(left) && right == ChannelType::String))
+                    && ((left == ChannelType::String && is_numeric(right.clone()))
+                        || (is_numeric(left.clone()) && right == ChannelType::String))
                 {
                     return ChannelType::String;
                 }
@@ -3454,11 +3454,11 @@ impl TypeChecker {
             let is_string_concat = op == BinOp::Add
                 && (left_ty == ChannelType::String || right_ty == ChannelType::String);
             let is_string_repeat = op == BinOp::Mul
-                && ((left_ty == ChannelType::String && is_numeric(right_ty))
-                    || (is_numeric(left_ty) && right_ty == ChannelType::String));
+                && ((left_ty == ChannelType::String && is_numeric(right_ty.clone().clone().clone()))
+                    || (is_numeric(left_ty.clone().clone()) && right_ty == ChannelType::String));
             if !is_string_concat && !is_string_repeat {
-                for ty in [left_ty, right_ty] {
-                    if ty != ChannelType::Null && !is_numeric(ty) {
+                for ty in [left_ty.clone(), right_ty.clone().clone()] {
+                    if ty != ChannelType::Null && !is_numeric(ty.clone()) {
                         self.emit_coded(
                             span.start_line,
                             span.start_col,
@@ -3490,7 +3490,7 @@ impl TypeChecker {
             && right_ty != ChannelType::Null
             && left_ty != right_ty
             // Allow cross-numeric comparisons (e.g. int64 == float64).
-            && !(is_numeric(left_ty) && is_numeric(right_ty))
+            && !(is_numeric(left_ty.clone()) && is_numeric(right_ty.clone()))
         {
             self.emit_coded(
                 span.start_line,
@@ -3669,7 +3669,7 @@ impl TypeChecker {
         for scope in &self.env {
             for (name, info) in scope {
                 if !name.starts_with('_') {
-                    variable_types.insert(name.clone(), info.channel_type);
+                    variable_types.insert(name.clone(), info.channel_type.clone());
                 }
             }
         }
@@ -3801,7 +3801,7 @@ fn promote_numeric(inputs: &[ChannelType]) -> ChannelType {
             ChannelType::Int32 | ChannelType::Int64 | ChannelType::Uint32 | ChannelType::Uint64 => {
                 has_int = true;
                 common = Some(match common {
-                    None => *ct,
+                    None => ct.clone(),
                     Some(prev) if prev == *ct => prev,
                     Some(_) => ChannelType::Int64,
                 });
@@ -3880,7 +3880,7 @@ fn promote_integer(inputs: &[ChannelType]) -> ChannelType {
         match ct {
             ChannelType::Int32 | ChannelType::Int64 | ChannelType::Uint32 | ChannelType::Uint64 => {
                 common = Some(match common {
-                    None => *ct,
+                    None => ct.clone(),
                     Some(prev) if prev == *ct => prev,
                     Some(_) => ChannelType::Int64,
                 });
@@ -3897,7 +3897,7 @@ fn first_non_null(types: &[ChannelType]) -> ChannelType {
     types
         .iter()
         .find(|ct| **ct != ChannelType::Null)
-        .copied()
+        .cloned()
         .unwrap_or(ChannelType::Null)
 }
 
@@ -4142,7 +4142,7 @@ fn resolve_method_type(obj_type: ChannelType, method: &str) -> Option<String> {
 fn unify_types(types: &[ChannelType]) -> ChannelType {
     let non_null: Vec<ChannelType> = types
         .iter()
-        .copied()
+        .cloned()
         .filter(|t| *t != ChannelType::Null)
         .collect();
 
@@ -4150,11 +4150,11 @@ fn unify_types(types: &[ChannelType]) -> ChannelType {
         return ChannelType::Null;
     }
 
-    let first = non_null[0];
-    if non_null.iter().all(|t| *t == first) {
-        first
+    let first = &non_null[0].clone();
+    if non_null.iter().all(|t| *t == *first) {
+        first.clone()
     } else {
-        if non_null.iter().all(|t| is_numeric(*t)) {
+        if non_null.iter().all(|t| is_numeric(t.clone())) {
             promote_numeric(&non_null)
         } else {
             ChannelType::Null

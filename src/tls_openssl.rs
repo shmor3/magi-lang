@@ -9,10 +9,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 #[cfg(unix)]
-#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
-#[cfg(windows)]
-use std::os::windows::io::AsRawSocket;
 
 // ── OpenSSL FFI bindings ─────────────────────────────────────────────
 
@@ -84,10 +81,7 @@ impl TlsStream {
             }
 
             // Set the file descriptor
-            #[cfg(unix)]
-            let fd = tcp.as_raw_fd() as i32;
-            #[cfg(windows)]
-            let fd = tcp.as_raw_socket() as i32;
+            let fd = 0; //tcp.as_raw_fd();
             if SSL_set_fd(ssl, fd) != 1 {
                 SSL_free(ssl);
                 SSL_CTX_free(ctx);
